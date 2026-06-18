@@ -24,17 +24,17 @@ public sealed class SqliteCharacterRepositoryTests
     }
 
     [Fact]
-    public async Task SavePositionPersistsForSubsequentLoad()
+    public async Task SaveTilePersistsForSubsequentLoad()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var repository = new SqliteCharacterRepository(database.ConnectionString);
         var character = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
-        var savedPosition = new TileCoord(12, 7);
+        var savedTile = new TileCoord(12, 7);
 
-        await repository.SavePositionAsync(character.CharacterId, savedPosition, CancellationToken.None);
+        await repository.SaveTileAsync(character.CharacterId, savedTile, CancellationToken.None);
         var reloaded = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
 
-        Assert.Equal(savedPosition, reloaded.Tile);
+        Assert.Equal(savedTile, reloaded.Tile);
     }
 
     [Fact]

@@ -126,7 +126,7 @@ public sealed class GameServer
         if (session.IsAuthenticated)
         {
             _networkIds.Return(session.NetworkId);
-            SavePositionBestEffort(session);
+            SaveTileBestEffort(session);
         }
 
         _metrics.RecordPeerDisconnected();
@@ -804,15 +804,15 @@ public sealed class GameServer
     {
         foreach (var session in _sessions.Values.Where(session => session.IsAuthenticated))
         {
-            SavePositionBestEffort(session);
+            SaveTileBestEffort(session);
         }
     }
 
-    private void SavePositionBestEffort(ClientSession session)
+    private void SaveTileBestEffort(ClientSession session)
     {
         try
         {
-            _characters.SavePositionAsync(session.CharacterId, session.Tile, CancellationToken.None)
+            _characters.SaveTileAsync(session.CharacterId, session.Tile, CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
         }

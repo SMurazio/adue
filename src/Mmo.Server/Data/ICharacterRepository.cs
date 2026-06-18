@@ -9,5 +9,5 @@ public interface ICharacterRepository
         string displayName,
         CancellationToken cancellationToken);
 
-    Task SavePositionAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken);
+    Task SaveTileAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken);
 }

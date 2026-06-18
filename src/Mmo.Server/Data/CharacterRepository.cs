@@ -31,7 +31,7 @@ public sealed class PostgresCharacterRepository : ICharacterRepository
         return character;
     }
 
-    public async Task SavePositionAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
+    public async Task SaveTileAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
     {
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);

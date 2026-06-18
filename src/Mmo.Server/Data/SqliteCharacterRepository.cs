@@ -31,7 +31,7 @@ public sealed class SqliteCharacterRepository : ICharacterRepository
         return character;
     }
 
-    public async Task SavePositionAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
+    public async Task SaveTileAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
