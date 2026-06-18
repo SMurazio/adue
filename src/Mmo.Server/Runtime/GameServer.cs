@@ -419,13 +419,6 @@ public sealed class GameServer
 
         BroadcastSnapshot(tickBudget);
 
-        if (_serverTick % (uint)(_options.TickRate * 10) == 0)
-        {
-            using (tickBudget.Measure(TickBudgetCategory.Other))
-            {
-                Log.Info($"tick={_serverTick} peers={_sessions.Count} players={_sessions.Values.Count(x => x.IsAuthenticated)}");
-            }
-        }
     }
 
     private void BroadcastSnapshot(TickBudgetRecorder tickBudget)
