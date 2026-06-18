@@ -50,6 +50,20 @@ public sealed class AoiIntegrationTests
 
             var outsideNetworkId = outsideClient.OwnNetworkId;
             observer.ClearMessages();
+            await WaitUntilAsync(
+                () => observer.Messages.OfType<WorldSnapshotMessage>().Any(),
+                observer,
+                outsideClient);
+            await PollForAsync(TimeSpan.FromMilliseconds(250), observer, outsideClient);
+
+            Assert.DoesNotContain(
+                observer.Messages.OfType<EntitySpawnMessage>(),
+                message => message.NetworkId == outsideNetworkId);
+            Assert.DoesNotContain(
+                observer.Messages.OfType<WorldSnapshotMessage>().SelectMany(message => message.Entities),
+                entity => entity.NetworkId == outsideNetworkId);
+
+            observer.ClearMessages();
             outsideClient.SendMove(-1, 0);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntitySpawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
@@ -95,6 +109,20 @@ public sealed class AoiIntegrationTests
         }
 
         throw new TimeoutException("Timed out waiting for integration condition.");
+    }
+
+    private static async Task PollForAsync(TimeSpan duration, params IntegrationClient[] clients)
+    {
+        var stopAt = DateTimeOffset.UtcNow + duration;
+        while (DateTimeOffset.UtcNow < stopAt)
+        {
+            foreach (var client in clients)
+            {
+                client.Poll();
+            }
+
+            await Task.Delay(10);
+        }
     }
 
     private sealed class IntegrationClient : IDisposable
