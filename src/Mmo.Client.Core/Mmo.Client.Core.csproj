@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="LiteNetLib" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mmo.Shared\Mmo.Shared.csproj" />
+  </ItemGroup>
+</Project>
