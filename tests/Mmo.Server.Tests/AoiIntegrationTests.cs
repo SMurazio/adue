@@ -79,14 +79,15 @@ public sealed class AoiIntegrationTests
                 outsideClient);
 
             observer.ClearMessages();
-            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 14, observer);
+            await StepOnceAsync(outsideClient, Direction8.E, observer);
+            await StepOnceAsync(outsideClient, Direction8.E, observer);
             await PollForAsync(TimeSpan.FromMilliseconds(300), observer, outsideClient);
             Assert.DoesNotContain(
                 observer.Messages.OfType<EntityDespawnMessage>(),
                 message => message.NetworkId == outsideNetworkId);
 
             observer.ClearMessages();
-            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 15, observer);
+            await StepOnceAsync(outsideClient, Direction8.E, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
@@ -318,6 +319,31 @@ public sealed class AoiIntegrationTests
         }
 
         throw new TimeoutException("Timed out waiting for step movement condition.");
+    }
+
+    private static async Task StepOnceAsync(IntegrationClient mover, Direction8 direction, params IntegrationClient[] observers)
+    {
+        var clients = observers.Prepend(mover).Distinct().ToArray();
+        var start = mover.OwnTile;
+        var delta = direction.Delta();
+        var expected = start.Offset(delta.X, delta.Y);
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            mover.SendMove(direction);
+            await PollForAsync(TimeSpan.FromMilliseconds(25), clients);
+            if (mover.OwnTile == expected)
+            {
+                return;
+            }
+
+            if (mover.OwnTile != start)
+            {
+                throw new InvalidOperationException($"Expected one step from {start} to {expected}, got {mover.OwnTile}.");
+            }
+        }
+
+        throw new TimeoutException("Timed out waiting for one accepted step.");
     }
 
     private static async Task<bool> PumpMovementUntilFullSnapshotAsync(TimeSpan timeout, IntegrationClient firstMover, IntegrationClient secondMover, IntegrationClient observer)

@@ -24,13 +24,13 @@ public sealed class ServerOptionsTests
     }
 
     [Fact]
-    public void FromEnvironmentUsesTileSizedInterestRadiusDefault()
+    public void FromEnvironmentUsesViewSizedInterestRadiusDefault()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>());
 
         var options = ServerOptions.FromEnvironment();
 
-        Assert.Equal(14f, options.InterestRadius);
+        Assert.Equal(40f, options.InterestRadius);
         Assert.Equal(140, options.StepCooldownMs);
     }
 
