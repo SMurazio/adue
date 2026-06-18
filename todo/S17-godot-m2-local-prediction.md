@@ -36,7 +36,18 @@ interpolated.
 
 ## Blocked
 
-S17 depends on S16: the Godot client must exist, render confirmed state, and be manually verified
-before local-player prediction is added. S16 still needs human editor/runtime verification with two
-visible clients. The server/shared prerequisites A/B are deliberately not started yet, to avoid
-landing prediction protocol changes before the Godot confirmed-state client is verified.
+S16 is now complete and manually verified, so the original prerequisite blocker is gone. This task
+is still blocked on an Orchestrator architecture decision because it conflicts with current
+authoritative planning text:
+
+- `docs/feature-roadmap.md` says to keep confirmed tile tweening and not add prediction unless
+  movement latency is measured as unacceptable.
+- `docs/networking-design-plan.md` section 2 says no client prediction now, probably not ever, and
+  only to revisit local-player prediction as a measured exception.
+- `docs/godot-client-design.md` and this todo describe prediction/reconciliation as M2.
+
+The human just verified the Godot movement direction/feel as correct after S16 fixes, so the measured
+trigger for prediction has not been established in this implementation pass. Because prediction
+requires protocol and architecture decisions (shared movement rule, snapshot/input-sequence echo,
+version bump, reconciliation behavior), the Implementer should not start it until the Orchestrator
+explicitly resolves the plan conflict and confirms S17 should supersede the no-prediction roadmap.
