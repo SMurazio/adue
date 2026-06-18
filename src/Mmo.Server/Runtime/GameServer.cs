@@ -31,9 +31,9 @@ public sealed class GameServer
     private readonly SyntheticClientLoad _syntheticLoad = new();
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
+    private readonly NetworkIdPool _networkIds = new();
 
     private uint _serverTick;
-    private uint _nextNetworkId = 1;
 
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
@@ -120,6 +120,7 @@ public sealed class GameServer
 
         if (session.IsAuthenticated)
         {
+            _networkIds.Return(session.NetworkId);
             SavePositionBestEffort(session);
         }
 
@@ -222,11 +223,21 @@ public sealed class GameServer
                         return;
                     }
 
-                    var role = ResolveRole(login.AccountName, character.DisplayName);
-                    current.Authenticate(_nextNetworkId++, character.CharacterId, character.DisplayName, role, character.ZoneId, character.Position);
-                    _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
-                    TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, character.Position, ""), DeliveryMethod.ReliableOrdered);
-                    Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
+                    try
+                    {
+                        var role = ResolveRole(login.AccountName, character.DisplayName);
+                        current.Authenticate(_networkIds.Rent(), character.CharacterId, character.DisplayName, role, character.ZoneId, character.Position);
+                        _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
+                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, character.Position, ""), DeliveryMethod.ReliableOrdered);
+                        Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
+                    }
+                    catch (Exception exception)
+                    {
+                        current.LoginInProgress = false;
+                        _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
+                        TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, WorldVector.Zero, "No network id available."), DeliveryMethod.ReliableOrdered);
+                        Log.Error("Login failed", exception);
+                    }
                 });
             }
             catch (Exception exception)
