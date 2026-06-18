@@ -12,10 +12,17 @@ public sealed class WebClientAssetTests
         Assert.Contains("const tileStepTweenMs = 200;", app);
         Assert.Contains("const movementInterpolationDelayMs = tileStepTweenMs;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
+        Assert.Contains("const movementChordDelayMs = 35;", app);
         Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
+        Assert.Contains("const screenInputStepDirections = new Map([", app);
+        Assert.Contains("[\"0,1\", \"NW\"]", app);
+        Assert.Contains("[\"1,1\", \"N\"]", app);
+        Assert.Contains("[\"1,0\", \"NE\"]", app);
+        Assert.Contains("[\"1,-1\", \"E\"]", app);
         Assert.Contains("function updateEntityTileTween", app);
         Assert.Contains("function screenInputToStepDirection", app);
-        Assert.Contains("return \"E\";", app);
+        Assert.Contains("return screenInputStepDirections.get(`${x},${y}`) ?? null;", app);
+        Assert.Contains("now - heldMoveChangedAt < movementChordDelayMs", app);
         Assert.Contains("function rememberEntityMetadata", app);
         Assert.Contains("function pruneEntityRegistry", app);
         Assert.Contains("const snapshotEntities = message.entities ?? [];", app);

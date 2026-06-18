@@ -45,6 +45,7 @@ let rightMousePointer = null;
 let lastRightMoveSentAt = 0;
 let heldMoveDirection = null;
 let lastHeldMoveSentAt = 0;
+let heldMoveChangedAt = 0;
 let lastMoveDirection = "";
 const cameraFollowAlpha = 0.14;
 const minCameraZoom = 0.55;
@@ -54,6 +55,7 @@ const tileGridHeight = 64;
 const tileStepTweenMs = 200;
 const movementInterpolationDelayMs = tileStepTweenMs;
 const stepRetryMs = 50;
+const movementChordDelayMs = 35;
 const debugVisibilityRadius = 96;
 const entityStaleAfterMs = 2500;
 const entityExpireAfterMs = 8000;
@@ -89,6 +91,17 @@ const metricsLines = {
   total: "",
   messages: ""
 };
+
+const screenInputStepDirections = new Map([
+  ["-1,1", "W"],
+  ["0,1", "NW"],
+  ["1,1", "N"],
+  ["-1,0", "SW"],
+  ["1,0", "NE"],
+  ["-1,-1", "S"],
+  ["0,-1", "SE"],
+  ["1,-1", "E"]
+]);
 let snapshotAssembly = null;
 const blockedTiles = buildBlockedTileSet(tileGridWidth, tileGridHeight);
 
@@ -1053,7 +1066,8 @@ function screenInputFromDirection(direction) {
 }
 
 function screenInputToStepDirection(screenX, screenY) {
-  // Keyboard input is screen-relative for the fixed isometric camera.
+  // Keyboard input is screen-relative for the fixed isometric camera:
+  // W is screen-up, WD is screen-up-right, D is screen-right.
   const x = Math.sign(screenX);
   const y = Math.sign(screenY);
 
@@ -1061,35 +1075,7 @@ function screenInputToStepDirection(screenX, screenY) {
     return null;
   }
 
-  if (x === 0 && y > 0) {
-    return "NW";
-  }
-
-  if (x > 0 && y > 0) {
-    return "N";
-  }
-
-  if (x > 0 && y === 0) {
-    return "NE";
-  }
-
-  if (x > 0 && y < 0) {
-    return "E";
-  }
-
-  if (x === 0 && y < 0) {
-    return "SE";
-  }
-
-  if (x < 0 && y < 0) {
-    return "S";
-  }
-
-  if (x < 0 && y === 0) {
-    return "SW";
-  }
-
-  return "W";
+  return screenInputStepDirections.get(`${x},${y}`) ?? null;
 }
 
 function worldVectorToStepDirection(x, y) {
@@ -1113,6 +1099,7 @@ function syncKeyboardMovement() {
   if (direction !== heldMoveDirection) {
     heldMoveDirection = direction;
     lastHeldMoveSentAt = 0;
+    heldMoveChangedAt = performance.now();
   }
 
   if (heldMoveDirection) {
@@ -1358,6 +1345,8 @@ function startNextConfirmedStep(entry, nowMs, startedAt) {
 
 function clearHeldMovement() {
   heldMoveDirection = null;
+  heldMoveChangedAt = 0;
+  lastHeldMoveSentAt = 0;
   lastMoveDirection = "";
 }
 
@@ -1367,6 +1356,10 @@ function sendHeldMoveStep() {
   }
 
   const now = performance.now();
+  if (now - heldMoveChangedAt < movementChordDelayMs) {
+    return;
+  }
+
   if (now - lastHeldMoveSentAt < stepRetryMs) {
     return;
   }
