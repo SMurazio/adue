@@ -30,7 +30,7 @@ public sealed record ServerOptions(
             ReadInt("MMO_WORLD_WIDTH_TILES", 64),
             ReadInt("MMO_WORLD_HEIGHT_TILES", 64),
             ReadInt("MMO_STEP_COOLDOWN_MS", 200),
-            ReadFloat("MMO_INTEREST_RADIUS", 96f),
+            ReadFloat("MMO_INTEREST_RADIUS", 14f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSet("MMO_ADMIN_NAMES", "Admin"));
 

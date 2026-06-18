@@ -66,7 +66,7 @@ Useful environment variables:
 - `MMO_WORLD_WIDTH_TILES`: tile-grid width; defaults to `64`
 - `MMO_WORLD_HEIGHT_TILES`: tile-grid height; defaults to `64`
 - `MMO_STEP_COOLDOWN_MS`: per-entity step cooldown; defaults to `200`
-- `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `96`
+- `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `14`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`

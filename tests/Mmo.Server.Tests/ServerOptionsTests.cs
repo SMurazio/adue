@@ -24,6 +24,16 @@ public sealed class ServerOptionsTests
     }
 
     [Fact]
+    public void FromEnvironmentUsesTileSizedInterestRadiusDefault()
+    {
+        using var _ = new EnvironmentScope(new Dictionary<string, string?>());
+
+        var options = ServerOptions.FromEnvironment();
+
+        Assert.Equal(14f, options.InterestRadius);
+    }
+
+    [Fact]
     public void FromEnvironmentRejectsInvalidWorldWidth()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>
