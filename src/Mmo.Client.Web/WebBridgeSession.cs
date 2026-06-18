@@ -275,26 +275,16 @@ public sealed class WebBridgeSession
         return false;
     }
 
-    private static bool TryParseDirection(string direction, out Direction8 parsed)
+    internal static bool TryParseDirection(string direction, out Direction8 parsed)
     {
-        return direction.ToLowerInvariant() switch
+        if (Enum.TryParse<Direction8>(direction, ignoreCase: true, out parsed)
+            && Enum.IsDefined(parsed))
         {
-            "w" or "up" or "n" => Set(Direction8.N, out parsed),
-            "a" or "left" or "west" => Set(Direction8.W, out parsed),
-            "s" or "down" or "south" => Set(Direction8.S, out parsed),
-            "d" or "right" or "east" => Set(Direction8.E, out parsed),
-            "nw" => Set(Direction8.NW, out parsed),
-            "ne" => Set(Direction8.NE, out parsed),
-            "sw" => Set(Direction8.SW, out parsed),
-            "se" => Set(Direction8.SE, out parsed),
-            _ => Set(Direction8.S, out parsed, false)
-        };
-    }
+            return true;
+        }
 
-    private static bool Set(Direction8 value, out Direction8 parsed, bool result = true)
-    {
-        parsed = value;
-        return result;
+        parsed = Direction8.S;
+        return false;
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
