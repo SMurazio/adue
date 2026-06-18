@@ -91,6 +91,16 @@ Useful environment variables:
 
 ## Run Clients
 
+Godot visual debug client:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
+```
+
+The Godot client uses the Compatibility (`gl_compatibility`) renderer. Forward+ on D3D12 caused
+visible frame hitches from lazy shader/pipeline compilation in this simple 2.5D scene; keep the
+Compatibility renderer unless a measured visual requirement justifies revisiting it.
+
 Isometric 3D browser debug client:
 
 ```powershell
