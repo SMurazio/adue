@@ -96,6 +96,8 @@ The stress tool defaults to strict pass criteria: every spawned client must auth
 - [Runbook](docs/runbook.md)
 - [Reference study: Godot Tiny MMO](docs/reference-study-godot-tiny-mmo.md)
 - [Multiplayer networking references](docs/networking-references.md)
+- [Networking reference catalogue (depth-annotated)](docs/networking-reference-catalogue.md)
+- [Networking design plan (extrapolated)](docs/networking-design-plan.md)
 
 ## Agent Skill
 

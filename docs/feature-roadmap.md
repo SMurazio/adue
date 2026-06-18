@@ -2,18 +2,23 @@
 
 This roadmap is intentionally phased. The project is still building the MMO spine, so the next work should make the single-zone prototype stable and observable before adding larger gameplay systems.
 
+The networking rationale is [Networking Design Plan](networking-design-plan.md), backed by the complete [Networking Reference Catalogue](networking-reference-catalogue.md). The design axis is authoritative state-sync snapshots with AOI scoping and interpolation now, then measured deltas/grid AOI later. The explicit resolution against older planning language is: no client prediction, reconciliation, lag compensation, lockstep, rollback, P2P, raycast/PVS visibility, extrapolation, hand-rolled UDP reliability, or engine/SaaS netcode in the current MMO spine.
+
 ## Near-Term Queue
 
 These are the next practical tasks before new gameplay:
 
-1. Add startup validation for `ServerOptions`: port range, tick rate, movement speed, interest radius, and visible entity cap should fail fast with clear errors.
-2. Wrap queued main-thread actions so one unexpected login/send/session exception cannot escape the server loop.
-3. Harden bad-packet handling: count bad packets per session, avoid echoing raw exception details, and disconnect after a small threshold.
-4. Add integration coverage for AOI enter/leave behavior now that `EntitySpawn`, `WorldSnapshot`, and `EntityDespawn` are separate messages.
-5. Improve stress-client reporting: connect timeout, login timeout, minimum auth rate, max error rate, and JSON/CSV output for run comparisons.
-6. Add latency percentiles to stress reports instead of relying only on average/max.
-7. Extract a small `WorldState`/`Zone` model so world entities stop being derived entirely from live sessions.
-8. Add a lightweight diagnostics endpoint after the in-game metrics stabilize.
+1. Keep robustness closed: startup validation, crash-proof tick/snapshot paths, movement bounds, bad-packet disconnects, and network-id recycling must stay covered by regression tests.
+2. Add per-tick budget profiling and drift metrics, bucketed into movement, AOI, serialization, network, persistence, and other work. This is the trigger mechanism for every later optimization.
+3. Add per-client bandwidth counters so stress runs show who is receiving how much snapshot/event traffic.
+4. Add snapshot sequence numbers and a client-to-server last-snapshot-sequence ack. Keep sending full snapshots for now; the ack exists to unlock later delta compression without redesign.
+5. Enforce AOI as an anti-cheat invariant: outside a client's AOI means never serialized into that client's packet, covered by integration tests.
+6. Improve the browser debug client with remote-entity interpolation using a small snapshot buffer. Do not add prediction.
+7. Keep persistence memory-first and write-behind: no database read/write in the tick hot path except explicit async boundaries.
+8. Formalize LiteNetLib delivery classes and channels: reliable ordered structural events, unreliable/sequenced high-frequency state, and documented message ownership in `Mmo.Shared`.
+9. Improve stress-client reporting: connect timeout, login timeout, minimum auth rate, max error rate, JSON/CSV output, and latency percentiles for run comparisons.
+10. Extract a small data-oriented `WorldState`/`Zone` model so entities stop being derived entirely from live sessions.
+11. Add a lightweight diagnostics endpoint after the in-game metrics stabilize.
 
 ## Phase 0: Finish Admin And Debug Work
 
@@ -29,15 +34,18 @@ Do not turn admin commands into a general scripting or shell system.
 - Separate connection/session lifecycle, login, command handling, world simulation, and snapshot broadcast.
 - Add an explicit world model instead of deriving every entity directly from connected sessions.
 - Track tick duration, drift, skipped ticks, snapshot count, peer count, and authenticated player count.
+- Track per-tick category costs and per-client bandwidth; use these numbers as the gate for delta snapshots, grid AOI, and any process split.
 - Add basic validation: unauthenticated action rejection, movement vector clamping, chat/command rate limits, and clear bad-packet handling.
 - Keep send paths defensive so one oversized or invalid packet cannot escape the main loop.
 
-Avoid sharding, gateways, actor systems, or multi-zone architecture until the single-zone server is boring.
+Avoid sharding, gateways, actor systems, or multi-zone architecture until the single-zone server is boring. See [Networking Design Plan](networking-design-plan.md) sections 3-4 for why metrics come before optimization.
 
 ## Phase 2: Networking And Protocol Maturity
 
 - Document delivery rules per message type.
 - Use movement sequence numbers to reject stale input.
+- Add snapshot sequence numbers and client snapshot acks now, while still sending full snapshots.
+- Treat AOI filtering as a security boundary, not just a rendering optimization.
 - Add protocol mismatch handling and reserve message IDs for future growth.
 - Add counters for messages and bytes in/out by message type.
 - Add local artificial latency/loss settings for testing interpolation and responsiveness.
@@ -45,9 +53,9 @@ Avoid sharding, gateways, actor systems, or multi-zone architecture until the si
 - Keep snapshots below the UDP packet budget; do not resend static identity data in every movement tick.
 - Keep reliable spawn metadata separate from unreliable high-frequency entity state.
 - Recycle channel-local network ids before long-running churn can exhaust the compact snapshot id range.
-- Add delta snapshots only after full packed snapshots are well measured.
+- Add delta snapshots only after full packed snapshots are well measured and snapshot ack baselines exist.
 
-Do not over-invest in client prediction until interpolation, tick timing, and server authority are stable.
+Do not add client prediction, reconciliation, lag compensation, extrapolation, or rewind. For this slow top-down MMO spine, interpolation is the chosen model; revisit local-player-only prediction only if measured movement latency proves unacceptable.
 
 ## Phase 3: Persistence Foundations
 
@@ -55,6 +63,7 @@ Do not over-invest in client prediction until interpolation, tick timing, and se
 - Add repository tests with temporary SQLite databases.
 - Test clean database bootstrap and existing database migration.
 - Persist character identity, display name, zone id, and position reliably.
+- Keep durable state separate from transient state; positions are server-memory truth with checkpoint/write-behind persistence.
 - Revisit Postgres only after the SQLite path is proven.
 
 Avoid account security, inventory schemas, item databases, and character creation complexity until login/session/persistence is stable.
@@ -63,6 +72,7 @@ Avoid account security, inventory schemas, item databases, and character creatio
 
 - Introduce `WorldState` and `Zone` abstractions.
 - Introduce explicit server-side entity objects instead of deriving world state directly from sessions.
+- Classify state as transient/lossy versus durable-contract before adding complex entity types.
 - Add world bounds and movement clamping.
 - Add basic non-player entity kinds only when needed: NPC placeholder, static object, resource node.
 - Add server-validated interactions: target entity, validate distance, emit result.
@@ -76,7 +86,7 @@ Combat should wait until movement, snapshots, targeting, and persistence are rel
 - Add admin commands around debugging: `/teleport`, `/summon`, `/kick`, `/setpos`, `/metrics`, `/entities`.
 - Add structured log lines or consistent key-value logs.
 - Add an optional HTTP diagnostics endpoint for health, peer count, tick stats, message counters, and synthetic load status.
-- Improve the browser debug client with selected entity details, latency/status, and a dedicated command input.
+- Improve the browser debug client with interpolation diagnostics, selected entity details, latency/status, and a dedicated command input.
 
 Keep this as debug tooling, not the final game UI.
 
@@ -85,6 +95,7 @@ Keep this as debug tooling, not the final game UI.
 - Add integration tests for two-client login, movement snapshots, chat broadcast, reconnect persistence, non-admin command denial, and admin command success.
 - Add deterministic stress profiles: 10-client smoke, 100-client local baseline, chat-heavy run, and connect/disconnect churn.
 - Track regression numbers manually at first: max stable clients, average latency, snapshot bandwidth, and tick duration.
+- Add stress profiles that report idle versus 120-150 visible-player tick-budget buckets.
 
 Load testing without metrics is mostly guesswork; add counters before chasing performance.
 
@@ -92,6 +103,7 @@ Load testing without metrics is mostly guesswork; add counters before chasing pe
 
 - Continue hardening radius-based area-of-interest filtering.
 - Move to a grid or spatial hash after entity counts make naive per-client distance checks measurable.
+- Use AOI bucket measurements as the trigger for grid/spatial-hash work.
 - Preserve packet-budgeted snapshots: include self first, then use stable AOI priority when channel population exceeds the visible target.
 - Test entities entering and leaving visibility.
 - Measure bandwidth before and after.
@@ -106,6 +118,7 @@ Do not add multi-zone or map instances until interest management works in one zo
 - First milestone: connect, login, render snapshots, interpolate movement, send movement input, and show chat.
 - Use the browser debug client as a behavior reference.
 - Follow the server object, replicated client object, view object separation before building real UI or combat presentation.
+- Do not port engine-coupled networking stacks; Godot consumes the shared protocol/client model.
 
 Start Godot after the protocol and server runtime stop changing every session.
 
