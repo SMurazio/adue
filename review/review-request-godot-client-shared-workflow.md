@@ -1,33 +1,38 @@
-# Review Request: Godot Client Core + Shared Agent Workflow
+# Review Request: Godot Client Core, Visual Client, and Shared Workflow
 
 ## 1. Intent & Scope
 
-This branch implements the current `todo/` queue on `D:\MMO` after the tile-stepped movement work:
-S15 introduces a pure C# `Mmo.Client.Core` and test coverage for the future Godot client, S16 drafts
-the Godot isometric view and remains blocked only on human visual verification, S17 is marked
-blocked behind S16, N12 moves repo-local skills into `.shared/skills/`, and N13 moves startup
-instructions plus durable project memory into `.shared/`. Source of truth:
-`todo/README.md`, `AGENTS.md` at task start, `todo/S15-godot-m1-client-core.md`,
-`todo/S16-godot-m1b-editor-view.md`, `todo/S17-godot-m2-local-prediction.md`,
-`todo/N12-share-skills-via-dotshared.md`, `todo/N13-share-startup-and-memory-via-dotshared.md`,
-and the local design notes cited by those tasks. Branch: `review/tile-step-todo`. Base for review:
-`16f480a docs: add review request for S14`. Implementation head before this review file:
-`1efd315 fix: S16 Godot headless run wrapper`.
+This branch implements the Godot-client and shared-workflow todo batch on `D:\MMO`: S15 adds a pure
+C# `Mmo.Client.Core`; S16 adds and manually verifies the Godot isometric client view with movement,
+chat, metrics overlay, and visual-check launcher; N12/N13 move shared skills, project startup
+instructions, and durable memory into `.shared/`; S17 remains blocked because its local-prediction
+request conflicts with the current no-prediction roadmap/design text and needs an Orchestrator
+decision. Source of truth: `todo/README.md`, `.shared/project.md`, `docs/godot-client-design.md`,
+`docs/networking-design-plan.md`, `docs/feature-roadmap.md`, and the todo files in this branch.
+Branch: `review/tile-step-todo`. Base: `16f480a docs: add review request for S14`. Implementation
+head to review: `24dd9ee blocked: S17 prediction needs architecture decision`.
 
 ## 2. How To See The Changes
 
 Run:
 
 ```powershell
-git diff 16f480a..1efd315 --stat
-git log --oneline 16f480a..1efd315
-git diff 16f480a..1efd315
+git diff 16f480a..24dd9ee --stat
+git log --oneline 16f480a..24dd9ee
+git diff 16f480a..24dd9ee
 ```
 
-Committed history to review:
+Committed implementation/history in this batch:
 
 ```text
+24dd9ee blocked: S17 prediction needs architecture decision
+62adc83 fix: S16 complete Godot editor view
+750f88e fix: S16 Godot chat input and metrics roles
+db06ee3 fix: S16 Godot overlay and screen-relative movement
+20f0c88 feat: add Godot visual check launcher
+a63fff6 docs: update review request after Godot smoke
 1efd315 fix: S16 Godot headless run wrapper
+b689e01 docs: add review request for Godot client workflow
 a28b068 fix: N13 share startup and memory via dotshared
 d5babbb fix: N12 share skills via dotshared
 1c2edb5 blocked: S17 local prediction waits on Godot view
@@ -37,96 +42,95 @@ fbeb562 blocked: S16 Godot editor view
 eca0e61 chore: add Godot client todo queue
 ```
 
-Skip generated/local artifacts: `bin/`, `obj/`, `.godot/` cache directories, and the untracked
-`src/Mmo.Client.Godot/MmoClientRoot.cs.uid`. No vendored runtime dependency was added.
-
-There were unrelated uncommitted user/orchestrator files in the workspace while this was done
-(`docs/networking-design-plan.md`, old deleted review files, `.claude/settings.local.json`,
-`docs/godot-client-design.md`, `docs/worldstate-zone-design.md`, `review/README.md`,
-`start-mmo.cmd`). They were not staged into these task commits.
+Skip generated/local artifacts: `bin/`, `obj/`, `.godot/`, `.run/`, and the untracked
+`src/Mmo.Client.Godot/MmoClientRoot.cs.uid`. Treat this review request file as briefing material,
+not implementation. Unrelated uncommitted workspace changes existed and were not staged:
+`docs/networking-design-plan.md`, old deleted review request files, `.claude/settings.local.json`,
+`docs/godot-client-design.md`, `docs/worldstate-zone-design.md`, `review/README.md`, `start-mmo.cmd`.
 
 ## 3. Change Manifest
 
 ### Protocol
 
-- No shared wire contract change in this batch. Protocol remains v9 from tile-stepped movement.
-- `src/Mmo.Client.Core/MmoClient.cs` consumes existing v9 messages, including snapshot sequence ack,
-  chunked snapshots, entity spawn/despawn, zone info, chat, and errors.
+- No protocol version bump. Protocol remains v9.
+- `src/Mmo.Client.Core/MmoClient.cs` consumes existing v9 messages and now exposes the login `Role`
+  from `LoginResultMessage`, so UI can decide whether admin-only debug commands are allowed.
 
 ### Server
 
-- No production server behavior was changed.
-- `tests/Mmo.Client.Core.Tests/MmoClientIntegrationTests.cs` starts a real `GameServer` with temp
-  SQLite to verify client-core behavior against the actual server.
+- No production server behavior change.
+- `.shared/skills/mmo-dev/scripts/start-godot-visual-check.ps1` sets `MMO_ADMIN_NAMES` for the
+  launched debug clients, so `/metrics` works during the manual visual check without changing server
+  defaults.
 
 ### Clients
 
-- `src/Mmo.Client.Core/*` - new pure C# client library with LiteNetLib polling, login, snapshot
-  assembly, stale snapshot filtering, entity replication, chat, move-step sending, and render-state
-  projection.
-- `src/Mmo.Client.Core/TileInterpolator.cs`, `MovementCadence.cs`, `RenderPosition.cs` - isolated
-  tile interpolation model for confirmed-state rendering; no prediction.
-- `src/Mmo.Client.Godot/*` - source-authored Godot 4 .NET project, scene, and C# root node that
-  consumes `Mmo.Client.Core`, builds an isometric 3D view, renders ground/grid/walls/entities, sends
-  held WASD movement, and can send a startup chat message.
-- `Mmo.sln` - includes `Mmo.Client.Core` and `Mmo.Client.Core.Tests`.
+- `src/Mmo.Client.Core/*` - new pure C# LiteNetLib client core: connect/login, polling, snapshot ack,
+  chunk assembly, entity spawn/despawn, replicated entities, tile interpolation, chat/errors, and
+  render states.
+- `src/Mmo.Client.Core/ScreenRelativeDirectionMapper.cs` - shared, tested screen-relative WASD to
+  world-direction mapping used by Godot (`W` = screen up, `S+D` = screen down-right).
+- `src/Mmo.Client.Godot/*` - Godot 4 .NET project and source-authored isometric 3D scene consuming
+  `Mmo.Client.Core`: grid/walls/entities/labels, camera follow, confirmed-state glide, visible HUD,
+  admin metrics panel, chat log, and real chat input (`Enter`/`T` focus, `Enter` send, `Esc` cancel).
+- `.shared/skills/mmo-dev/scripts/start-godot-visual-check.cmd/.ps1` - one-command launcher for
+  server plus two visible Godot clients (`GodotA`, `GodotB`).
+- `.shared/skills/mmo-dev/scripts/godot-run.ps1` - switched from `Start-Process` to
+  `System.Diagnostics.Process` to avoid Windows PowerShell duplicate `Path`/`PATH` environment-key
+  failures.
+- `.shared/skills/mmo-dev/scripts/stop-mmo.ps1` - cleans Godot client PID files/processes and avoids
+  killing the visual-check launcher while it is still starting.
 
 ### Persistence
 
-- No production persistence/schema change.
-- `tests/Mmo.Client.Core.Tests/TestSqliteDatabase.cs` creates disposable SQLite storage for
-  integration tests.
+- No production schema/persistence change.
+- `tests/Mmo.Client.Core.Tests/TestSqliteDatabase.cs` creates temp migrated SQLite databases for
+  real server/client integration tests.
 
 ### Tests
 
-- `tests/Mmo.Client.Core.Tests/TileInterpolatorTests.cs` - cadence quantization, local confirmed
-  movement, and remote interpolation behavior.
-- `tests/Mmo.Client.Core.Tests/MmoClientIntegrationTests.cs` - real server/client tests for login,
-  server/zone info, two-client visibility, movement replication, and chat.
-- `Mmo.Client.Core.Tests` was added to `Mmo.sln`.
+- `tests/Mmo.Client.Core.Tests/MmoClientIntegrationTests.cs` - real server/client login, server/zone
+  info, role propagation, two-client visibility, movement replication, and chat.
+- `tests/Mmo.Client.Core.Tests/TileInterpolatorTests.cs` - local confirmed glide and remote
+  interpolation behavior.
+- `tests/Mmo.Client.Core.Tests/ScreenRelativeDirectionMapperTests.cs` - screen-relative movement map.
+- `Mmo.Client.Core.Tests` added to `Mmo.sln`.
 
 ### Docs / Workflow
 
-- `.shared/skills/mmo-dev/*` - canonical repo-local skill and scripts.
-- `.shared/skills/mmo-dev/scripts/godot-run.ps1` - uses `System.Diagnostics.Process` instead of
-  `Start-Process` to avoid the Windows PowerShell duplicate `Path`/`PATH` environment-key failure.
-- `.codex/skills/mmo-dev/SKILL.md` and `.claude/skills/mmo-dev/SKILL.md` - thin stubs pointing to
-  the shared skill.
-- `.shared/project.md` - canonical shared project contract/startup instructions.
-- `AGENTS.md` and `CLAUDE.md` - root entry points pointing to `.shared/project.md`.
-- `.shared/memory/*` - canonical version-controlled memory store with migrated project notes.
-- `README.md`, `MMO_PROJECT_PLAN.md`, `docs/runbook.md`, `todo/README.md` - updated script paths and
-  shared artifact references.
-- Claude user-memory pointer created outside the repo at
+- `.shared/skills/mmo-dev/*` - canonical shared skill/scripts; `.codex/` and `.claude/` skill files
+  are thin stubs.
+- `.shared/project.md`, `AGENTS.md`, `CLAUDE.md` - canonical project contract plus root entry stubs.
+- `.shared/memory/*` - versioned shared memory notes and index.
+- `README.md`, `MMO_PROJECT_PLAN.md`, `docs/runbook.md`, `todo/README.md` - updated shared path and
+  workflow references.
+- Claude user-memory pointer was created outside git:
   `C:\Users\stefano\.claude\projects\D--MMO\memory\shared-memory-pointer.md`.
 
 ### Todo State
 
-- Completed/deleted in their fix commits: `S15-godot-m1-client-core.md`,
+- Completed/deleted: `S15-godot-m1-client-core.md`, `S16-godot-m1b-editor-view.md`,
   `N12-share-skills-via-dotshared.md`, `N13-share-startup-and-memory-via-dotshared.md`.
-- Blocked and still present: `S16-godot-m1b-editor-view.md`, `S17-godot-m2-local-prediction.md`.
+- Remaining blocked: `todo/S17-godot-m2-local-prediction.md`.
 
 ## 4. Decisions & Deviations
 
-- S16 was not deleted because acceptance still requires human visual verification with two visible
-  Godot clients. I drafted the source-level Godot project and C# view code, verified the C# build,
-  fixed `godot-run.cmd`, verified headless Godot startup, then kept `## Blocked` for the manual
-  verification only.
-- S17 was not implemented because it explicitly depends on S16. I did not start the shared movement
-  rule extraction or input-sequence echo; landing prediction protocol work before a verified
-  confirmed-state Godot client would violate the queue ordering.
-- The Godot scene is mostly built in `MmoClientRoot.cs` from a minimal `Main.tscn`. This keeps the
-  work source-reviewable and headless-authorable, but it still needs real editor/runtime validation.
-- `Mmo.Client.Core` may create placeholder replicated entities if a snapshot state arrives before
-  the corresponding spawn metadata. Later spawn messages update metadata. This avoids dropping valid
-  state under packet ordering, but please scrutinize lifecycle behavior.
-- N13 migrated the Claude memory notes as clean ASCII repo-local summaries, not byte-identical
-  copies. The original user-memory files contained mojibake; the shared memory captures the same
-  durable decisions in a versioned form.
-- The Claude user-memory pointer is intentionally outside git because Claude auto-loads user memory
-  from that location. The repo records the canonical memory in `.shared/memory/`.
-- No client prediction, pathfinding, LOS, rollback, lag compensation, process split, or protocol
-  bump was introduced.
+- I initially blocked S16 because `MMO_GODOT` was not visible, then the user set it. After that,
+  `godot-run.cmd` exposed a wrapper bug, which I fixed.
+- S16 was completed only after the human visually confirmed the relaunched Godot clients worked:
+  map/two players visible, movement direction fixed, chat input working, metrics no longer denied.
+- The Godot scene is mostly built in C# from a minimal `Main.tscn` to keep it source-reviewable and
+  headless-authorable.
+- The Godot metrics panel uses server chat commands (`/metrics`) for now. The visual-check launcher
+  elevates `GodotA`/`GodotB` by setting `MMO_ADMIN_NAMES`; production defaults are unchanged.
+- `Mmo.Client.Core` creates placeholder metadata if snapshot state arrives before spawn metadata,
+  then updates when spawn arrives. This is intentional packet-order tolerance but should be reviewed.
+- N13 migrated Claude memory as clean repo-local summaries, not byte-identical copies.
+- S17 was not implemented. After S16 was verified, the blocker changed from "needs S16" to an
+  architecture conflict: `docs/godot-client-design.md` asks for prediction M2, while
+  `docs/feature-roadmap.md` and `docs/networking-design-plan.md` still defer/reject prediction unless
+  latency is measured as unacceptable. Since movement was reported correct after S16, I did not
+  unilaterally add prediction/protocol changes.
 
 ## 5. Self-Verification Evidence
 
@@ -146,50 +150,45 @@ Build succeeded.
     0 Error(s)
 
 Passed!  - Failed:     0, Passed:    13, Skipped:     0, Total:    13 - Mmo.Shared.Tests.dll
-Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5 - Mmo.Client.Core.Tests.dll
+Passed!  - Failed:     0, Passed:    14, Skipped:     0, Total:    14 - Mmo.Client.Core.Tests.dll
 Passed!  - Failed:     0, Passed:    55, Skipped:     0, Total:    55 - Mmo.Server.Tests.dll
 ```
 
-Warnings were `NU1900` vulnerability-feed warnings because the sandbox could not load
-`https://api.nuget.org/v3/index.json`; build/tests still passed.
+Warnings were `NU1900` vulnerability-feed warnings because package vulnerability data could not be
+loaded from `https://api.nuget.org/v3/index.json`; build/tests passed.
 
 ### Godot build/run
 
-Command:
+Commands:
 
 ```powershell
 .\.shared\skills\mmo-dev\scripts\godot-build.cmd
-```
-
-Result:
-
-```text
-Building Godot client: D:\MMO\src\Mmo.Client.Godot\MmoClientGodot.sln
-Mmo.Shared -> D:\MMO\src\Mmo.Shared\bin\Debug\net8.0\Mmo.Shared.dll
-Mmo.Client.Core -> D:\MMO\src\Mmo.Client.Core\bin\Debug\net8.0\Mmo.Client.Core.dll
-MmoClientGodot -> D:\MMO\src\Mmo.Client.Godot\.godot\mono\temp\bin\Debug\MmoClientGodot.dll
-
-Build succeeded.
-    0 Warning(s)
-    0 Error(s)
-```
-
-Command:
-
-```powershell
 .\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
 ```
 
-Result:
+Results:
 
 ```text
+MmoClientGodot -> D:\MMO\src\Mmo.Client.Godot\.godot\mono\temp\bin\Debug\MmoClientGodot.dll
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
 Running Godot headless for ~8 s: D:\MMO\src\Mmo.Client.Godot
-(for a server-connection smoke, start the MMO server first via start-server.cmd)
 (stopped after ~8 s)
 ----- stdout -----
 Godot Engine v4.6.3.stable.mono.official.7d41c59c4 - https://godotengine.org
-
 ----- stderr -----
+```
+
+Manual visual check:
+
+```text
+The user visually verified two launched Godot clients after the overlay/chat fixes:
+- movement direction is correct
+- chat input works
+- metrics no longer produce command-denied spam
+- the visible Godot client flow "seems to work"
 ```
 
 ### Fresh 120-client / 60s stress run
@@ -200,92 +199,72 @@ Command:
 .\.shared\skills\mmo-dev\scripts\review-stress.cmd
 ```
 
-Server-side metrics captured during stress:
+Server-side metrics:
 
 ```text
-Review stress: clients=120 duration=60s metricsDelay=52s
-metrics state: uptime=55.2s, tick=1103, peers=121, players=121, stress idle.
-metrics 5s: tick/s=18.0, tickMs avg/max=4.72/24.18, driftMs avg/max=7.34/15.70,
-budgetMs move/aoi/ser/net/persist/other=0.04/2.99/0.18/0.51/0.00/0.00,
-snap/s=1625.0, visible avg/max=61.7/91, clientBytes avg/max=142.1/661,
-culled/s=1625.0, out=1907.8kbps, in=179.1kbps,
+metrics state: uptime=55.2s, tick=1104, peers=121, players=121, stress idle.
+metrics 5s: tick/s=19.0, tickMs avg/max=4.13/22.94, driftMs avg/max=7.69/15.36,
+budgetMs move/aoi/ser/net/persist/other=0.04/2.64/0.17/0.44/0.00/0.00,
+snap/s=2028.0, visible avg/max=58.9/94, clientBytes avg/max=119.9/675,
+culled/s=2028.0, out=2011.0kbps, in=215.6kbps,
 sendFail/s=0.0, bad/s=0.0, netErr/s=0.0, runtimeFault/s=0.0
-metrics 60s: tick/s=20.0, tickMs avg/max=4.33/39.72, driftMs avg/max=7.78/17.05,
-budgetMs move/aoi/ser/net/persist/other=0.03/2.72/0.18/0.48/0.00/0.00,
-snap/s=1730.6, visible avg/max=74.7/120, clientBytes avg/max=153.4/864,
-culled/s=1725.2, out=2302.6kbps, in=187.1kbps,
+metrics 60s: tick/s=20.0, tickMs avg/max=4.23/40.22, driftMs avg/max=7.67/19.39,
+budgetMs move/aoi/ser/net/persist/other=0.04/2.67/0.18/0.46/0.00/0.00,
+snap/s=1994.7, visible avg/max=73.2/119, clientBytes avg/max=135.4/857,
+culled/s=1986.1, out=2340.3kbps, in=210.3kbps,
 sendFail/s=0.0, bad/s=0.0, netErr/s=0.0, runtimeFault/s=0.0
-metrics total: tickMs last/avg/max=4.51/4.33/39.72, driftMs avg/max=7.78/17.05,
-budgetMs avg=0.03/2.72/0.18/0.48/0.00/0.00,
-budgetMs max=0.49/6.43/1.22/3.22/0.00/0.44,
-snap/s(avg)=1730.6, snapshots=95506, visible avg/max=74.7/120,
-clientBytes avg/max=153.4/864, outAvg=2302.7kbps, inAvg=187.1kbps,
+metrics total: tickMs last/avg/max=4.21/4.23/40.22, driftMs avg/max=7.67/19.39,
+budgetMs avg=0.04/2.67/0.18/0.46/0.00/0.00,
+budgetMs max=0.54/6.63/0.74/4.39/0.00/0.34,
+snap/s(avg)=1994.7, snapshots=110186, visible avg/max=73.2/119,
+clientBytes avg/max=135.4/857, outAvg=2340.4kbps, inAvg=210.3kbps,
 sendFail=0, badPackets=0, netErr=0, runtimeFaults=0,
-login=121/0, loginMs avg/max=29.7/357.3ms
-message metrics: received[ClientHello=121, LoginRequest=121, MoveStep=19395, ChatSend=1, SnapshotAck=95441],
-sent[ServerHello=121, LoginResult=121, WorldSnapshot=95506, ChatBroadcast=4, EntitySpawn=13508,
-EntityDespawn=20981, ZoneInfo=121]
+login=121/0, loginMs avg/max=27.1/172.6ms
+message metrics: received[ClientHello=121, LoginRequest=121, MoveStep=19491, ChatSend=1, SnapshotAck=110059],
+sent[ServerHello=121, LoginResult=121, WorldSnapshot=110186, ChatBroadcast=4, EntitySpawn=13442, EntityDespawn=21192, ZoneInfo=121]
 ```
 
 Stress client summary:
 
 ```text
-Stress target: 127.0.0.1:7777
-Clients=120 duration=60s spawnRate=25/s seed=349512859
-Movement every 250ms, direction every 1s, chat=off
-Pass criteria: authRate>=100%, errors<=0
-
 Summary
-  elapsed: 60.104s
+  elapsed: 60.168s
   spawned: 120
   connected: 120
   disconnected: 120
   logins accepted/rejected: 120/0
-  snapshots: 112953 total, max entities in one snapshot: 120
-  protocol messages sent/received: 136625/152286
-  protocol bytes sent/received: 1531467/18351493
-  avg/max latency: 0.0ms/4ms
+  snapshots: 130243 total, max entities in one snapshot: 119
+  protocol messages sent/received: 153868/169288
+  protocol bytes sent/received: 1721093/18533225
+  avg/max latency: 0.0ms/2ms
   server/network errors: 0/0
 ```
 
-Bandwidth comparison: the tile-step task targeted a drop from the earlier observed approximately
-112 kbps per client. This fresh run reports server `outAvg=2302.7kbps` over 120 stress clients plus
-one metrics client, which is about 19.2 kbps per stress client by total server outbound divided by
-120. The stress client's received bytes are 18,351,493 over 60.104s across 120 clients, about
-20.4 kbps/client.
-
-Protocol compatibility: protocol version remains v9. This batch did not change shared wire
-contracts, so there is no new old/new-client compatibility boundary beyond the existing v9
-tile-stepped protocol.
+Protocol compatibility: no new protocol bump in this batch. Protocol remains v9.
 
 ## 6. Known Gaps / TODOs / Low-Confidence Areas
 
-- `todo/S16-godot-m1b-editor-view.md` remains blocked: Godot headless build/run is now green, but
-  manual visual verification with two visible clients is still required.
-- `todo/S17-godot-m2-local-prediction.md` remains blocked behind S16. No prediction work was started.
-- The Godot client has not been visually tested with two live clients. The C# build is green only.
-- Godot input mapping and camera-relative movement need hands-on verification; browser movement bugs
-  motivated this work, but this branch does not alter the web client.
-- `Mmo.Client.Core` integration tests cover real server login/move/chat, but not packet loss,
-  reordering, chunk loss, reconnect behavior, or long-running churn.
-- The shared memory migration is a summarized repo-local version of Claude user-memory, not a
-  byte-for-byte archival copy.
+- `todo/S17-godot-m2-local-prediction.md` remains blocked on an Orchestrator architecture decision.
+- The Godot metrics panel is intentionally simple and backed by `/metrics` chat command text, not a
+  dedicated metrics protocol/API.
+- Manual visual verification was done by the human, not automated through screenshot assertions.
+- Godot UI layout is functional, not polished; reviewer should scrutinize resize/overlap behavior.
+- `Mmo.Client.Core` does not yet test packet loss/reordering, reconnect behavior, or long-running
+  client churn.
 
 ## 7. Highest-Risk Areas To Scrutinize
 
 - `src/Mmo.Client.Core/MmoClient.cs`: snapshot chunk assembly, stale sequence handling, full vs
-  partial snapshot merge/prune semantics, entity spawn/despawn ordering, and ack emission.
-- `src/Mmo.Client.Core/TileInterpolator.cs`: local confirmed-tile glide, remote interpolation timing,
-  and whether it can produce visible boundary stalls.
-- `tests/Mmo.Client.Core.Tests/MmoClientIntegrationTests.cs`: server lifecycle cleanup, temp SQLite
-  isolation, and whether the assertions are strong enough.
-- `src/Mmo.Client.Godot/MmoClientRoot.cs`: tile-to-world coordinate mapping, camera framing,
-  movement input mapping, per-frame allocations, and separation between Godot view code and client
-  core networking.
-- `.shared/skills/mmo-dev/*` and docs updates: stale references to `.codex\skills\mmo-dev\scripts`
-  or inconsistent startup instructions.
-- `.shared/project.md`, `AGENTS.md`, `CLAUDE.md`, `.shared/memory/*`: whether the shared contract is
-  complete enough and whether the root stubs are thin enough.
+  partial snapshot pruning, placeholder entity metadata, and ack emission.
+- `src/Mmo.Client.Core/TileInterpolator.cs`: local confirmed glide and remote interpolation timing.
+- `src/Mmo.Client.Core/ScreenRelativeDirectionMapper.cs`: screen-relative mapping must match the
+  isometric camera convention.
+- `src/Mmo.Client.Godot/MmoClientRoot.cs`: input focus, chat submission, metrics polling, overlay
+  layout, per-frame allocations, camera follow, and view/core separation.
+- `.shared/skills/mmo-dev/scripts/start-godot-visual-check.ps1`: temporary admin elevation and
+  process cleanup behavior.
+- `todo/S17-godot-m2-local-prediction.md`: whether blocking prediction is correct or whether the
+  Orchestrator wants `docs/godot-client-design.md` to supersede the no-prediction roadmap.
 
 ## 8. What I Want The Reviewer To Do
 
@@ -295,22 +274,26 @@ tile-stepped protocol.
 
 ```powershell
 .\.shared\skills\mmo-dev\scripts\run-checks.cmd
-.\.shared\skills\mmo-dev\scripts\review-stress.cmd
 .\.shared\skills\mmo-dev\scripts\godot-build.cmd
+.\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
+.\.shared\skills\mmo-dev\scripts\review-stress.cmd
 ```
 
-- If Godot .NET is installed and `MMO_GODOT` is configured, run:
+- If visual verification is available, run:
 
 ```powershell
-.\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
+```
+
+Then confirm two clients render the map and each other, movement is screen-relative, chat input works,
+and the metrics panel populates without command-denied spam. Stop with:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\stop-mmo.cmd
 ```
 
 - Review `Mmo.Client.Core` for protocol correctness and hot-path allocations.
-- Verify S16 and S17 are correctly blocked, not silently incomplete.
-- Verify N12/N13 match the shared `.shared/` pattern and that no stale script paths remain in
-  committed docs.
-- Confirm the branch did not introduce rejected-for-this-genre items: prediction, pathfinding, LOS,
-  rollback, lag compensation, lockstep, process split, or hand-rolled reliability.
-- Confirm docs/code agree about the current state: Godot confirmed-state client core exists; Godot
-  visual runtime is drafted and passes headless build/run, but remains blocked on manual visible-client
-  verification; local prediction remains future work.
+- Confirm S16 is legitimately complete and S17 is legitimately blocked rather than silently skipped.
+- Resolve or explicitly route the plan conflict around local prediction.
+- Confirm no rejected-for-this-genre items were introduced: server rewind, lag compensation,
+  rollback, lockstep, P2P, LOS/PVS AOI, process split, or hand-rolled reliability.
