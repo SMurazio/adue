@@ -54,7 +54,8 @@ let tileGridWidth = 128;
 let tileGridHeight = 128;
 const defaultTileStepTweenMs = 140;
 let tileStepTweenMs = defaultTileStepTweenMs;
-let movementInterpolationDelayMs = tileStepTweenMs;
+const remoteInterpolationCadenceMultiplier = 2;
+let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;
 const selfMovementInterpolationDelayMs = 0;
 const stepRetryMs = 50;
 const movementChordDelayMs = 70;
@@ -393,7 +394,7 @@ function handleMessage(message) {
       setStatus(message.text);
       break;
     case "serverHello":
-      setStepCooldownMs(message.stepCooldownMs);
+      setStepCooldownMs(message.stepCooldownMs, message.tickRate);
       setStatus(`${message.serverName} - ${message.tickRate} ticks/sec`);
       break;
     case "login":
@@ -431,15 +432,24 @@ function handleMessage(message) {
   }
 }
 
-function setStepCooldownMs(value) {
+function setStepCooldownMs(value, tickRate) {
+  tileStepTweenMs = computeEffectiveStepCadenceMs(value, tickRate);
+  movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;
+}
+
+function computeEffectiveStepCadenceMs(value, tickRate) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    tileStepTweenMs = defaultTileStepTweenMs;
-  } else {
-    tileStepTweenMs = THREE.MathUtils.clamp(parsed, 50, 5000);
+  const cooldownMs = Number.isFinite(parsed) && parsed > 0
+    ? THREE.MathUtils.clamp(parsed, 50, 5000)
+    : defaultTileStepTweenMs;
+  const parsedTickRate = Number(tickRate);
+  if (!Number.isFinite(parsedTickRate) || parsedTickRate <= 0) {
+    return cooldownMs;
   }
 
-  movementInterpolationDelayMs = tileStepTweenMs;
+  const tickIntervalMs = 1000 / parsedTickRate;
+  const cooldownTicks = Math.max(1, Math.ceil(cooldownMs / tickIntervalMs));
+  return cooldownTicks * tickIntervalMs;
 }
 
 function handleZoneInfo(message) {

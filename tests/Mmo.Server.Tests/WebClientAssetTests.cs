@@ -13,9 +13,13 @@ public sealed class WebClientAssetTests
         Assert.Contains("let tileGridHeight = 128;", app);
         Assert.Contains("const defaultTileStepTweenMs = 140;", app);
         Assert.Contains("let tileStepTweenMs = defaultTileStepTweenMs;", app);
-        Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs;", app);
+        Assert.Contains("const remoteInterpolationCadenceMultiplier = 2;", app);
+        Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;", app);
         Assert.Contains("function setStepCooldownMs", app);
-        Assert.Contains("setStepCooldownMs(message.stepCooldownMs);", app);
+        Assert.Contains("setStepCooldownMs(message.stepCooldownMs, message.tickRate);", app);
+        Assert.Contains("function computeEffectiveStepCadenceMs", app);
+        Assert.Contains("Math.ceil(cooldownMs / tickIntervalMs)", app);
+        Assert.Contains("movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;", app);
         Assert.Contains("const selfMovementInterpolationDelayMs = 0;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const movementChordDelayMs = 70;", app);
