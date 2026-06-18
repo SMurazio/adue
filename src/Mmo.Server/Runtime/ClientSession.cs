@@ -84,8 +84,8 @@ public sealed class ClientSession
         }
     }
 
-    public void Advance(float deltaSeconds, float movementUnitsPerSecond)
+    public void Advance(float deltaSeconds, float movementUnitsPerSecond, WorldBounds worldBounds)
     {
-        Position += PendingDirection * movementUnitsPerSecond * deltaSeconds;
+        Position = worldBounds.Clamp(Position + (PendingDirection * movementUnitsPerSecond * deltaSeconds));
     }
 }

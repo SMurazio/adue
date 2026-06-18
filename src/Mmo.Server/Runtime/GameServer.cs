@@ -259,7 +259,7 @@ public sealed class GameServer
         {
             if (session.IsAuthenticated)
             {
-                session.Advance(deltaSeconds, _options.MovementUnitsPerSecond);
+                session.Advance(deltaSeconds, _options.MovementUnitsPerSecond, _options.WorldBounds);
             }
         }
 

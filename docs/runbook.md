@@ -65,6 +65,7 @@ Useful environment variables:
 - `MMO_ADMIN_NAMES`: comma-separated local dev admin names; defaults to `Admin`
 - `MMO_INTEREST_RADIUS`: server-side AOI radius in world units; defaults to `96`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
+- `MMO_WORLD_MIN_X`, `MMO_WORLD_MAX_X`, `MMO_WORLD_MIN_Y`, `MMO_WORLD_MAX_Y`: authoritative world bounds; default to `-3000..3000` on both axes and must stay inside snapshot range
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`
