@@ -9,8 +9,11 @@ public sealed class WebClientAssetTests
     {
         var app = File.ReadAllText(FindWebAsset("app.js"));
 
-        Assert.Contains("const tileStepTweenMs = 200;", app);
-        Assert.Contains("const movementInterpolationDelayMs = tileStepTweenMs;", app);
+        Assert.Contains("const defaultTileStepTweenMs = 140;", app);
+        Assert.Contains("let tileStepTweenMs = defaultTileStepTweenMs;", app);
+        Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs;", app);
+        Assert.Contains("function setStepCooldownMs", app);
+        Assert.Contains("setStepCooldownMs(message.stepCooldownMs);", app);
         Assert.Contains("const selfMovementInterpolationDelayMs = 0;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const movementChordDelayMs = 70;", app);

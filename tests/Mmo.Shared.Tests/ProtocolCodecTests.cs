@@ -67,6 +67,19 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void ServerHelloRoundTripsStepCooldown()
+    {
+        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140);
+
+        var decoded = Assert.IsType<ServerHelloMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal("server", decoded.ServerName);
+        Assert.Equal(ProtocolCodec.Version, decoded.ProtocolVersion);
+        Assert.Equal(20, decoded.TickRate);
+        Assert.Equal(140, decoded.StepCooldownMs);
+    }
+
+    [Fact]
     public void EntitySpawnRoundTrips()
     {
         var characterId = Guid.NewGuid();

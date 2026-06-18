@@ -52,8 +52,9 @@ const minCameraZoom = 0.55;
 const maxCameraZoom = 3.25;
 let tileGridWidth = 64;
 let tileGridHeight = 64;
-const tileStepTweenMs = 200;
-const movementInterpolationDelayMs = tileStepTweenMs;
+const defaultTileStepTweenMs = 140;
+let tileStepTweenMs = defaultTileStepTweenMs;
+let movementInterpolationDelayMs = tileStepTweenMs;
 const selfMovementInterpolationDelayMs = 0;
 const stepRetryMs = 50;
 const movementChordDelayMs = 70;
@@ -392,6 +393,7 @@ function handleMessage(message) {
       setStatus(message.text);
       break;
     case "serverHello":
+      setStepCooldownMs(message.stepCooldownMs);
       setStatus(`${message.serverName} - ${message.tickRate} ticks/sec`);
       break;
     case "login":
@@ -427,6 +429,17 @@ function handleMessage(message) {
       setStatus(`${message.code}: ${message.message}`);
       break;
   }
+}
+
+function setStepCooldownMs(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    tileStepTweenMs = defaultTileStepTweenMs;
+  } else {
+    tileStepTweenMs = THREE.MathUtils.clamp(parsed, 50, 5000);
+  }
+
+  movementInterpolationDelayMs = tileStepTweenMs;
 }
 
 function handleZoneInfo(message) {

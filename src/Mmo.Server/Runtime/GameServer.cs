@@ -125,7 +125,7 @@ public sealed class GameServer
     {
         _sessions[peer] = new ClientSession(peer);
         _metrics.RecordPeerConnected();
-        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate), DeliveryMethod.ReliableOrdered);
+        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate, _options.StepCooldownMs), DeliveryMethod.ReliableOrdered);
         Log.Info($"Peer connected: {FormatPeer(peer)}.");
     }
 

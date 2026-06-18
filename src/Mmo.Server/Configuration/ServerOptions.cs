@@ -29,7 +29,7 @@ public sealed record ServerOptions(
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
             ReadInt("MMO_WORLD_WIDTH_TILES", 64),
             ReadInt("MMO_WORLD_HEIGHT_TILES", 64),
-            ReadInt("MMO_STEP_COOLDOWN_MS", 200),
+            ReadInt("MMO_STEP_COOLDOWN_MS", 140),
             ReadFloat("MMO_INTEREST_RADIUS", 14f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSet("MMO_ADMIN_NAMES", "Admin"));

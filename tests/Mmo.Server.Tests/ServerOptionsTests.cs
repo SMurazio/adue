@@ -31,6 +31,7 @@ public sealed class ServerOptionsTests
         var options = ServerOptions.FromEnvironment();
 
         Assert.Equal(14f, options.InterestRadius);
+        Assert.Equal(140, options.StepCooldownMs);
     }
 
     [Fact]
