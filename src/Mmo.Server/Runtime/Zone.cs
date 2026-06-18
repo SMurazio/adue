@@ -1,4 +1,5 @@
 using Mmo.Shared.Domain;
+using Mmo.Server.Configuration;
 
 namespace Mmo.Server.Runtime;
 
@@ -9,6 +10,7 @@ public sealed class Zone
 
     private readonly TileGrid _tileGrid;
     private readonly TileCoord[] _spawnTiles;
+    private int _nextSpawnTileIndex;
 
     public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles)
     {
@@ -37,9 +39,10 @@ public sealed class Zone
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
     public WorldState World { get; } = new();
 
-    public static Zone CreateDefault(int width, int height)
+    public static Zone CreateDefault(int width, int height, SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
     {
-        return new Zone(DefaultId, TileGrid.CreateDefault(width, height), [DefaultSpawnTile]);
+        var tileGrid = TileGrid.CreateDefault(width, height);
+        return new Zone(DefaultId, tileGrid, CreateSpawnTiles(tileGrid, spawnDistribution));
     }
 
     public bool IsWalkable(TileCoord tile)
@@ -55,6 +58,22 @@ public sealed class Zone
         }
 
         return _spawnTiles[0];
+    }
+
+    public TileCoord ResolvePlayerSpawnTile(TileCoord persistedTile)
+    {
+        if (IsWalkable(persistedTile) && persistedTile != TileGrid.DefaultSpawnTile)
+        {
+            return persistedTile;
+        }
+
+        return NextSpawnTile();
+    }
+
+    public TileCoord NextSpawnTile()
+    {
+        var index = _nextSpawnTileIndex++ % _spawnTiles.Length;
+        return _spawnTiles[index];
     }
 
     public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks)
@@ -90,5 +109,36 @@ public sealed class Zone
     public bool Despawn(ulong entityId, out WorldEntity entity)
     {
         return World.Remove(entityId, out entity);
+    }
+
+    private static IReadOnlyList<TileCoord> CreateSpawnTiles(TileGrid tileGrid, SpawnDistribution spawnDistribution)
+    {
+        var center = new TileCoord(tileGrid.Width / 2, tileGrid.Height / 2);
+        if (spawnDistribution == SpawnDistribution.Clustered)
+        {
+            return [center];
+        }
+
+        var spawnTiles = new List<TileCoord>();
+        const int spreadTiles = 32;
+        const int spacingTiles = 4;
+        for (var y = center.Y - spreadTiles; y <= center.Y + spreadTiles; y += spacingTiles)
+        {
+            for (var x = center.X - spreadTiles; x <= center.X + spreadTiles; x += spacingTiles)
+            {
+                var tile = new TileCoord(x, y);
+                if (tileGrid.IsWalkable(tile))
+                {
+                    spawnTiles.Add(tile);
+                }
+            }
+        }
+
+        if (spawnTiles.Count == 0)
+        {
+            spawnTiles.Add(center);
+        }
+
+        return spawnTiles;
     }
 }

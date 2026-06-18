@@ -12,6 +12,7 @@ public sealed record ServerOptions(
     int StepCooldownMs,
     float InterestRadius,
     int MaxVisibleEntities,
+    SpawnDistribution SpawnDistribution,
     IReadOnlySet<string> AdminNames)
 {
     public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
@@ -27,11 +28,12 @@ public sealed record ServerOptions(
             ReadDatabaseProvider("MMO_DB_PROVIDER", DatabaseProvider.Sqlite),
             ResolveConnectionString(ReadString("MMO_DB", "Data Source=data/mmo.db")),
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
-            ReadInt("MMO_WORLD_WIDTH_TILES", 64),
-            ReadInt("MMO_WORLD_HEIGHT_TILES", 64),
+            ReadInt("MMO_WORLD_WIDTH_TILES", 128),
+            ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
             ReadInt("MMO_STEP_COOLDOWN_MS", 140),
             ReadFloat("MMO_INTEREST_RADIUS", 40f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
+            ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
             ReadSet("MMO_ADMIN_NAMES", "Admin"));
 
         options.Validate();
@@ -129,6 +131,22 @@ public sealed record ServerOptions(
         {
             "sqlite" => DatabaseProvider.Sqlite,
             "postgres" or "postgresql" => DatabaseProvider.Postgres,
+            _ => fallback
+        };
+    }
+
+    private static SpawnDistribution ReadSpawnDistribution(string key, SpawnDistribution fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(key);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "distributed" => SpawnDistribution.Distributed,
+            "clustered" or "cluster" => SpawnDistribution.Clustered,
             _ => fallback
         };
     }

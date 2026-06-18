@@ -63,11 +63,12 @@ Useful environment variables:
 - `MMO_TICK_RATE`
 - `MMO_CONNECTION_KEY`
 - `MMO_ADMIN_NAMES`: comma-separated local dev admin names; defaults to `Admin`
-- `MMO_WORLD_WIDTH_TILES`: tile-grid width; defaults to `64`
-- `MMO_WORLD_HEIGHT_TILES`: tile-grid height; defaults to `64`
+- `MMO_WORLD_WIDTH_TILES`: tile-grid width; defaults to `128`
+- `MMO_WORLD_HEIGHT_TILES`: tile-grid height; defaults to `128`
 - `MMO_STEP_COOLDOWN_MS`: per-entity step cooldown; defaults to `140`
 - `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `40`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
+- `MMO_SPAWN_DISTRIBUTION`: `distributed` by default; use `clustered` to force worst-case all-visible spawn tests
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`

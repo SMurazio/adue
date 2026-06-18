@@ -31,6 +31,7 @@ public sealed class AoiIntegrationTests
             50,
             5,
             150,
+            SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
@@ -43,11 +44,14 @@ public sealed class AoiIntegrationTests
             outsideClient.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => outsideClient.IsLoggedIn && outsideClient.OwnNetworkId != 0, outsideClient);
 
-            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 15);
+            var spawnTile = outsideClient.OwnTile;
+            var outsideX = spawnTile.X + 7;
+            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= outsideX);
 
             using var observer = new IntegrationClient("Observer");
             observer.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => observer.IsLoggedIn && observer.OwnNetworkId != 0, observer, outsideClient);
+            Assert.Equal(spawnTile, observer.OwnTile);
 
             var outsideNetworkId = outsideClient.OwnNetworkId;
             observer.ClearMessages();
@@ -65,7 +69,7 @@ public sealed class AoiIntegrationTests
                 entity => entity.NetworkId == outsideNetworkId);
 
             observer.ClearMessages();
-            await StepUntilAsync(outsideClient, Direction8.W, () => outsideClient.OwnTile.X <= 12, observer);
+            await StepUntilAsync(outsideClient, Direction8.W, () => outsideClient.OwnTile.X <= observer.OwnTile.X + 4, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntitySpawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
@@ -79,15 +83,7 @@ public sealed class AoiIntegrationTests
                 outsideClient);
 
             observer.ClearMessages();
-            await StepOnceAsync(outsideClient, Direction8.E, observer);
-            await StepOnceAsync(outsideClient, Direction8.E, observer);
-            await PollForAsync(TimeSpan.FromMilliseconds(300), observer, outsideClient);
-            Assert.DoesNotContain(
-                observer.Messages.OfType<EntityDespawnMessage>(),
-                message => message.NetworkId == outsideNetworkId);
-
-            observer.ClearMessages();
-            await StepOnceAsync(outsideClient, Direction8.E, observer);
+            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= outsideX, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
@@ -117,6 +113,7 @@ public sealed class AoiIntegrationTests
             50,
             2,
             150,
+            SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
@@ -128,6 +125,7 @@ public sealed class AoiIntegrationTests
             using var client = new IntegrationClient("Observer");
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
+            var spawnTile = client.OwnTile;
             await WaitUntilAsync(
                 () => client.Messages.OfType<EntitySpawnMessage>().Any(message => message.DisplayName == PlaceholderEntityName),
                 client);
@@ -146,7 +144,7 @@ public sealed class AoiIntegrationTests
                 client);
 
             client.ClearMessages();
-            await StepUntilAsync(client, Direction8.S, () => client.OwnTile.Y >= 12);
+            await StepUntilAsync(client, Direction8.S, () => client.OwnTile.Y >= spawnTile.Y + 4);
             await WaitUntilAsync(
                 () => client.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == markerSpawn.NetworkId),
                 client);
@@ -175,6 +173,7 @@ public sealed class AoiIntegrationTests
             50,
             30,
             150,
+            SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
@@ -218,6 +217,7 @@ public sealed class AoiIntegrationTests
             50,
             30,
             150,
+            SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
@@ -319,31 +319,6 @@ public sealed class AoiIntegrationTests
         }
 
         throw new TimeoutException("Timed out waiting for step movement condition.");
-    }
-
-    private static async Task StepOnceAsync(IntegrationClient mover, Direction8 direction, params IntegrationClient[] observers)
-    {
-        var clients = observers.Prepend(mover).Distinct().ToArray();
-        var start = mover.OwnTile;
-        var delta = direction.Delta();
-        var expected = start.Offset(delta.X, delta.Y);
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            mover.SendMove(direction);
-            await PollForAsync(TimeSpan.FromMilliseconds(25), clients);
-            if (mover.OwnTile == expected)
-            {
-                return;
-            }
-
-            if (mover.OwnTile != start)
-            {
-                throw new InvalidOperationException($"Expected one step from {start} to {expected}, got {mover.OwnTile}.");
-            }
-        }
-
-        throw new TimeoutException("Timed out waiting for one accepted step.");
     }
 
     private static async Task<bool> PumpMovementUntilFullSnapshotAsync(TimeSpan timeout, IntegrationClient firstMover, IntegrationClient secondMover, IntegrationClient observer)

@@ -1,4 +1,5 @@
 using Mmo.Server.Runtime;
+using Mmo.Server.Configuration;
 using Mmo.Shared.Domain;
 using Xunit;
 
@@ -46,5 +47,36 @@ public sealed class ZoneTests
         Assert.Equal(4u, entity.NetworkId);
         Assert.Equal(new TileCoord(3, 3), entity.Tile);
         Assert.True(entity.IsDurable);
+    }
+
+    [Fact]
+    public void CreateDefaultDistributedSeedsCentralSpawnRegion()
+    {
+        var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Distributed);
+
+        Assert.True(zone.SpawnTiles.Count > 1);
+        Assert.Contains(new TileCoord(64, 64), zone.SpawnTiles);
+        Assert.All(zone.SpawnTiles, tile => Assert.True(zone.IsWalkable(tile)));
+    }
+
+    [Fact]
+    public void CreateDefaultClusteredUsesSingleCentralSpawn()
+    {
+        var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Clustered);
+
+        var spawn = Assert.Single(zone.SpawnTiles);
+        Assert.Equal(new TileCoord(64, 64), spawn);
+    }
+
+    [Fact]
+    public void ResolvePlayerSpawnTileDistributesLegacyDefaultTile()
+    {
+        var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Distributed);
+
+        var first = zone.ResolvePlayerSpawnTile(TileGrid.DefaultSpawnTile);
+        var second = zone.ResolvePlayerSpawnTile(TileGrid.DefaultSpawnTile);
+
+        Assert.NotEqual(TileGrid.DefaultSpawnTile, first);
+        Assert.NotEqual(first, second);
     }
 }

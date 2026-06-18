@@ -12,7 +12,8 @@ public sealed class ServerOptionsTests
         {
             ["MMO_WORLD_WIDTH_TILES"] = "96",
             ["MMO_WORLD_HEIGHT_TILES"] = "80",
-            ["MMO_STEP_COOLDOWN_MS"] = "250"
+            ["MMO_STEP_COOLDOWN_MS"] = "250",
+            ["MMO_SPAWN_DISTRIBUTION"] = "clustered"
         });
 
         var options = ServerOptions.FromEnvironment();
@@ -21,10 +22,11 @@ public sealed class ServerOptionsTests
         Assert.Equal(80, options.WorldHeightTiles);
         Assert.Equal(250, options.StepCooldownMs);
         Assert.Equal(TimeSpan.FromMilliseconds(250), options.StepCooldown);
+        Assert.Equal(SpawnDistribution.Clustered, options.SpawnDistribution);
     }
 
     [Fact]
-    public void FromEnvironmentUsesViewSizedInterestRadiusDefault()
+    public void FromEnvironmentUsesProductionSizedDefaults()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>());
 
@@ -32,6 +34,9 @@ public sealed class ServerOptionsTests
 
         Assert.Equal(40f, options.InterestRadius);
         Assert.Equal(140, options.StepCooldownMs);
+        Assert.Equal(128, options.WorldWidthTiles);
+        Assert.Equal(128, options.WorldHeightTiles);
+        Assert.Equal(SpawnDistribution.Distributed, options.SpawnDistribution);
     }
 
     [Fact]
@@ -75,6 +80,7 @@ public sealed class ServerOptionsTests
             "MMO_STEP_COOLDOWN_MS",
             "MMO_INTEREST_RADIUS",
             "MMO_MAX_VISIBLE_ENTITIES",
+            "MMO_SPAWN_DISTRIBUTION",
             "MMO_ADMIN_NAMES"
         ];
 

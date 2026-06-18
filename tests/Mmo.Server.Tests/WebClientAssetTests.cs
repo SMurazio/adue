@@ -9,6 +9,8 @@ public sealed class WebClientAssetTests
     {
         var app = File.ReadAllText(FindWebAsset("app.js"));
 
+        Assert.Contains("let tileGridWidth = 128;", app);
+        Assert.Contains("let tileGridHeight = 128;", app);
         Assert.Contains("const defaultTileStepTweenMs = 140;", app);
         Assert.Contains("let tileStepTweenMs = defaultTileStepTweenMs;", app);
         Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs;", app);

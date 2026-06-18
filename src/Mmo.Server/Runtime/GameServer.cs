@@ -20,7 +20,6 @@ public sealed class GameServer
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
-    private static readonly TileCoord PlaceholderEntityTile = new(10, 8);
     private const string PlaceholderEntityName = "Ancient Marker";
     private const float InterestExitHysteresisTiles = 1f;
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
@@ -55,8 +54,8 @@ public sealed class GameServer
         _options = options;
         _characters = characters;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
-        _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles);
-        _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, PlaceholderEntityTile, Direction8.S);
+        _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles, options.SpawnDistribution);
+        _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -419,15 +418,10 @@ public sealed class GameServer
             return;
         }
 
-        var radiusSquared = _options.InterestRadius * _options.InterestRadius;
-        var exitRadius = _options.InterestRadius + InterestExitHysteresisTiles;
-        var exitRadiusSquared = exitRadius * exitRadius;
         foreach (var candidate in entities)
         {
             var distanceSquared = DistanceSquared(recipientEntity, candidate);
-            if (candidate.Id == recipientEntity.Id
-                || distanceSquared <= radiusSquared
-                || (recipient.WasInLastSnapshot(candidate.NetworkId) && distanceSquared <= exitRadiusSquared))
+            if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
             {
                 _visibleCandidateScratch.Add(new VisibleEntity(candidate, SnapshotSortKey(recipient, candidate, distanceSquared)));
             }
@@ -566,6 +560,29 @@ public sealed class GameServer
         return (dx * dx) + (dy * dy);
     }
 
+    internal static bool IsEntityInInterest(
+        WorldEntity recipientEntity,
+        WorldEntity candidate,
+        ClientSession recipient,
+        float interestRadius)
+    {
+        if (candidate.Id == recipientEntity.Id)
+        {
+            return true;
+        }
+
+        var distanceSquared = DistanceSquared(recipientEntity, candidate);
+        var radiusSquared = interestRadius * interestRadius;
+        if (distanceSquared <= radiusSquared)
+        {
+            return true;
+        }
+
+        var exitRadius = interestRadius + InterestExitHysteresisTiles;
+        var exitRadiusSquared = exitRadius * exitRadius;
+        return recipient.WasInLastSnapshot(candidate.NetworkId) && distanceSquared <= exitRadiusSquared;
+    }
+
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
         return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing);
@@ -594,7 +611,13 @@ public sealed class GameServer
 
     private TileCoord ResolveLoginTile(TileCoord tile)
     {
-        return _zone.ResolveSpawnTile(tile);
+        return _zone.ResolvePlayerSpawnTile(tile);
+    }
+
+    private TileCoord ResolvePlaceholderEntityTile()
+    {
+        var preferred = _zone.SpawnTiles[0].Offset(2, 0);
+        return _zone.ResolveSpawnTile(preferred);
     }
 
     private ZoneInfoMessage CreateZoneInfoMessage()
