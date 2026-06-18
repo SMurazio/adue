@@ -35,6 +35,7 @@ public sealed class GameServer
     private readonly TileGrid _tileGrid;
 
     private uint _serverTick;
+    private long _pendingMovementElapsedTicks;
 
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
@@ -191,7 +192,15 @@ public sealed class GameServer
             case MoveStepMessage move:
                 if (session.IsAuthenticated)
                 {
-                    session.TryStep(move.Direction, _serverTick, _options.StepCooldownTicks, _tileGrid);
+                    var startedAt = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        session.TryStep(move.Direction, _serverTick, _options.StepCooldownTicks, _tileGrid);
+                    }
+                    finally
+                    {
+                        _pendingMovementElapsedTicks += Stopwatch.GetTimestamp() - startedAt;
+                    }
                 }
                 break;
             case ChatSendMessage chat:
@@ -276,10 +285,7 @@ public sealed class GameServer
     private void TickCore(TickBudgetRecorder tickBudget)
     {
         _serverTick++;
-
-        using (tickBudget.Measure(TickBudgetCategory.Movement))
-        {
-        }
+        tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
 
         BroadcastSnapshot(tickBudget);
 
@@ -785,6 +791,13 @@ public sealed class GameServer
                 Log.Error("Main-thread action failed", exception);
             }
         }
+    }
+
+    private long DrainPendingMovementElapsedTicks()
+    {
+        var elapsedTicks = _pendingMovementElapsedTicks;
+        _pendingMovementElapsedTicks = 0;
+        return elapsedTicks;
     }
 
     private void PersistConnectedPlayers()

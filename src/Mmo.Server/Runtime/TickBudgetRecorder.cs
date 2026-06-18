@@ -13,6 +13,11 @@ internal sealed class TickBudgetRecorder
         return new TickBudgetScope(this, category);
     }
 
+    public void RecordElapsed(TickBudgetCategory category, long elapsedTicks)
+    {
+        Add(category, elapsedTicks);
+    }
+
     public TickBudgetSample ToSample()
     {
         return new TickBudgetSample(
