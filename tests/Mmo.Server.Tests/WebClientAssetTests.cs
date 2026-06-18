@@ -13,7 +13,7 @@ public sealed class WebClientAssetTests
         Assert.Contains("let tileGridHeight = 128;", app);
         Assert.Contains("const defaultTileStepTweenMs = 140;", app);
         Assert.Contains("let tileStepTweenMs = defaultTileStepTweenMs;", app);
-        Assert.Contains("const remoteInterpolationCadenceMultiplier = 2;", app);
+        Assert.Contains("const remoteInterpolationCadenceMultiplier = 1.3;", app);
         Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;", app);
         Assert.Contains("const defaultDebugVisibilityRadius = 40;", app);
         Assert.Contains("let debugVisibilityRadius = defaultDebugVisibilityRadius;", app);
