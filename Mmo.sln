@@ -1,0 +1,54 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Mmo.Shared", "src\Mmo.Shared\Mmo.Shared.csproj", "{F68CE27F-1B89-4F19-9B07-D3F54271C42E}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Mmo.Server", "src\Mmo.Server\Mmo.Server.csproj", "{684A2901-8E22-4E62-A4E5-16B2FB48F1CC}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Mmo.Client.Console", "src\Mmo.Client.Console\Mmo.Client.Console.csproj", "{CA9452F9-B3E3-44D8-B996-82B15F0E228B}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Mmo.Shared.Tests", "tests\Mmo.Shared.Tests\Mmo.Shared.Tests.csproj", "{03B73A03-21CB-4E5C-A924-4CA69D5AE597}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{85E93034-FD88-4389-B824-23B4E8A0FF74}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mmo.Client.Web", "src\Mmo.Client.Web\Mmo.Client.Web.csproj", "{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mmo.Tools.Stress", "src\Mmo.Tools.Stress\Mmo.Tools.Stress.csproj", "{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F68CE27F-1B89-4F19-9B07-D3F54271C42E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F68CE27F-1B89-4F19-9B07-D3F54271C42E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F68CE27F-1B89-4F19-9B07-D3F54271C42E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F68CE27F-1B89-4F19-9B07-D3F54271C42E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{684A2901-8E22-4E62-A4E5-16B2FB48F1CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{684A2901-8E22-4E62-A4E5-16B2FB48F1CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{684A2901-8E22-4E62-A4E5-16B2FB48F1CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{684A2901-8E22-4E62-A4E5-16B2FB48F1CC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CA9452F9-B3E3-44D8-B996-82B15F0E228B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CA9452F9-B3E3-44D8-B996-82B15F0E228B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CA9452F9-B3E3-44D8-B996-82B15F0E228B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CA9452F9-B3E3-44D8-B996-82B15F0E228B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{03B73A03-21CB-4E5C-A924-4CA69D5AE597}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{03B73A03-21CB-4E5C-A924-4CA69D5AE597}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{03B73A03-21CB-4E5C-A924-4CA69D5AE597}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{03B73A03-21CB-4E5C-A924-4CA69D5AE597}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63} = {85E93034-FD88-4389-B824-23B4E8A0FF74}
+		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060} = {85E93034-FD88-4389-B824-23B4E8A0FF74}
+	EndGlobalSection
+EndGlobal

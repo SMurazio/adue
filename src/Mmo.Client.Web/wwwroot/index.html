@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MMO Debug Client</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="toolbar" aria-label="Connection">
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" autocomplete="off" value="WebPlayer">
+      </div>
+      <div class="field host">
+        <label for="host">Server</label>
+        <input id="host" autocomplete="off" value="127.0.0.1">
+      </div>
+      <div class="field port">
+        <label for="port">Port</label>
+        <input id="port" inputmode="numeric" value="7777">
+      </div>
+      <button id="connect" type="button">Connect</button>
+      <button id="disconnect" type="button" disabled>Disconnect</button>
+      <div id="status" class="status">Idle</div>
+    </section>
+
+    <section class="workspace">
+      <div class="viewport">
+        <div id="world" class="world"></div>
+        <div class="hud">
+          <span id="tick">tick -</span>
+          <span id="entity-count">0 entities</span>
+        </div>
+        <div id="metrics-panel" class="metrics-panel" hidden>
+          <div class="metrics-header">
+            <div class="metrics-title">Server Metrics</div>
+            <button id="metrics-toggle" class="metrics-toggle" type="button" aria-label="Collapse metrics" aria-expanded="true"></button>
+          </div>
+          <div class="metrics-body">
+            <div id="metrics-grid" class="metrics-grid"></div>
+            <div id="metrics-messages" class="metrics-messages"></div>
+            <div id="metrics-updated" class="metrics-updated"></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="side">
+        <section class="panel movement" aria-label="Movement">
+          <button data-move="nw">NW</button>
+          <button data-move="w">N</button>
+          <button data-move="ne">NE</button>
+          <button data-move="a">A</button>
+          <button data-move="stop">Stop</button>
+          <button data-move="d">D</button>
+          <button data-move="sw">SW</button>
+          <button data-move="s">S</button>
+          <button data-move="se">SE</button>
+        </section>
+
+        <section class="panel">
+          <h2>Entities</h2>
+          <div id="entities" class="entity-list"></div>
+        </section>
+
+        <section class="panel chat">
+          <h2>Chat</h2>
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form">
+            <input id="chat-input" autocomplete="off" placeholder="Message">
+            <button type="submit">Send</button>
+          </form>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js?v=28"></script>
+</body>
+</html>

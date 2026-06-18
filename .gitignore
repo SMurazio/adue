@@ -1,0 +1,20 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+TestResults/
+coverage/
+*.user
+*.suo
+*.nupkg
+
+# Local runtime state
+.env
+logs/
+data/
+.tools/
+.run/
+
+# Docker/Postgres local files
+postgres-data/
