@@ -52,6 +52,7 @@ const maxCameraZoom = 3.25;
 const tileGridWidth = 64;
 const tileGridHeight = 64;
 const tileStepTweenMs = 200;
+const movementInterpolationDelayMs = tileStepTweenMs;
 const stepRetryMs = 50;
 const debugVisibilityRadius = 96;
 const entityStaleAfterMs = 2500;
@@ -747,12 +748,11 @@ function updateEntityTileTween(entry, entity, nowMs) {
   entry.serverPosition.set(position.x, 0, position.z);
 
   if (!entry.localInitialized) {
-    entry.from.copy(entry.serverPosition);
-    entry.to.copy(entry.serverPosition);
     entry.renderPosition.copy(entry.serverPosition);
     entry.tileX = entity.x;
     entry.tileY = entity.y;
-    entry.tweenStartedAt = nowMs;
+    entry.confirmedStepQueue.length = 0;
+    entry.activeStep = null;
     entry.localInitialized = true;
     return;
   }
@@ -762,20 +762,20 @@ function updateEntityTileTween(entry, entity, nowMs) {
   }
 
   if (Math.abs(entry.tileX - entity.x) > 1 || Math.abs(entry.tileY - entity.y) > 1) {
-    entry.from.copy(entry.serverPosition);
-    entry.to.copy(entry.serverPosition);
     entry.renderPosition.copy(entry.serverPosition);
     entry.tileX = entity.x;
     entry.tileY = entity.y;
-    entry.tweenStartedAt = nowMs;
+    entry.confirmedStepQueue.length = 0;
+    entry.activeStep = null;
     return;
   }
 
-  entry.from.copy(entry.renderPosition);
-  entry.to.copy(entry.serverPosition);
   entry.tileX = entity.x;
   entry.tileY = entity.y;
-  entry.tweenStartedAt = nowMs;
+  entry.confirmedStepQueue.push({
+    position: entry.serverPosition.clone(),
+    receivedAt: nowMs
+  });
 }
 
 function findSelfEntity(entities) {
@@ -847,15 +847,13 @@ function getOrCreateEntity(entity) {
     head,
     ring,
     label,
-    from: new THREE.Vector3(position.x, 0, position.z),
-    to: new THREE.Vector3(position.x, 0, position.z),
     renderPosition: new THREE.Vector3(position.x, 0, position.z),
     serverPosition: new THREE.Vector3(position.x, 0, position.z),
     tileX: entity.x,
     tileY: entity.y,
     facing: entity.facing ?? "S",
-    tweenStartedAt: performance.now(),
-    tweenDurationMs: tileStepTweenMs,
+    confirmedStepQueue: [],
+    activeStep: null,
     lastSnapshotAt: performance.now(),
     lastSeenAt: performance.now(),
     name: entity.name,
@@ -1313,11 +1311,49 @@ function syncRightMouseMovement(force = false) {
 }
 
 function sampleEntityPosition(entry, nowMs) {
-  const elapsed = nowMs - entry.tweenStartedAt;
-  const alpha = THREE.MathUtils.clamp(elapsed / Math.max(1, entry.tweenDurationMs), 0, 1);
-  const eased = alpha * alpha * (3 - (2 * alpha));
-  entry.renderPosition.lerpVectors(entry.from, entry.to, eased);
+  let carryOverMs = 0;
+
+  for (let i = 0; i < 4; i++) {
+    if (!entry.activeStep && !startNextConfirmedStep(entry, nowMs, nowMs - carryOverMs)) {
+      return entry.renderPosition;
+    }
+
+    const step = entry.activeStep;
+    const elapsed = nowMs - step.startedAt;
+    const alpha = THREE.MathUtils.clamp(elapsed / Math.max(1, step.durationMs), 0, 1);
+    entry.renderPosition.lerpVectors(step.from, step.to, alpha);
+
+    if (alpha < 1) {
+      return entry.renderPosition;
+    }
+
+    carryOverMs = Math.max(0, elapsed - step.durationMs);
+    entry.renderPosition.copy(step.to);
+    entry.activeStep = null;
+
+    if (carryOverMs <= 0) {
+      startNextConfirmedStep(entry, nowMs, nowMs);
+      return entry.renderPosition;
+    }
+  }
+
   return entry.renderPosition;
+}
+
+function startNextConfirmedStep(entry, nowMs, startedAt) {
+  const next = entry.confirmedStepQueue[0];
+  if (!next || nowMs - next.receivedAt < movementInterpolationDelayMs) {
+    return false;
+  }
+
+  entry.confirmedStepQueue.shift();
+  entry.activeStep = {
+    from: entry.renderPosition.clone(),
+    to: next.position,
+    startedAt,
+    durationMs: tileStepTweenMs
+  };
+  return true;
 }
 
 function clearHeldMovement() {

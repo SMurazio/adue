@@ -10,6 +10,7 @@ public sealed class WebClientAssetTests
         var app = File.ReadAllText(FindWebAsset("app.js"));
 
         Assert.Contains("const tileStepTweenMs = 200;", app);
+        Assert.Contains("const movementInterpolationDelayMs = tileStepTweenMs;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
         Assert.Contains("function updateEntityTileTween", app);
@@ -23,8 +24,11 @@ public sealed class WebClientAssetTests
         Assert.Contains("function mergeSnapshotEntities", app);
         Assert.Contains("function sendMoveStep", app);
         Assert.Contains("type: \"moveStep\"", app);
-        Assert.Contains("entry.renderPosition.lerpVectors(entry.from, entry.to, eased);", app);
+        Assert.Contains("confirmedStepQueue", app);
+        Assert.Contains("function startNextConfirmedStep", app);
+        Assert.Contains("entry.renderPosition.lerpVectors(step.from, step.to, alpha);", app);
         Assert.Contains("desiredFocus.copy(self.renderPosition);", app);
+        Assert.DoesNotContain("const eased = alpha * alpha", app);
         Assert.DoesNotContain("function interpolateRemoteEntityPosition", app);
     }
 
