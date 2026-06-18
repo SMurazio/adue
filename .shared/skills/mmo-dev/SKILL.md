@@ -110,6 +110,50 @@ These cover the automatable checks (does the C# compile, does it start/run/log w
 token-cheap alternative to a Godot MCP — a fixed script the agent runs, not a tool-schema tax every
 turn.
 
+## Driving the Godot client (debug control channel)
+
+The Godot client can expose a **localhost-only** debug control channel when started with the
+`MMO_DEBUG_CONTROL_PORT` environment variable set (off by default; absent in shipped builds). When
+enabled, `client-control.cmd` connects to it and lets the agent drive movement and read live state
+without a human moving the avatar — the immediate unblock for profiling the residual hitch.
+
+Set the port and start a Godot client with the channel enabled (in the same shell):
+
+```powershell
+$env:MMO_DEBUG_CONTROL_PORT = 7780
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
+```
+
+Then drive it (the script reads `MMO_DEBUG_CONTROL_PORT`, or pass `-Port`):
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -State          # connection/login/role/zone/tile
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Telemetry      # fps, frame ms, per-section ms, gc, hitches
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Interp         # queue depth, cadence, confirmed tile, latency
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Entities       # network id / tile / render pos per entity
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Move N -DurationMs 2000
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Stop
+```
+
+Run a scripted autopilot loop and get a frame-timing summary (worst frames + dominant `_Process`
+section), backed by `.run/client-frames.csv`:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Autopilot 20            # 20s, default 'square'
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Autopilot 30 -Pattern zigzag -Top 12
+```
+
+Switches combine (queries run first, then move/stop, then autopilot). `-Cmd '{...}'` sends a raw
+JSON request line for commands without a dedicated switch (`chat`, `toggle_perf`,
+`toggle_fullscreen`, `ping`):
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Cmd '{"cmd":"chat","text":"hi"}'
+```
+
+The channel binds `127.0.0.1` only and never touches the filesystem/shell on behalf of a request —
+its only disk write is the autopilot CSV under `.run/`.
+
 ## Local Runtime Facts
 
 - Game server: UDP `127.0.0.1:7777`.
@@ -118,6 +162,8 @@ turn.
 - PID files: `.run/server.pid`, `.run/web-client.pid`.
 - Godot client project: `src/Mmo.Client.Godot` (`MmoClientGodot.sln`); Godot 4.x .NET build.
 - `MMO_GODOT` env var: path to the Godot .NET executable (used by `godot-run.cmd`).
+- `MMO_DEBUG_CONTROL_PORT` env var: Godot client only, off by default; when set, the client opens a localhost-only debug control channel that `client-control.cmd` drives.
+- Godot client control CSV: `.run/client-frames.csv` (written by an `autopilot` run).
 
 ## Rules
 

@@ -100,6 +100,7 @@ Useful environment variables:
 - `MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER`: tick hitch threshold as a multiple of tick interval; defaults to `1.5`
 - `MMO_DEBUG_MOVEMENT_TICK_DURATION_MS`: duration-only tick trace threshold; defaults to `15`
 - `MMO_GODOT_FRAME_HITCH_MS`: Godot client frame-hitch trace threshold; defaults to `33.3`
+- `MMO_DEBUG_CONTROL_PORT`: Godot client only; off by default. When set to a valid port the client opens a localhost-only (`127.0.0.1`) debug control channel driven by `client-control.cmd`. Absent in shipped builds.
 - `MMO_SERVER_LOG_FILE`: optional server log file path; set by `start-server.cmd -LogToFile`
 - `MMO_SERVER_ERR_LOG_FILE`: optional error-only server log file path; set by `start-server.cmd -LogToFile`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
@@ -161,6 +162,52 @@ Use the headless trace harness when movement visibly stalls and you need a corre
 ```
 
 The harness enables `MMO_DEBUG_MOVEMENT`, runs an in-process server plus two `Mmo.Client.Core` clients, and prints structured `mmo_trace` lines for send -> validate/apply -> snapshot -> confirm. In live Godot runs, setting `MMO_DEBUG_MOVEMENT=1` also adds compact movement and frame fields to the top-left overlay. Godot frame hitches emit `mmo_trace side=client event=frame_hitch` with frame duration, client GC deltas, interpolation queue depth, cadence, latency, visible entity count, and render position. Use those fields to separate client GC, interpolation starvation, and engine/frame-pacing stalls.
+
+## Drive the Godot Client (debug control channel)
+
+The Godot client can open a **localhost-only** debug control channel for driving movement and reading
+live state from a script — so the agent can reproduce, profile, and functionally test client behavior
+without a human moving the avatar. It is **off by default**, gated by `MMO_DEBUG_CONTROL_PORT`, binds
+`127.0.0.1` only, and is absent in shipped builds.
+
+Set the port, then start a Godot client with the channel enabled (same shell):
+
+```powershell
+$env:MMO_DEBUG_CONTROL_PORT = 7780
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
+```
+
+Drive it with `client-control.cmd` (reads `MMO_DEBUG_CONTROL_PORT`, or pass `-Port`):
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -State
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Telemetry
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Interp
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Entities
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Move N -DurationMs 2000
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Stop
+```
+
+Run a scripted autopilot loop, then get a frame-timing summary (worst frames by `frameMs` plus the
+dominant `_Process` section: poll / render-state / entities / camera / overlay), backed by
+`.run\client-frames.csv`:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Autopilot 20
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Autopilot 30 -Pattern zigzag -Top 12
+```
+
+Switches combine (queries first, then move/stop, then autopilot). Use `-Cmd '{...}'` to send a raw
+JSON request line for commands without a dedicated switch (`chat`, `toggle_perf`,
+`toggle_fullscreen`, `ping`):
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\client-control.cmd -Cmd '{"cmd":"chat","text":"hi"}'
+```
+
+The protocol is line-delimited JSON: one `{"cmd":"..."}` request line in, one JSON response line out.
+The channel never touches the filesystem or shell on behalf of a request; its only disk write is the
+autopilot CSV under `.run\`.
 
 ## Dev Admin Commands
 
