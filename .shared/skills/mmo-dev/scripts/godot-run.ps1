@@ -26,9 +26,16 @@ $outFile = [System.IO.Path]::GetTempFileName()
 $errFile = [System.IO.Path]::GetTempFileName()
 Write-Host "Running Godot headless for ~$seconds s: $project"
 Write-Host "(for a server-connection smoke, start the MMO server first via start-server.cmd)"
-$proc = Start-Process -FilePath $godot `
-    -ArgumentList @('--headless', '--path', $project, '--build-solutions') `
-    -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $godot
+$psi.Arguments = "--headless --path `"$project`" --build-solutions"
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$proc = New-Object System.Diagnostics.Process
+$proc.StartInfo = $psi
+[void]$proc.Start()
 try {
     if (-not $proc.WaitForExit($seconds * 1000)) {
         $proc.Kill(); $proc.WaitForExit()
@@ -36,6 +43,8 @@ try {
     } else {
         Write-Host "(exited on its own, code $($proc.ExitCode))"
     }
+    $proc.StandardOutput.ReadToEnd() | Set-Content -LiteralPath $outFile
+    $proc.StandardError.ReadToEnd() | Set-Content -LiteralPath $errFile
 } finally {
     Write-Host "----- stdout -----"
     Get-Content $outFile -ErrorAction SilentlyContinue

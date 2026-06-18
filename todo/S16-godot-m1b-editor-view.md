@@ -30,8 +30,8 @@ Albion 3-layer separation in the design doc.)
 
 ## Blocked
 
-Headless C# view work was drafted and `godot-build.cmd` is green. `godot-run.cmd` cannot be completed
-in this environment because no Godot .NET executable is configured (`MMO_GODOT` is unset and
-`godot` is not on `PATH`). The remaining acceptance also requires human editor/runtime verification:
-two visible Godot clients need to connect to the live server and be checked by eye for map rendering,
-entity rendering, movement, and chat.
+Headless C# view work was drafted. `godot-build.cmd` is green, and after `MMO_GODOT` was configured
+`godot-run.cmd 8` starts the Godot .NET client headless and stops cleanly after the timeout. The
+remaining acceptance requires human editor/runtime verification: two visible Godot clients need to
+connect to the live server and be checked by eye for map rendering, entity rendering, movement, and
+chat.
