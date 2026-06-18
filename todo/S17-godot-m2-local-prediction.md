@@ -33,3 +33,12 @@ interpolated.
 - Local avatar responds instantly to input with no rubber-band, while remaining authoritative.
 - A forced mispredict (e.g. stepping into a wall the client didn't expect) corrects cleanly.
 - Prereqs A/B covered by tests; `run-checks.cmd` green; Godot client builds (`godot-build.cmd`).
+
+## Blocked
+
+S17 depends on S16: the Godot client must exist, render confirmed state, and be manually verified
+before local-player prediction is added. S16 is currently blocked because this environment has no
+Godot .NET executable configured for `godot-run.cmd`, and the remaining acceptance requires human
+editor/runtime verification with two clients. The server/shared prerequisites A/B are deliberately
+not started yet, to avoid landing prediction protocol changes before the Godot confirmed-state
+client is verified.
