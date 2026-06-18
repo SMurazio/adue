@@ -12,7 +12,7 @@ config_version=5
 
 config/name="MmoClientGodot"
 run/main_scene="res://Main.tscn"
-config/features=PackedStringArray("4.6", "Forward Plus")
+config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [dotnet]
@@ -25,4 +25,6 @@ project/assembly_name="MmoClientGodot"
 
 [rendering]
 
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
 rendering_device/driver.windows="d3d12"

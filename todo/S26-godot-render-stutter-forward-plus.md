@@ -22,6 +22,22 @@ Forward+ on D3D12 compiles shader/pipeline state objects lazily on first use of 
 material/mesh/light combination → frame hitches when new entities appear and the camera reveals new
 geometry. This matches the magnitude and recurrence observed.
 
+## CONFIRMED (human test, renderer switch)
+
+Switching `project.godot` to the Compatibility renderer (`renderer/rendering_method=gl_compatibility`
++ `.mobile`, features → "GL Compatibility") was tested live: client frame hitches dropped from
+**159 → ~28-35** (both clients, consistent), `gc=0/0/0`, and the human reports movement is now
+**smooth except occasional hitches** (was a constant stutter). This confirms Forward+ pipeline
+compilation was the dominant cause. The change is currently in the working tree, **uncommitted** —
+the Implementer should formalize it (commit) as part of this task.
+
+Residual: ~30 hitches/session with a ~143ms max remain. Human reports they are **random, with
+nothing new appearing on screen** — which argues against on-first-render shader/material compiles
+(those track with new content). With `gc=0`, the likely residual causes are **VSync / frame pacing**
+(Godot defaults VSync on; an occasional long frame waits a full refresh → doubled-frame hitch) and/or
+**.NET tiered-JIT warm-up** (background re-compilation of hot methods in the first minute or two,
+which settles). Distinguish via whether hitches taper off after ~1-2 min (JIT) or persist (VSync).
+
 ## Fix (measure each change with the FRAME overlay from S25)
 
 Try in order, keeping what moves `hitches`/`max ms` down:
