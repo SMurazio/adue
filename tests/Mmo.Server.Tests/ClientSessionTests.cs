@@ -135,4 +135,16 @@ public sealed class ClientSessionTests
         Assert.False(session.ShouldSendFullSnapshot(26, heartbeatTicks));
         Assert.True(session.ShouldSendFullSnapshot(27, heartbeatTicks));
     }
+
+    [Fact]
+    public void CollectSnapshotEntitiesMissingFromReusesDestination()
+    {
+        var session = new ClientSession(null!);
+        session.RememberSnapshotEntities([1u, 2u, 3u]);
+        var missing = new List<uint>();
+
+        session.CollectSnapshotEntitiesMissingFrom(new HashSet<uint> { 1u, 3u }, missing);
+
+        Assert.Equal([2u], missing);
+    }
 }

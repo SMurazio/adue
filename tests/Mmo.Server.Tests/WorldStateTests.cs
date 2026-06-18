@@ -34,4 +34,18 @@ public sealed class WorldStateTests
         Assert.Same(entity, removed);
         Assert.False(state.TryGet(entity.Id, out _));
     }
+
+    [Fact]
+    public void CopyEntitiesToReusesCallerOwnedBuffer()
+    {
+        var state = new WorldState();
+        var first = state.AddPlayer(12, Guid.NewGuid(), "First", new TileCoord(4, 5), new ClientSession(null!));
+        var second = state.AddPlayer(13, Guid.NewGuid(), "Second", new TileCoord(5, 5), new ClientSession(null!));
+        var buffer = new List<WorldEntity> { first };
+
+        buffer.Clear();
+        state.CopyEntitiesTo(buffer);
+
+        Assert.Equal([first, second], buffer);
+    }
 }

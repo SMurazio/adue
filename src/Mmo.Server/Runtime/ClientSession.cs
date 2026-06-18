@@ -114,12 +114,32 @@ public sealed class ClientSession
         }
     }
 
+    public void CollectSnapshotEntitiesMissingFrom(IReadOnlySet<uint> currentNetworkIds, ICollection<uint> destination)
+    {
+        foreach (var networkId in _lastSnapshotEntityIds)
+        {
+            if (!currentNetworkIds.Contains(networkId))
+            {
+                destination.Add(networkId);
+            }
+        }
+    }
+
     public void RememberSnapshotEntities(IEnumerable<uint> networkIds)
     {
         _lastSnapshotEntityIds.Clear();
         foreach (var networkId in networkIds)
         {
             _lastSnapshotEntityIds.Add(networkId);
+        }
+    }
+
+    public void RememberSnapshotEntities(IReadOnlyList<WorldEntity> entities)
+    {
+        _lastSnapshotEntityIds.Clear();
+        foreach (var entity in entities)
+        {
+            _lastSnapshotEntityIds.Add(entity.NetworkId);
         }
     }
 

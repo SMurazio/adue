@@ -33,6 +33,16 @@ public sealed class GameServer
     private readonly ServerRuntimeGuard _runtimeGuard;
     private readonly NetworkIdPool _networkIds = new();
     private readonly Zone _zone;
+    private readonly List<ClientSession> _authenticatedScratch = [];
+    private readonly List<WorldEntity> _entityScratch = [];
+    private readonly List<VisibleEntity> _visibleCandidateScratch = [];
+    private readonly List<WorldEntity> _visibleEntityScratch = [];
+    private readonly HashSet<uint> _visibleNetworkIdScratch = [];
+    private readonly List<uint> _despawnScratch = [];
+    private readonly List<WorldEntity> _payloadEntityScratch = [];
+    private readonly List<EntityStateSnapshot> _snapshotChunkScratch = [];
+    private readonly List<byte[]> _snapshotPacketScratch = [];
+    private readonly VisibleEntityComparer _visibleEntityComparer = new();
 
     private uint _serverTick;
     private long _pendingMovementElapsedTicks;
@@ -317,45 +327,48 @@ public sealed class GameServer
 
     private void BroadcastSnapshot(TickBudgetRecorder tickBudget)
     {
-        var authenticated = _sessions.Values
-            .Where(session => session.IsAuthenticated)
-            .ToArray();
-        var entities = _zone.World.Entities.ToArray();
-
-        foreach (var session in authenticated)
+        _authenticatedScratch.Clear();
+        foreach (var session in _sessions.Values)
         {
-            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, entities, tickBudget));
+            if (session.IsAuthenticated)
+            {
+                _authenticatedScratch.Add(session);
+            }
+        }
+
+        _entityScratch.Clear();
+        _zone.World.CopyEntitiesTo(_entityScratch);
+
+        foreach (var session in _authenticatedScratch)
+        {
+            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, _entityScratch, tickBudget));
         }
     }
 
     private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<WorldEntity> entities, TickBudgetRecorder tickBudget)
     {
-        IReadOnlyList<WorldEntity> visible;
-        HashSet<uint> visibleIds;
         using (tickBudget.Measure(TickBudgetCategory.Aoi))
         {
-            visible = SelectVisibleEntities(session, entities);
-            visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
+            SelectVisibleEntities(session, entities, _visibleEntityScratch, _visibleNetworkIdScratch);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Network))
         {
-            SendEntityDespawns(session, visibleIds);
-            EnsureEntitySpawns(session, visible);
+            SendEntityDespawns(session, _visibleNetworkIdScratch);
+            EnsureEntitySpawns(session, _visibleEntityScratch);
         }
 
-        IReadOnlyList<byte[]> packets;
         int visibleCount;
         using (tickBudget.Measure(TickBudgetCategory.Serialize))
         {
-            packets = BuildSnapshotPackets(session, visible, out visibleCount);
+            BuildSnapshotPackets(session, _visibleEntityScratch, _snapshotPacketScratch, out visibleCount);
         }
 
         var sentBytes = 0;
         var sentPackets = 0;
         using (tickBudget.Measure(TickBudgetCategory.Network))
         {
-            foreach (var packet in packets)
+            foreach (var packet in _snapshotPacketScratch)
             {
                 if (TrySend(session.Peer, packet, DeliveryMethod.Unreliable))
                 {
@@ -372,126 +385,125 @@ public sealed class GameServer
 
         if ((visibleCount < entities.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
         {
-            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{entities.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{packets.Count}, bytes={sentBytes}");
+            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{entities.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{_snapshotPacketScratch.Count}, bytes={sentBytes}");
         }
     }
 
     private void SendEntityDespawns(ClientSession recipient, IReadOnlySet<uint> visibleIds)
     {
-        foreach (var networkId in recipient.SnapshotEntitiesMissingFrom(visibleIds))
+        _despawnScratch.Clear();
+        recipient.CollectSnapshotEntitiesMissingFrom(visibleIds, _despawnScratch);
+        foreach (var networkId in _despawnScratch)
         {
             TrySend(recipient.Peer, new EntityDespawnMessage(_serverTick, networkId), DeliveryMethod.ReliableOrdered);
             recipient.ForgetSentRevision(networkId);
         }
     }
 
-    private IReadOnlyList<WorldEntity> SelectVisibleEntities(
+    private void SelectVisibleEntities(
         ClientSession recipient,
-        IReadOnlyCollection<WorldEntity> entities)
+        IReadOnlyCollection<WorldEntity> entities,
+        List<WorldEntity> destination,
+        HashSet<uint> visibleIds)
     {
+        destination.Clear();
+        visibleIds.Clear();
+        _visibleCandidateScratch.Clear();
+
         if (!TryGetSessionEntity(recipient, out var recipientEntity))
         {
-            return [];
+            return;
         }
 
         var radiusSquared = _options.InterestRadius * _options.InterestRadius;
-        return entities
-            .Select(candidate => new
+        foreach (var candidate in entities)
+        {
+            var distanceSquared = DistanceSquared(recipientEntity, candidate);
+            if (candidate.Id == recipientEntity.Id || distanceSquared <= radiusSquared)
             {
-                Entity = candidate,
-                DistanceSquared = DistanceSquared(recipientEntity, candidate)
-            })
-            .Where(candidate => candidate.Entity.Id == recipientEntity.Id || candidate.DistanceSquared <= radiusSquared)
-            .OrderBy(candidate => SnapshotSortKey(recipient, candidate.Entity, candidate.DistanceSquared))
-            .Take(_options.MaxVisibleEntities)
-            .Select(candidate => candidate.Entity)
-            .ToArray();
+                _visibleCandidateScratch.Add(new VisibleEntity(candidate, SnapshotSortKey(recipient, candidate, distanceSquared)));
+            }
+        }
+
+        _visibleCandidateScratch.Sort(_visibleEntityComparer);
+        var visibleCount = Math.Min(_visibleCandidateScratch.Count, _options.MaxVisibleEntities);
+        for (var i = 0; i < visibleCount; i++)
+        {
+            var entity = _visibleCandidateScratch[i].Entity;
+            destination.Add(entity);
+            visibleIds.Add(entity.NetworkId);
+        }
     }
 
-    private IReadOnlyList<byte[]> BuildSnapshotPackets(
+    private void BuildSnapshotPackets(
         ClientSession recipient,
-        IReadOnlyCollection<WorldEntity> visible,
+        IReadOnlyList<WorldEntity> visible,
+        List<byte[]> packets,
         out int visibleCount)
     {
+        packets.Clear();
         if (!TryGetSessionEntity(recipient, out var recipientEntity))
         {
             visibleCount = 0;
-            return [];
+            return;
         }
 
-        var orderedEntities = visible
-            .OrderBy(entity => SnapshotSortKey(recipient, entity, DistanceSquared(recipientEntity, entity)))
-            .ToArray();
         var isComplete = recipient.ShouldSendFullSnapshot(_serverTick, SnapshotHeartbeatTicks());
-        var payloadSessions = isComplete
-            ? orderedEntities
-            : orderedEntities.Where(entity => !recipient.HasSentRevision(entity)).ToArray();
-
-        recipient.RememberSnapshotEntities(orderedEntities.Select(entity => entity.NetworkId));
-
-        if (payloadSessions.Length == 0)
+        _payloadEntityScratch.Clear();
+        foreach (var entity in visible)
         {
-            visibleCount = orderedEntities.Length;
-            return [];
+            if (isComplete || !recipient.HasSentRevision(entity))
+            {
+                _payloadEntityScratch.Add(entity);
+            }
         }
 
-        var payload = payloadSessions
-            .Select(ToEntityStateSnapshot)
-            .ToArray();
+        recipient.RememberSnapshotEntities(visible);
 
-        var chunks = new List<List<EntityStateSnapshot>>();
-        var current = new List<EntityStateSnapshot>();
-        var currentBytes = ProtocolHeaderBytes + SnapshotHeaderBytes;
-
-        foreach (var entity in payload)
+        if (_payloadEntityScratch.Count == 0)
         {
-            var entityBytes = EstimateEntityStateBytes();
-            if (current.Count > 0 && currentBytes + entityBytes > MaxSequencedSnapshotBytes)
+            visibleCount = visible.Count;
+            return;
+        }
+
+        var maxEntitiesPerPacket = Math.Max(1, (MaxSequencedSnapshotBytes - ProtocolHeaderBytes - SnapshotHeaderBytes) / EstimateEntityStateBytes());
+        var chunkCount = Math.Max(1, (int)Math.Ceiling(_payloadEntityScratch.Count / (double)maxEntitiesPerPacket));
+        var snapshotSequence = recipient.NextSnapshotSequence();
+
+        for (var chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+        {
+            _snapshotChunkScratch.Clear();
+            var start = chunkIndex * maxEntitiesPerPacket;
+            var end = Math.Min(start + maxEntitiesPerPacket, _payloadEntityScratch.Count);
+            for (var i = start; i < end; i++)
             {
-                chunks.Add(current);
-                current = [];
-                currentBytes = ProtocolHeaderBytes + SnapshotHeaderBytes;
+                _snapshotChunkScratch.Add(ToEntityStateSnapshot(_payloadEntityScratch[i]));
             }
 
-            current.Add(entity);
-            currentBytes += entityBytes;
-        }
-
-        if (current.Count > 0 || chunks.Count == 0)
-        {
-            chunks.Add(current);
-        }
-
-        var packets = new List<byte[]>(chunks.Count);
-        var snapshotSequence = recipient.NextSnapshotSequence();
-        for (var i = 0; i < chunks.Count; i++)
-        {
-            var chunk = chunks[i];
             var packet = ProtocolCodec.Encode(new WorldSnapshotMessage(
                 _serverTick,
                 snapshotSequence,
-                orderedEntities.Length,
+                visible.Count,
                 isComplete,
-                i,
-                chunks.Count,
-                chunk));
+                chunkIndex,
+                chunkCount,
+                _snapshotChunkScratch));
 
             if (packet.Length > MaxSequencedSnapshotBytes)
             {
-                Log.Warn($"Snapshot chunk exceeded budget for {recipient.DisplayName}: chunk={i + 1}/{chunks.Count}, bytes={packet.Length}.");
+                Log.Warn($"Snapshot chunk exceeded budget for {recipient.DisplayName}: chunk={chunkIndex + 1}/{chunkCount}, bytes={packet.Length}.");
             }
 
             packets.Add(packet);
         }
 
-        foreach (var session in payloadSessions)
+        foreach (var entity in _payloadEntityScratch)
         {
-            recipient.RememberSentRevision(session);
+            recipient.RememberSentRevision(entity);
         }
 
         recipient.RememberSnapshotSent(_serverTick, isComplete);
-        visibleCount = orderedEntities.Length;
-        return packets;
+        visibleCount = visible.Count;
     }
 
     private void EnsureEntitySpawns(ClientSession recipient, IReadOnlyCollection<WorldEntity> authenticated)
@@ -524,6 +536,19 @@ public sealed class GameServer
         return recipient.WasInLastSnapshot(candidate.NetworkId)
             ? distanceSquared - SnapshotRetentionBonusDistanceSquared
             : distanceSquared;
+    }
+
+    private readonly record struct VisibleEntity(WorldEntity Entity, float SortKey);
+
+    private sealed class VisibleEntityComparer : IComparer<VisibleEntity>
+    {
+        public int Compare(VisibleEntity x, VisibleEntity y)
+        {
+            var keyComparison = x.SortKey.CompareTo(y.SortKey);
+            return keyComparison != 0
+                ? keyComparison
+                : x.Entity.Id.CompareTo(y.Entity.Id);
+        }
     }
 
     private static float DistanceSquared(WorldEntity a, WorldEntity b)

@@ -9,6 +9,14 @@ public sealed class WorldState
 
     public IReadOnlyCollection<WorldEntity> Entities => _entities.Values;
 
+    public void CopyEntitiesTo(ICollection<WorldEntity> destination)
+    {
+        foreach (var entity in _entities.Values)
+        {
+            destination.Add(entity);
+        }
+    }
+
     public WorldEntity AddPlayer(
         uint networkId,
         Guid characterId,
