@@ -10,6 +10,9 @@ public partial class MmoClientRoot : Node3D
     private readonly Dictionary<uint, Label3D> _entityLabels = [];
     private readonly HashSet<TileCoord> _renderedBlockedTiles = [];
     private readonly Dictionary<Direction8, double> _nextStepAt = [];
+    private readonly List<EntityRenderState> _renderStates = [];
+    private readonly HashSet<uint> _seenEntityIds = [];
+    private readonly List<uint> _staleEntityIds = [];
 
     private MmoClient? _client;
     private Node3D? _worldRoot;
@@ -55,7 +58,8 @@ public partial class MmoClientRoot : Node3D
         SendHeldMovement(now);
         SendStartupChat();
         RequestMetrics(now);
-        UpdateEntities(now);
+        SampleRenderStates(now);
+        UpdateEntities();
         UpdateCamera();
         UpdateOverlay();
     }
@@ -199,17 +203,23 @@ public partial class MmoClientRoot : Node3D
         }
     }
 
-    private void UpdateEntities(TimeSpan now)
+    private void SampleRenderStates(TimeSpan now)
     {
-        if (_client is null || _entityRoot is null)
+        _renderStates.Clear();
+        _client?.CopyRenderStatesTo(_renderStates, now);
+    }
+
+    private void UpdateEntities()
+    {
+        if (_entityRoot is null)
         {
             return;
         }
 
-        var seen = new HashSet<uint>();
-        foreach (var state in _client.GetRenderStates(now))
+        _seenEntityIds.Clear();
+        foreach (var state in _renderStates)
         {
-            seen.Add(state.NetworkId);
+            _seenEntityIds.Add(state.NetworkId);
             if (!_entityNodes.TryGetValue(state.NetworkId, out var node))
             {
                 node = CreateEntityNode(state);
@@ -224,9 +234,16 @@ public partial class MmoClientRoot : Node3D
             }
         }
 
-        foreach (var stale in _entityNodes.Keys
-            .Where(networkId => !seen.Contains(networkId))
-            .ToArray())
+        _staleEntityIds.Clear();
+        foreach (var networkId in _entityNodes.Keys)
+        {
+            if (!_seenEntityIds.Contains(networkId))
+            {
+                _staleEntityIds.Add(networkId);
+            }
+        }
+
+        foreach (var stale in _staleEntityIds)
         {
             _entityNodes[stale].QueueFree();
             _entityNodes.Remove(stale);
@@ -263,8 +280,16 @@ public partial class MmoClientRoot : Node3D
             return;
         }
 
-        var local = _client.GetRenderStates(TimeSpan.FromSeconds(_elapsedSeconds))
-            .FirstOrDefault(entity => entity.NetworkId == localNetworkId);
+        EntityRenderState? local = null;
+        foreach (var state in _renderStates)
+        {
+            if (state.NetworkId == localNetworkId)
+            {
+                local = state;
+                break;
+            }
+        }
+
         if (local is null)
         {
             return;
@@ -289,7 +314,7 @@ public partial class MmoClientRoot : Node3D
                 ? "server: pending"
                 : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
             _statusLabel.Text =
-                $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.Entities.Count}  local={localTile}\n" +
+                $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
                 $"{server}\n" +
                 "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat.";
         }

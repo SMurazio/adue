@@ -14,6 +14,8 @@ public sealed class MmoClient : IDisposable
     private readonly Dictionary<uint, ClientEntity> _entities = [];
     private readonly List<ChatLine> _chatLog = [];
     private readonly List<ClientError> _errors = [];
+    private readonly HashSet<uint> _snapshotVisibleScratch = [];
+    private readonly List<uint> _staleEntityScratch = [];
     private readonly long _startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
 
     private NetPeer? _serverPeer;
@@ -66,6 +68,8 @@ public sealed class MmoClient : IDisposable
 
     public IReadOnlyList<ClientError> Errors => _errors;
 
+    public int EntityCount => _entities.Count;
+
     public IReadOnlyList<ReplicatedEntity> Entities => _entities.Values.Select(static entity => entity.ToSnapshot()).ToArray();
 
     public IReadOnlyList<EntityRenderState> GetRenderStates()
@@ -76,6 +80,15 @@ public sealed class MmoClient : IDisposable
     public IReadOnlyList<EntityRenderState> GetRenderStates(TimeSpan now)
     {
         return _entities.Values.Select(entity => entity.ToRenderState(now)).ToArray();
+    }
+
+    public void CopyRenderStatesTo(ICollection<EntityRenderState> destination, TimeSpan now)
+    {
+        destination.Clear();
+        foreach (var entity in _entities.Values)
+        {
+            destination.Add(entity.ToRenderState(now));
+        }
     }
 
     public bool TryGetEntity(uint networkId, out ReplicatedEntity entity)
@@ -271,10 +284,10 @@ public sealed class MmoClient : IDisposable
 
     private void ApplySnapshot(uint serverTick, uint sequence, bool isComplete, IReadOnlyCollection<EntityStateSnapshot> entities)
     {
-        var visible = new HashSet<uint>();
+        _snapshotVisibleScratch.Clear();
         foreach (var state in entities)
         {
-            visible.Add(state.NetworkId);
+            _snapshotVisibleScratch.Add(state.NetworkId);
             if (!_entities.TryGetValue(state.NetworkId, out var entity))
             {
                 entity = UpsertEntity(
@@ -291,7 +304,16 @@ public sealed class MmoClient : IDisposable
 
         if (isComplete)
         {
-            foreach (var networkId in _entities.Keys.Where(networkId => !visible.Contains(networkId)).ToArray())
+            _staleEntityScratch.Clear();
+            foreach (var networkId in _entities.Keys)
+            {
+                if (!_snapshotVisibleScratch.Contains(networkId))
+                {
+                    _staleEntityScratch.Add(networkId);
+                }
+            }
+
+            foreach (var networkId in _staleEntityScratch)
             {
                 _entities.Remove(networkId);
                 if (LocalNetworkId == networkId)

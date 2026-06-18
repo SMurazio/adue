@@ -58,7 +58,7 @@ public sealed class PersistenceWriteBehindIntegrationTests
         try
         {
             await Task.Delay(100);
-            var client = new IntegrationClient("DisconnectPlayer");
+            using var client = new IntegrationClient("DisconnectPlayer");
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
@@ -67,7 +67,7 @@ public sealed class PersistenceWriteBehindIntegrationTests
             var expectedTile = client.OwnTile;
             var characterId = client.CharacterId;
 
-            client.Dispose();
+            await client.DisconnectAsync();
 
             var save = await repository.WaitForSaveAsync(
                 item => item.CharacterId == characterId && item.Tile == expectedTile,
@@ -181,10 +181,12 @@ public sealed class PersistenceWriteBehindIntegrationTests
                 Send(new ClientHelloMessage(_name), DeliveryMethod.ReliableOrdered);
                 Send(new LoginRequestMessage(_name, _name), DeliveryMethod.ReliableOrdered);
             };
+            _listener.PeerDisconnectedEvent += (_, _) => IsDisconnected = true;
             _listener.NetworkReceiveEvent += OnNetworkReceive;
         }
 
         public bool IsLoggedIn { get; private set; }
+        public bool IsDisconnected { get; private set; }
         public Guid CharacterId { get; private set; }
         public uint OwnNetworkId { get; private set; }
         public TileCoord OwnTile { get; private set; } = TileGrid.DefaultSpawnTile;
@@ -208,6 +210,25 @@ public sealed class PersistenceWriteBehindIntegrationTests
             Send(new MoveStepMessage(++_moveSequence, direction), DeliveryMethod.Sequenced);
         }
 
+        public async Task DisconnectAsync()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _serverPeer?.Disconnect();
+            var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(1);
+            while (!IsDisconnected && DateTimeOffset.UtcNow < deadline)
+            {
+                _client.PollEvents();
+                await Task.Delay(10);
+            }
+
+            _client.Stop();
+            _disposed = true;
+        }
+
         public void Dispose()
         {
             if (_disposed)
@@ -216,7 +237,12 @@ public sealed class PersistenceWriteBehindIntegrationTests
             }
 
             _serverPeer?.Disconnect();
-            _client.PollEvents();
+            for (var i = 0; i < 5 && !IsDisconnected; i++)
+            {
+                _client.PollEvents();
+                Thread.Sleep(10);
+            }
+
             _client.Stop();
             _disposed = true;
         }
