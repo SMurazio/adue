@@ -73,7 +73,12 @@ Acceptance:
 - No sharding.
 - No combat yet.
 - No Godot client yet.
-- No account security beyond a dev login identifier.
+- No account security beyond a dev login identifier — explicit placeholder. Production target: a
+  login/auth service issues short-lived signed connect tokens that the game server validates before
+  creating a session; account and role derive from the verified identity, never from a self-asserted
+  name. Until then, do NOT build authorization (roles, ownership, moderation, trades) on the current
+  self-claimed identity (e.g. the admin-by-name shortcut is dev-only). `LoginRequest` is the seam
+  where real auth slots in without a rewrite.
 - No real asset pipeline.
 - No cloud deployment until the local spine works.
 
@@ -99,7 +104,7 @@ Use SQLite during the locked-down-machine phase. Keep database calls behind `ICh
 
 ## Agent Workflow Skill
 
-Maintain repo-local skill `.codex/skills/mmo-dev/SKILL.md` for repeatable development workflows. Add scripts only for actions that are frequent, stateful, or easy to run incorrectly.
+Maintain repo-local skill `.shared/skills/mmo-dev/SKILL.md` for repeatable development workflows. Add scripts only for actions that are frequent, stateful, or easy to run incorrectly.
 
 ## Debug Client Direction
 

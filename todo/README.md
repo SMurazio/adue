@@ -9,7 +9,7 @@ through them and removes them as they land.
   or `N` (nit/follow-up). Work `S*` before `N*`.
 - Each file states: the problem (with `file:line`), the fix, and acceptance criteria.
 - On completion: implement the fix, add/adjust regression tests, run
-  `.\.codex\skills\mmo-dev\scripts\run-checks.cmd`, then **delete the file in the same commit**.
+  `.\.shared\skills\mmo-dev\scripts\run-checks.cmd`, then **delete the file in the same commit**.
   One commit per task; reference the task filename in the commit message.
 - If a task cannot be completed, do **not** delete it — append a `## Blocked` section explaining
   why, and move on to the next.

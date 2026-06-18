@@ -24,14 +24,14 @@ The default database is SQLite at `data/mmo.db`. The server creates it and appli
 .\.tools\dotnet\dotnet.exe test .\Mmo.sln
 ```
 
-Agent workflow scripts live under `.codex\skills\mmo-dev\scripts`.
+Agent workflow scripts live under `.shared\skills\mmo-dev\scripts`.
 
 ## Stress Test
 
 Start the server first, then run a conservative synthetic-client load:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd
 ```
 
 The stress client opens many LiteNetLib connections, logs in unique local characters, sends `MoveStep` inputs, receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
@@ -39,10 +39,10 @@ The stress client opens many LiteNetLib connections, logs in unique local charac
 Useful examples:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd --clients=10 --duration=10s
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd --clients=100 --duration=60s --spawn-rate=50
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd --clients=50 --duration=30s --chat-interval=10s
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd --clients=150 --duration=15s --spawn-rate=100
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=10 --duration=10s
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=100 --duration=60s --spawn-rate=50
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=50 --duration=30s --chat-interval=10s
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=150 --duration=15s --spawn-rate=100
 ```
 
 The stress tool fails the process if the accepted-login ratio is below `--min-auth-rate` or errors exceed `--max-errors`. Defaults are strict: `--min-auth-rate=1` and `--max-errors=0`.

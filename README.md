@@ -76,13 +76,13 @@ Then open http://127.0.0.1:5080.
 To stress test the server with synthetic LiteNetLib clients, keep the server running and run:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd
 ```
 
 For a larger run:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd --clients=100 --duration=60s --spawn-rate=50
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=100 --duration=60s --spawn-rate=50
 ```
 
 The stress tool defaults to strict pass criteria: every spawned client must authenticate and server/network errors must stay at zero.
@@ -98,30 +98,36 @@ The stress tool defaults to strict pass criteria: every spawned client must auth
 - [Multiplayer networking references](docs/networking-references.md)
 - [Networking reference catalogue (depth-annotated)](docs/networking-reference-catalogue.md)
 - [Networking design plan (extrapolated)](docs/networking-design-plan.md)
+- [WorldState / Zone design](docs/worldstate-zone-design.md)
+- [Godot client design](docs/godot-client-design.md)
 
 ## Agent Skill
 
-Repo-local workflow skill: `.codex/skills/mmo-dev/SKILL.md`.
+Repo-local workflow skill: `.shared/skills/mmo-dev/SKILL.md`.
+
+New project skills should use the shared layout: put the canonical skill under
+`.shared/skills/<skill-name>/`, then add thin discovery stubs for each agent under `.codex/skills/`
+and `.claude/skills/`.
 
 Useful scripts:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\start-server.cmd
-.\.codex\skills\mmo-dev\scripts\start-web-client.cmd
-.\.codex\skills\mmo-dev\scripts\stress-test.cmd
-.\.codex\skills\mmo-dev\scripts\stop-mmo.cmd
-.\.codex\skills\mmo-dev\scripts\run-checks.cmd
+.\.shared\skills\mmo-dev\scripts\start-server.cmd
+.\.shared\skills\mmo-dev\scripts\start-web-client.cmd
+.\.shared\skills\mmo-dev\scripts\stress-test.cmd
+.\.shared\skills\mmo-dev\scripts\stop-mmo.cmd
+.\.shared\skills\mmo-dev\scripts\run-checks.cmd
 ```
 
 To preview cleanup targets before stopping server/web processes:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\stop-mmo.cmd -DryRun
+.\.shared\skills\mmo-dev\scripts\stop-mmo.cmd -DryRun
 ```
 
 The default start scripts open visible console windows and `stop-mmo.cmd` closes them through PID files. The older direct window helpers are still available for manual debugging:
 
 ```powershell
-.\.codex\skills\mmo-dev\scripts\run-server-window.cmd
-.\.codex\skills\mmo-dev\scripts\run-web-client-window.cmd
+.\.shared\skills\mmo-dev\scripts\run-server-window.cmd
+.\.shared\skills\mmo-dev\scripts\run-web-client-window.cmd
 ```

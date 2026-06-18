@@ -26,15 +26,16 @@ work and honor it. The `todo/` queue is the shared backlog (see `todo/README.md`
 2. **Implement** — Implementer works `todo/` in priority order (`S` before `N`): one commit per
    task, referencing the task filename; delete the task file in that same commit on success; a task
    that can't be finished gets a `## Blocked` note and stays. Runs
-   `.\.codex\skills\mmo-dev\scripts\run-checks.cmd` before and after. No scope creep — new issues
+   `.\.shared\skills\mmo-dev\scripts\run-checks.cmd` before and after. No scope creep — new issues
    become new `todo/` files, never silent changes.
 3. **Report** — Implementer emits a self-contained **review-request briefing**: intent + branch &
    base commit, how to diff, change manifest, decisions & deviations, self-verification evidence
    (incl. a fresh 120-client/60s stress run), known gaps, highest-risk areas, and what the reviewer
-   should check. Emitted in a fenced ```text block.
-4. **Review** — Orchestrator verifies the briefing **independently** (re-runs build/tests/stress,
-   re-reads the diff — never rubber-stamps), produces a severity-ranked verdict, and updates the
-   `todo/` queue with any new findings.
+   should check. It is written as `review/review-request-<slug>.md` (see `review/README.md`).
+4. **Review** — Orchestrator picks up each file in `review/` as a task, verifies the briefing
+   **independently** (re-runs build/tests/stress, re-reads the diff — never rubber-stamps), produces
+   a severity-ranked verdict, updates the `todo/` queue with any new findings, and deletes the
+   request file once reviewed.
 5. Repeat.
 
 The baton alternates between steps 1–2 (Orchestrator → Implementer) and 3–4 (Implementer →
@@ -54,13 +55,17 @@ Orchestrator waits for a briefing.
   decision.
 - `todo/` — the live backlog and its convention (`todo/README.md`). The single source of "what's
   outstanding."
+- `review/` — the Orchestrator's inbound review queue (`review/README.md`). The Implementer drops a
+  `review-request-<slug>.md` here when work needs review; the Orchestrator processes and clears it.
 - `docs/` — plans and decision records (e.g. `networking-design-plan.md`, `feature-roadmap.md`).
-- Handoff prompts (Orchestrator → Implementer) and review briefings (Implementer → Orchestrator),
-  relayed by the human.
+- `.shared/skills/` - canonical repo-local skills. Agent-specific skill folders under `.codex/`
+  and `.claude/` should be thin stubs that point to the canonical skill.
+- Handoff prompts (Orchestrator → Implementer) and review requests in `review/` (Implementer →
+  Orchestrator), relayed by the human.
 
 ## Project Guardrails (already decided — do not relitigate)
 
 - Movement is tile-stepped (protocol v9); server-authoritative; no client prediction/lockstep/
   rollback/lag-comp/LOS-for-AOID. See `docs/networking-design-plan.md`.
 - Single process until metrics justify a split. Measure before optimizing.
-- Use the repo-local SDK at `.tools\dotnet\dotnet.exe` and the `.codex/skills/mmo-dev` scripts.
+- Use the repo-local SDK at `.tools\dotnet\dotnet.exe` and the `.shared/skills/mmo-dev` scripts.
