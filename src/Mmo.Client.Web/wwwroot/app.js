@@ -50,8 +50,8 @@ let lastMoveDirection = "";
 const cameraFollowAlpha = 0.14;
 const minCameraZoom = 0.55;
 const maxCameraZoom = 3.25;
-const tileGridWidth = 64;
-const tileGridHeight = 64;
+let tileGridWidth = 64;
+let tileGridHeight = 64;
 const tileStepTweenMs = 200;
 const movementInterpolationDelayMs = tileStepTweenMs;
 const selfMovementInterpolationDelayMs = 0;
@@ -76,6 +76,7 @@ let pointer = null;
 let groundPlane = null;
 let ground = null;
 let grid = null;
+let wallGroup = null;
 let moveMarker = null;
 let visibilityRing = null;
 let resizeObserver = null;
@@ -110,44 +111,10 @@ const movementKeysByCode = new Map([
   ["KeyD", "d"]
 ]);
 let snapshotAssembly = null;
-const blockedTiles = buildBlockedTileSet(tileGridWidth, tileGridHeight);
+let blockedTiles = new Set();
 
 function setStatus(text) {
   els.status.textContent = text;
-}
-
-function buildBlockedTileSet(width, height) {
-  const tiles = new Set();
-  const add = (x, y) => {
-    if (x >= 0 && x < width && y >= 0 && y < height) {
-      tiles.add(`${x},${y}`);
-    }
-  };
-
-  for (let x = 0; x < width; x++) {
-    add(x, 0);
-    add(x, height - 1);
-  }
-
-  for (let y = 0; y < height; y++) {
-    add(0, y);
-    add(width - 1, y);
-  }
-
-  for (let y = 8; y <= 20; y++) {
-    add(16, y);
-  }
-
-  for (let x = 20; x <= 36; x++) {
-    add(x, 24);
-  }
-
-  for (let y = 12; y <= 18; y++) {
-    add(40, y);
-  }
-
-  tiles.delete("8,8");
-  return tiles;
 }
 
 function tileToWorld(x, y) {
@@ -232,19 +199,7 @@ function initScene() {
     pointer = new THREE.Vector2();
     groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
-    ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(tileGridWidth, tileGridHeight),
-      new THREE.MeshStandardMaterial({ color: 0x182127, roughness: 0.95, metalness: 0.0 })
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.03;
-    ground.receiveShadow = true;
-    worldRoot.add(ground);
-
-    grid = new THREE.GridHelper(tileGridWidth, tileGridWidth, 0x31414d, 0x202a31);
-    grid.position.y = 0.01;
-    worldRoot.add(grid);
-    addBlockedTileWalls();
+    rebuildWorldMap();
 
     visibilityRing = new THREE.Mesh(
       new THREE.RingGeometry(0.9985, 1.0015, 128),
@@ -303,6 +258,7 @@ function addBlockedTileWalls() {
     return;
   }
 
+  wallGroup = new THREE.Group();
   const wallGeometry = new THREE.BoxGeometry(0.96, 0.78, 0.96);
   const wallMaterial = new THREE.MeshStandardMaterial({
     color: 0x46535e,
@@ -315,8 +271,56 @@ function addBlockedTileWalls() {
     const position = tileToWorld(x, y);
     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
     wall.position.set(position.x, 0.36, position.z);
-    worldRoot.add(wall);
+    wallGroup.add(wall);
   }
+
+  worldRoot.add(wallGroup);
+}
+
+function rebuildWorldMap() {
+  if (!worldRoot) {
+    return;
+  }
+
+  removeMapObject(ground);
+  removeMapObject(grid);
+  removeMapObject(wallGroup);
+  ground = null;
+  grid = null;
+  wallGroup = null;
+
+  ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(tileGridWidth, tileGridHeight),
+    new THREE.MeshStandardMaterial({ color: 0x182127, roughness: 0.95, metalness: 0.0 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.03;
+  ground.receiveShadow = true;
+  worldRoot.add(ground);
+
+  const gridSize = Math.max(tileGridWidth, tileGridHeight);
+  grid = new THREE.GridHelper(gridSize, gridSize, 0x31414d, 0x202a31);
+  grid.position.y = 0.01;
+  worldRoot.add(grid);
+  addBlockedTileWalls();
+}
+
+function removeMapObject(object) {
+  if (!worldRoot || !object) {
+    return;
+  }
+
+  worldRoot.remove(object);
+  object.traverse?.(child => {
+    child.geometry?.dispose?.();
+    if (Array.isArray(child.material)) {
+      for (const material of child.material) {
+        material.dispose?.();
+      }
+    } else {
+      child.material?.dispose?.();
+    }
+  });
 }
 
 function bindResponsiveCanvas() {
@@ -410,6 +414,9 @@ function handleMessage(message) {
     case "entityDespawn":
       handleEntityDespawn(message);
       break;
+    case "zoneInfo":
+      handleZoneInfo(message);
+      break;
     case "chat":
       if (message.sender === "server" && handleMetricsLine(message.text)) {
         break;
@@ -419,6 +426,18 @@ function handleMessage(message) {
     case "error":
       setStatus(`${message.code}: ${message.message}`);
       break;
+  }
+}
+
+function handleZoneInfo(message) {
+  tileGridWidth = Math.max(1, Number(message.width) || tileGridWidth);
+  tileGridHeight = Math.max(1, Number(message.height) || tileGridHeight);
+  blockedTiles = new Set((message.blockedTiles ?? []).map(tile => `${tile.x},${tile.y}`));
+  rebuildWorldMap();
+  for (const entry of meshes.values()) {
+    entry.localInitialized = false;
+    entry.confirmedStepQueue.length = 0;
+    entry.activeStep = null;
   }
 }
 

@@ -144,6 +144,49 @@ public sealed class AoiIntegrationTests
     }
 
     [Fact]
+    public async Task ServerSendsZoneInfoAfterLogin()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = new ServerOptions(
+            port,
+            20,
+            "integration-test",
+            DatabaseProvider.Sqlite,
+            database.ConnectionString,
+            TestSqliteDatabase.MigrationsPath,
+            64,
+            64,
+            50,
+            30,
+            150,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var client = new IntegrationClient("Observer");
+            client.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => client.Messages.OfType<ZoneInfoMessage>().Any(), client);
+
+            var zone = client.Messages.OfType<ZoneInfoMessage>().Single();
+            Assert.Equal(Zone.DefaultId, zone.ZoneId);
+            Assert.Equal(64, zone.Width);
+            Assert.Equal(64, zone.Height);
+            Assert.Contains(new TileCoord(16, 8), zone.BlockedTiles);
+            Assert.DoesNotContain(TileGrid.DefaultSpawnTile, zone.BlockedTiles);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
     public async Task FullSnapshotHeartbeatIsNotStarvedByPartialSnapshots()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();

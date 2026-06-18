@@ -235,6 +235,16 @@ public sealed class WebBridgeSession
                     despawn.NetworkId
                 });
                 break;
+            case ZoneInfoMessage zone:
+                EnqueueBrowser(new
+                {
+                    type = "zoneInfo",
+                    zone.ZoneId,
+                    zone.Width,
+                    zone.Height,
+                    blockedTiles = zone.BlockedTiles.Select(tile => new { tile.X, tile.Y })
+                });
+                break;
             case ChatBroadcastMessage chat:
                 EnqueueBrowser(new { type = "chat", chat.Sender, chat.Text });
                 break;

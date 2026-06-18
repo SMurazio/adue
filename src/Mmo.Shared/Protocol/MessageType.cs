@@ -14,5 +14,6 @@ public enum MessageType : ushort
     ChatBroadcast = 103,
     ServerError = 104,
     EntitySpawn = 105,
-    EntityDespawn = 106
+    EntityDespawn = 106,
+    ZoneInfo = 107
 }

@@ -37,6 +37,10 @@ public sealed class WebClientAssetTests
         Assert.Contains("Math.abs(entry.tileX - entity.x) > 1", app);
         Assert.Contains("entity.characterId === state.selfCharacterId", app);
         Assert.Contains("function mergeSnapshotEntities", app);
+        Assert.Contains("case \"zoneInfo\":", app);
+        Assert.Contains("function handleZoneInfo", app);
+        Assert.Contains("blockedTiles = new Set((message.blockedTiles ?? []).map(tile => `${tile.x},${tile.y}`));", app);
+        Assert.Contains("function rebuildWorldMap", app);
         Assert.Contains("function sendMoveStep", app);
         Assert.Contains("type: \"moveStep\"", app);
         Assert.Contains("confirmedStepQueue", app);
@@ -47,6 +51,7 @@ public sealed class WebClientAssetTests
         Assert.Contains("entry.renderPosition.lerpVectors(step.from, step.to, alpha);", app);
         Assert.Contains("desiredFocus.copy(self.renderPosition);", app);
         Assert.DoesNotContain("const eased = alpha * alpha", app);
+        Assert.DoesNotContain("function buildBlockedTileSet", app);
         Assert.DoesNotContain("function interpolateRemoteEntityPosition", app);
     }
 

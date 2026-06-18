@@ -278,6 +278,7 @@ public sealed class GameServer
                         current.AttachEntity(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
                         TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.Tile, ""), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, CreateZoneInfoMessage(), DeliveryMethod.ReliableOrdered);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -590,6 +591,15 @@ public sealed class GameServer
     private TileCoord ResolveLoginTile(TileCoord tile)
     {
         return _zone.ResolveSpawnTile(tile);
+    }
+
+    private ZoneInfoMessage CreateZoneInfoMessage()
+    {
+        var blockedTiles = _zone.BlockedTiles
+            .OrderBy(tile => tile.Y)
+            .ThenBy(tile => tile.X)
+            .ToArray();
+        return new ZoneInfoMessage(_zone.Id, _zone.Width, _zone.Height, blockedTiles);
     }
 
     private void HandleChat(ClientSession sender, string text)

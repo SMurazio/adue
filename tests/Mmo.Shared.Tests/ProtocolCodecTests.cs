@@ -100,6 +100,27 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void ZoneInfoRoundTrips()
+    {
+        var original = new ZoneInfoMessage(
+            "sandbox",
+            16,
+            12,
+            [
+                new TileCoord(0, 0),
+                new TileCoord(4, 7),
+                new TileCoord(15, 11)
+            ]);
+
+        var decoded = Assert.IsType<ZoneInfoMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal("sandbox", decoded.ZoneId);
+        Assert.Equal(16, decoded.Width);
+        Assert.Equal(12, decoded.Height);
+        Assert.Equal(original.BlockedTiles, decoded.BlockedTiles);
+    }
+
+    [Fact]
     public void LoginResultRoundTripsRole()
     {
         var characterId = Guid.NewGuid();

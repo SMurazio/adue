@@ -105,6 +105,15 @@ public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IPr
     public MessageType Type => MessageType.EntityDespawn;
 }
 
+public sealed record ZoneInfoMessage(
+    string ZoneId,
+    int Width,
+    int Height,
+    IReadOnlyList<TileCoord> BlockedTiles) : IProtocolMessage
+{
+    public MessageType Type => MessageType.ZoneInfo;
+}
+
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatBroadcast;
