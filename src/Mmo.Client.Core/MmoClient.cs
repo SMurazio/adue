@@ -7,6 +7,11 @@ namespace Mmo.Client.Core;
 public sealed class MmoClient : IDisposable
 {
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
+
+    // Small local playout buffer so the local player's tween isn't starved by snapshot tick-boundary
+    // jitter (server confirms tiles on ~50ms tick boundaries). 0 here caused q to oscillate 1-2 and a
+    // slight stutter; ~0.5x cadence (~75ms) holds a one-tick cushion with minimal added input latency.
+    public const double LocalInterpolationCadenceMultiplier = 0.5d;
     private const uint PlaceholderSnapshotTtl = 60;
 
     private readonly ClientConnectionOptions _options;
@@ -445,7 +450,7 @@ public sealed class MmoClient : IDisposable
         var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
         foreach (var entity in _entities.Values)
         {
-            var delay = entity.IsLocal ? 0d : cadence * RemoteInterpolationCadenceMultiplier;
+            var delay = cadence * (entity.IsLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
             entity.UpdateInterpolationCadence(cadence, delay);
         }
     }
@@ -453,7 +458,7 @@ public sealed class MmoClient : IDisposable
     private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal)
     {
         var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
-        var delay = isLocal ? 0d : cadence * RemoteInterpolationCadenceMultiplier;
+        var delay = cadence * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
         return new TileInterpolator(initialTile, cadence, delay);
     }
 
