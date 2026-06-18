@@ -10,10 +10,15 @@ public sealed class WebClientAssetTests
         var app = File.ReadAllText(FindWebAsset("app.js"));
 
         Assert.Contains("const tileStepTweenMs = 200;", app);
+        Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("function updateEntityTileTween", app);
+        Assert.Contains("function screenInputToStepDirection", app);
+        Assert.Contains("return \"E\";", app);
         Assert.Contains("function mergeSnapshotEntities", app);
         Assert.Contains("function sendMoveStep", app);
         Assert.Contains("type: \"moveStep\"", app);
+        Assert.Contains("entry.renderPosition.lerpVectors(entry.from, entry.to, eased);", app);
+        Assert.Contains("desiredFocus.copy(self.renderPosition);", app);
         Assert.DoesNotContain("function interpolateRemoteEntityPosition", app);
     }
 

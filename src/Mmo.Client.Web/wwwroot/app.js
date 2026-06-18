@@ -51,7 +51,7 @@ const maxCameraZoom = 3.25;
 const tileGridWidth = 64;
 const tileGridHeight = 64;
 const tileStepTweenMs = 200;
-const stepRepeatMs = 200;
+const stepRetryMs = 50;
 const debugVisibilityRadius = 96;
 const entityStaleAfterMs = 2500;
 const entityExpireAfterMs = 8000;
@@ -683,12 +683,6 @@ function readMetric(line, pattern) {
 }
 
 function updateSceneEntities(tick, sequence) {
-  const self = findSelfEntity(state.entities);
-  if (self) {
-    const position = tileToWorld(self.x, self.y);
-    desiredFocus.set(position.x, 0, position.z);
-  }
-
   if (!worldRoot) {
     return;
   }
@@ -973,7 +967,7 @@ function sendMoveStep(direction, force = false) {
   }
 
   const now = performance.now();
-  if (!force && direction === lastMoveDirection && now - lastHeldMoveSentAt < stepRepeatMs) {
+  if (!force && direction === lastMoveDirection && now - lastHeldMoveSentAt < stepRetryMs) {
     return;
   }
 
@@ -1009,36 +1003,44 @@ function screenInputFromDirection(direction) {
   }
 }
 
-function screenInputToWorldVector(screenX, screenY) {
-  if (screenX === 0 && screenY === 0) {
-    return { x: 0, y: 0 };
-  }
-
-  if (!camera) {
-    const fallbackX = (screenX * 0.70710678) + (screenY * -0.70710678);
-    const fallbackY = (screenX * -0.70710678) + (screenY * -0.70710678);
-    return normalize2(fallbackX, fallbackY);
-  }
-
-  camera.updateMatrixWorld();
-  const screenRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-  const screenUp = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-  screenRight.y = 0;
-  screenUp.y = 0;
-
-  if (screenRight.lengthSq() < 0.0001 || screenUp.lengthSq() < 0.0001) {
-    return { x: 0, y: 0 };
-  }
-
-  screenRight.normalize();
-  screenUp.normalize();
-  const world = screenRight.multiplyScalar(screenX).add(screenUp.multiplyScalar(screenY));
-  return normalize2(world.x, world.z);
-}
-
 function screenInputToStepDirection(screenX, screenY) {
-  const world = screenInputToWorldVector(screenX, screenY);
-  return worldVectorToStepDirection(world.x, world.y);
+  // Keyboard input is screen-relative for the fixed isometric camera.
+  const x = Math.sign(screenX);
+  const y = Math.sign(screenY);
+
+  if (x === 0 && y === 0) {
+    return null;
+  }
+
+  if (x === 0 && y > 0) {
+    return "NW";
+  }
+
+  if (x > 0 && y > 0) {
+    return "N";
+  }
+
+  if (x > 0 && y === 0) {
+    return "NE";
+  }
+
+  if (x > 0 && y < 0) {
+    return "E";
+  }
+
+  if (x === 0 && y < 0) {
+    return "SE";
+  }
+
+  if (x < 0 && y < 0) {
+    return "S";
+  }
+
+  if (x < 0 && y === 0) {
+    return "SW";
+  }
+
+  return "W";
 }
 
 function worldVectorToStepDirection(x, y) {
@@ -1049,15 +1051,6 @@ function worldVectorToStepDirection(x, y) {
   const angle = Math.atan2(y, x);
   const sector = (Math.round(angle / (Math.PI / 4)) + 8) % 8;
   return ["E", "SE", "S", "SW", "W", "NW", "N", "NE"][sector];
-}
-
-function normalize2(x, y) {
-  const length = Math.hypot(x, y);
-  if (length < 0.0001) {
-    return { x: 0, y: 0 };
-  }
-
-  return { x: x / length, y: y / length };
 }
 
 function syncKeyboardMovement() {
@@ -1243,7 +1236,7 @@ function syncRightMouseMovement(force = false) {
   }
 
   const now = performance.now();
-  if (!force && now - lastRightMoveSentAt < stepRepeatMs) {
+  if (!force && now - lastRightMoveSentAt < stepRetryMs) {
     return;
   }
 
@@ -1271,7 +1264,8 @@ function syncRightMouseMovement(force = false) {
 function sampleEntityPosition(entry, nowMs) {
   const elapsed = nowMs - entry.tweenStartedAt;
   const alpha = THREE.MathUtils.clamp(elapsed / Math.max(1, entry.tweenDurationMs), 0, 1);
-  entry.renderPosition.lerpVectors(entry.from, entry.to, alpha);
+  const eased = alpha * alpha * (3 - (2 * alpha));
+  entry.renderPosition.lerpVectors(entry.from, entry.to, eased);
   return entry.renderPosition;
 }
 
@@ -1286,7 +1280,7 @@ function sendHeldMoveStep() {
   }
 
   const now = performance.now();
-  if (now - lastHeldMoveSentAt < stepRepeatMs) {
+  if (now - lastHeldMoveSentAt < stepRetryMs) {
     return;
   }
 
