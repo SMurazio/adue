@@ -30,6 +30,24 @@ a general-purpose OS (Windows is not an RTOS) without core-pinning/dedicated har
   inflated `tickMs max` (~33 ms Debug vs a single ~22 ms OS blip in Release). Debug perf numbers are
   not representative. See [[review-handoff-loop]] — verify perf claims with a Release run.
 
+## The actual residual stutter: synchronous logging on the tick thread (S24)
+
+The "single ~22 ms OS blip/min in Release" conclusion above was incomplete — it came from the
+synthetic stress harness, which did not exercise the periodic-log path the way a live client run
+does. A live Release server + 2 Godot clients with the S22 duration trace exposed the real,
+user-perceived stutter: **every 200 ticks (10 s) one tick took ~50 ms, entirely in `otherMs`, with
+`gc=0` and `driftMs≈0`.** Cause: `GameServer.TickCore`'s periodic status log
+(`_serverTick % (TickRate*10) == 0 → Log.Info(...)`), and `Log.Info` is a plain synchronous
+`Console.WriteLine` (`Log.cs`). Synchronous console I/O on the simulation thread blocks ~50 ms per
+call (worse with a real console window / QuickEdit selection), freezing the tick and delaying every
+client's snapshot at once ⇒ **simultaneous, ~10 s-cadence stutter on all clients.** The same path
+fires on connect/disconnect (PollEvents runs on the tick thread) — the login-time hitch.
+
+Lesson: **never do synchronous `Console`/file I/O on the tick or network-callback thread.** Fix is
+async logging (background consumer; tick thread only enqueues). Tracked in `todo/S24`. Also a
+process lesson: **the synthetic stress tool masked this — reproduce perf issues with a real client
+run, not only the stress harness.**
+
 ## Footgun avoided
 
 Direct wire encoding was chosen over object pooling for hot messages deliberately: it removes the
