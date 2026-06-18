@@ -32,7 +32,7 @@ public sealed class GameServer
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
     private readonly NetworkIdPool _networkIds = new();
-    private readonly TileGrid _tileGrid;
+    private readonly Zone _zone;
 
     private uint _serverTick;
     private long _pendingMovementElapsedTicks;
@@ -42,7 +42,7 @@ public sealed class GameServer
         _options = options;
         _characters = characters;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
-        _tileGrid = TileGrid.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles);
+        _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles);
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -195,7 +195,7 @@ public sealed class GameServer
                     var startedAt = Stopwatch.GetTimestamp();
                     try
                     {
-                        session.TryStep(move.Direction, _serverTick, _options.StepCooldownTicks, _tileGrid);
+                        _zone.TryStep(session, move.Direction, _serverTick, _options.StepCooldownTicks);
                     }
                     finally
                     {
@@ -255,7 +255,7 @@ public sealed class GameServer
                     {
                         current.LoginInProgress = false;
                         _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
-                        TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, TileGrid.DefaultSpawnTile, "No network id available."), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, _zone.ResolveSpawnTile(Zone.DefaultSpawnTile), "No network id available."), DeliveryMethod.ReliableOrdered);
                         Log.Error("Login failed", exception);
                     }
                 });
@@ -270,7 +270,7 @@ public sealed class GameServer
                     }
 
                     _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
-                    TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, TileGrid.DefaultSpawnTile, exception.Message), DeliveryMethod.ReliableOrdered);
+                    TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, _zone.ResolveSpawnTile(Zone.DefaultSpawnTile), exception.Message), DeliveryMethod.ReliableOrdered);
                     Log.Error("Login failed", exception);
                 });
             }
@@ -522,14 +522,7 @@ public sealed class GameServer
 
     private TileCoord ResolveLoginTile(TileCoord tile)
     {
-        if (_tileGrid.IsWalkable(tile))
-        {
-            return tile;
-        }
-
-        return _tileGrid.IsWalkable(TileGrid.DefaultSpawnTile)
-            ? TileGrid.DefaultSpawnTile
-            : new TileCoord(1, 1);
+        return _zone.ResolveSpawnTile(tile);
     }
 
     private void HandleChat(ClientSession sender, string text)
