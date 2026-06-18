@@ -28,7 +28,7 @@ public sealed class ProtocolCodecTests
             6,
             new[]
             {
-                new EntityStateSnapshot(99, new WorldVector(1.25f, -2.5f))
+                new EntityStateSnapshot(99, new TileCoord(12, -25), Direction8.NE)
             });
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -41,8 +41,19 @@ public sealed class ProtocolCodecTests
         Assert.Equal(6, decoded.ChunkCount);
         var entity = Assert.Single(decoded.Entities);
         Assert.Equal(99u, entity.NetworkId);
-        Assert.InRange(entity.Position.X, 1.2f, 1.3f);
-        Assert.Equal(-2.5f, entity.Position.Y);
+        Assert.Equal(new TileCoord(12, -25), entity.Tile);
+        Assert.Equal(Direction8.NE, entity.Facing);
+    }
+
+    [Fact]
+    public void MoveStepRoundTrips()
+    {
+        var original = new MoveStepMessage(123, Direction8.SW);
+
+        var decoded = Assert.IsType<MoveStepMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(123u, decoded.Sequence);
+        Assert.Equal(Direction8.SW, decoded.Direction);
     }
 
     [Fact]
@@ -64,7 +75,8 @@ public sealed class ProtocolCodecTests
             characterId,
             EntityKind.Player,
             "PlayerOne",
-            new WorldVector(1.25f, -2.5f));
+            new TileCoord(12, 25),
+            Direction8.W);
 
         var decoded = Assert.IsType<EntitySpawnMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -72,8 +84,8 @@ public sealed class ProtocolCodecTests
         Assert.Equal(characterId, decoded.CharacterId);
         Assert.Equal(EntityKind.Player, decoded.Kind);
         Assert.Equal("PlayerOne", decoded.DisplayName);
-        Assert.Equal(1.25f, decoded.Position.X);
-        Assert.Equal(-2.5f, decoded.Position.Y);
+        Assert.Equal(new TileCoord(12, 25), decoded.Tile);
+        Assert.Equal(Direction8.W, decoded.Facing);
     }
 
     [Fact]
@@ -96,7 +108,7 @@ public sealed class ProtocolCodecTests
             characterId,
             "Admin",
             ClientRole.Admin,
-            new WorldVector(3.5f, 4.5f),
+            new TileCoord(3, 4),
             "");
 
         var decoded = Assert.IsType<LoginResultMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -104,8 +116,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(characterId, decoded.CharacterId);
         Assert.Equal("Admin", decoded.DisplayName);
         Assert.Equal(ClientRole.Admin, decoded.Role);
-        Assert.Equal(3.5f, decoded.Position.X);
-        Assert.Equal(4.5f, decoded.Position.Y);
+        Assert.Equal(new TileCoord(3, 4), decoded.Tile);
     }
 
     [Fact]

@@ -1,5 +1,4 @@
 using Mmo.Server.Configuration;
-using Mmo.Shared.Domain;
 using Xunit;
 
 namespace Mmo.Server.Tests;
@@ -7,32 +6,47 @@ namespace Mmo.Server.Tests;
 public sealed class ServerOptionsTests
 {
     [Fact]
-    public void FromEnvironmentReadsWorldBounds()
+    public void FromEnvironmentReadsTileMovementOptions()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>
         {
-            ["MMO_WORLD_MIN_X"] = "-100",
-            ["MMO_WORLD_MAX_X"] = "101",
-            ["MMO_WORLD_MIN_Y"] = "-50",
-            ["MMO_WORLD_MAX_Y"] = "51"
+            ["MMO_WORLD_WIDTH_TILES"] = "96",
+            ["MMO_WORLD_HEIGHT_TILES"] = "80",
+            ["MMO_STEP_COOLDOWN_MS"] = "250"
         });
 
         var options = ServerOptions.FromEnvironment();
 
-        Assert.Equal(new WorldBounds(-100, 101, -50, 51), options.WorldBounds);
+        Assert.Equal(96, options.WorldWidthTiles);
+        Assert.Equal(80, options.WorldHeightTiles);
+        Assert.Equal(250, options.StepCooldownMs);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), options.StepCooldown);
     }
 
     [Fact]
-    public void FromEnvironmentRejectsWorldBoundsOutsideSnapshotRange()
+    public void FromEnvironmentRejectsInvalidWorldWidth()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>
         {
-            ["MMO_WORLD_MAX_X"] = "4000"
+            ["MMO_WORLD_WIDTH_TILES"] = "8"
         });
 
         var exception = Assert.Throws<InvalidOperationException>(ServerOptions.FromEnvironment);
 
-        Assert.Contains("snapshot range", exception.Message);
+        Assert.Contains("MMO_WORLD_WIDTH_TILES", exception.Message);
+    }
+
+    [Fact]
+    public void FromEnvironmentRejectsInvalidStepCooldown()
+    {
+        using var _ = new EnvironmentScope(new Dictionary<string, string?>
+        {
+            ["MMO_STEP_COOLDOWN_MS"] = "10"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(ServerOptions.FromEnvironment);
+
+        Assert.Contains("MMO_STEP_COOLDOWN_MS", exception.Message);
     }
 
     private sealed class EnvironmentScope : IDisposable
@@ -45,13 +59,11 @@ public sealed class ServerOptionsTests
             "MMO_DB_PROVIDER",
             "MMO_DB",
             "MMO_MIGRATIONS_PATH",
-            "MMO_MOVE_SPEED",
+            "MMO_WORLD_WIDTH_TILES",
+            "MMO_WORLD_HEIGHT_TILES",
+            "MMO_STEP_COOLDOWN_MS",
             "MMO_INTEREST_RADIUS",
             "MMO_MAX_VISIBLE_ENTITIES",
-            "MMO_WORLD_MIN_X",
-            "MMO_WORLD_MAX_X",
-            "MMO_WORLD_MIN_Y",
-            "MMO_WORLD_MAX_Y",
             "MMO_ADMIN_NAMES"
         ];
 

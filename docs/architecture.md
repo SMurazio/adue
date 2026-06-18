@@ -2,7 +2,7 @@
 
 ## Shape
 
-The server is authoritative. Clients send intent, not final state. The server runs a fixed tick loop, applies pending inputs, updates world state, and sends snapshots.
+The server is authoritative. Clients send intent, not final state. The server loop polls network events, applies validated step inputs, runs a fixed tick, and sends snapshots when visible state changes or a heartbeat is due.
 
 ```text
 Console Client / Future Godot Client
@@ -19,6 +19,12 @@ Mmo.Server
 SQLite now / Postgres later
 ```
 
+## Movement Model
+
+Movement is tile-stepped and server-authoritative. The world is a fixed tile grid, the client sends discrete step intents, and the server moves an entity exactly one tile per validated step, gated by a per-entity step cooldown. Movement is 8-way. The server rejects steps that target blocked or out-of-bounds tiles; entities do not block each other, so multiple players may share a tile.
+
+Clients tween between confirmed tile centers over the step duration; there is no client prediction. Rationale: [networking-design-plan.md](networking-design-plan.md) section 5a.
+
 ## Projects
 
 - `Mmo.Shared`: protocol messages, binary codec, and shared world/domain types.
@@ -32,15 +38,16 @@ SQLite now / Postgres later
 - Accept or reject connections.
 - Create sessions after login.
 - Load or create persisted characters.
-- Own player positions and movement speed.
-- Broadcast snapshots at the configured tick rate.
-- Persist character position on disconnect.
+- Own player tile coordinates, facing, and movement cooldown.
+- Evaluate snapshots at the configured tick rate and send changed state or heartbeat snapshots.
+- Persist character tile coordinates on disconnect.
 
 ## Client Responsibilities
 
 - Connect to the server with the shared connection key.
-- Send login and player input messages.
+- Send login and player step-intent messages.
 - Render or print server snapshots.
+- Tween between confirmed tile centers.
 - Never decide authoritative position.
 
 ## Object Separation Direction
@@ -49,21 +56,21 @@ Use the user-provided Albion Online separation diagram as a target shape for cli
 
 ```text
 Server authority object
-  - owns position and game rules
+  - owns tile position and game rules
   - receives action requests
   - decides interest enter/leave
 
 Client replicated object
   - mirrors server-approved state
   - sends action requests
-  - does interpolation/prediction locally
+  - does tile tweening locally
 
 Client view object
   - owns renderer, animation, labels, effects, and local input affordances
   - can be destroyed or recreated without changing server state
 ```
 
-The current browser client already moved partway in this direction with `EntitySpawn` metadata plus compact movement snapshots. The next client cleanup should avoid mixing network state, interpolation state, and Three.js mesh/view state into one structure.
+The browser client already moved partway in this direction with `EntitySpawn` metadata plus compact snapshots. The next client cleanup should avoid mixing network state, tween state, and Three.js mesh/view state into one structure.
 
 ## Threading Model Direction
 
@@ -89,7 +96,7 @@ The current server already follows the early form of this model:
 - LiteNetLib events are polled from the server loop.
 - Login/database work runs asynchronously.
 - Completed login work is returned through `_mainThreadActions`.
-- The tick loop owns movement, snapshots, and session mutation.
+- The server loop owns movement, snapshots, and session mutation.
 
 Next hardening steps:
 
@@ -112,9 +119,9 @@ For this project, keep one process until metrics show a real bottleneck. The fir
 
 ## Future Pressure Points
 
-- Interest management: replace all-players snapshots with radius/grid queries.
+- Interest management: replace O(n) radius selection with grid queries when metrics justify it.
 - Protocol evolution: add feature flags and compatibility checks.
 - Persistence: split online session state from durable character state.
-- Godot: introduce client-side interpolation before prediction/reconciliation.
+- Godot: introduce tile tweening before considering any local-player prediction.
 - Observability: add metrics endpoint or OpenTelemetry once the tick loop is stable.
 - Persistence: keep SQLite and Postgres behind the same repository interface.

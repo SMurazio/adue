@@ -20,7 +20,7 @@ public sealed class SqliteCharacterRepositoryTests
         Assert.Equal(first.CharacterId, second.CharacterId);
         Assert.Equal("PlayerOne", second.DisplayName);
         Assert.Equal("sandbox", second.ZoneId);
-        Assert.Equal(WorldVector.Zero, second.Position);
+        Assert.Equal(new TileCoord(8, 8), second.Tile);
     }
 
     [Fact]
@@ -29,12 +29,12 @@ public sealed class SqliteCharacterRepositoryTests
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var repository = new SqliteCharacterRepository(database.ConnectionString);
         var character = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
-        var savedPosition = new WorldVector(12.5f, -7.25f);
+        var savedPosition = new TileCoord(12, 7);
 
         await repository.SavePositionAsync(character.CharacterId, savedPosition, CancellationToken.None);
         var reloaded = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
 
-        Assert.Equal(savedPosition, reloaded.Position);
+        Assert.Equal(savedPosition, reloaded.Tile);
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class SqliteCharacterRepositoryTests
         await using var command = connection.CreateCommand();
         command.CommandText = "select count(*) from schema_migrations;";
         var count = Convert.ToInt32(await command.ExecuteScalarAsync());
-        Assert.Equal(1, count);
+        Assert.Equal(2, count);
 
         command.CommandText = "select count(*) from accounts;";
         Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));

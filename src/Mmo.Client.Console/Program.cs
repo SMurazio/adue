@@ -86,7 +86,7 @@ try
 
         while (serverPeer is not null && outgoing.TryDequeue(out var message))
         {
-            var deliveryMethod = message is MoveInputMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            var deliveryMethod = message is MoveStepMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(serverPeer, message, deliveryMethod);
         }
 
@@ -137,21 +137,23 @@ static void ReadInputLoop(
         var command = trimmed.ToLowerInvariant();
         var direction = command switch
         {
-            "w" => new WorldVector(0, -1),
-            "a" => new WorldVector(-1, 0),
-            "s" => new WorldVector(0, 1),
-            "d" => new WorldVector(1, 0),
-            "wa" or "aw" or "nw" => new WorldVector(-1, -1),
-            "wd" or "dw" or "ne" => new WorldVector(1, -1),
-            "sa" or "as" or "sw" => new WorldVector(-1, 1),
-            "sd" or "ds" or "se" => new WorldVector(1, 1),
-            "stop" => WorldVector.Zero,
-            _ => WorldVector.Zero
+            "w" => Direction8.N,
+            "a" => Direction8.W,
+            "s" => Direction8.S,
+            "d" => Direction8.E,
+            "wa" or "aw" or "nw" => Direction8.NW,
+            "wd" or "dw" or "ne" => Direction8.NE,
+            "sa" or "as" or "sw" => Direction8.SW,
+            "sd" or "ds" or "se" => Direction8.SE,
+            _ => (Direction8?)null
         };
 
-        if (command is "w" or "a" or "s" or "d" or "wa" or "aw" or "nw" or "wd" or "dw" or "ne" or "sa" or "as" or "sw" or "sd" or "ds" or "se" or "stop")
+        if (direction.HasValue)
         {
-            outgoing.Enqueue(new MoveInputMessage(nextSequence(), direction));
+            outgoing.Enqueue(new MoveStepMessage(nextSequence(), direction.Value));
+        }
+        else if (command == "stop")
+        {
         }
         else
         {
@@ -178,7 +180,7 @@ static void PrintMessage(
             break;
         case LoginResultMessage login:
             Console.WriteLine(login.Accepted
-                ? $"Logged in as {login.DisplayName} ({login.Role}) at ({login.Position.X:0.00}, {login.Position.Y:0.00})"
+                ? $"Logged in as {login.DisplayName} ({login.Role}) at tile ({login.Tile.X}, {login.Tile.Y})"
                 : $"Login rejected: {login.Reason}");
             break;
         case EntitySpawnMessage spawn:
@@ -208,7 +210,7 @@ static void PrintMessage(
                 var name = entityNames.TryGetValue(entity.NetworkId, out var knownName)
                     ? knownName
                     : $"#{entity.NetworkId}";
-                return $"{name}@({entity.Position.X:0.0},{entity.Position.Y:0.0})";
+                return $"{name}@({entity.Tile.X},{entity.Tile.Y}) {entity.Facing}";
             }));
             Console.WriteLine($"tick={snapshot.ServerTick} seq={snapshot.SnapshotSequence} visible=[{players}]");
             break;

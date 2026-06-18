@@ -140,7 +140,12 @@ public sealed class WebBridgeSession
         switch (type)
         {
             case "move":
-                _toServer.Enqueue(new MoveInputMessage(++_inputSequence, ReadDirection(root)));
+            case "moveStep":
+                if (TryReadDirection(root, out var direction))
+                {
+                    _toServer.Enqueue(new MoveStepMessage(++_inputSequence, direction));
+                }
+
                 break;
             case "chat":
                 var text = root.GetProperty("text").GetString() ?? "";
@@ -156,7 +161,7 @@ public sealed class WebBridgeSession
     {
         while (_serverPeer is not null && _toServer.TryDequeue(out var message))
         {
-            var delivery = message is MoveInputMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            var delivery = message is MoveStepMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(_serverPeer, message, delivery);
         }
     }
@@ -185,7 +190,7 @@ public sealed class WebBridgeSession
                     login.CharacterId,
                     login.DisplayName,
                     role = login.Role.ToString(),
-                    position = new { login.Position.X, login.Position.Y },
+                    tile = new { login.Tile.X, login.Tile.Y },
                     login.Reason
                 });
                 break;
@@ -203,8 +208,9 @@ public sealed class WebBridgeSession
                     entities = snapshot.Entities.Select(entity => new
                     {
                         id = entity.NetworkId,
-                        x = entity.Position.X,
-                        y = entity.Position.Y
+                        x = entity.Tile.X,
+                        y = entity.Tile.Y,
+                        facing = entity.Facing.ToString()
                     })
                 });
                 break;
@@ -216,8 +222,9 @@ public sealed class WebBridgeSession
                     spawn.CharacterId,
                     kind = spawn.Kind.ToString(),
                     name = spawn.DisplayName,
-                    x = spawn.Position.X,
-                    y = spawn.Position.Y
+                    x = spawn.Tile.X,
+                    y = spawn.Tile.Y,
+                    facing = spawn.Facing.ToString()
                 });
                 break;
             case EntityDespawnMessage despawn:
@@ -247,34 +254,37 @@ public sealed class WebBridgeSession
         peer.Send(ProtocolCodec.Encode(message), 0, deliveryMethod);
     }
 
-    private static WorldVector ReadDirection(JsonElement root)
+    private static bool TryReadDirection(JsonElement root, out Direction8 direction)
     {
-        if (root.TryGetProperty("x", out var x) && root.TryGetProperty("y", out var y))
+        if (root.TryGetProperty("direction", out var property))
         {
-            return new WorldVector(x.GetSingle(), y.GetSingle());
+            return TryParseDirection(property.GetString() ?? "", out direction);
         }
 
-        var direction = root.TryGetProperty("direction", out var property)
-            ? property.GetString() ?? "stop"
-            : "stop";
-
-        return ToDirection(direction);
+        direction = Direction8.S;
+        return false;
     }
 
-    private static WorldVector ToDirection(string direction)
+    private static bool TryParseDirection(string direction, out Direction8 parsed)
     {
         return direction.ToLowerInvariant() switch
         {
-            "w" or "up" => new WorldVector(0, -1),
-            "a" or "left" => new WorldVector(-1, 0),
-            "s" or "down" => new WorldVector(0, 1),
-            "d" or "right" => new WorldVector(1, 0),
-            "nw" => new WorldVector(-1, -1),
-            "ne" => new WorldVector(1, -1),
-            "sw" => new WorldVector(-1, 1),
-            "se" => new WorldVector(1, 1),
-            _ => WorldVector.Zero
+            "w" or "up" or "n" => Set(Direction8.N, out parsed),
+            "a" or "left" or "west" => Set(Direction8.W, out parsed),
+            "s" or "down" or "south" => Set(Direction8.S, out parsed),
+            "d" or "right" or "east" => Set(Direction8.E, out parsed),
+            "nw" => Set(Direction8.NW, out parsed),
+            "ne" => Set(Direction8.NE, out parsed),
+            "sw" => Set(Direction8.SW, out parsed),
+            "se" => Set(Direction8.SE, out parsed),
+            _ => Set(Direction8.S, out parsed, false)
         };
+    }
+
+    private static bool Set(Direction8 value, out Direction8 parsed, bool result = true)
+    {
+        parsed = value;
+        return result;
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);

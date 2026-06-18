@@ -24,10 +24,11 @@ public sealed class AoiIntegrationTests
             DatabaseProvider.Sqlite,
             database.ConnectionString,
             TestSqliteDatabase.MigrationsPath,
-            40,
+            64,
+            64,
+            50,
             5,
             150,
-            new WorldBounds(-100, 100, -100, 100),
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
@@ -40,9 +41,7 @@ public sealed class AoiIntegrationTests
             outsideClient.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => outsideClient.IsLoggedIn && outsideClient.OwnNetworkId != 0, outsideClient);
 
-            outsideClient.SendMove(1, 0);
-            await WaitUntilAsync(() => outsideClient.OwnPosition.X > 8, outsideClient);
-            outsideClient.SendMove(0, 0);
+            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 15);
 
             using var observer = new IntegrationClient("Observer");
             observer.Connect(port, options.ConnectionKey);
@@ -64,14 +63,14 @@ public sealed class AoiIntegrationTests
                 entity => entity.NetworkId == outsideNetworkId);
 
             observer.ClearMessages();
-            outsideClient.SendMove(-1, 0);
+            await StepUntilAsync(outsideClient, Direction8.W, () => outsideClient.OwnTile.X <= 12, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntitySpawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
                 outsideClient);
 
             observer.ClearMessages();
-            outsideClient.SendMove(1, 0);
+            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 14, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
@@ -125,6 +124,23 @@ public sealed class AoiIntegrationTests
         }
     }
 
+    private static async Task StepUntilAsync(IntegrationClient mover, Direction8 direction, Func<bool> condition, params IntegrationClient[] observers)
+    {
+        var clients = observers.Prepend(mover).Distinct().ToArray();
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            mover.SendMove(direction);
+            await PollForAsync(TimeSpan.FromMilliseconds(75), clients);
+            if (condition())
+            {
+                return;
+            }
+        }
+
+        throw new TimeoutException("Timed out waiting for step movement condition.");
+    }
+
     private sealed class IntegrationClient : IDisposable
     {
         private readonly EventBasedNetListener _listener = new();
@@ -153,7 +169,7 @@ public sealed class AoiIntegrationTests
         public List<IProtocolMessage> Messages { get; } = [];
         public bool IsLoggedIn { get; private set; }
         public uint OwnNetworkId { get; private set; }
-        public WorldVector OwnPosition { get; private set; } = WorldVector.Zero;
+        public TileCoord OwnTile { get; private set; } = TileGrid.DefaultSpawnTile;
 
         public void Connect(int port, string key)
         {
@@ -166,9 +182,9 @@ public sealed class AoiIntegrationTests
             _client.PollEvents();
         }
 
-        public void SendMove(float x, float y)
+        public void SendMove(Direction8 direction)
         {
-            Send(new MoveInputMessage(++_moveSequence, new WorldVector(x, y)), DeliveryMethod.Unreliable);
+            Send(new MoveStepMessage(++_moveSequence, direction), DeliveryMethod.Sequenced);
         }
 
         public void ClearMessages()
@@ -194,14 +210,14 @@ public sealed class AoiIntegrationTests
                         break;
                     case EntitySpawnMessage spawn when spawn.DisplayName == _name:
                         OwnNetworkId = spawn.NetworkId;
-                        OwnPosition = spawn.Position;
+                        OwnTile = spawn.Tile;
                         break;
                     case WorldSnapshotMessage snapshot:
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         var own = snapshot.Entities.FirstOrDefault(entity => entity.NetworkId == OwnNetworkId);
                         if (own is not null)
                         {
-                            OwnPosition = own.Position;
+                            OwnTile = own.Tile;
                         }
 
                         break;

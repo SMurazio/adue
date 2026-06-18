@@ -14,6 +14,7 @@ The project should remain small enough to reason about, but the structure should
 - Game shape: one-zone 2D top-down Ultima-like sandbox.
 - Authority: server owns truth; clients send commands.
 - Simulation: fixed tick loop.
+- Movement model: tile-stepped on a tile grid, implemented in protocol v9. The server times steps with a per-entity cooldown, supports 8-way movement, validates blocked tiles, and clients tween between confirmed tiles. This replaces continuous streamed positions. See [networking-design-plan.md](docs/networking-design-plan.md) section 5a.
 - First client: diagnostic console client.
 - Later client: Godot, using the same protocol.
 
@@ -41,7 +42,7 @@ Deliverables:
 - LiteNetLib server listening on UDP.
 - Console client can connect, login, move, and chat.
 - Server creates or loads one persisted character per account/display name.
-- Server broadcasts snapshots on a fixed tick.
+- Server evaluates snapshots on a fixed tick and sends changed state or heartbeat snapshots.
 - Two clients can see each other in the same zone.
 
 Acceptance:
@@ -49,8 +50,8 @@ Acceptance:
 - Start server and two clients locally.
 - Client A sees Client B in snapshots.
 - Chat from Client A appears on Client B.
-- Movement is accepted only as input; server computes actual positions.
-- Disconnect/reconnect persists the latest position.
+- Movement is accepted only as step input; server computes actual tile positions.
+- Disconnect/reconnect persists the latest tile position.
 
 ## Milestone 3: Production Learning Layer
 
@@ -102,14 +103,15 @@ Maintain repo-local skill `.codex/skills/mmo-dev/SKILL.md` for repeatable develo
 
 ## Debug Client Direction
 
-Use the browser debug client as the primary manual test surface. Keep it basic but visual: isometric Three.js scene, 8-way movement, entity list, chat, and connection status. Do not let it become the production game client yet.
+Use the browser debug client as the primary manual test surface. Keep it basic but visual: isometric Three.js scene, tile grid, blocked walls, 8-way movement, entity list, chat, metrics, and connection status. Do not let it become the production game client yet.
 
 ## Implementation Defaults
 
 - Keep the protocol binary and versioned.
 - Use reliable ordered delivery for login/chat/entity spawn metadata.
-- Use unreliable packet-budgeted delivery for compact movement snapshots.
-- Keep hot snapshots small: channel-local network id plus quantized position, not repeated names/kinds/character ids.
-- Use a single zone and radius-free visibility for v1; every player sees every other player.
+- Use unreliable packet-budgeted delivery for compact snapshots.
+- Keep hot snapshots small: channel-local network id plus tile coordinate/facing, not repeated names/kinds/character ids.
+- Use a single zone with radius-based area-of-interest; AOI is also the anti-cheat boundary, so entities outside a client's interest are never serialized to it.
+- Movement is tile-stepped: discrete server-validated steps gated by a step cooldown, not continuous streamed positions. Walls block; entities may share a tile.
 - Prefer boring SQL over an ORM until the persistence model earns more complexity.
 - Keep the server loop single-process and single-zone until profiling shows a real need to split it.

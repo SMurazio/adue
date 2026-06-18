@@ -12,7 +12,7 @@ coverage/
 # Local runtime state
 .env
 logs/
-data/
+/data/
 .tools/
 .run/
 

@@ -7,7 +7,10 @@ public sealed class ClientSession
 {
     private readonly HashSet<uint> _lastSnapshotEntityIds = [];
     private readonly HashSet<uint> _knownEntityIds = [];
+    private readonly Dictionary<uint, uint> _sentEntityRevisions = [];
     private uint _nextSnapshotSequence = 1;
+    private uint? _lastStepTick;
+    private uint _lastSnapshotSentTick;
 
     public ClientSession(NetPeer peer)
     {
@@ -22,27 +25,46 @@ public sealed class ClientSession
     public string DisplayName { get; private set; } = "unknown";
     public ClientRole Role { get; private set; } = ClientRole.Player;
     public string ZoneId { get; private set; } = "sandbox";
-    public WorldVector Position { get; private set; } = WorldVector.Zero;
-    public WorldVector PendingDirection { get; private set; } = WorldVector.Zero;
+    public TileCoord Tile { get; private set; } = TileGrid.DefaultSpawnTile;
+    public Direction8 Facing { get; private set; } = Direction8.S;
+    public uint LastStepTick => _lastStepTick ?? 0;
+    public uint StateRevision { get; private set; } = 1;
     public int LastLatencyMs { get; set; }
     public int BadPacketCount { get; private set; }
     public uint LastAcknowledgedSnapshotSequence { get; private set; }
 
-    public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId, WorldVector position)
+    public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId, TileCoord tile)
     {
         NetworkId = networkId;
         CharacterId = characterId;
         DisplayName = displayName;
         Role = role;
         ZoneId = zoneId;
-        Position = position;
+        Tile = tile;
         IsAuthenticated = true;
         LoginInProgress = false;
     }
 
-    public void SetDirection(WorldVector direction)
+    public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
     {
-        PendingDirection = direction.NormalizeOrZero();
+        if (_lastStepTick.HasValue && serverTick - _lastStepTick.Value < stepCooldownTicks)
+        {
+            return false;
+        }
+
+        var delta = direction.Delta();
+        var target = Tile.Offset(delta.X, delta.Y);
+        // TODO: reject diagonal corner-cutting once tiles can carry richer collision flags.
+        if (!grid.IsWalkable(target))
+        {
+            return false;
+        }
+
+        Tile = target;
+        Facing = direction;
+        _lastStepTick = serverTick;
+        StateRevision++;
+        return true;
     }
 
     public int RecordBadPacket()
@@ -86,6 +108,32 @@ public sealed class ClientSession
         }
     }
 
+    public bool ShouldSendFullSnapshot(uint serverTick, uint heartbeatTicks)
+    {
+        return _lastSnapshotSentTick == 0 || serverTick - _lastSnapshotSentTick >= heartbeatTicks;
+    }
+
+    public bool HasSentRevision(ClientSession entity)
+    {
+        return _sentEntityRevisions.TryGetValue(entity.NetworkId, out var revision)
+            && revision == entity.StateRevision;
+    }
+
+    public void RememberSentRevision(ClientSession entity)
+    {
+        _sentEntityRevisions[entity.NetworkId] = entity.StateRevision;
+    }
+
+    public void ForgetSentRevision(uint networkId)
+    {
+        _sentEntityRevisions.Remove(networkId);
+    }
+
+    public void RememberSnapshotSent(uint serverTick)
+    {
+        _lastSnapshotSentTick = serverTick;
+    }
+
     public uint NextSnapshotSequence()
     {
         return _nextSnapshotSequence++;
@@ -99,8 +147,4 @@ public sealed class ClientSession
         }
     }
 
-    public void Advance(float deltaSeconds, float movementUnitsPerSecond, WorldBounds worldBounds)
-    {
-        Position = worldBounds.Clamp(Position + (PendingDirection * movementUnitsPerSecond * deltaSeconds));
-    }
 }

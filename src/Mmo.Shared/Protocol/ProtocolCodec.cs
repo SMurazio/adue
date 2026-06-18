@@ -6,11 +6,10 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 8;
+    public const byte Version = 9;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
-    private const float SnapshotPositionScale = 10f;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -30,9 +29,9 @@ public static class ProtocolCodec
                 WriteString(writer, value.AccountName);
                 WriteString(writer, value.DisplayName);
                 break;
-            case MoveInputMessage value:
+            case MoveStepMessage value:
                 writer.Write(value.Sequence);
-                WriteVector(writer, value.Direction);
+                writer.Write((byte)value.Direction);
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
@@ -50,7 +49,7 @@ public static class ProtocolCodec
                 WriteGuid(writer, value.CharacterId);
                 WriteString(writer, value.DisplayName);
                 writer.Write((byte)value.Role);
-                WriteVector(writer, value.Position);
+                WriteTile(writer, value.Tile);
                 WriteString(writer, value.Reason);
                 break;
             case WorldSnapshotMessage value:
@@ -64,7 +63,8 @@ public static class ProtocolCodec
                 WriteGuid(writer, value.CharacterId);
                 writer.Write((byte)value.Kind);
                 WriteString(writer, value.DisplayName);
-                WriteVector(writer, value.Position);
+                WriteTile(writer, value.Tile);
+                writer.Write((byte)value.Facing);
                 break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
@@ -107,7 +107,7 @@ public static class ProtocolCodec
         {
             MessageType.ClientHello => new ClientHelloMessage(ReadString(reader)),
             MessageType.LoginRequest => new LoginRequestMessage(ReadString(reader), ReadString(reader)),
-            MessageType.MoveInput => new MoveInputMessage(reader.ReadUInt32(), ReadVector(reader)),
+            MessageType.MoveStep => new MoveStepMessage(reader.ReadUInt32(), ReadDirection(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32()),
@@ -116,7 +116,7 @@ public static class ProtocolCodec
                 ReadGuid(reader),
                 ReadString(reader),
                 (ClientRole)reader.ReadByte(),
-                ReadVector(reader),
+                ReadTile(reader),
                 ReadString(reader)),
             MessageType.WorldSnapshot => ReadWorldSnapshot(reader),
             MessageType.ChatBroadcast => new ChatBroadcastMessage(ReadString(reader), ReadString(reader)),
@@ -126,7 +126,8 @@ public static class ProtocolCodec
                 ReadGuid(reader),
                 (EntityKind)reader.ReadByte(),
                 ReadString(reader),
-                ReadVector(reader)),
+                ReadTile(reader),
+                ReadDirection(reader)),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
         };
@@ -143,8 +144,9 @@ public static class ProtocolCodec
         foreach (var entity in entities)
         {
             writer.Write(ToSnapshotNetworkId(entity.NetworkId));
-            writer.Write(QuantizeSnapshotCoordinate(entity.Position.X));
-            writer.Write(QuantizeSnapshotCoordinate(entity.Position.Y));
+            WriteSnapshotTileCoordinate(writer, entity.Tile.X);
+            WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
+            writer.Write((byte)entity.Facing);
         }
     }
 
@@ -200,9 +202,10 @@ public static class ProtocolCodec
         for (var i = 0; i < count; i++)
         {
             var networkId = reader.ReadUInt16();
-            var x = DequantizeSnapshotCoordinate(reader.ReadInt16());
-            var y = DequantizeSnapshotCoordinate(reader.ReadInt16());
-            entities.Add(new EntityStateSnapshot(networkId, new WorldVector(x, y)));
+            var x = reader.ReadInt16();
+            var y = reader.ReadInt16();
+            var facing = ReadDirection(reader);
+            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing));
         }
 
         return entities;
@@ -218,36 +221,36 @@ public static class ProtocolCodec
         return (ushort)networkId;
     }
 
-    private static short QuantizeSnapshotCoordinate(float value)
+    private static void WriteSnapshotTileCoordinate(BinaryWriter writer, int value)
     {
-        if (!float.IsFinite(value))
+        if (value < short.MinValue || value > short.MaxValue)
         {
-            throw new ProtocolException("Snapshot coordinate must be finite.");
+            throw new ProtocolException($"Snapshot tile coordinate is out of range: {value}.");
         }
 
-        var scaled = MathF.Round(value * SnapshotPositionScale, MidpointRounding.AwayFromZero);
-        if (scaled < short.MinValue || scaled > short.MaxValue)
+        writer.Write((short)value);
+    }
+
+    private static void WriteTile(BinaryWriter writer, TileCoord value)
+    {
+        WriteSnapshotTileCoordinate(writer, value.X);
+        WriteSnapshotTileCoordinate(writer, value.Y);
+    }
+
+    private static TileCoord ReadTile(BinaryReader reader)
+    {
+        return new TileCoord(reader.ReadInt16(), reader.ReadInt16());
+    }
+
+    private static Direction8 ReadDirection(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)Direction8.NW)
         {
-            throw new ProtocolException($"Snapshot coordinate is out of range: {value}.");
+            throw new ProtocolException($"Invalid Direction8 value: {value}.");
         }
 
-        return (short)scaled;
-    }
-
-    private static float DequantizeSnapshotCoordinate(short value)
-    {
-        return value / SnapshotPositionScale;
-    }
-
-    private static void WriteVector(BinaryWriter writer, WorldVector value)
-    {
-        writer.Write(value.X);
-        writer.Write(value.Y);
-    }
-
-    private static WorldVector ReadVector(BinaryReader reader)
-    {
-        return new WorldVector(reader.ReadSingle(), reader.ReadSingle());
+        return (Direction8)value;
     }
 
     private static void WriteGuid(BinaryWriter writer, Guid value)

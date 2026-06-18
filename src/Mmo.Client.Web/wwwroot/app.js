@@ -35,7 +35,6 @@ const els = {
 };
 
 const keysDown = new Set();
-let lastMoveKey = "";
 let metricsTimer = null;
 const metricsCollapsedKey = "mmo.metricsCollapsed";
 const playerNameKey = "mmo.playerName";
@@ -43,19 +42,20 @@ let rightMouseActive = false;
 let rightMouseTarget = null;
 let rightMousePointer = null;
 let lastRightMoveSentAt = 0;
-const snapshotInterpolationDelayMs = 150;
-const maxEntitySnapshotBuffer = 8;
+let heldMoveDirection = null;
+let lastHeldMoveSentAt = 0;
+let lastMoveDirection = "";
 const cameraFollowAlpha = 0.14;
-const serverMoveUnitsPerSecond = 5;
-const localCorrectionAlpha = 0.18;
 const minCameraZoom = 0.55;
 const maxCameraZoom = 3.25;
+const tileGridWidth = 64;
+const tileGridHeight = 64;
+const tileStepTweenMs = 200;
+const stepRepeatMs = 200;
 const debugVisibilityRadius = 96;
-const entityStaleAfterMs = 250;
-const entityExpireAfterMs = 1500;
+const entityStaleAfterMs = 2500;
+const entityExpireAfterMs = 8000;
 const partialSnapshotGhostOpacity = 0.42;
-const currentMoveVector = { x: 0, y: 0 };
-let lastFrameAt = performance.now();
 let cameraZoom = 1;
 let scene = null;
 let camera = null;
@@ -87,9 +87,58 @@ const metricsLines = {
   messages: ""
 };
 let snapshotAssembly = null;
+const blockedTiles = buildBlockedTileSet(tileGridWidth, tileGridHeight);
 
 function setStatus(text) {
   els.status.textContent = text;
+}
+
+function buildBlockedTileSet(width, height) {
+  const tiles = new Set();
+  const add = (x, y) => {
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+      tiles.add(`${x},${y}`);
+    }
+  };
+
+  for (let x = 0; x < width; x++) {
+    add(x, 0);
+    add(x, height - 1);
+  }
+
+  for (let y = 0; y < height; y++) {
+    add(0, y);
+    add(width - 1, y);
+  }
+
+  for (let y = 8; y <= 20; y++) {
+    add(16, y);
+  }
+
+  for (let x = 20; x <= 36; x++) {
+    add(x, 24);
+  }
+
+  for (let y = 12; y <= 18; y++) {
+    add(40, y);
+  }
+
+  tiles.delete("8,8");
+  return tiles;
+}
+
+function tileToWorld(x, y) {
+  return {
+    x: x - (tileGridWidth / 2) + 0.5,
+    z: y - (tileGridHeight / 2) + 0.5
+  };
+}
+
+function worldToTile(x, z) {
+  return {
+    x: Math.floor(x + (tileGridWidth / 2)),
+    y: Math.floor(z + (tileGridHeight / 2))
+  };
 }
 
 function readMetricsCollapsedPreference() {
@@ -161,7 +210,7 @@ function initScene() {
     groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
     ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(2000, 2000),
+      new THREE.PlaneGeometry(tileGridWidth, tileGridHeight),
       new THREE.MeshStandardMaterial({ color: 0x182127, roughness: 0.95, metalness: 0.0 })
     );
     ground.rotation.x = -Math.PI / 2;
@@ -169,9 +218,10 @@ function initScene() {
     ground.receiveShadow = true;
     worldRoot.add(ground);
 
-    grid = new THREE.GridHelper(2000, 500, 0x31414d, 0x202a31);
+    grid = new THREE.GridHelper(tileGridWidth, tileGridWidth, 0x31414d, 0x202a31);
     grid.position.y = 0.01;
     worldRoot.add(grid);
+    addBlockedTileWalls();
 
     visibilityRing = new THREE.Mesh(
       new THREE.RingGeometry(0.9985, 1.0015, 128),
@@ -222,6 +272,27 @@ function initScene() {
     els.world.classList.add("world-fallback");
     els.world.textContent = "3D view unavailable. Connection, chat, and entity list still work.";
     setStatus(`3D unavailable: ${error.message}`);
+  }
+}
+
+function addBlockedTileWalls() {
+  if (!worldRoot) {
+    return;
+  }
+
+  const wallGeometry = new THREE.BoxGeometry(0.96, 0.78, 0.96);
+  const wallMaterial = new THREE.MeshStandardMaterial({
+    color: 0x46535e,
+    roughness: 0.88,
+    metalness: 0.0
+  });
+
+  for (const key of blockedTiles) {
+    const [x, y] = key.split(",").map(Number);
+    const position = tileToWorld(x, y);
+    const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+    wall.position.set(position.x, 0.36, position.z);
+    worldRoot.add(wall);
   }
 }
 
@@ -351,7 +422,8 @@ function handleEntitySpawn(message) {
     kind: message.kind ?? "Player",
     name: message.name ?? `Entity ${id}`,
     x: message.x ?? 0,
-    y: message.y ?? 0
+    y: message.y ?? 0,
+    facing: message.facing ?? "S"
   };
 
   entityRegistry.set(id, entity);
@@ -427,7 +499,9 @@ function handleSnapshotMessage(message) {
 function applySnapshot(tick, sequence, totalEntities, isComplete, entities) {
   state.tick = tick;
   state.snapshotSequence = sequence;
-  state.entities = hydrateSnapshotEntities(entities);
+  state.entities = isComplete
+    ? hydrateSnapshotEntities(entities)
+    : mergeSnapshotEntities(state.entities, hydrateSnapshotEntities(entities));
   state.snapshotIsComplete = isComplete;
   state.snapshotTotalEntities = totalEntities;
   updateSceneEntities(tick, sequence);
@@ -448,9 +522,19 @@ function hydrateSnapshotEntities(states) {
       kind: known?.kind ?? "Player",
       name: known?.name ?? `Entity ${id}`,
       x: entity.x,
-      y: entity.y
+      y: entity.y,
+      facing: entity.facing ?? known?.facing ?? "S"
     };
   });
+}
+
+function mergeSnapshotEntities(current, updates) {
+  const merged = new Map(current.map(entity => [entity.id, entity]));
+  for (const entity of updates) {
+    merged.set(entity.id, entity);
+  }
+
+  return [...merged.values()];
 }
 
 function startMetricsPolling() {
@@ -601,7 +685,8 @@ function readMetric(line, pattern) {
 function updateSceneEntities(tick, sequence) {
   const self = findSelfEntity(state.entities);
   if (self) {
-    desiredFocus.set(self.x, 0, self.y);
+    const position = tileToWorld(self.x, self.y);
+    desiredFocus.set(position.x, 0, position.z);
   }
 
   if (!worldRoot) {
@@ -615,7 +700,6 @@ function updateSceneEntities(tick, sequence) {
   const now = performance.now();
   for (const entity of state.entities) {
     const entry = getOrCreateEntity(entity);
-    entry.to.set(entity.x, 0, entity.y);
     entry.lastSnapshotAt = now;
     entry.lastSeenAt = now;
     entry.inLatestSnapshot = true;
@@ -624,33 +708,36 @@ function updateSceneEntities(tick, sequence) {
       replaceEntityLabel(entry, entity.name);
     }
     entry.isSelf = isSelfEntity(entity);
-    if (entry.isSelf) {
-      entry.serverPosition.set(entity.x, 0, entity.y);
-      if (!entry.localInitialized) {
-        entry.renderPosition.copy(entry.serverPosition);
-        entry.localInitialized = true;
-      }
-    } else {
-      addEntitySnapshotSample(entry, tick, sequence, entity.x, entity.y, now);
-    }
+    updateEntityTileTween(entry, entity, now);
     setEntityColor(entry, entry.isSelf);
   }
 }
 
-function addEntitySnapshotSample(entry, tick, sequence, x, y, receivedAt) {
-  const last = entry.snapshotBuffer.at(-1);
-  if (last && last.sequence === sequence) {
-    last.tick = tick;
-    last.x = x;
-    last.y = y;
-    last.receivedAt = receivedAt;
-  } else {
-    entry.snapshotBuffer.push({ tick, sequence, x, y, receivedAt });
+function updateEntityTileTween(entry, entity, nowMs) {
+  const position = tileToWorld(entity.x, entity.y);
+  entry.facing = entity.facing ?? entry.facing;
+  entry.serverPosition.set(position.x, 0, position.z);
+
+  if (!entry.localInitialized) {
+    entry.from.copy(entry.serverPosition);
+    entry.to.copy(entry.serverPosition);
+    entry.renderPosition.copy(entry.serverPosition);
+    entry.tileX = entity.x;
+    entry.tileY = entity.y;
+    entry.tweenStartedAt = nowMs;
+    entry.localInitialized = true;
+    return;
   }
 
-  while (entry.snapshotBuffer.length > maxEntitySnapshotBuffer) {
-    entry.snapshotBuffer.shift();
+  if (entry.tileX === entity.x && entry.tileY === entity.y) {
+    return;
   }
+
+  entry.from.copy(entry.renderPosition);
+  entry.to.copy(entry.serverPosition);
+  entry.tileX = entity.x;
+  entry.tileY = entity.y;
+  entry.tweenStartedAt = nowMs;
 }
 
 function findSelfEntity(entities) {
@@ -670,7 +757,8 @@ function getOrCreateEntity(entity) {
   }
 
   const group = new THREE.Group();
-  group.position.set(entity.x, 0, entity.y);
+  const position = tileToWorld(entity.x, entity.y);
+  group.position.set(position.x, 0, position.z);
 
   const shadow = new THREE.Mesh(
     new THREE.CylinderGeometry(0.48, 0.48, 0.025, 32),
@@ -714,13 +802,17 @@ function getOrCreateEntity(entity) {
     head,
     ring,
     label,
-    from: new THREE.Vector3(entity.x, 0, entity.y),
-    to: new THREE.Vector3(entity.x, 0, entity.y),
-    renderPosition: new THREE.Vector3(entity.x, 0, entity.y),
-    serverPosition: new THREE.Vector3(entity.x, 0, entity.y),
+    from: new THREE.Vector3(position.x, 0, position.z),
+    to: new THREE.Vector3(position.x, 0, position.z),
+    renderPosition: new THREE.Vector3(position.x, 0, position.z),
+    serverPosition: new THREE.Vector3(position.x, 0, position.z),
+    tileX: entity.x,
+    tileY: entity.y,
+    facing: entity.facing ?? "S",
+    tweenStartedAt: performance.now(),
+    tweenDurationMs: tileStepTweenMs,
     lastSnapshotAt: performance.now(),
     lastSeenAt: performance.now(),
-    snapshotBuffer: [],
     name: entity.name,
     isSelf: false,
     inLatestSnapshot: true,
@@ -851,7 +943,7 @@ function renderEntities() {
 
     const pos = document.createElement("div");
     pos.className = "pos";
-    pos.textContent = `${entity.x.toFixed(1)}, ${entity.y.toFixed(1)}`;
+    pos.textContent = `${entity.x}, ${entity.y} ${entity.facing ?? ""}`;
 
     row.append(name, pos);
     return row;
@@ -864,36 +956,34 @@ function sendMoveDirection(direction) {
   if (moveMarker) {
     moveMarker.visible = false;
   }
-  sendScreenMove(direction);
-}
-
-function sendMoveVector(x, y) {
-  if (Math.abs(x) < 0.0001) {
-    x = 0;
-  }
-
-  if (Math.abs(y) < 0.0001) {
-    y = 0;
-  }
-
-  x = Number(x.toFixed(4));
-  y = Number(y.toFixed(4));
-  currentMoveVector.x = x;
-  currentMoveVector.y = y;
-
-  const key = `${x},${y}`;
-  if (key === lastMoveKey) {
+  if (direction === "stop") {
+    clearHeldMovement();
     return;
   }
 
-  lastMoveKey = key;
-  send({ type: "move", x, y });
+  const moveDirection = screenDirectionToStep(direction);
+  if (moveDirection) {
+    sendMoveStep(moveDirection, true);
+  }
 }
 
-function sendScreenMove(direction) {
+function sendMoveStep(direction, force = false) {
+  if (!direction) {
+    return;
+  }
+
+  const now = performance.now();
+  if (!force && direction === lastMoveDirection && now - lastHeldMoveSentAt < stepRepeatMs) {
+    return;
+  }
+
+  lastMoveDirection = direction;
+  send({ type: "moveStep", direction });
+}
+
+function screenDirectionToStep(direction) {
   const input = screenInputFromDirection(direction);
-  const world = screenInputToWorldVector(input.x, input.y);
-  sendMoveVector(world.x, world.y);
+  return screenInputToStepDirection(input.x, input.y);
 }
 
 function screenInputFromDirection(direction) {
@@ -946,6 +1036,21 @@ function screenInputToWorldVector(screenX, screenY) {
   return normalize2(world.x, world.z);
 }
 
+function screenInputToStepDirection(screenX, screenY) {
+  const world = screenInputToWorldVector(screenX, screenY);
+  return worldVectorToStepDirection(world.x, world.y);
+}
+
+function worldVectorToStepDirection(x, y) {
+  if (Math.hypot(x, y) < 0.0001) {
+    return null;
+  }
+
+  const angle = Math.atan2(y, x);
+  const sector = (Math.round(angle / (Math.PI / 4)) + 8) % 8;
+  return ["E", "SE", "S", "SW", "W", "NW", "N", "NE"][sector];
+}
+
 function normalize2(x, y) {
   const length = Math.hypot(x, y);
   if (length < 0.0001) {
@@ -962,13 +1067,19 @@ function syncKeyboardMovement() {
 
   const screenX = (keysDown.has("d") ? 1 : 0) + (keysDown.has("a") ? -1 : 0);
   const screenY = (keysDown.has("w") ? 1 : 0) + (keysDown.has("s") ? -1 : 0);
-  const world = screenInputToWorldVector(screenX, screenY);
-  sendMoveVector(world.x, world.y);
+  const direction = screenInputToStepDirection(screenX, screenY);
+  if (direction !== heldMoveDirection) {
+    heldMoveDirection = direction;
+    lastHeldMoveSentAt = 0;
+  }
+
+  if (heldMoveDirection) {
+    sendHeldMoveStep();
+  }
 }
 
 for (const button of document.querySelectorAll("[data-move]")) {
   button.addEventListener("click", () => {
-    lastMoveKey = "";
     sendMoveDirection(button.dataset.move);
   });
 }
@@ -990,10 +1101,10 @@ document.addEventListener("keydown", event => {
     keysDown.clear();
     rightMouseActive = false;
     rightMousePointer = null;
+    clearHeldMovement();
     if (moveMarker) {
       moveMarker.visible = false;
     }
-    sendMoveVector(0, 0);
   }
 });
 
@@ -1077,10 +1188,10 @@ window.addEventListener("blur", () => {
   keysDown.clear();
   rightMouseActive = false;
   rightMousePointer = null;
+  clearHeldMovement();
   if (moveMarker) {
     moveMarker.visible = false;
   }
-  sendMoveVector(0, 0);
 });
 
 function stopRightMouseMovement(pointerId) {
@@ -1091,10 +1202,10 @@ function stopRightMouseMovement(pointerId) {
   rightMouseActive = false;
   rightMouseTarget = null;
   rightMousePointer = null;
+  clearHeldMovement();
   if (moveMarker) {
     moveMarker.visible = false;
   }
-  sendMoveVector(0, 0);
 }
 
 function rememberRightMousePointer(event) {
@@ -1132,67 +1243,7 @@ function syncRightMouseMovement(force = false) {
   }
 
   const now = performance.now();
-  if (!force && now - lastRightMoveSentAt < 50) {
-    return;
-  }
-
-  const self = findSelfEntity(state.entities);
-  if (!self) {
-    return;
-  }
-
-  const dx = rightMouseTarget.x - self.x;
-  const dy = rightMouseTarget.z - self.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance < 0.35) {
-    sendMoveVector(0, 0);
-    return;
-  }
-
-  lastRightMoveSentAt = now;
-  sendMoveVector(dx / distance, dy / distance);
-}
-
-function sampleEntityPosition(entry, nowMs) {
-  if (entry.isSelf) {
-    return entry.renderPosition;
-  }
-
-  const interpolated = interpolateRemoteEntityPosition(entry.snapshotBuffer, nowMs - snapshotInterpolationDelayMs);
-  if (interpolated) {
-    entry.renderPosition.set(interpolated.x, 0, interpolated.y);
-  }
-
-  return entry.renderPosition;
-}
-
-function interpolateRemoteEntityPosition(samples, renderTimeMs) {
-  if (samples.length === 0) {
-    return null;
-  }
-
-  if (samples.length === 1 || renderTimeMs <= samples[0].receivedAt) {
-    return samples[0];
-  }
-
-  for (let i = 1; i < samples.length; i++) {
-    const previous = samples[i - 1];
-    const next = samples[i];
-    if (renderTimeMs <= next.receivedAt) {
-      const span = Math.max(1, next.receivedAt - previous.receivedAt);
-      const alpha = THREE.MathUtils.clamp((renderTimeMs - previous.receivedAt) / span, 0, 1);
-      return {
-        x: THREE.MathUtils.lerp(previous.x, next.x, alpha),
-        y: THREE.MathUtils.lerp(previous.y, next.y, alpha)
-      };
-    }
-  }
-
-  return samples.at(-1);
-}
-
-function advanceLocalPlayer(deltaSeconds) {
-  if (currentMoveVector.x === 0 && currentMoveVector.y === 0) {
+  if (!force && now - lastRightMoveSentAt < stepRepeatMs) {
     return;
   }
 
@@ -1201,16 +1252,46 @@ function advanceLocalPlayer(deltaSeconds) {
     return;
   }
 
-  self.renderPosition.x += currentMoveVector.x * serverMoveUnitsPerSecond * deltaSeconds;
-  self.renderPosition.z += currentMoveVector.y * serverMoveUnitsPerSecond * deltaSeconds;
+  const dx = rightMouseTarget.x - self.renderPosition.x;
+  const dy = rightMouseTarget.z - self.renderPosition.z;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 0.35) {
+    return;
+  }
+
+  const direction = worldVectorToStepDirection(dx, dy);
+  if (!direction) {
+    return;
+  }
+
+  lastRightMoveSentAt = now;
+  sendMoveStep(direction, true);
 }
 
-function reconcileLocalPlayers() {
-  for (const entry of meshes.values()) {
-    if (entry.isSelf) {
-      entry.renderPosition.lerp(entry.serverPosition, localCorrectionAlpha);
-    }
+function sampleEntityPosition(entry, nowMs) {
+  const elapsed = nowMs - entry.tweenStartedAt;
+  const alpha = THREE.MathUtils.clamp(elapsed / Math.max(1, entry.tweenDurationMs), 0, 1);
+  entry.renderPosition.lerpVectors(entry.from, entry.to, alpha);
+  return entry.renderPosition;
+}
+
+function clearHeldMovement() {
+  heldMoveDirection = null;
+  lastMoveDirection = "";
+}
+
+function sendHeldMoveStep() {
+  if (!heldMoveDirection) {
+    return;
   }
+
+  const now = performance.now();
+  if (now - lastHeldMoveSentAt < stepRepeatMs) {
+    return;
+  }
+
+  lastHeldMoveSentAt = now;
+  sendMoveStep(heldMoveDirection, true);
 }
 
 function updateDebugVisibilityRing() {
@@ -1291,15 +1372,12 @@ function animate() {
   camera.updateMatrixWorld();
 
   const nowMs = performance.now();
-  const deltaSeconds = Math.min((nowMs - lastFrameAt) / 1000, 0.05);
-  lastFrameAt = nowMs;
   const now = nowMs * 0.001;
-  advanceLocalPlayer(deltaSeconds);
-  reconcileLocalPlayers();
   updateCameraFocusTargetFromSelf();
   updateDebugVisibilityRing();
   updateRightMouseTargetFromPointer();
   syncRightMouseMovement();
+  sendHeldMoveStep();
 
   for (const [id, entry] of [...meshes]) {
     if (!updateEntityFreshness(id, entry, nowMs)) {

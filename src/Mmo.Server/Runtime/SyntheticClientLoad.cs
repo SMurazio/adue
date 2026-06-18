@@ -123,17 +123,17 @@ public sealed class SyntheticClientLoad : IDisposable
 
     private sealed class SyntheticClient : IDisposable
     {
-        private static readonly WorldVector[] Directions =
+        private static readonly Direction8?[] Directions =
         [
-            new(0, -1),
-            new(1, -1),
-            new(1, 0),
-            new(1, 1),
-            new(0, 1),
-            new(-1, 1),
-            new(-1, 0),
-            new(-1, -1),
-            WorldVector.Zero
+            Direction8.N,
+            Direction8.NE,
+            Direction8.E,
+            Direction8.SE,
+            Direction8.S,
+            Direction8.SW,
+            Direction8.W,
+            Direction8.NW,
+            null
         ];
 
         private readonly string _name;
@@ -149,7 +149,7 @@ public sealed class SyntheticClientLoad : IDisposable
         private uint _inputSequence;
         private TimeSpan _nextMoveAt;
         private TimeSpan _nextDirectionAt;
-        private WorldVector _direction = WorldVector.Zero;
+        private Direction8? _direction;
 
         public SyntheticClient(int id, string name, int serverPort, string connectionKey, SyntheticClientLoad owner)
         {
@@ -199,13 +199,17 @@ public sealed class SyntheticClientLoad : IDisposable
 
             if (elapsed >= _nextDirectionAt)
             {
-                _direction = Directions[_random.Next(Directions.Length)].NormalizeOrZero();
+                _direction = Directions[_random.Next(Directions.Length)];
                 _nextDirectionAt = elapsed + TimeSpan.FromSeconds(1);
             }
 
-            if (elapsed >= _nextMoveAt)
+            if (elapsed >= _nextMoveAt && _direction.HasValue)
             {
-                Send(_serverPeer, new MoveInputMessage(++_inputSequence, _direction), DeliveryMethod.Sequenced);
+                Send(_serverPeer, new MoveStepMessage(++_inputSequence, _direction.Value), DeliveryMethod.Sequenced);
+                _nextMoveAt = elapsed + TimeSpan.FromMilliseconds(250);
+            }
+            else if (elapsed >= _nextMoveAt)
+            {
                 _nextMoveAt = elapsed + TimeSpan.FromMilliseconds(250);
             }
         }

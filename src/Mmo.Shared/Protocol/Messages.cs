@@ -17,9 +17,9 @@ public sealed record LoginRequestMessage(string AccountName, string DisplayName)
     public MessageType Type => MessageType.LoginRequest;
 }
 
-public sealed record MoveInputMessage(uint Sequence, WorldVector Direction) : IProtocolMessage
+public sealed record MoveStepMessage(uint Sequence, Direction8 Direction) : IProtocolMessage
 {
-    public MessageType Type => MessageType.MoveInput;
+    public MessageType Type => MessageType.MoveStep;
 }
 
 public sealed record ChatSendMessage(string Text) : IProtocolMessage
@@ -42,7 +42,7 @@ public sealed record LoginResultMessage(
     Guid CharacterId,
     string DisplayName,
     ClientRole Role,
-    WorldVector Position,
+    TileCoord Tile,
     string Reason) : IProtocolMessage
 {
     public MessageType Type => MessageType.LoginResult;
@@ -94,7 +94,8 @@ public sealed record EntitySpawnMessage(
     Guid CharacterId,
     EntityKind Kind,
     string DisplayName,
-    WorldVector Position) : IProtocolMessage
+    TileCoord Tile,
+    Direction8 Facing) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntitySpawn;
 }

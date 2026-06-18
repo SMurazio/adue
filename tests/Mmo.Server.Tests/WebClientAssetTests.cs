@@ -5,14 +5,16 @@ namespace Mmo.Server.Tests;
 public sealed class WebClientAssetTests
 {
     [Fact]
-    public void WebClientUsesBufferedRemoteEntityInterpolation()
+    public void WebClientUsesTileTweenedMoveSteps()
     {
         var app = File.ReadAllText(FindWebAsset("app.js"));
 
-        Assert.Contains("const snapshotInterpolationDelayMs = 150;", app);
-        Assert.Contains("const maxEntitySnapshotBuffer = 8;", app);
-        Assert.Contains("function interpolateRemoteEntityPosition", app);
-        Assert.Contains("addEntitySnapshotSample(entry, tick, sequence", app);
+        Assert.Contains("const tileStepTweenMs = 200;", app);
+        Assert.Contains("function updateEntityTileTween", app);
+        Assert.Contains("function mergeSnapshotEntities", app);
+        Assert.Contains("function sendMoveStep", app);
+        Assert.Contains("type: \"moveStep\"", app);
+        Assert.DoesNotContain("function interpolateRemoteEntityPosition", app);
     }
 
     private static string FindWebAsset(string fileName)

@@ -6,17 +6,17 @@ namespace Mmo.Tools.Stress;
 
 public sealed class LoadClient : IDisposable
 {
-    private static readonly WorldVector[] Directions =
+    private static readonly Direction8?[] Directions =
     [
-        new(0, -1),
-        new(1, -1),
-        new(1, 0),
-        new(1, 1),
-        new(0, 1),
-        new(-1, 1),
-        new(-1, 0),
-        new(-1, -1),
-        WorldVector.Zero
+        Direction8.N,
+        Direction8.NE,
+        Direction8.E,
+        Direction8.SE,
+        Direction8.S,
+        Direction8.SW,
+        Direction8.W,
+        Direction8.NW,
+        null
     ];
 
     private readonly int _id;
@@ -34,7 +34,7 @@ public sealed class LoadClient : IDisposable
     private TimeSpan _nextMoveAt;
     private TimeSpan _nextDirectionAt;
     private TimeSpan _nextChatAt;
-    private WorldVector _direction = WorldVector.Zero;
+    private Direction8? _direction;
 
     public LoadClient(int id, StressOptions options, RunStats stats, Random random)
     {
@@ -92,13 +92,17 @@ public sealed class LoadClient : IDisposable
 
         if (elapsed >= _nextDirectionAt)
         {
-            _direction = Directions[_random.Next(Directions.Length)].NormalizeOrZero();
+            _direction = Directions[_random.Next(Directions.Length)];
             _nextDirectionAt = elapsed + _options.DirectionInterval;
         }
 
-        if (elapsed >= _nextMoveAt)
+        if (elapsed >= _nextMoveAt && _direction.HasValue)
         {
-            Send(_serverPeer, new MoveInputMessage(++_inputSequence, _direction), DeliveryMethod.Sequenced);
+            Send(_serverPeer, new MoveStepMessage(++_inputSequence, _direction.Value), DeliveryMethod.Sequenced);
+            _nextMoveAt = elapsed + _options.MoveInterval;
+        }
+        else if (elapsed >= _nextMoveAt)
+        {
             _nextMoveAt = elapsed + _options.MoveInterval;
         }
 

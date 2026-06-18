@@ -34,7 +34,7 @@ Start the server first, then run a conservative synthetic-client load:
 .\.codex\skills\mmo-dev\scripts\stress-test.cmd
 ```
 
-The stress client opens many LiteNetLib connections, logs in unique local characters, sends movement inputs, receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
+The stress client opens many LiteNetLib connections, logs in unique local characters, sends `MoveStep` inputs, receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
 
 Useful examples:
 
@@ -49,7 +49,7 @@ The stress tool fails the process if the accepted-login ratio is below `--min-au
 
 The default SQLite database will create local load-test characters. Delete `data\mmo.db` when you want a clean local world.
 
-The near-term channel target is 120-150 connected clients visible in one channel. The server sends reliable entity spawn metadata once, then sends compact unreliable movement snapshots that should fit in one UDP packet at this target.
+The near-term channel target is 120-150 connected clients visible in one channel. The server sends reliable entity spawn metadata once, then sends compact unreliable snapshots when visible tile state changes or a heartbeat is due. Between full heartbeat snapshots, incomplete snapshots contain only changed visible tile states and clients merge them into the current visible set.
 
 ## Run Server
 
@@ -63,9 +63,11 @@ Useful environment variables:
 - `MMO_TICK_RATE`
 - `MMO_CONNECTION_KEY`
 - `MMO_ADMIN_NAMES`: comma-separated local dev admin names; defaults to `Admin`
-- `MMO_INTEREST_RADIUS`: server-side AOI radius in world units; defaults to `96`
+- `MMO_WORLD_WIDTH_TILES`: tile-grid width; defaults to `64`
+- `MMO_WORLD_HEIGHT_TILES`: tile-grid height; defaults to `64`
+- `MMO_STEP_COOLDOWN_MS`: per-entity step cooldown; defaults to `200`
+- `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `96`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
-- `MMO_WORLD_MIN_X`, `MMO_WORLD_MAX_X`, `MMO_WORLD_MIN_Y`, `MMO_WORLD_MAX_Y`: authoritative world bounds; default to `-3000..3000` on both axes and must stay inside snapshot range
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`
@@ -89,16 +91,16 @@ Console diagnostic clients:
 
 Client commands:
 
-- `w`, `a`, `s`, `d`: move
+- `w`, `a`, `s`, `d`: send one tile step, repeated while held
 - `w`, `a`, `s`, `d` are screen-relative in the web client; `w` moves up on the isometric view
 - hold two movement keys together for diagonals, for example `w` + `d`
-- `stop`: stop movement
+- `stop`: stop local repeated movement in clients that support it
 - `/say hello`: send chat
 - `/quit`: disconnect
 
 The web client also has diagonal movement buttons: `NW`, `NE`, `SW`, and `SE`.
 In the 3D web view, hold right mouse button on the ground to move toward the pointer; release to stop.
-The web renderer keeps local movement responsive and renders remote entities through a small snapshot buffer, about 150 ms behind the newest received state. The server owns authoritative position.
+The web renderer shows the tile grid and blocked wall tiles. It tweens local and remote entities only after the server confirms a new tile in a snapshot. The server owns authoritative tile position; there is no client prediction.
 
 Snapshot logging is off by default. Add `--snapshots` to the client command to print once-per-second world snapshots.
 

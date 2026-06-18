@@ -1,5 +1,3 @@
-using Mmo.Shared.Domain;
-
 namespace Mmo.Server.Configuration;
 
 public sealed record ServerOptions(
@@ -9,13 +7,16 @@ public sealed record ServerOptions(
     DatabaseProvider DatabaseProvider,
     string ConnectionString,
     string MigrationsPath,
-    float MovementUnitsPerSecond,
+    int WorldWidthTiles,
+    int WorldHeightTiles,
+    int StepCooldownMs,
     float InterestRadius,
     int MaxVisibleEntities,
-    WorldBounds WorldBounds,
     IReadOnlySet<string> AdminNames)
 {
-    private const float SnapshotCoordinateLimit = short.MaxValue / 10f;
+    public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
+
+    public uint StepCooldownTicks => (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / TickRate)));
 
     public static ServerOptions FromEnvironment()
     {
@@ -26,14 +27,11 @@ public sealed record ServerOptions(
             ReadDatabaseProvider("MMO_DB_PROVIDER", DatabaseProvider.Sqlite),
             ResolveConnectionString(ReadString("MMO_DB", "Data Source=data/mmo.db")),
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
-            ReadFloat("MMO_MOVE_SPEED", 5f),
+            ReadInt("MMO_WORLD_WIDTH_TILES", 64),
+            ReadInt("MMO_WORLD_HEIGHT_TILES", 64),
+            ReadInt("MMO_STEP_COOLDOWN_MS", 200),
             ReadFloat("MMO_INTEREST_RADIUS", 96f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
-            new WorldBounds(
-                ReadFloat("MMO_WORLD_MIN_X", -3000f),
-                ReadFloat("MMO_WORLD_MAX_X", 3000f),
-                ReadFloat("MMO_WORLD_MIN_Y", -3000f),
-                ReadFloat("MMO_WORLD_MAX_Y", 3000f)),
             ReadSet("MMO_ADMIN_NAMES", "Admin"));
 
         options.Validate();
@@ -57,9 +55,19 @@ public sealed record ServerOptions(
             throw new InvalidOperationException("MMO_CONNECTION_KEY cannot be empty.");
         }
 
-        if (MovementUnitsPerSecond <= 0)
+        if (WorldWidthTiles < 16 || WorldWidthTiles > short.MaxValue)
         {
-            throw new InvalidOperationException("MMO_MOVE_SPEED must be greater than zero.");
+            throw new InvalidOperationException($"MMO_WORLD_WIDTH_TILES must be between 16 and {short.MaxValue}.");
+        }
+
+        if (WorldHeightTiles < 16 || WorldHeightTiles > short.MaxValue)
+        {
+            throw new InvalidOperationException($"MMO_WORLD_HEIGHT_TILES must be between 16 and {short.MaxValue}.");
+        }
+
+        if (StepCooldownMs < 50 || StepCooldownMs > 5000)
+        {
+            throw new InvalidOperationException("MMO_STEP_COOLDOWN_MS must be between 50 and 5000.");
         }
 
         if (InterestRadius <= 0)
@@ -72,8 +80,6 @@ public sealed record ServerOptions(
             throw new InvalidOperationException("MMO_MAX_VISIBLE_ENTITIES must be between 1 and 4096.");
         }
 
-        ValidateWorldBounds();
-
         if (string.IsNullOrWhiteSpace(ConnectionString))
         {
             throw new InvalidOperationException("MMO_DB cannot be empty.");
@@ -82,35 +88,6 @@ public sealed record ServerOptions(
         if (string.IsNullOrWhiteSpace(MigrationsPath))
         {
             throw new InvalidOperationException("MMO_MIGRATIONS_PATH cannot be empty.");
-        }
-    }
-
-    private void ValidateWorldBounds()
-    {
-        if (!float.IsFinite(WorldBounds.MinX) ||
-            !float.IsFinite(WorldBounds.MaxX) ||
-            !float.IsFinite(WorldBounds.MinY) ||
-            !float.IsFinite(WorldBounds.MaxY))
-        {
-            throw new InvalidOperationException("MMO world bounds must be finite numbers.");
-        }
-
-        if (WorldBounds.MinX >= WorldBounds.MaxX)
-        {
-            throw new InvalidOperationException("MMO_WORLD_MIN_X must be lower than MMO_WORLD_MAX_X.");
-        }
-
-        if (WorldBounds.MinY >= WorldBounds.MaxY)
-        {
-            throw new InvalidOperationException("MMO_WORLD_MIN_Y must be lower than MMO_WORLD_MAX_Y.");
-        }
-
-        if (WorldBounds.MinX < -SnapshotCoordinateLimit ||
-            WorldBounds.MaxX > SnapshotCoordinateLimit ||
-            WorldBounds.MinY < -SnapshotCoordinateLimit ||
-            WorldBounds.MaxY > SnapshotCoordinateLimit)
-        {
-            throw new InvalidOperationException($"MMO world bounds must stay within snapshot range {-SnapshotCoordinateLimit:0.0}..{SnapshotCoordinateLimit:0.0}.");
         }
     }
 

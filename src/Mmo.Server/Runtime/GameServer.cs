@@ -15,8 +15,8 @@ public sealed class GameServer
     private const string ServerName = "mmo-learning-server";
     private const int MaxSequencedSnapshotBytes = 1000;
     private const int ProtocolHeaderBytes = 7;
-    private const int SnapshotHeaderBytes = 13;
-    private const int EntityStateFixedBytes = 6;
+    private const int SnapshotHeaderBytes = 17;
+    private const int EntityStateFixedBytes = 7;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -32,6 +32,7 @@ public sealed class GameServer
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
     private readonly NetworkIdPool _networkIds = new();
+    private readonly TileGrid _tileGrid;
 
     private uint _serverTick;
 
@@ -40,6 +41,7 @@ public sealed class GameServer
         _options = options;
         _characters = characters;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
+        _tileGrid = TileGrid.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles);
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -80,7 +82,7 @@ public sealed class GameServer
                     var tickStartedAt = Stopwatch.GetTimestamp();
                     var tickBudget = new TickBudgetRecorder();
                     var scheduleDrift = now - nextTickAt;
-                    Tick((float)tickInterval.TotalSeconds, tickBudget);
+                    Tick(tickBudget);
                     _metrics.RecordTick(Stopwatch.GetElapsedTime(tickStartedAt), scheduleDrift, tickBudget.ToSample());
                     nextTickAt += tickInterval;
                 }
@@ -186,10 +188,10 @@ public sealed class GameServer
             case LoginRequestMessage login:
                 BeginLogin(peer, session, login);
                 break;
-            case MoveInputMessage move:
+            case MoveStepMessage move:
                 if (session.IsAuthenticated)
                 {
-                    session.SetDirection(move.Direction);
+                    session.TryStep(move.Direction, _serverTick, _options.StepCooldownTicks, _tileGrid);
                 }
                 break;
             case ChatSendMessage chat:
@@ -234,16 +236,17 @@ public sealed class GameServer
                     try
                     {
                         var role = ResolveRole(login.AccountName, character.DisplayName);
-                        current.Authenticate(_networkIds.Rent(), character.CharacterId, character.DisplayName, role, character.ZoneId, character.Position);
+                        var loginTile = ResolveLoginTile(character.Tile);
+                        current.Authenticate(_networkIds.Rent(), character.CharacterId, character.DisplayName, role, character.ZoneId, loginTile);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
-                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, character.Position, ""), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, loginTile, ""), DeliveryMethod.ReliableOrdered);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
                     {
                         current.LoginInProgress = false;
                         _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
-                        TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, WorldVector.Zero, "No network id available."), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, TileGrid.DefaultSpawnTile, "No network id available."), DeliveryMethod.ReliableOrdered);
                         Log.Error("Login failed", exception);
                     }
                 });
@@ -258,31 +261,24 @@ public sealed class GameServer
                     }
 
                     _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
-                    TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, WorldVector.Zero, exception.Message), DeliveryMethod.ReliableOrdered);
+                    TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, TileGrid.DefaultSpawnTile, exception.Message), DeliveryMethod.ReliableOrdered);
                     Log.Error("Login failed", exception);
                 });
             }
         });
     }
 
-    private void Tick(float deltaSeconds, TickBudgetRecorder tickBudget)
+    private void Tick(TickBudgetRecorder tickBudget)
     {
-        _runtimeGuard.TryRun("tick", () => TickCore(deltaSeconds, tickBudget));
+        _runtimeGuard.TryRun("tick", () => TickCore(tickBudget));
     }
 
-    private void TickCore(float deltaSeconds, TickBudgetRecorder tickBudget)
+    private void TickCore(TickBudgetRecorder tickBudget)
     {
         _serverTick++;
 
         using (tickBudget.Measure(TickBudgetCategory.Movement))
         {
-            foreach (var session in _sessions.Values)
-            {
-                if (session.IsAuthenticated)
-                {
-                    session.Advance(deltaSeconds, _options.MovementUnitsPerSecond, _options.WorldBounds);
-                }
-            }
         }
 
         BroadcastSnapshot(tickBudget);
@@ -361,6 +357,7 @@ public sealed class GameServer
         foreach (var networkId in recipient.SnapshotEntitiesMissingFrom(visibleIds))
         {
             TrySend(recipient.Peer, new EntityDespawnMessage(_serverTick, networkId), DeliveryMethod.ReliableOrdered);
+            recipient.ForgetSentRevision(networkId);
         }
     }
 
@@ -388,8 +385,23 @@ public sealed class GameServer
         IReadOnlyCollection<ClientSession> visible,
         out int visibleCount)
     {
-        var ordered = visible
+        var orderedSessions = visible
             .OrderBy(session => SnapshotSortKey(recipient, session, DistanceSquared(recipient, session)))
+            .ToArray();
+        var isComplete = recipient.ShouldSendFullSnapshot(_serverTick, SnapshotHeartbeatTicks());
+        var payloadSessions = isComplete
+            ? orderedSessions
+            : orderedSessions.Where(session => !recipient.HasSentRevision(session)).ToArray();
+
+        recipient.RememberSnapshotEntities(orderedSessions.Select(session => session.NetworkId));
+
+        if (payloadSessions.Length == 0)
+        {
+            visibleCount = orderedSessions.Length;
+            return [];
+        }
+
+        var payload = payloadSessions
             .Select(ToEntityStateSnapshot)
             .ToArray();
 
@@ -397,7 +409,7 @@ public sealed class GameServer
         var current = new List<EntityStateSnapshot>();
         var currentBytes = ProtocolHeaderBytes + SnapshotHeaderBytes;
 
-        foreach (var entity in ordered)
+        foreach (var entity in payload)
         {
             var entityBytes = EstimateEntityStateBytes();
             if (current.Count > 0 && currentBytes + entityBytes > MaxSequencedSnapshotBytes)
@@ -424,8 +436,8 @@ public sealed class GameServer
             var packet = ProtocolCodec.Encode(new WorldSnapshotMessage(
                 _serverTick,
                 snapshotSequence,
-                ordered.Length,
-                true,
+                orderedSessions.Length,
+                isComplete,
                 i,
                 chunks.Count,
                 chunk));
@@ -438,8 +450,13 @@ public sealed class GameServer
             packets.Add(packet);
         }
 
-        recipient.RememberSnapshotEntities(ordered.Select(entity => entity.NetworkId));
-        visibleCount = ordered.Length;
+        foreach (var session in payloadSessions)
+        {
+            recipient.RememberSentRevision(session);
+        }
+
+        recipient.RememberSnapshotSent(_serverTick);
+        visibleCount = orderedSessions.Length;
         return packets;
     }
 
@@ -457,7 +474,8 @@ public sealed class GameServer
                 session.CharacterId,
                 EntityKind.Player,
                 session.DisplayName,
-                session.Position), DeliveryMethod.ReliableOrdered);
+                session.Tile,
+                session.Facing), DeliveryMethod.ReliableOrdered);
             recipient.RememberKnownEntity(session.NetworkId);
         }
     }
@@ -476,19 +494,36 @@ public sealed class GameServer
 
     private static float DistanceSquared(ClientSession a, ClientSession b)
     {
-        var dx = b.Position.X - a.Position.X;
-        var dy = b.Position.Y - a.Position.Y;
+        var dx = b.Tile.X - a.Tile.X;
+        var dy = b.Tile.Y - a.Tile.Y;
         return (dx * dx) + (dy * dy);
     }
 
     private static EntityStateSnapshot ToEntityStateSnapshot(ClientSession session)
     {
-        return new EntityStateSnapshot(session.NetworkId, session.Position);
+        return new EntityStateSnapshot(session.NetworkId, session.Tile, session.Facing);
     }
 
     private static int EstimateEntityStateBytes()
     {
         return EntityStateFixedBytes;
+    }
+
+    private uint SnapshotHeartbeatTicks()
+    {
+        return (uint)Math.Max(1, _options.TickRate);
+    }
+
+    private TileCoord ResolveLoginTile(TileCoord tile)
+    {
+        if (_tileGrid.IsWalkable(tile))
+        {
+            return tile;
+        }
+
+        return _tileGrid.IsWalkable(TileGrid.DefaultSpawnTile)
+            ? TileGrid.DefaultSpawnTile
+            : new TileCoord(1, 1);
     }
 
     private void HandleChat(ClientSession sender, string text)
@@ -764,7 +799,7 @@ public sealed class GameServer
     {
         try
         {
-            _characters.SavePositionAsync(session.CharacterId, session.Position, CancellationToken.None)
+            _characters.SavePositionAsync(session.CharacterId, session.Tile, CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
         }

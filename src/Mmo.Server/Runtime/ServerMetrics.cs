@@ -372,7 +372,7 @@ public sealed class ServerMetrics
             $"culled/s={Rate(snapshot.SnapshotCulled, seconds):0.0}, " +
             $"out={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, in={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
             $"recv/s={Rate(snapshot.ReceivedMessageCount, seconds):0.0}, sent/s={Rate(snapshot.SentMessageCount, seconds):0.0}, " +
-            $"move/s={Rate(Count(snapshot.ReceivedMessages, MessageType.MoveInput), seconds):0.0}, " +
+            $"move/s={Rate(Count(snapshot.ReceivedMessages, MessageType.MoveStep), seconds):0.0}, " +
             $"chat/s={Rate(Count(snapshot.ReceivedMessages, MessageType.ChatSend), seconds):0.0}, " +
             $"sendFail/s={Rate(snapshot.SendFailures, seconds):0.0}, bad/s={Rate(snapshot.BadPackets, seconds):0.0}, netErr/s={Rate(snapshot.NetworkErrors, seconds):0.0}, runtimeFault/s={Rate(snapshot.RuntimeFaults, seconds):0.0}, " +
             $"login/s={Rate(snapshot.LoginAccepted + snapshot.LoginRejected, seconds):0.0}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
