@@ -455,7 +455,7 @@ public sealed class GameServer
             recipient.RememberSentRevision(session);
         }
 
-        recipient.RememberSnapshotSent(_serverTick);
+        recipient.RememberSnapshotSent(_serverTick, isComplete);
         visibleCount = orderedSessions.Length;
         return packets;
     }

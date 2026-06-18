@@ -10,7 +10,7 @@ public sealed class ClientSession
     private readonly Dictionary<uint, uint> _sentEntityRevisions = [];
     private uint _nextSnapshotSequence = 1;
     private uint? _lastStepTick;
-    private uint _lastSnapshotSentTick;
+    private uint _lastFullSnapshotSentTick;
 
     public ClientSession(NetPeer peer)
     {
@@ -110,7 +110,7 @@ public sealed class ClientSession
 
     public bool ShouldSendFullSnapshot(uint serverTick, uint heartbeatTicks)
     {
-        return _lastSnapshotSentTick == 0 || serverTick - _lastSnapshotSentTick >= heartbeatTicks;
+        return _lastFullSnapshotSentTick == 0 || serverTick - _lastFullSnapshotSentTick >= heartbeatTicks;
     }
 
     public bool HasSentRevision(ClientSession entity)
@@ -129,9 +129,12 @@ public sealed class ClientSession
         _sentEntityRevisions.Remove(networkId);
     }
 
-    public void RememberSnapshotSent(uint serverTick)
+    public void RememberSnapshotSent(uint serverTick, bool isComplete)
     {
-        _lastSnapshotSentTick = serverTick;
+        if (isComplete)
+        {
+            _lastFullSnapshotSentTick = serverTick;
+        }
     }
 
     public uint NextSnapshotSequence()

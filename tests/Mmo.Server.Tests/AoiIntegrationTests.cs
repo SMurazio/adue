@@ -83,6 +83,68 @@ public sealed class AoiIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task FullSnapshotHeartbeatIsNotStarvedByPartialSnapshots()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = new ServerOptions(
+            port,
+            20,
+            "integration-test",
+            DatabaseProvider.Sqlite,
+            database.ConnectionString,
+            TestSqliteDatabase.MigrationsPath,
+            64,
+            64,
+            50,
+            30,
+            150,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var moverA = new IntegrationClient("MoverA");
+            using var moverB = new IntegrationClient("MoverB");
+            using var observer = new IntegrationClient("Observer");
+            moverA.Connect(port, options.ConnectionKey);
+            moverB.Connect(port, options.ConnectionKey);
+            observer.Connect(port, options.ConnectionKey);
+
+            await WaitUntilAsync(
+                () => moverA.IsLoggedIn && moverA.OwnNetworkId != 0
+                    && moverB.IsLoggedIn && moverB.OwnNetworkId != 0
+                    && observer.IsLoggedIn && observer.OwnNetworkId != 0,
+                moverA,
+                moverB,
+                observer);
+            await WaitUntilAsync(
+                () => observer.Messages.OfType<WorldSnapshotMessage>().Any(message => message.IsComplete),
+                moverA,
+                moverB,
+                observer);
+
+            observer.ClearMessages();
+
+            var sawFullHeartbeat = await PumpMovementUntilFullSnapshotAsync(
+                TimeSpan.FromMilliseconds(1600),
+                moverA,
+                moverB,
+                observer);
+
+            Assert.True(sawFullHeartbeat);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
     private static int GetFreeUdpPort()
     {
         using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
@@ -139,6 +201,39 @@ public sealed class AoiIntegrationTests
         }
 
         throw new TimeoutException("Timed out waiting for step movement condition.");
+    }
+
+    private static async Task<bool> PumpMovementUntilFullSnapshotAsync(TimeSpan timeout, IntegrationClient firstMover, IntegrationClient secondMover, IntegrationClient observer)
+    {
+        var clients = new[] { firstMover, secondMover, observer };
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        var nextMoveAt = DateTimeOffset.UtcNow;
+        var direction = Direction8.E;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (DateTimeOffset.UtcNow >= nextMoveAt)
+            {
+                firstMover.SendMove(direction);
+                secondMover.SendMove(direction);
+                direction = direction == Direction8.E ? Direction8.W : Direction8.E;
+                nextMoveAt += TimeSpan.FromMilliseconds(60);
+            }
+
+            foreach (var client in clients)
+            {
+                client.Poll();
+            }
+
+            if (observer.Messages.OfType<WorldSnapshotMessage>().Any(message => message.IsComplete))
+            {
+                return true;
+            }
+
+            await Task.Delay(5);
+        }
+
+        return false;
     }
 
     private sealed class IntegrationClient : IDisposable
