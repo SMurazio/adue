@@ -117,6 +117,8 @@ Godot visual debug client:
 The Godot client uses the Compatibility (`gl_compatibility`) renderer. Forward+ on D3D12 caused
 visible frame hitches from lazy shader/pipeline compilation in this simple 2.5D scene; keep the
 Compatibility renderer unless a measured visual requirement justifies revisiting it.
+Press `F3` in the Godot client to toggle the performance HUD. It shows FPS, process/physics frame
+time, render counts, memory, GC counts, frame hitches, and a rolling frame-time graph.
 
 Isometric 3D browser debug client:
 

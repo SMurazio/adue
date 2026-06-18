@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using Godot;
 using Mmo.Client.Core;
 using Mmo.Shared.Domain;
@@ -15,6 +16,7 @@ public partial class MmoClientRoot : Node3D
     private readonly HashSet<uint> _seenEntityIds = [];
     private readonly List<uint> _staleEntityIds = [];
     private readonly List<string> _chatRows = [];
+    private readonly StringBuilder _perfText = new(768);
 
     private MmoClient? _client;
     private Node3D? _worldRoot;
@@ -25,9 +27,12 @@ public partial class MmoClientRoot : Node3D
     private Label? _metricsLabel;
     private Label? _chatLabel;
     private LineEdit? _chatInput;
+    private Label? _perfLabel;
+    private FrameTimeGraph? _perfGraph;
     private double _elapsedSeconds;
     private double _nextMetricsAt;
     private double _nextOverlayAt;
+    private double _nextPerfHudAt;
     private double _lastFrameMs;
     private double _maxFrameMs;
     private long _frameHitchCount;
@@ -39,6 +44,7 @@ public partial class MmoClientRoot : Node3D
     private int _lastGc2;
     private bool _zoneBuilt;
     private bool _sentStartupChat;
+    private bool _perfHudVisible;
 
     [Export] public string Host { get; set; } = ReadString("MMO_HOST", "127.0.0.1");
     [Export] public int Port { get; set; } = ReadInt("MMO_PORT", 7777);
@@ -85,6 +91,13 @@ public partial class MmoClientRoot : Node3D
     {
         if (@event is not InputEventKey { Pressed: true, Echo: false } key)
         {
+            return;
+        }
+
+        if (key.Keycode == Key.F3)
+        {
+            TogglePerfHud();
+            GetViewport().SetInputAsHandled();
             return;
         }
 
@@ -144,6 +157,14 @@ public partial class MmoClientRoot : Node3D
         _statusLabel = CreateOverlayLabel("Status", new Vector2(12, 10), new Vector2(760, 124), 15);
         _metricsLabel = CreateOverlayLabel("Metrics", new Vector2(0, 10), new Vector2(650, 330), 13);
         _chatLabel = CreateOverlayLabel("Chat", new Vector2(12, 0), new Vector2(760, 164), 14);
+        _perfLabel = CreateOverlayLabel("PerfHud", new Vector2(12, 138), new Vector2(460, 184), 13);
+        _perfGraph = new FrameTimeGraph
+        {
+            Name = "PerfFrameGraph",
+            Position = new Vector2(12, 326),
+            Size = new Vector2(460, 78),
+            Visible = false
+        };
         _chatInput = new LineEdit
         {
             Name = "ChatInput",
@@ -172,9 +193,13 @@ public partial class MmoClientRoot : Node3D
         _chatInput.OffsetTop = -40f;
         _chatInput.OffsetBottom = -12f;
 
+        _perfLabel.Visible = false;
+
         layer.AddChild(_statusLabel);
         layer.AddChild(_metricsLabel);
         layer.AddChild(_chatLabel);
+        layer.AddChild(_perfLabel);
+        layer.AddChild(_perfGraph);
         layer.AddChild(_chatInput);
     }
 
@@ -243,6 +268,7 @@ public partial class MmoClientRoot : Node3D
 
         _lastFrameMs = Math.Max(0, delta * 1000d);
         _maxFrameMs = Math.Max(_maxFrameMs, _lastFrameMs);
+        _perfGraph?.AddSample(_lastFrameMs);
         if (_lastFrameMs < FrameHitchThresholdMs)
         {
             return;
@@ -345,6 +371,8 @@ public partial class MmoClientRoot : Node3D
 
     private void UpdateOverlay(TimeSpan now)
     {
+        UpdatePerfHud(now);
+
         if (_client is null)
         {
             return;
@@ -369,7 +397,7 @@ public partial class MmoClientRoot : Node3D
             SetTextIfChanged(_statusLabel,
                 $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
                 $"{server}\n" +
-                "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat." +
+                "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F3 toggles perf." +
                 movementDebug);
         }
 
@@ -382,6 +410,67 @@ public partial class MmoClientRoot : Node3D
         {
             SetTextIfChanged(_chatLabel, FormatChat(_client));
         }
+    }
+
+    private void TogglePerfHud()
+    {
+        _perfHudVisible = !_perfHudVisible;
+        if (_perfLabel is not null)
+        {
+            _perfLabel.Visible = _perfHudVisible;
+        }
+
+        if (_perfGraph is not null)
+        {
+            _perfGraph.Visible = _perfHudVisible;
+        }
+
+        _nextPerfHudAt = 0;
+    }
+
+    private void UpdatePerfHud(TimeSpan now)
+    {
+        if (!_perfHudVisible || _perfLabel is null)
+        {
+            return;
+        }
+
+        if (now.TotalSeconds < _nextPerfHudAt)
+        {
+            return;
+        }
+
+        _nextPerfHudAt = now.TotalSeconds + 0.1d;
+        _perfText.Clear();
+        _perfText.AppendLine("PERF HUD (F3)");
+        AppendPerfRow("fps", Performance.GetMonitor(Performance.Monitor.TimeFps));
+        AppendPerfRow("frame ms last/max", _lastFrameMs, _maxFrameMs);
+        AppendPerfRow("process/physics ms",
+            Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d,
+            Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d);
+        AppendPerfRow("draw/objects",
+            Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame),
+            Performance.GetMonitor(Performance.Monitor.RenderTotalObjectsInFrame));
+        AppendPerfRow("primitives",
+            Performance.GetMonitor(Performance.Monitor.RenderTotalPrimitivesInFrame));
+        AppendPerfRow("video/static MB",
+            BytesToMiB(Performance.GetMonitor(Performance.Monitor.RenderVideoMemUsed)),
+            BytesToMiB(Performance.GetMonitor(Performance.Monitor.MemoryStatic)));
+        AppendPerfRow("managed MB", BytesToMiB(GC.GetTotalMemory(false)));
+        AppendPerfRow("nodes", Performance.GetMonitor(Performance.Monitor.ObjectNodeCount));
+        _perfText.Append("gc ")
+            .Append(_clientGc0Count.ToString(CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_clientGc1Count.ToString(CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_clientGc2Count.ToString(CultureInfo.InvariantCulture))
+            .Append("  hitches ")
+            .Append(_frameHitchCount.ToString(CultureInfo.InvariantCulture))
+            .Append(" >")
+            .Append(FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .AppendLine("ms");
+
+        SetTextIfChanged(_perfLabel, _perfText.ToString());
     }
 
     private void SendHeldMovement(TimeSpan now)
@@ -629,6 +718,29 @@ public partial class MmoClientRoot : Node3D
     private string FormatFrameDebug()
     {
         return $"FRAME ms={_lastFrameMs.ToString("0.0", CultureInfo.InvariantCulture)}/{_maxFrameMs.ToString("0.0", CultureInfo.InvariantCulture)} hitches={_frameHitchCount} threshold={FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture)} gc={_clientGc0Count}/{_clientGc1Count}/{_clientGc2Count}";
+    }
+
+    private void AppendPerfRow(string label, double value)
+    {
+        _perfText.Append(label)
+            .Append(' ')
+            .Append(value.ToString("0.0", CultureInfo.InvariantCulture))
+            .AppendLine();
+    }
+
+    private void AppendPerfRow(string label, double first, double second)
+    {
+        _perfText.Append(label)
+            .Append(' ')
+            .Append(first.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(second.ToString("0.0", CultureInfo.InvariantCulture))
+            .AppendLine();
+    }
+
+    private static double BytesToMiB(double bytes)
+    {
+        return bytes / (1024d * 1024d);
     }
 
     private static string LastMetric(MmoClient client, string prefix)

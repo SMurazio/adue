@@ -96,6 +96,8 @@ and `GodotB`:
 ```
 
 Add `-LogToFile` to capture the server logs during that visual check.
+Inside the Godot client, press `F3` to toggle the performance HUD with FPS, frame timings, render
+counts, memory, GC, hitch count, and a rolling frame-time graph.
 
 `godot-run` needs `MMO_GODOT` set to the Godot .NET executable (or `godot` on PATH):
 
