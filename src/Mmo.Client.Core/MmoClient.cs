@@ -8,10 +8,13 @@ public sealed class MmoClient : IDisposable
 {
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
 
-    // Small local playout buffer so the local player's tween isn't starved by snapshot tick-boundary
-    // jitter (server confirms tiles on ~50ms tick boundaries). 0 here caused q to oscillate 1-2 and a
-    // slight stutter; ~0.5x cadence (~75ms) holds a one-tick cushion with minimal added input latency.
-    public const double LocalInterpolationCadenceMultiplier = 0.5d;
+    // Local playout buffer so the local player's tween isn't starved by snapshot tick-boundary jitter
+    // (server confirms tiles on ~50ms tick boundaries). delay=0 starved (q stuck at 1); 0.5x (~75ms)
+    // still dipped to 1; 1.0x cadence (~one full step) keeps a spare tile buffered so q holds ~2.
+    // This trades a little local input latency for smoothness — the latency-free answer is client
+    // prediction, which is deferred by design. Tunable: raise toward RemoteInterpolationCadenceMultiplier
+    // (1.3) if it still dips, lower if start-of-move feels laggy.
+    public const double LocalInterpolationCadenceMultiplier = 1.0d;
     private const uint PlaceholderSnapshotTtl = 60;
 
     private readonly ClientConnectionOptions _options;
