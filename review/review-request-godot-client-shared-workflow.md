@@ -4,29 +4,30 @@
 
 This branch implements the current `todo/` queue on `D:\MMO` after the tile-stepped movement work:
 S15 introduces a pure C# `Mmo.Client.Core` and test coverage for the future Godot client, S16 drafts
-the Godot isometric view then marks the task blocked because this machine has no Godot .NET runtime
-configured, S17 is marked blocked behind S16, N12 moves repo-local skills into `.shared/skills/`,
-and N13 moves startup instructions plus durable project memory into `.shared/`. Source of truth:
+the Godot isometric view and remains blocked only on human visual verification, S17 is marked
+blocked behind S16, N12 moves repo-local skills into `.shared/skills/`, and N13 moves startup
+instructions plus durable project memory into `.shared/`. Source of truth:
 `todo/README.md`, `AGENTS.md` at task start, `todo/S15-godot-m1-client-core.md`,
 `todo/S16-godot-m1b-editor-view.md`, `todo/S17-godot-m2-local-prediction.md`,
 `todo/N12-share-skills-via-dotshared.md`, `todo/N13-share-startup-and-memory-via-dotshared.md`,
 and the local design notes cited by those tasks. Branch: `review/tile-step-todo`. Base for review:
 `16f480a docs: add review request for S14`. Implementation head before this review file:
-`a28b068 fix: N13 share startup and memory via dotshared`.
+`1efd315 fix: S16 Godot headless run wrapper`.
 
 ## 2. How To See The Changes
 
 Run:
 
 ```powershell
-git diff 16f480a..a28b068 --stat
-git log --oneline 16f480a..a28b068
-git diff 16f480a..a28b068
+git diff 16f480a..1efd315 --stat
+git log --oneline 16f480a..1efd315
+git diff 16f480a..1efd315
 ```
 
 Committed history to review:
 
 ```text
+1efd315 fix: S16 Godot headless run wrapper
 a28b068 fix: N13 share startup and memory via dotshared
 d5babbb fix: N12 share skills via dotshared
 1c2edb5 blocked: S17 local prediction waits on Godot view
@@ -87,6 +88,8 @@ There were unrelated uncommitted user/orchestrator files in the workspace while 
 ### Docs / Workflow
 
 - `.shared/skills/mmo-dev/*` - canonical repo-local skill and scripts.
+- `.shared/skills/mmo-dev/scripts/godot-run.ps1` - uses `System.Diagnostics.Process` instead of
+  `Start-Process` to avoid the Windows PowerShell duplicate `Path`/`PATH` environment-key failure.
 - `.codex/skills/mmo-dev/SKILL.md` and `.claude/skills/mmo-dev/SKILL.md` - thin stubs pointing to
   the shared skill.
 - `.shared/project.md` - canonical shared project contract/startup instructions.
@@ -105,9 +108,10 @@ There were unrelated uncommitted user/orchestrator files in the workspace while 
 
 ## 4. Decisions & Deviations
 
-- S16 was not deleted because acceptance requires `godot-run.cmd` and human visual verification with
-  two visible Godot clients. I drafted the source-level Godot project and C# view code, verified the
-  C# build, then appended `## Blocked`.
+- S16 was not deleted because acceptance still requires human visual verification with two visible
+  Godot clients. I drafted the source-level Godot project and C# view code, verified the C# build,
+  fixed `godot-run.cmd`, verified headless Godot startup, then kept `## Blocked` for the manual
+  verification only.
 - S17 was not implemented because it explicitly depends on S16. I did not start the shared movement
   rule extraction or input-sequence echo; landing prediction protocol work before a verified
   confirmed-state Godot client would violate the queue ordering.
@@ -138,7 +142,7 @@ Result:
 
 ```text
 Build succeeded.
-    4 Warning(s)
+    3 Warning(s)
     0 Error(s)
 
 Passed!  - Failed:     0, Passed:    13, Skipped:     0, Total:    13 - Mmo.Shared.Tests.dll
@@ -173,16 +177,19 @@ Build succeeded.
 Command:
 
 ```powershell
-.\.shared\skills\mmo-dev\scripts\godot-run.cmd 5
+.\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
 ```
 
 Result:
 
 ```text
-Godot executable not found.
-Set MMO_GODOT to your Godot .NET exe (persists for your account):
-  setx MMO_GODOT "D:\Tools\Godot\Godot_v4.6.3-stable_mono_win64.exe"
-Open a new terminal afterwards, then retry. (Or add godot to PATH.)
+Running Godot headless for ~8 s: D:\MMO\src\Mmo.Client.Godot
+(for a server-connection smoke, start the MMO server first via start-server.cmd)
+(stopped after ~8 s)
+----- stdout -----
+Godot Engine v4.6.3.stable.mono.official.7d41c59c4 - https://godotengine.org
+
+----- stderr -----
 ```
 
 ### Fresh 120-client / 60s stress run
@@ -253,8 +260,8 @@ tile-stepped protocol.
 
 ## 6. Known Gaps / TODOs / Low-Confidence Areas
 
-- `todo/S16-godot-m1b-editor-view.md` remains blocked: no Godot .NET executable is configured here,
-  and manual visual verification is still required.
+- `todo/S16-godot-m1b-editor-view.md` remains blocked: Godot headless build/run is now green, but
+  manual visual verification with two visible clients is still required.
 - `todo/S17-godot-m2-local-prediction.md` remains blocked behind S16. No prediction work was started.
 - The Godot client has not been visually tested with two live clients. The C# build is green only.
 - Godot input mapping and camera-relative movement need hands-on verification; browser movement bugs
@@ -292,10 +299,10 @@ tile-stepped protocol.
 .\.shared\skills\mmo-dev\scripts\godot-build.cmd
 ```
 
-- If Godot .NET is installed, set `MMO_GODOT` and run:
+- If Godot .NET is installed and `MMO_GODOT` is configured, run:
 
 ```powershell
-.\.shared\skills\mmo-dev\scripts\godot-run.cmd 5
+.\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
 ```
 
 - Review `Mmo.Client.Core` for protocol correctness and hot-path allocations.
@@ -305,5 +312,5 @@ tile-stepped protocol.
 - Confirm the branch did not introduce rejected-for-this-genre items: prediction, pathfinding, LOS,
   rollback, lag compensation, lockstep, process split, or hand-rolled reliability.
 - Confirm docs/code agree about the current state: Godot confirmed-state client core exists; Godot
-  visual runtime is drafted but blocked on local Godot runtime/manual verification; local prediction
-  remains future work.
+  visual runtime is drafted and passes headless build/run, but remains blocked on manual visible-client
+  verification; local prediction remains future work.
