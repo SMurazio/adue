@@ -29,6 +29,12 @@ Pass through load settings when needed:
 .\.shared\skills\mmo-dev\scripts\stress-test.cmd --clients=100 --duration=60s --spawn-rate=50
 ```
 
+Run review/performance stress numbers in Release:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\review-stress-release.cmd --clients=120 --duration=60s
+```
+
 Start the MMO server in the background:
 
 ```powershell

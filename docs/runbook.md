@@ -49,6 +49,14 @@ The stress tool fails the process if the accepted-login ratio is below `--min-au
 
 The default SQLite database will create local load-test characters. Delete `data\mmo.db` when you want a clean local world.
 
+Use Debug stress runs for quick functional checks. Use Release for performance acceptance numbers:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\review-stress-release.cmd --clients=120 --duration=60s
+```
+
+The Release review stress command starts a Release server, runs the stress tool in Release, captures `/metrics`, and stops the server afterward.
+
 The near-term channel target is 120-150 connected clients visible in one channel. The server sends reliable entity spawn metadata once, then sends compact unreliable snapshots when visible tile state changes or a heartbeat is due. Between full heartbeat snapshots, incomplete snapshots contain only changed visible tile states and clients merge them into the current visible set.
 
 The server tick loop uses `Stopwatch` deadlines and requests 1 ms Windows timer resolution while running. On Windows this avoids the default coarse timer oversleep that can stretch the nominal 20 Hz / 50 ms tick cadence into uneven 60 ms+ gaps. The loop still polls network events between ticks instead of sleeping for a whole tick interval. The server project enables server GC and concurrent GC. Server logging is asynchronous so the simulation thread never performs console I/O, and the old periodic 10-second tick status log is intentionally removed. Use `/metrics` to watch `gc=gen0/gen1/gen2` counts alongside tick max and drift when validating movement hitches.

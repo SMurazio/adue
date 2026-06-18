@@ -5,10 +5,16 @@ param(
     [string]$HostName = '127.0.0.1',
     [int]$Port = 7777,
     [string]$ConnectionKey = 'local-dev',
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Debug',
+    [switch]$Release,
     [switch]$KeepServer
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Release) {
+    $Configuration = 'Release'
+}
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
 $dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
@@ -138,7 +144,7 @@ static int ReadInt(string[] args, string prefix, int fallback)
 }
 '@
 
-    & $dotnet build $metricsProject
+    & $dotnet build $metricsProject -c $Configuration
 }
 
 $durationSeconds = Convert-DurationToSeconds $Duration
@@ -149,27 +155,27 @@ if ($MetricsDelaySeconds -le 0) {
 $MetricsDelaySeconds = [Math]::Min($MetricsDelaySeconds, [Math]::Max(1, $durationSeconds - 1))
 Ensure-MetricsClient
 
-Write-Output "Review stress: clients=$Clients duration=$Duration metricsDelay=${MetricsDelaySeconds}s"
+Write-Output "Review stress: configuration=$Configuration clients=$Clients duration=$Duration metricsDelay=${MetricsDelaySeconds}s"
 Write-Output "--- STOP EXISTING SERVER ---"
 & $stopScript
 
 try {
     Write-Output "--- START SERVER ---"
-    & $startServerScript
+    & $startServerScript -Configuration $Configuration
     Start-Sleep -Seconds 2
 
     $stressJob = Start-Job -ScriptBlock {
-        param($Root, $StressScript, $Clients, $Duration)
+        param($Root, $StressScript, $Clients, $Duration, $Configuration)
         Set-Location $Root
-        & $StressScript "--clients=$Clients" "--duration=$Duration"
+        & $StressScript "--configuration=$Configuration" "--clients=$Clients" "--duration=$Duration"
         if ($LASTEXITCODE -ne 0) {
             throw "stress-test exited with code $LASTEXITCODE"
         }
-    } -ArgumentList $root, $stressScript, $Clients, $Duration
+    } -ArgumentList $root, $stressScript, $Clients, $Duration, $Configuration
 
     Start-Sleep -Seconds $MetricsDelaySeconds
     Write-Output "--- METRICS DURING STRESS ---"
-    & $dotnet run --no-build --project $metricsProject -- "--host=$HostName" "--port=$Port" "--key=$ConnectionKey" "--name=Admin"
+    & $dotnet run --no-build -c $Configuration --project $metricsProject -- "--host=$HostName" "--port=$Port" "--key=$ConnectionKey" "--name=Admin"
 
     Wait-Job $stressJob | Out-Null
     Write-Output "--- STRESS OUTPUT ---"

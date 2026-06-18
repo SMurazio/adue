@@ -1,3 +1,8 @@
+param(
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Debug'
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
@@ -16,9 +21,9 @@ if (Test-Path -LiteralPath $pidFile) {
     }
 }
 
-& $dotnet build (Join-Path $root 'src\Mmo.Server\Mmo.Server.csproj') --no-restore
+& $dotnet build (Join-Path $root 'src\Mmo.Server\Mmo.Server.csproj') --no-restore -c $Configuration
 
-$serverDll = Join-Path $root 'src\Mmo.Server\bin\Debug\net8.0\Mmo.Server.dll'
+$serverDll = Join-Path $root "src\Mmo.Server\bin\$Configuration\net8.0\Mmo.Server.dll"
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $dotnet
@@ -30,4 +35,4 @@ $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
 $process = [System.Diagnostics.Process]::Start($psi)
 
 $process.Id | Set-Content -LiteralPath $pidFile
-"Server started as PID $($process.Id)"
+"Server started as PID $($process.Id) ($Configuration)"
