@@ -5,8 +5,8 @@ namespace Mmo.Client.Core;
 public sealed class TileInterpolator
 {
     private readonly Queue<ConfirmedTile> _confirmedTiles = new();
-    private readonly double _stepDurationMs;
-    private readonly double _interpolationDelayMs;
+    private double _stepDurationMs;
+    private double _interpolationDelayMs;
     private RenderPosition _renderPosition;
     private ActiveStep? _activeStep;
     private TileCoord _lastConfirmedTile;
@@ -20,6 +20,12 @@ public sealed class TileInterpolator
     }
 
     public RenderPosition RenderPosition => _renderPosition;
+
+    public void UpdateCadence(double stepDurationMs, double interpolationDelayMs)
+    {
+        _stepDurationMs = Math.Max(1, stepDurationMs);
+        _interpolationDelayMs = Math.Max(0, interpolationDelayMs);
+    }
 
     public void Reset(TileCoord tile)
     {

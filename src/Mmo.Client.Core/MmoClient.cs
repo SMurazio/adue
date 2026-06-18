@@ -7,6 +7,7 @@ namespace Mmo.Client.Core;
 public sealed class MmoClient : IDisposable
 {
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
+    private const uint PlaceholderSnapshotTtl = 60;
 
     private readonly ClientConnectionOptions _options;
     private readonly EventBasedNetListener _listener = new();
@@ -53,6 +54,8 @@ public sealed class MmoClient : IDisposable
     public ZoneModel? Zone { get; private set; }
 
     public ClientRole Role { get; private set; } = ClientRole.Player;
+
+    internal Action<IProtocolMessage, DeliveryMethod>? OutboundSinkForTests { get; set; }
 
     public bool IsLoggedIn => State == ClientConnectionState.LoggedIn;
 
@@ -198,7 +201,7 @@ public sealed class MmoClient : IDisposable
         switch (message)
         {
             case ServerHelloMessage hello:
-                Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles);
+                HandleServerHello(hello);
                 break;
             case LoginResultMessage login:
                 HandleLogin(login);
@@ -243,10 +246,19 @@ public sealed class MmoClient : IDisposable
         State = ClientConnectionState.LoggedIn;
     }
 
+    internal void HandleMessageForTests(IProtocolMessage message)
+    {
+        HandleMessage(message);
+    }
+
+    private void HandleServerHello(ServerHelloMessage hello)
+    {
+        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles);
+        RefreshInterpolatorCadence();
+    }
+
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
     {
-        Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
-
         if (_lastAppliedSnapshotSequence.HasValue && snapshot.SnapshotSequence <= _lastAppliedSnapshotSequence.Value)
         {
             return;
@@ -255,6 +267,7 @@ public sealed class MmoClient : IDisposable
         if (snapshot.ChunkCount <= 1)
         {
             ApplySnapshot(snapshot.ServerTick, snapshot.SnapshotSequence, snapshot.IsComplete, snapshot.Entities);
+            AcknowledgeAppliedSnapshot(snapshot.SnapshotSequence);
             return;
         }
 
@@ -279,6 +292,7 @@ public sealed class MmoClient : IDisposable
             _pendingSnapshot.Sequence,
             _pendingSnapshot.IsFullSnapshot,
             _pendingSnapshot.Entities);
+        AcknowledgeAppliedSnapshot(_pendingSnapshot.Sequence);
         _pendingSnapshot = null;
     }
 
@@ -299,7 +313,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            entity.ApplySnapshot(state.Tile, state.Facing, _currentTime);
+            entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence);
         }
 
         if (isComplete)
@@ -322,8 +336,40 @@ public sealed class MmoClient : IDisposable
                 }
             }
         }
+        else
+        {
+            PruneStalePlaceholders(sequence);
+        }
 
         _lastAppliedSnapshotSequence = sequence;
+    }
+
+    private void AcknowledgeAppliedSnapshot(uint snapshotSequence)
+    {
+        Send(new SnapshotAckMessage(snapshotSequence), DeliveryMethod.Sequenced);
+    }
+
+    private void PruneStalePlaceholders(uint currentSequence)
+    {
+        _staleEntityScratch.Clear();
+        foreach (var entity in _entities.Values)
+        {
+            if (entity.IsPlaceholder
+                && currentSequence > entity.LastSeenSnapshotSequence
+                && currentSequence - entity.LastSeenSnapshotSequence > PlaceholderSnapshotTtl)
+            {
+                _staleEntityScratch.Add(entity.NetworkId);
+            }
+        }
+
+        foreach (var networkId in _staleEntityScratch)
+        {
+            _entities.Remove(networkId);
+            if (LocalNetworkId == networkId)
+            {
+                LocalNetworkId = null;
+            }
+        }
     }
 
     private ClientEntity UpsertEntity(
@@ -338,7 +384,7 @@ public sealed class MmoClient : IDisposable
         if (_entities.TryGetValue(networkId, out var existing))
         {
             existing.UpdateMetadata(characterId, kind, displayName, isLocal);
-            existing.ApplySnapshot(tile, facing, _currentTime);
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -365,6 +411,16 @@ public sealed class MmoClient : IDisposable
         return entity;
     }
 
+    private void RefreshInterpolatorCadence()
+    {
+        var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
+        foreach (var entity in _entities.Values)
+        {
+            var delay = entity.IsLocal ? 0d : cadence * RemoteInterpolationCadenceMultiplier;
+            entity.UpdateInterpolationCadence(cadence, delay);
+        }
+    }
+
     private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal)
     {
         var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
@@ -374,6 +430,12 @@ public sealed class MmoClient : IDisposable
 
     private void Send(IProtocolMessage message, DeliveryMethod deliveryMethod)
     {
+        if (OutboundSinkForTests is not null)
+        {
+            OutboundSinkForTests(message, deliveryMethod);
+            return;
+        }
+
         if (_serverPeer is null)
         {
             throw new InvalidOperationException("Client is not connected.");
@@ -425,6 +487,12 @@ public sealed class MmoClient : IDisposable
 
         public bool IsLocal { get; private set; }
 
+        public bool IsPlaceholder => CharacterId == Guid.Empty
+            && Kind == EntityKind.Player
+            && DisplayName.StartsWith("#", StringComparison.Ordinal);
+
+        public uint LastSeenSnapshotSequence { get; private set; }
+
         public void UpdateMetadata(Guid characterId, EntityKind kind, string displayName, bool isLocal)
         {
             if (characterId != Guid.Empty)
@@ -437,11 +505,17 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public void ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt)
+        public void ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence)
         {
             Tile = tile;
             Facing = facing;
+            LastSeenSnapshotSequence = snapshotSequence;
             _interpolator.Confirm(tile, receivedAt);
+        }
+
+        public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
+        {
+            _interpolator.UpdateCadence(stepDurationMs, interpolationDelayMs);
         }
 
         public ReplicatedEntity ToSnapshot()
