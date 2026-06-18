@@ -1,5 +1,6 @@
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$SkipLauncherProcesses
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +11,10 @@ $pidFiles = @(
     (Join-Path $runDir 'server.pid'),
     (Join-Path $runDir 'web-client.pid')
 )
+if (Test-Path -LiteralPath $runDir) {
+    $pidFiles += Get-ChildItem -LiteralPath $runDir -Filter 'godot-client*.pid' -File -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName
+}
 $stopped = New-Object 'System.Collections.Generic.HashSet[int]'
 
 function Test-ContainsAny {
@@ -128,6 +133,8 @@ $runtimeMarkers = @(
     'Mmo.Client.Web.csproj',
     'Mmo.Server.dll',
     'Mmo.Client.Web.dll',
+    'Mmo.Client.Godot',
+    'MmoClientGodot',
     'run-server-window.cmd',
     'run-web-client-window.cmd',
     'start-server.ps1',
@@ -135,6 +142,12 @@ $runtimeMarkers = @(
     'start-server.cmd',
     'start-web-client.cmd'
 )
+if (-not $SkipLauncherProcesses) {
+    $runtimeMarkers += @(
+        'start-godot-visual-check.ps1',
+        'start-godot-visual-check.cmd'
+    )
+}
 
 try {
     $processes = Get-CimInstance Win32_Process -ErrorAction Stop

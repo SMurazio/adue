@@ -74,6 +74,13 @@ Run the Godot client headless for ~N seconds and capture its output (compile + r
 .\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
 ```
 
+Launch the manual Godot visual check: visible server plus two visible Godot clients named `GodotA`
+and `GodotB`:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
+```
+
 `godot-run` needs `MMO_GODOT` set to the Godot .NET executable (or `godot` on PATH):
 
 ```powershell
@@ -102,4 +109,5 @@ turn.
 - Use `stop-mmo.cmd` before restarting server/web; it cleans PID files, port listeners, repo-local dotnet, and known wrapper windows.
 - Use `--snapshots` only when the console client needs snapshot logs.
 - Use `stress-test.cmd` for synthetic client load before trying manual multi-window testing.
+- Use `start-godot-visual-check.cmd` when the S16 Godot visual/manual check is needed.
 - Keep Postgres as a later provider, not the default path.
