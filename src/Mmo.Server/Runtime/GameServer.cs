@@ -281,7 +281,8 @@ public sealed class GameServer
                     try
                     {
                         var role = ResolveRole(login.AccountName, character.DisplayName);
-                        var loginTile = ResolveLoginTile(character.Tile);
+                        var takeoverTile = KickExistingSessionForCharacter(current, character.CharacterId);
+                        var loginTile = ResolveLoginTile(takeoverTile ?? character.Tile);
                         networkId = _networkIds.Rent();
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current);
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
@@ -316,6 +317,49 @@ public sealed class GameServer
                 });
             }
         });
+    }
+
+    private TileCoord? KickExistingSessionForCharacter(ClientSession current, Guid characterId)
+    {
+        ClientSession? existing = null;
+        foreach (var session in _sessions.Values)
+        {
+            if (ReferenceEquals(session, current) || !session.IsAuthenticated || session.CharacterId != characterId)
+            {
+                continue;
+            }
+
+            existing = session;
+            break;
+        }
+
+        return existing is null
+            ? null
+            : KickAuthenticatedSession(existing, "logged_in_elsewhere", "Logged in elsewhere.");
+    }
+
+    private TileCoord? KickAuthenticatedSession(ClientSession session, string code, string message)
+    {
+        TrySend(session.Peer, new ServerErrorMessage(code, message), DeliveryMethod.ReliableOrdered);
+        _sessions.Remove(session.Peer);
+        _metrics.RecordPeerDisconnected();
+
+        TileCoord? tile = null;
+        if (session.EntityId.HasValue && _zone.Despawn(session.EntityId.Value, out var entity))
+        {
+            tile = entity.Tile;
+            _networkIds.Return(entity.NetworkId);
+            QueueTileSave(session, entity.Tile);
+        }
+        else
+        {
+            _networkIds.Return(session.NetworkId);
+            QueueTileSave(session);
+        }
+
+        _netManager.DisconnectPeer(session.Peer);
+        Log.Info($"Kicked {session.DisplayName}: {message}");
+        return tile;
     }
 
     private void Tick(TickBudgetRecorder tickBudget)
