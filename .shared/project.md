@@ -79,3 +79,22 @@ for a review request.
 - Measure before optimizing.
 - Use the repo-local SDK at `.tools\dotnet\dotnet.exe`.
 - Use `.shared\skills\mmo-dev\scripts\run-checks.cmd` for the standard build/test check.
+
+## Safe Local Execution (binds BOTH agents)
+
+Run the server and clients **only** through the repo skill scripts under
+`.shared\skills\mmo-dev\scripts\` (e.g. `start-server.cmd`, `start-godot-visual-check.cmd`,
+`review-stress*.cmd`, `stop-mmo.cmd`). This is a hard rule, not a preference.
+
+**Never** hand-roll ad-hoc shell that resembles a malware launcher on the user's machine. Concretely,
+do NOT run commands that combine any of: `Start-Process -WindowStyle Hidden`, `-ExecutionPolicy
+Bypass`, base64/escaped-quote-obfuscated one-liners, or `Stop-Process -Id`/`taskkill` PID-killing.
+That pattern triggers Windows Defender (it has, including a silent launch failure) and makes the
+machine look like it is under attack.
+
+- Keep process launches **visible** (normal window) and **script-based**, never hidden/background.
+- Stop processes via `stop-mmo.cmd`, not ad-hoc PID kills.
+- If a diagnostic needs something the scripts don't do (e.g. a Release server, or server output teed
+  to a file), **extend the script** (and have it reviewed) rather than improvising a raw launcher.
+- If the only way to do a task looks like the forbidden pattern, stop and raise it instead of running
+  it. See `.shared/memory/safe-local-execution.md`.
