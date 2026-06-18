@@ -406,7 +406,8 @@ public partial class MmoClientRoot : Node3D
             return;
         }
 
-        var focus = new Vector3((float)local.Position.X, 0, (float)local.Position.Y);
+        var localState = local.Value;
+        var focus = new Vector3((float)localState.Position.X, 0, (float)localState.Position.Y);
         _camera.Position = focus + new Vector3(24, 28, 24);
         _camera.LookAt(focus, Vector3.Up);
     }
