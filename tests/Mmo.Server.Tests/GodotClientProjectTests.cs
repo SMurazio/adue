@@ -42,6 +42,22 @@ public sealed class GodotClientProjectTests
         Assert.Contains("QueueRedraw", graph);
     }
 
+    [Fact]
+    public void GodotClientBatchesStaticWallsAndReusesEntityResources()
+    {
+        var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
+
+        Assert.Contains("MultiMeshInstance3D", root);
+        Assert.Contains("new MultiMesh", root);
+        Assert.Contains("InstanceCount = wallTiles.Count", root);
+        Assert.Contains("SetInstanceTransform", root);
+        Assert.Contains("Name = \"WallTiles\"", root);
+        Assert.DoesNotContain("Name = $\"Wall_{tile.X}_{tile.Y}\"", root);
+        Assert.Contains("private readonly BoxMesh _wallMesh", root);
+        Assert.Contains("private readonly CapsuleMesh _entityMesh", root);
+        Assert.Contains("MaterialOverride = state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial", root);
+    }
+
     private static string FindGodotProject()
     {
         return FindGodotSource("project.godot");

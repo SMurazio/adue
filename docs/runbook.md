@@ -119,6 +119,8 @@ visible frame hitches from lazy shader/pipeline compilation in this simple 2.5D 
 Compatibility renderer unless a measured visual requirement justifies revisiting it.
 Press `F3` in the Godot client to toggle the performance HUD. It shows FPS, process/physics frame
 time, render counts, memory, GC counts, frame hitches, and a rolling frame-time graph.
+Static wall tiles render through one `MultiMeshInstance3D`, and entity meshes/materials are reused,
+so the Godot client should not create one render object per blocked tile or per entity material.
 
 Isometric 3D browser debug client:
 

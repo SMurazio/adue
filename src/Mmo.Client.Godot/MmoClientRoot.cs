@@ -17,6 +17,13 @@ public partial class MmoClientRoot : Node3D
     private readonly List<uint> _staleEntityIds = [];
     private readonly List<string> _chatRows = [];
     private readonly StringBuilder _perfText = new(768);
+    private readonly BoxMesh _wallMesh = new() { Size = new Vector3(0.92f, 0.85f, 0.92f) };
+    private readonly CapsuleMesh _entityMesh = new() { Radius = 0.28f, Height = 0.9f };
+    private readonly StandardMaterial3D _groundMaterial = Material(new Color(0.08f, 0.12f, 0.13f));
+    private readonly StandardMaterial3D _gridMaterial = Material(new Color(0.22f, 0.42f, 0.48f, 0.55f));
+    private readonly StandardMaterial3D _wallMaterial = Material(new Color(0.45f, 0.50f, 0.53f));
+    private readonly StandardMaterial3D _localEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
+    private readonly StandardMaterial3D _remoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
 
     private MmoClient? _client;
     private Node3D? _worldRoot;
@@ -215,7 +222,7 @@ public partial class MmoClientRoot : Node3D
             Name = "Ground",
             Mesh = new BoxMesh { Size = new Vector3(zone.Width, 0.04f, zone.Height) },
             Position = new Vector3(zone.Width / 2f - 0.5f, -0.04f, zone.Height / 2f - 0.5f),
-            MaterialOverride = Material(new Color(0.08f, 0.12f, 0.13f))
+            MaterialOverride = _groundMaterial
         };
         _worldRoot.AddChild(ground);
 
@@ -223,10 +230,11 @@ public partial class MmoClientRoot : Node3D
         {
             Name = "Grid",
             Mesh = BuildGridMesh(zone.Width, zone.Height),
-            MaterialOverride = Material(new Color(0.22f, 0.42f, 0.48f, 0.55f))
+            MaterialOverride = _gridMaterial
         };
         _worldRoot.AddChild(grid);
 
+        var wallTiles = new List<TileCoord>();
         foreach (var tile in zone.BlockedTiles)
         {
             if (!_renderedBlockedTiles.Add(tile))
@@ -234,14 +242,29 @@ public partial class MmoClientRoot : Node3D
                 continue;
             }
 
-            var wall = new MeshInstance3D
+            wallTiles.Add(tile);
+        }
+
+        if (wallTiles.Count > 0)
+        {
+            var wallMultiMesh = new MultiMesh
             {
-                Name = $"Wall_{tile.X}_{tile.Y}",
-                Mesh = new BoxMesh { Size = new Vector3(0.92f, 0.85f, 0.92f) },
-                Position = TileToWorld(tile, 0.4f),
-                MaterialOverride = Material(new Color(0.45f, 0.50f, 0.53f))
+                Mesh = _wallMesh,
+                TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
+                InstanceCount = wallTiles.Count
             };
-            _wallRoot.AddChild(wall);
+            for (var i = 0; i < wallTiles.Count; i++)
+            {
+                wallMultiMesh.SetInstanceTransform(i, new Transform3D(Basis.Identity, TileToWorld(wallTiles[i], 0.4f)));
+            }
+
+            var walls = new MultiMeshInstance3D
+            {
+                Name = "WallTiles",
+                Multimesh = wallMultiMesh,
+                MaterialOverride = _wallMaterial
+            };
+            _wallRoot.AddChild(walls);
         }
     }
 
@@ -325,8 +348,8 @@ public partial class MmoClientRoot : Node3D
         var body = new MeshInstance3D
         {
             Name = $"Entity_{state.NetworkId}",
-            Mesh = new CapsuleMesh { Radius = 0.28f, Height = 0.9f },
-            MaterialOverride = Material(state.IsLocal ? new Color(0.22f, 0.70f, 1.0f) : new Color(0.94f, 0.68f, 0.22f))
+            Mesh = _entityMesh,
+            MaterialOverride = state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial
         };
 
         var label = new Label3D
