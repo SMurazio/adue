@@ -60,6 +60,17 @@ public sealed class GodotClientProjectTests
         Assert.Contains("MaterialOverride = state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial", root);
     }
 
+    [Fact]
+    public void GodotClientDrawsGridWithAShaderOnAPlane()
+    {
+        var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
+
+        Assert.Contains("shader_type spatial", root);
+        Assert.Contains("new PlaneMesh", root);
+        // The old per-line ImmediateMesh grid geometry is gone.
+        Assert.DoesNotContain("Mesh.PrimitiveType.Lines", root);
+    }
+
     private static string FindGodotProject()
     {
         return FindGodotSource("project.godot");

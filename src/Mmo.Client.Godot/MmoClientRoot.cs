@@ -20,7 +20,6 @@ public partial class MmoClientRoot : Node3D
     private readonly BoxMesh _wallMesh = new() { Size = new Vector3(0.92f, 0.85f, 0.92f) };
     private readonly CapsuleMesh _entityMesh = new() { Radius = 0.28f, Height = 0.9f };
     private readonly StandardMaterial3D _groundMaterial = Material(new Color(0.08f, 0.12f, 0.13f));
-    private readonly StandardMaterial3D _gridMaterial = Material(new Color(0.22f, 0.42f, 0.48f, 0.55f));
     private readonly StandardMaterial3D _wallMaterial = Material(new Color(0.45f, 0.50f, 0.53f));
     private readonly StandardMaterial3D _localEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
     private readonly StandardMaterial3D _remoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
@@ -105,6 +104,16 @@ public partial class MmoClientRoot : Node3D
         if (key.Keycode == Key.F3)
         {
             TogglePerfHud();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
+        if (key.Keycode == Key.F11)
+        {
+            var mode = DisplayServer.WindowGetMode();
+            DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.ExclusiveFullscreen
+                ? DisplayServer.WindowMode.Windowed
+                : DisplayServer.WindowMode.ExclusiveFullscreen);
             GetViewport().SetInputAsHandled();
             return;
         }
@@ -248,8 +257,9 @@ public partial class MmoClientRoot : Node3D
         var grid = new MeshInstance3D
         {
             Name = "Grid",
-            Mesh = BuildGridMesh(zone.Width, zone.Height),
-            MaterialOverride = _gridMaterial
+            Mesh = new PlaneMesh { Size = new Vector2(zone.Width, zone.Height) },
+            Position = new Vector3(zone.Width / 2f - 0.5f, 0.02f, zone.Height / 2f - 0.5f),
+            MaterialOverride = CreateGridMaterial()
         };
         _worldRoot.AddChild(grid);
 
@@ -611,25 +621,35 @@ public partial class MmoClientRoot : Node3D
         return new Vector3(tile.X, y, tile.Y);
     }
 
-    private static ImmediateMesh BuildGridMesh(int width, int height)
+    private static ShaderMaterial CreateGridMaterial()
     {
-        var mesh = new ImmediateMesh();
-        mesh.SurfaceBegin(Mesh.PrimitiveType.Lines);
-        for (var x = 0; x <= width; x++)
-        {
-            mesh.SurfaceAddVertex(new Vector3(x - 0.5f, 0.02f, -0.5f));
-            mesh.SurfaceAddVertex(new Vector3(x - 0.5f, 0.02f, height - 0.5f));
-        }
-
-        for (var y = 0; y <= height; y++)
-        {
-            mesh.SurfaceAddVertex(new Vector3(-0.5f, 0.02f, y - 0.5f));
-            mesh.SurfaceAddVertex(new Vector3(width - 0.5f, 0.02f, y - 0.5f));
-        }
-
-        mesh.SurfaceEnd();
-        return mesh;
+        // Procedural grid drawn in the fragment shader on a single ground-sized PlaneMesh, replacing
+        // the old per-line ImmediateMesh geometry. Lines sit at tile boundaries (world *.5) and are
+        // anti-aliased via fwidth. One plane + one draw call, scales to any zone size for free.
+        return new ShaderMaterial { Shader = new Shader { Code = GridShaderCode } };
     }
+
+    private const string GridShaderCode = @"
+shader_type spatial;
+render_mode unshaded;
+
+uniform vec4 line_color : source_color = vec4(0.22, 0.42, 0.48, 0.55);
+uniform float tile_size = 1.0;
+
+varying vec3 world_pos;
+
+void vertex() {
+    world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+    vec2 uv = world_pos.xz / tile_size;
+    vec2 d = abs(fract(uv) - 0.5) / fwidth(uv);
+    float line = min(d.x, d.y);
+    ALBEDO = line_color.rgb;
+    ALPHA = (1.0 - min(line, 1.0)) * line_color.a;
+}
+";
 
     private static StandardMaterial3D Material(Color color)
     {
