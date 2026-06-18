@@ -35,6 +35,7 @@ public sealed class GameServer
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
     private readonly ServerMovementTrace _movementTrace;
+    private readonly ServerCadenceTrace _cadenceTrace = ServerCadenceTrace.FromEnvironment();
     private readonly NetworkIdPool _networkIds = new();
     private readonly Zone _zone;
     private readonly List<ClientSession> _authenticatedScratch = [];
@@ -53,6 +54,8 @@ public sealed class GameServer
     private uint _serverTick;
     private uint _nextPersistenceCheckpointTick;
     private long _pendingMovementElapsedTicks;
+    private long _traceStartTimestamp;
+    private int _snapshotsSentThisTick;
 
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
@@ -96,7 +99,12 @@ public sealed class GameServer
 
         _netManager.Start(_options.Port);
         Log.Info($"Server listening on UDP {_options.Port}.");
+        if (_cadenceTrace.Enabled)
+        {
+            Log.Info("Server cadence trace enabled: writing .run/server-cadence.csv and .run/server-steps.csv.");
+        }
 
+        _traceStartTimestamp = Stopwatch.GetTimestamp();
         var tickIntervalTimestampTicks = PreciseTickScheduler.TickIntervalTimestampTicks(_options.TickRate);
         var tickInterval = PreciseTickScheduler.ToTimeSpan(tickIntervalTimestampTicks);
         var nextTickAt = Stopwatch.GetTimestamp();
@@ -158,6 +166,8 @@ public sealed class GameServer
             await _persistence.DisposeAsync();
             _syntheticLoad.Stop();
             _netManager.Stop();
+            _cadenceTrace.Flush();
+            _cadenceTrace.Dispose();
             Log.Info("Server stopped.");
         }
     }
@@ -419,10 +429,19 @@ public sealed class GameServer
 
         BroadcastSnapshot(tickBudget);
 
+        if (_cadenceTrace.Enabled)
+        {
+            _cadenceTrace.RecordTick(
+                _serverTick,
+                Stopwatch.GetElapsedTime(_traceStartTimestamp),
+                _entityScratch,
+                _snapshotsSentThisTick);
+        }
     }
 
     private void BroadcastSnapshot(TickBudgetRecorder tickBudget)
     {
+        _snapshotsSentThisTick = 0;
         _authenticatedScratch.Clear();
         foreach (var session in _sessions.Values)
         {
@@ -472,6 +491,7 @@ public sealed class GameServer
         if (sentPackets > 0)
         {
             _metrics.RecordSnapshotSent(sentBytes, visibleCount, entities.Count);
+            _snapshotsSentThisTick++;
         }
 
         if ((visibleCount < entities.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
