@@ -431,10 +431,13 @@ public sealed class AoiIntegrationTests
                         break;
                     case WorldSnapshotMessage snapshot:
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
-                        var own = snapshot.Entities.FirstOrDefault(entity => entity.NetworkId == OwnNetworkId);
-                        if (own is not null)
+                        foreach (var entity in snapshot.Entities)
                         {
-                            OwnTile = own.Tile;
+                            if (entity.NetworkId == OwnNetworkId)
+                            {
+                                OwnTile = entity.Tile;
+                                break;
+                            }
                         }
 
                         break;
