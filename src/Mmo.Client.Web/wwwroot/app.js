@@ -10,6 +10,7 @@ const state = {
   connected: false,
   snapshotIsComplete: true,
   snapshotTotalEntities: 0,
+  selfCharacterId: null,
   selfNetworkId: null
 };
 
@@ -55,6 +56,7 @@ const stepRetryMs = 50;
 const debugVisibilityRadius = 96;
 const entityStaleAfterMs = 2500;
 const entityExpireAfterMs = 8000;
+const entityRegistryMaxEntries = 2048;
 const partialSnapshotGhostOpacity = 0.42;
 let cameraZoom = 1;
 let scene = null;
@@ -336,6 +338,8 @@ function connect() {
   state.socket.addEventListener("close", () => {
     state.connected = false;
     state.role = "Player";
+    state.selfCharacterId = null;
+    state.selfNetworkId = null;
     stopMetricsPolling();
     els.connect.disabled = false;
     els.disconnect.disabled = true;
@@ -367,6 +371,8 @@ function handleMessage(message) {
       break;
     case "login":
       state.role = message.role ?? "Player";
+      state.selfCharacterId = message.accepted ? message.characterId ?? null : null;
+      state.selfNetworkId = null;
       setStatus(message.accepted ? `Logged in as ${message.displayName} (${state.role})` : `Login rejected: ${message.reason}`);
       if (message.accepted && state.role === "Admin") {
         startMetricsPolling();
@@ -426,8 +432,10 @@ function handleEntitySpawn(message) {
     facing: message.facing ?? "S"
   };
 
-  entityRegistry.set(id, entity);
-  if (entity.name === state.name) {
+  rememberEntityMetadata(entity);
+  if (state.selfCharacterId !== null && entity.characterId === state.selfCharacterId) {
+    state.selfNetworkId = id;
+  } else if (state.selfCharacterId === null && entity.name === state.name) {
     state.selfNetworkId = id;
   }
 
@@ -435,6 +443,31 @@ function handleEntitySpawn(message) {
   if (entry && entry.name !== entity.name) {
     entry.name = entity.name;
     replaceEntityLabel(entry, entity.name);
+  }
+}
+
+function rememberEntityMetadata(entity) {
+  entityRegistry.delete(entity.id);
+  entityRegistry.set(entity.id, entity);
+  pruneEntityRegistry();
+}
+
+function pruneEntityRegistry() {
+  if (entityRegistry.size <= entityRegistryMaxEntries) {
+    return;
+  }
+
+  const activeIds = new Set(state.entities.map(entity => entity.id));
+  for (const id of entityRegistry.keys()) {
+    if (entityRegistry.size <= entityRegistryMaxEntries) {
+      return;
+    }
+
+    if (id === state.selfNetworkId || activeIds.has(id)) {
+      continue;
+    }
+
+    entityRegistry.delete(id);
   }
 }
 
@@ -452,7 +485,8 @@ function addChat(sender, text) {
 function handleSnapshotMessage(message) {
   const chunkCount = Math.max(1, message.chunkCount ?? 1);
   const chunkIndex = message.chunkIndex ?? 0;
-  const totalEntities = message.totalEntities ?? message.entities.length;
+  const snapshotEntities = message.entities ?? [];
+  const totalEntities = message.totalEntities ?? snapshotEntities.length;
   const sequence = message.sequence ?? message.tick;
 
   if (state.tick !== null && message.tick < state.tick) {
@@ -461,7 +495,7 @@ function handleSnapshotMessage(message) {
 
   if (chunkCount === 1) {
     snapshotAssembly = null;
-    applySnapshot(message.tick, sequence, totalEntities, message.isComplete ?? true, message.entities);
+    applySnapshot(message.tick, sequence, totalEntities, message.isComplete ?? true, snapshotEntities);
     return;
   }
 
@@ -487,7 +521,7 @@ function handleSnapshotMessage(message) {
 
   snapshotAssembly.totalEntities = totalEntities;
   snapshotAssembly.isComplete = snapshotAssembly.isComplete && (message.isComplete ?? false);
-  snapshotAssembly.chunks[chunkIndex] = message.entities;
+  snapshotAssembly.chunks[chunkIndex] = snapshotEntities;
 
   if (snapshotAssembly.chunks.every(Boolean)) {
     const entities = snapshotAssembly.chunks.flat();
@@ -496,7 +530,7 @@ function handleSnapshotMessage(message) {
   }
 }
 
-function applySnapshot(tick, sequence, totalEntities, isComplete, entities) {
+function applySnapshot(tick, sequence, totalEntities, isComplete, entities = []) {
   state.tick = tick;
   state.snapshotSequence = sequence;
   state.entities = isComplete
@@ -512,7 +546,7 @@ function applySnapshot(tick, sequence, totalEntities, isComplete, entities) {
     : `${state.entities.length}/${state.snapshotTotalEntities} entities`;
 }
 
-function hydrateSnapshotEntities(states) {
+function hydrateSnapshotEntities(states = []) {
   return states.map(entity => {
     const id = entity.id;
     const known = entityRegistry.get(id);
@@ -727,6 +761,16 @@ function updateEntityTileTween(entry, entity, nowMs) {
     return;
   }
 
+  if (Math.abs(entry.tileX - entity.x) > 1 || Math.abs(entry.tileY - entity.y) > 1) {
+    entry.from.copy(entry.serverPosition);
+    entry.to.copy(entry.serverPosition);
+    entry.renderPosition.copy(entry.serverPosition);
+    entry.tileX = entity.x;
+    entry.tileY = entity.y;
+    entry.tweenStartedAt = nowMs;
+    return;
+  }
+
   entry.from.copy(entry.renderPosition);
   entry.to.copy(entry.serverPosition);
   entry.tileX = entity.x;
@@ -739,9 +783,16 @@ function findSelfEntity(entities) {
 }
 
 function isSelfEntity(entity) {
-  return state.selfNetworkId !== null
-    ? entity.id === state.selfNetworkId
-    : entity.name === state.name;
+  if (state.selfNetworkId !== null) {
+    return entity.id === state.selfNetworkId;
+  }
+
+  if (state.selfCharacterId !== null) {
+    return entity.characterId === state.selfCharacterId;
+  }
+
+  // Fallback only until login/spawn metadata arrives; display names are not unique.
+  return entity.name === state.name;
 }
 
 function getOrCreateEntity(entity) {

@@ -11,9 +11,15 @@ public sealed class WebClientAssetTests
 
         Assert.Contains("const tileStepTweenMs = 200;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
+        Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
         Assert.Contains("function updateEntityTileTween", app);
         Assert.Contains("function screenInputToStepDirection", app);
         Assert.Contains("return \"E\";", app);
+        Assert.Contains("function rememberEntityMetadata", app);
+        Assert.Contains("function pruneEntityRegistry", app);
+        Assert.Contains("const snapshotEntities = message.entities ?? [];", app);
+        Assert.Contains("Math.abs(entry.tileX - entity.x) > 1", app);
+        Assert.Contains("entity.characterId === state.selfCharacterId", app);
         Assert.Contains("function mergeSnapshotEntities", app);
         Assert.Contains("function sendMoveStep", app);
         Assert.Contains("type: \"moveStep\"", app);
