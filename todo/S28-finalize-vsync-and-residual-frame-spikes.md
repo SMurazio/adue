@@ -22,11 +22,23 @@ The residual stutter after S26/S27 was **VSync frame pacing in windowed dev mode
    interference). When the real window/fullscreen flow is built, choose and test the vsync mode there
    (likely Enabled in fullscreen; also try Mailbox `3`), and consider a user-facing VSync/FPS-cap
    option. Don't tune this against windowed dev behavior.
-2. **Characterize the residual frame spike.** With vsync off (~1300 fps) a slight stutter still
-   happens occasionally — a rare single long frame (`gc` counts are tiny, so likely engine/OS/GC
-   blip). Use the F3 HUD frame-time graph + hitch counter to catch what coincides with it; fix only
-   if it's something cheap (e.g. throttle/avoid an allocation or a periodic engine call). It may be
-   the practical floor for a windowed dev client.
+2. **Characterize the residual stutter — LEADING THEORY: tile interpolation, not frame pacing.**
+   Human observation: the stutter did **not** happen with the old *non-tiled* (continuous) movement;
+   it appeared with tile-stepping. With vsync off the client frames are even (~1300 fps), so a
+   residual "slight stutter every so often" most likely comes from the **interpolation layer**: the
+   client tweens between discrete confirmed tiles (~140-150 ms apart), and if a confirmed-tile update
+   arrives late (delivery jitter), the tween starves at a step boundary → brief pause → micro-stutter.
+   Earlier `tile_confirmed` traces already showed uneven arrivals (134-300 ms) and swinging
+   `queueDepth`.
+   - **Confirm:** watch the `MOVE` line `q=` (interpolation queueDepth) / `cadence` during a stutter
+     (and/or the `tile_confirmed` trace). `q` dipping to 0-1 at the stutter → starvation; healthy `q`
+     but still hitching → tween easing/cadence.
+   - **Fix lever:** `TileInterpolator` playout buffer / cadence in `Mmo.Client.Core` — hold a slightly
+     larger cushion of confirmed tiles to absorb arrival jitter, and/or adapt tween speed to the
+     actual arrival rate. (S13/S14 tuned this for the web client; the Godot client uses the same core
+     and may need its own tuning.) Also check whether server snapshot *delivery* itself is bursty.
+   - Secondary: if the trace shows even arrivals + healthy queue + even frames yet still a rare blip,
+     fall back to the frame-spike angle (F3 HUD graph: GC/engine/OS), which may be the practical floor.
 
 ## Acceptance
 
