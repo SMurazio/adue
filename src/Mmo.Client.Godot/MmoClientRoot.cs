@@ -34,6 +34,7 @@ public partial class MmoClientRoot : Node3D
     private Label? _metricsLabel;
     private Label? _chatLabel;
     private LineEdit? _chatInput;
+    private PanelContainer? _perfPanel;
     private Label? _perfLabel;
     private FrameTimeGraph? _perfGraph;
     private double _elapsedSeconds;
@@ -161,53 +162,71 @@ public partial class MmoClientRoot : Node3D
         var layer = new CanvasLayer { Name = "Overlay" };
         AddChild(layer);
 
-        _statusLabel = CreateOverlayLabel("Status", new Vector2(12, 10), new Vector2(760, 124), 15);
-        _metricsLabel = CreateOverlayLabel("Metrics", new Vector2(0, 10), new Vector2(650, 330), 13);
-        _chatLabel = CreateOverlayLabel("Chat", new Vector2(12, 0), new Vector2(760, 164), 14);
-        _perfLabel = CreateOverlayLabel("PerfHud", new Vector2(12, 138), new Vector2(460, 184), 13);
+        var statusPanel = CreateOverlayPanel("StatusPanel", new Vector2(12, 10), new Vector2(840, 132));
+        var statusRows = CreatePanelVBox(statusPanel);
+        _statusLabel = CreateOverlayLabel("Status", 15);
+        statusRows.AddChild(_statusLabel);
+
+        var metricsPanel = CreateOverlayPanel("MetricsPanel", Vector2.Zero, new Vector2(650, 330));
+        metricsPanel.AnchorLeft = 1f;
+        metricsPanel.AnchorRight = 1f;
+        metricsPanel.OffsetLeft = -662f;
+        metricsPanel.OffsetRight = -12f;
+        metricsPanel.OffsetTop = 10f;
+        metricsPanel.OffsetBottom = 340f;
+        var metricsRows = CreatePanelVBox(metricsPanel);
+        _metricsLabel = CreateOverlayLabel("Metrics", 13);
+        metricsRows.AddChild(_metricsLabel);
+
+        var chatPanel = CreateOverlayPanel("ChatPanel", Vector2.Zero, new Vector2(760, 164));
+        chatPanel.AnchorTop = 1f;
+        chatPanel.AnchorBottom = 1f;
+        chatPanel.OffsetLeft = 12f;
+        chatPanel.OffsetRight = 772f;
+        chatPanel.OffsetTop = -220f;
+        chatPanel.OffsetBottom = -50f;
+        var chatRows = CreatePanelVBox(chatPanel);
+        _chatLabel = CreateOverlayLabel("Chat", 14);
+        chatRows.AddChild(_chatLabel);
+
+        _perfPanel = CreateOverlayPanel("PerfPanel", new Vector2(12, 154), new Vector2(460, 304));
+        var perfRows = CreatePanelVBox(_perfPanel);
+        _perfLabel = CreateOverlayLabel("PerfHud", 13);
         _perfGraph = new FrameTimeGraph
         {
             Name = "PerfFrameGraph",
-            Position = new Vector2(12, 326),
-            Size = new Vector2(460, 78),
-            Visible = false
+            CustomMinimumSize = new Vector2(436, 78)
         };
+        perfRows.AddChild(_perfLabel);
+        perfRows.AddChild(_perfGraph);
+
+        var inputPanel = CreateOverlayPanel("ChatInputPanel", Vector2.Zero, new Vector2(760, 40));
+        inputPanel.AnchorTop = 1f;
+        inputPanel.AnchorBottom = 1f;
+        inputPanel.OffsetLeft = 12f;
+        inputPanel.OffsetRight = 772f;
+        inputPanel.OffsetTop = -42f;
+        inputPanel.OffsetBottom = -8f;
+        var inputMargin = CreatePanelMargin(inputPanel);
         _chatInput = new LineEdit
         {
             Name = "ChatInput",
             PlaceholderText = "Enter/T to chat. Try: hello or /role",
-            Size = new Vector2(760, 28)
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
         };
         _chatInput.AddThemeFontSizeOverride("font_size", 14);
         _chatInput.AddThemeColorOverride("font_color", new Color(0.94f, 0.98f, 1.0f));
         _chatInput.AddThemeColorOverride("font_placeholder_color", new Color(0.70f, 0.78f, 0.82f));
         _chatInput.TextSubmitted += OnChatSubmitted;
+        inputMargin.AddChild(_chatInput);
 
-        _metricsLabel.AnchorLeft = 1f;
-        _metricsLabel.AnchorRight = 1f;
-        _metricsLabel.OffsetLeft = -662f;
-        _metricsLabel.OffsetRight = -12f;
+        _perfPanel.Visible = false;
 
-        _chatLabel.AnchorTop = 1f;
-        _chatLabel.AnchorBottom = 1f;
-        _chatLabel.OffsetTop = -212f;
-        _chatLabel.OffsetBottom = -48f;
-
-        _chatInput.AnchorTop = 1f;
-        _chatInput.AnchorBottom = 1f;
-        _chatInput.OffsetLeft = 12f;
-        _chatInput.OffsetRight = 772f;
-        _chatInput.OffsetTop = -40f;
-        _chatInput.OffsetBottom = -12f;
-
-        _perfLabel.Visible = false;
-
-        layer.AddChild(_statusLabel);
-        layer.AddChild(_metricsLabel);
-        layer.AddChild(_chatLabel);
-        layer.AddChild(_perfLabel);
-        layer.AddChild(_perfGraph);
-        layer.AddChild(_chatInput);
+        layer.AddChild(statusPanel);
+        layer.AddChild(metricsPanel);
+        layer.AddChild(chatPanel);
+        layer.AddChild(_perfPanel);
+        layer.AddChild(inputPanel);
     }
 
     private void BuildZone(ZoneModel zone)
@@ -415,7 +434,7 @@ public partial class MmoClientRoot : Node3D
                 ? "server: pending"
                 : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
             var movementDebug = _client.DebugMovementEnabled
-                ? "\n" + FormatMovementDebug(_client.MovementDebug) + "\n" + FormatFrameDebug()
+                ? "\n" + FormatMovementDebug(_client.MovementDebug)
                 : "";
             SetTextIfChanged(_statusLabel,
                 $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
@@ -438,14 +457,9 @@ public partial class MmoClientRoot : Node3D
     private void TogglePerfHud()
     {
         _perfHudVisible = !_perfHudVisible;
-        if (_perfLabel is not null)
+        if (_perfPanel is not null)
         {
-            _perfLabel.Visible = _perfHudVisible;
-        }
-
-        if (_perfGraph is not null)
-        {
-            _perfGraph.Visible = _perfHudVisible;
+            _perfPanel.Visible = _perfHudVisible;
         }
 
         _nextPerfHudAt = 0;
@@ -611,13 +625,50 @@ public partial class MmoClientRoot : Node3D
         };
     }
 
-    private static Label CreateOverlayLabel(string name, Vector2 position, Vector2 size, int fontSize)
+    private static PanelContainer CreateOverlayPanel(string name, Vector2 position, Vector2 size)
+    {
+        var panel = new PanelContainer
+        {
+            Name = name,
+            Position = position,
+            CustomMinimumSize = size
+        };
+
+        var style = new StyleBoxFlat
+        {
+            BgColor = new Color(0.04f, 0.06f, 0.08f, 0.62f),
+            BorderColor = new Color(0.30f, 0.45f, 0.50f, 0.55f)
+        };
+        style.SetCornerRadiusAll(6);
+        style.SetBorderWidthAll(1);
+        panel.AddThemeStyleboxOverride("panel", style);
+        return panel;
+    }
+
+    private static MarginContainer CreatePanelMargin(Control panel)
+    {
+        var margin = new MarginContainer { Name = "Margin" };
+        margin.AddThemeConstantOverride("margin_left", 10);
+        margin.AddThemeConstantOverride("margin_right", 10);
+        margin.AddThemeConstantOverride("margin_top", 6);
+        margin.AddThemeConstantOverride("margin_bottom", 6);
+        panel.AddChild(margin);
+        return margin;
+    }
+
+    private static VBoxContainer CreatePanelVBox(PanelContainer panel)
+    {
+        var vbox = new VBoxContainer { Name = "Rows" };
+        vbox.AddThemeConstantOverride("separation", 2);
+        CreatePanelMargin(panel).AddChild(vbox);
+        return vbox;
+    }
+
+    private static Label CreateOverlayLabel(string name, int fontSize)
     {
         var label = new Label
         {
             Name = name,
-            Position = position,
-            Size = size,
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
         label.AddThemeFontSizeOverride("font_size", fontSize);
@@ -736,11 +787,6 @@ public partial class MmoClientRoot : Node3D
         var confirmedTile = debug.LastConfirmedTile?.ToString() ?? "-";
         var render = $"{debug.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{debug.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}";
         return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
-    }
-
-    private string FormatFrameDebug()
-    {
-        return $"FRAME ms={_lastFrameMs.ToString("0.0", CultureInfo.InvariantCulture)}/{_maxFrameMs.ToString("0.0", CultureInfo.InvariantCulture)} hitches={_frameHitchCount} threshold={FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture)} gc={_clientGc0Count}/{_clientGc1Count}/{_clientGc2Count}";
     }
 
     private void AppendPerfRow(string label, double value)
