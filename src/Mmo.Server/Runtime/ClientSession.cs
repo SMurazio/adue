@@ -110,6 +110,16 @@ public sealed class ClientSession
 
     public bool ShouldSendFullSnapshot(uint serverTick, uint heartbeatTicks)
     {
+        if (heartbeatTicks <= 1)
+        {
+            return true;
+        }
+
+        if (serverTick % heartbeatTicks != NetworkId % heartbeatTicks)
+        {
+            return false;
+        }
+
         return _lastFullSnapshotSentTick == 0 || serverTick - _lastFullSnapshotSentTick >= heartbeatTicks;
     }
 

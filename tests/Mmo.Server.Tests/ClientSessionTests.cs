@@ -99,4 +99,40 @@ public sealed class ClientSessionTests
         Assert.Equal(1u, session.NextSnapshotSequence());
         Assert.Equal(2u, session.NextSnapshotSequence());
     }
+
+    [Fact]
+    public void FullSnapshotHeartbeatIsPhasedByNetworkId()
+    {
+        const uint heartbeatTicks = 20;
+        var sessions = Enumerable.Range(1, 40)
+            .Select(networkId =>
+            {
+                var session = new ClientSession(null!);
+                session.Authenticate((uint)networkId, Guid.NewGuid(), $"Player{networkId}", ClientRole.Player, "sandbox", TileGrid.DefaultSpawnTile);
+                return session;
+            })
+            .ToArray();
+
+        var fullSnapshotCountsByTick = Enumerable.Range(1, (int)heartbeatTicks)
+            .Select(tick => sessions.Count(session => session.ShouldSendFullSnapshot((uint)tick, heartbeatTicks)))
+            .ToArray();
+
+        Assert.All(fullSnapshotCountsByTick, count => Assert.Equal(2, count));
+    }
+
+    [Fact]
+    public void FullSnapshotHeartbeatRepeatsOnSessionPhase()
+    {
+        const uint heartbeatTicks = 20;
+        var session = new ClientSession(null!);
+        session.Authenticate(7, Guid.NewGuid(), "Player", ClientRole.Player, "sandbox", TileGrid.DefaultSpawnTile);
+
+        Assert.False(session.ShouldSendFullSnapshot(6, heartbeatTicks));
+        Assert.True(session.ShouldSendFullSnapshot(7, heartbeatTicks));
+
+        session.RememberSnapshotSent(7, isComplete: true);
+
+        Assert.False(session.ShouldSendFullSnapshot(26, heartbeatTicks));
+        Assert.True(session.ShouldSendFullSnapshot(27, heartbeatTicks));
+    }
 }
