@@ -12,7 +12,7 @@ public sealed class WebClientAssetTests
         Assert.Contains("const tileStepTweenMs = 200;", app);
         Assert.Contains("const movementInterpolationDelayMs = tileStepTweenMs;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
-        Assert.Contains("const movementChordDelayMs = 35;", app);
+        Assert.Contains("const movementChordDelayMs = 70;", app);
         Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
         Assert.Contains("const screenInputStepDirections = new Map([", app);
         Assert.Contains("[\"0,1\", \"NW\"]", app);
@@ -22,6 +22,13 @@ public sealed class WebClientAssetTests
         Assert.Contains("function updateEntityTileTween", app);
         Assert.Contains("function screenInputToStepDirection", app);
         Assert.Contains("return screenInputStepDirections.get(`${x},${y}`) ?? null;", app);
+        Assert.Contains("const movementKeysByCode = new Map([", app);
+        Assert.Contains("[\"KeyS\", \"s\"]", app);
+        Assert.Contains("[\"KeyD\", \"d\"]", app);
+        Assert.Contains("function movementKeyFromEvent", app);
+        Assert.Contains("function setMovementKeyDown", app);
+        Assert.Contains("keysDown.delete(\"w\");", app);
+        Assert.Contains("keysDown.delete(\"a\");", app);
         Assert.Contains("now - heldMoveChangedAt < movementChordDelayMs", app);
         Assert.Contains("function rememberEntityMetadata", app);
         Assert.Contains("function pruneEntityRegistry", app);

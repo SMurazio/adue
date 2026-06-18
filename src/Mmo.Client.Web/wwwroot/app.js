@@ -55,7 +55,7 @@ const tileGridHeight = 64;
 const tileStepTweenMs = 200;
 const movementInterpolationDelayMs = tileStepTweenMs;
 const stepRetryMs = 50;
-const movementChordDelayMs = 35;
+const movementChordDelayMs = 70;
 const debugVisibilityRadius = 96;
 const entityStaleAfterMs = 2500;
 const entityExpireAfterMs = 8000;
@@ -101,6 +101,12 @@ const screenInputStepDirections = new Map([
   ["-1,-1", "S"],
   ["0,-1", "SE"],
   ["1,-1", "E"]
+]);
+const movementKeysByCode = new Map([
+  ["KeyW", "w"],
+  ["KeyA", "a"],
+  ["KeyS", "s"],
+  ["KeyD", "d"]
 ]);
 let snapshotAssembly = null;
 const blockedTiles = buildBlockedTileSet(tileGridWidth, tileGridHeight);
@@ -1107,6 +1113,30 @@ function syncKeyboardMovement() {
   }
 }
 
+function movementKeyFromEvent(event) {
+  const codeKey = movementKeysByCode.get(event.code);
+  if (codeKey) {
+    return codeKey;
+  }
+
+  const key = event.key.toLowerCase();
+  return ["w", "a", "s", "d"].includes(key) ? key : null;
+}
+
+function setMovementKeyDown(key) {
+  if (key === "w") {
+    keysDown.delete("s");
+  } else if (key === "s") {
+    keysDown.delete("w");
+  } else if (key === "a") {
+    keysDown.delete("d");
+  } else if (key === "d") {
+    keysDown.delete("a");
+  }
+
+  keysDown.add(key);
+}
+
 for (const button of document.querySelectorAll("[data-move]")) {
   button.addEventListener("click", () => {
     sendMoveDirection(button.dataset.move);
@@ -1118,10 +1148,10 @@ document.addEventListener("keydown", event => {
     return;
   }
 
-  const key = event.key.toLowerCase();
-  if (["w", "a", "s", "d"].includes(key)) {
+  const key = movementKeyFromEvent(event);
+  if (key) {
     event.preventDefault();
-    keysDown.add(key);
+    setMovementKeyDown(key);
     syncKeyboardMovement();
   }
 
@@ -1142,8 +1172,8 @@ document.addEventListener("keyup", event => {
     return;
   }
 
-  const key = event.key.toLowerCase();
-  if (["w", "a", "s", "d"].includes(key)) {
+  const key = movementKeyFromEvent(event);
+  if (key) {
     event.preventDefault();
     keysDown.delete(key);
     syncKeyboardMovement();
