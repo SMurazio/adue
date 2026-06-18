@@ -17,21 +17,6 @@ if (Test-Path -LiteralPath $runDir) {
 }
 $stopped = New-Object 'System.Collections.Generic.HashSet[int]'
 
-function Test-ContainsAny {
-    param(
-        [string]$Value,
-        [string[]]$Needles
-    )
-
-    foreach ($needle in $Needles) {
-        if ($Value.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            return $true
-        }
-    }
-
-    return $false
-}
-
 function Stop-MmoProcess {
     param(
         [int]$ProcessId,
@@ -122,47 +107,10 @@ foreach ($process in (Get-Process -ErrorAction SilentlyContinue)) {
     }
 }
 
-$repoMarkers = @(
-    $root,
-    (Join-Path $root '.tools\dotnet\dotnet.exe'),
-    $PSScriptRoot
-)
-
-$runtimeMarkers = @(
-    'Mmo.Server.csproj',
-    'Mmo.Client.Web.csproj',
-    'Mmo.Server.dll',
-    'Mmo.Client.Web.dll',
-    'Mmo.Client.Godot',
-    'MmoClientGodot',
-    'run-server-window.ps1',
-    'run-server-window.cmd',
-    'run-web-client-window.cmd',
-    'start-server.ps1',
-    'start-web-client.ps1',
-    'start-server.cmd',
-    'start-web-client.cmd'
-)
-if (-not $SkipLauncherProcesses) {
-    $runtimeMarkers += @(
-        'start-godot-visual-check.ps1',
-        'start-godot-visual-check.cmd'
-    )
-}
-
-try {
-    $processes = Get-CimInstance Win32_Process -ErrorAction Stop
-    foreach ($process in $processes) {
-        $commandLine = $process.CommandLine
-        if ([string]::IsNullOrWhiteSpace($commandLine)) {
-            continue
-        }
-
-        if ((Test-ContainsAny $commandLine $repoMarkers) -and (Test-ContainsAny $commandLine $runtimeMarkers)) {
-            Stop-MmoProcess ([int]$process.ProcessId) "MMO runtime command line"
-        }
-    }
-}
-catch {
-    "Could not inspect command lines for leftover wrapper windows: $($_.Exception.Message)"
-}
+# NOTE (fix): a blind `Get-CimInstance Win32_Process` command-line sweep used to run here to catch
+# leftover wrapper processes. On managed/EDR Windows it hung (WMI process enumeration with
+# CommandLine is intercepted and can stall indefinitely) and risked force-killing unrelated
+# processes that merely referenced the repo path (e.g. an open editor or terminal). It is removed:
+# the tracked pid files (server/web-client/godot-client*), MMO port listeners, repo-local dotnet
+# processes, and the MMO window-title scan above already cover server + client shutdown. The
+# $SkipLauncherProcesses switch is retained for caller compatibility but is now a no-op.
