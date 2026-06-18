@@ -48,6 +48,24 @@ async logging (background consumer; tick thread only enqueues). Tracked in `todo
 process lesson: **the synthetic stress tool masked this — reproduce perf issues with a real client
 run, not only the stress harness.**
 
+## The residual was the CLIENT, not the server (S25 → S26)
+
+After the server was provably clean (S24: 0 tick_hitches with live clients), the human STILL
+perceived stutter. S25 added client-side frame instrumentation (`frame_hitch` trace + on-screen
+`FRAME` overlay: frame ms/max, hitch count, client GC deltas) and low-risk mitigations (overlay
+throttle, `SetTextIfChanged`, concurrent GC). The overlay then nailed it: `FRAME ms=16.7/146.7
+hitches=159 gc=6/1/0` — **159 frame hitches with only 6/1/0 GC collections, so NOT GC**, and the
+worst frame was 146 ms. The bursty `tile_confirmed` interpolation trace (uneven 134–300 ms arrivals,
+growing queueDepth) was a downstream symptom: uneven frames → uneven `Poll`.
+
+Root cause: the Godot client uses the **Forward+ renderer (D3D12)**, whose lazy shader/pipeline
+compilation hitches on first use of each material/mesh/light combo. Fix in `todo/S26`: switch to the
+Compatibility/Mobile renderer (right for a 2.5D tile game) and/or precompile + reuse materials.
+
+Lesson reinforced: this whole multi-round saga repeatedly **passed metrics but failed the human
+check**. Instrument the layer the human actually experiences (here, client frame timing) before
+fixing, and treat "the stress numbers look fine" as necessary-but-not-sufficient.
+
 ## Footgun avoided
 
 Direct wire encoding was chosen over object pooling for hot messages deliberately: it removes the
