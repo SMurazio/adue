@@ -507,6 +507,20 @@ public partial class MmoClientRoot : Node3D
             .Append(FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture))
             .AppendLine("ms");
 
+        if (_client is not null)
+        {
+            var md = _client.MovementDebug;
+            _perfText.Append("interp q=")
+                .Append(md.QueueDepth.ToString(CultureInfo.InvariantCulture))
+                .Append(" cadence=")
+                .Append(md.EffectiveCadenceMs.ToString("0.#", CultureInfo.InvariantCulture))
+                .Append("ms lat=")
+                .Append(md.LastLatencyMs.ToString(CultureInfo.InvariantCulture))
+                .Append("ms conf=")
+                .Append(md.LastConfirmedTile?.ToString() ?? "-")
+                .AppendLine();
+        }
+
         SetTextIfChanged(_perfLabel, _perfText.ToString());
     }
 

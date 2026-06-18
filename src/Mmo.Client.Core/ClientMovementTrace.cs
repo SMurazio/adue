@@ -24,21 +24,14 @@ internal sealed class ClientMovementTrace
 
     public void UpdateLatency(int latency)
     {
-        if (!Enabled)
-        {
-            return;
-        }
-
+        // Snapshot state is tracked unconditionally so live debug HUDs (e.g. the Godot F3 panel) can
+        // read interpolation/movement state without enabling the console trace. Only the console
+        // output below is gated by Enabled.
         Snapshot = Snapshot with { LastLatencyMs = latency };
     }
 
     public void MoveSent(uint sequence, Direction8 direction)
     {
-        if (!Enabled)
-        {
-            return;
-        }
-
         var sentAt = DateTimeOffset.UtcNow;
         Snapshot = Snapshot with
         {
@@ -46,6 +39,11 @@ internal sealed class ClientMovementTrace
             LastSentDirection = direction,
             LastSentAtUtc = sentAt
         };
+
+        if (!Enabled)
+        {
+            return;
+        }
 
         _write(
             "mmo_trace side=client event=move_sent" +
@@ -61,11 +59,6 @@ internal sealed class ClientMovementTrace
         double effectiveCadenceMs,
         RenderPosition renderPosition)
     {
-        if (!Enabled)
-        {
-            return;
-        }
-
         Snapshot = Snapshot with
         {
             LastConfirmedNetworkId = networkId,
@@ -76,6 +69,11 @@ internal sealed class ClientMovementTrace
             EffectiveCadenceMs = effectiveCadenceMs,
             RenderPosition = renderPosition
         };
+
+        if (!Enabled)
+        {
+            return;
+        }
 
         _write(
             "mmo_trace side=client event=tile_confirmed" +

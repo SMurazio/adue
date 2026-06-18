@@ -192,12 +192,16 @@ public sealed class MmoClientProtocolTests
         var lines = new List<string>();
         using var client = CreateClient(out _, debugMovement: false, lines.Add);
 
-        client.SendMoveStep(Direction8.E);
+        var sequence = client.SendMoveStep(Direction8.E);
         client.RecordFrameHitch(40, 1, 0, 0);
 
         Assert.False(client.DebugMovementEnabled);
-        Assert.Equal(0u, client.MovementDebug.LastSentSequence);
+        // Console trace stays silent when disabled (no spam, no I/O).
         Assert.Empty(lines);
+        // But the in-memory snapshot still tracks state so live debug HUDs (e.g. the Godot F3 panel)
+        // can read interpolation/movement state without enabling the console trace.
+        Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
+        Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
     }
 
     [Fact]

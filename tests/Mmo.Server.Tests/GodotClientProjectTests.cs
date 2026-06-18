@@ -37,6 +37,8 @@ public sealed class GodotClientProjectTests
         Assert.Contains("Performance.GetMonitor(Performance.Monitor.ObjectNodeCount)", root);
         Assert.Contains("GC.GetTotalMemory(false)", root);
         Assert.Contains("_nextPerfHudAt = now.TotalSeconds + 0.1d;", root);
+        // Interpolation queue depth / cadence is surfaced in the F3 HUD (no env flag needed).
+        Assert.Contains("interp q=", root);
         Assert.Contains("SampleCount = 120", graph);
         Assert.Contains("DrawLine", graph);
         Assert.Contains("QueueRedraw", graph);
