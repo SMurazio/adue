@@ -16,6 +16,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mmo.Client.Web", "src\Mmo.C
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mmo.Tools.Stress", "src\Mmo.Tools.Stress\Mmo.Tools.Stress.csproj", "{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{E8C38963-B8EC-4108-9A01-E4FA2FDDC9BD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mmo.Server.Tests", "tests\Mmo.Server.Tests\Mmo.Server.Tests.csproj", "{2BAD6353-37BB-49AE-A231-65AC49EC195D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -46,9 +50,14 @@ Global
 		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2BAD6353-37BB-49AE-A231-65AC49EC195D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2BAD6353-37BB-49AE-A231-65AC49EC195D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2BAD6353-37BB-49AE-A231-65AC49EC195D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2BAD6353-37BB-49AE-A231-65AC49EC195D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{3BA59FC6-2E9F-49B4-9257-7B31FAF41F63} = {85E93034-FD88-4389-B824-23B4E8A0FF74}
 		{7B84DF4A-F2A5-4884-A35D-EC6C7488E060} = {85E93034-FD88-4389-B824-23B4E8A0FF74}
+		{2BAD6353-37BB-49AE-A231-65AC49EC195D} = {E8C38963-B8EC-4108-9A01-E4FA2FDDC9BD}
 	EndGlobalSection
 EndGlobal

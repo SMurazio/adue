@@ -30,6 +30,7 @@ public sealed class GameServer
     private readonly ConcurrentQueue<Action> _mainThreadActions = new();
     private readonly SyntheticClientLoad _syntheticLoad = new();
     private readonly ServerMetrics _metrics = new();
+    private readonly ServerRuntimeGuard _runtimeGuard;
 
     private uint _serverTick;
     private uint _nextNetworkId = 1;
@@ -38,6 +39,7 @@ public sealed class GameServer
     {
         _options = options;
         _characters = characters;
+        _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -246,6 +248,11 @@ public sealed class GameServer
 
     private void Tick(float deltaSeconds)
     {
+        _runtimeGuard.TryRun("tick", () => TickCore(deltaSeconds));
+    }
+
+    private void TickCore(float deltaSeconds)
+    {
         _serverTick++;
 
         foreach (var session in _sessions.Values)
@@ -272,31 +279,36 @@ public sealed class GameServer
 
         foreach (var session in authenticated)
         {
-            var visible = SelectVisibleSessions(session, authenticated);
-            var visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
-            SendEntityDespawns(session, visibleIds);
-            EnsureEntitySpawns(session, visible);
-            var packets = BuildSnapshotPackets(session, visible, out var visibleCount);
-            var sentBytes = 0;
-            var sentPackets = 0;
-            foreach (var packet in packets)
-            {
-                if (TrySend(session.Peer, packet, DeliveryMethod.Unreliable))
-                {
-                    sentBytes += packet.Length;
-                    sentPackets++;
-                }
-            }
+            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, authenticated));
+        }
+    }
 
-            if (sentPackets > 0)
+    private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<ClientSession> authenticated)
+    {
+        var visible = SelectVisibleSessions(session, authenticated);
+        var visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
+        SendEntityDespawns(session, visibleIds);
+        EnsureEntitySpawns(session, visible);
+        var packets = BuildSnapshotPackets(session, visible, out var visibleCount);
+        var sentBytes = 0;
+        var sentPackets = 0;
+        foreach (var packet in packets)
+        {
+            if (TrySend(session.Peer, packet, DeliveryMethod.Unreliable))
             {
-                _metrics.RecordSnapshotSent(sentBytes, visibleCount, authenticated.Length);
+                sentBytes += packet.Length;
+                sentPackets++;
             }
+        }
 
-            if ((visibleCount < authenticated.Length || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
-            {
-                Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{authenticated.Length}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{packets.Count}, bytes={sentBytes}");
-            }
+        if (sentPackets > 0)
+        {
+            _metrics.RecordSnapshotSent(sentBytes, visibleCount, authenticated.Count);
+        }
+
+        if ((visibleCount < authenticated.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
+        {
+            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{authenticated.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{packets.Count}, bytes={sentBytes}");
         }
     }
 

@@ -24,6 +24,7 @@ public sealed class ServerMetrics
     private long _networkErrors;
     private long _badPackets;
     private long _sendFailures;
+    private long _runtimeFaults;
     private long _receivedBytes;
     private long _sentBytes;
     private long _snapshotsSent;
@@ -146,6 +147,12 @@ public sealed class ServerMetrics
         CurrentBucket().SendFailures++;
     }
 
+    public void RecordRuntimeFault()
+    {
+        _runtimeFaults++;
+        CurrentBucket().RuntimeFaults++;
+    }
+
     public void RecordLogin(bool accepted, TimeSpan elapsed)
     {
         if (accepted)
@@ -188,6 +195,7 @@ public sealed class ServerMetrics
             _networkErrors,
             _badPackets,
             _sendFailures,
+            _runtimeFaults,
             _receivedBytes,
             _sentBytes,
             _snapshotsSent,
@@ -221,6 +229,7 @@ public sealed class ServerMetrics
         long networkErrors = 0;
         long badPackets = 0;
         long sendFailures = 0;
+        long runtimeFaults = 0;
         long receivedBytes = 0;
         long sentBytes = 0;
         long receivedMessageCount = 0;
@@ -248,6 +257,7 @@ public sealed class ServerMetrics
             networkErrors += bucket.NetworkErrors;
             badPackets += bucket.BadPackets;
             sendFailures += bucket.SendFailures;
+            runtimeFaults += bucket.RuntimeFaults;
             receivedBytes += bucket.ReceivedBytes;
             sentBytes += bucket.SentBytes;
             receivedMessageCount += bucket.ReceivedMessageCount;
@@ -278,6 +288,7 @@ public sealed class ServerMetrics
             networkErrors,
             badPackets,
             sendFailures,
+            runtimeFaults,
             receivedBytes,
             sentBytes,
             receivedMessageCount,
@@ -315,7 +326,7 @@ public sealed class ServerMetrics
             $"recv/s={Rate(snapshot.ReceivedMessageCount, seconds):0.0}, sent/s={Rate(snapshot.SentMessageCount, seconds):0.0}, " +
             $"move/s={Rate(Count(snapshot.ReceivedMessages, MessageType.MoveInput), seconds):0.0}, " +
             $"chat/s={Rate(Count(snapshot.ReceivedMessages, MessageType.ChatSend), seconds):0.0}, " +
-            $"sendFail/s={Rate(snapshot.SendFailures, seconds):0.0}, bad/s={Rate(snapshot.BadPackets, seconds):0.0}, netErr/s={Rate(snapshot.NetworkErrors, seconds):0.0}, " +
+            $"sendFail/s={Rate(snapshot.SendFailures, seconds):0.0}, bad/s={Rate(snapshot.BadPackets, seconds):0.0}, netErr/s={Rate(snapshot.NetworkErrors, seconds):0.0}, runtimeFault/s={Rate(snapshot.RuntimeFaults, seconds):0.0}, " +
             $"login/s={Rate(snapshot.LoginAccepted + snapshot.LoginRejected, seconds):0.0}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
     }
 
@@ -328,7 +339,7 @@ public sealed class ServerMetrics
             $"snap/s(avg)={Rate(snapshot.SnapshotsSent, seconds):0.0}, snapshots={snapshot.SnapshotsSent}, " +
             $"visible avg/max={snapshot.SnapshotAverageVisibleEntities:0.0}/{snapshot.SnapshotMaxVisibleEntities}, " +
             $"outAvg={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, inAvg={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
-            $"sendFail={snapshot.SendFailures}, badPackets={snapshot.BadPackets}, netErr={snapshot.NetworkErrors}, " +
+            $"sendFail={snapshot.SendFailures}, badPackets={snapshot.BadPackets}, netErr={snapshot.NetworkErrors}, runtimeFaults={snapshot.RuntimeFaults}, " +
             $"login={snapshot.LoginAccepted}/{snapshot.LoginRejected}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
     }
 
@@ -408,6 +419,7 @@ public sealed class ServerMetrics
         public long NetworkErrors { get; set; }
         public long BadPackets { get; set; }
         public long SendFailures { get; set; }
+        public long RuntimeFaults { get; set; }
         public long ReceivedBytes { get; set; }
         public long SentBytes { get; set; }
         public long ReceivedMessageCount { get; set; }
@@ -431,6 +443,7 @@ public sealed class ServerMetrics
             NetworkErrors = 0;
             BadPackets = 0;
             SendFailures = 0;
+            RuntimeFaults = 0;
             ReceivedBytes = 0;
             SentBytes = 0;
             ReceivedMessageCount = 0;
@@ -461,6 +474,7 @@ public sealed record MetricsSnapshot(
     long NetworkErrors,
     long BadPackets,
     long SendFailures,
+    long RuntimeFaults,
     long ReceivedBytes,
     long SentBytes,
     long SnapshotsSent,
@@ -486,6 +500,7 @@ public sealed record MetricsWindowSnapshot(
     long NetworkErrors,
     long BadPackets,
     long SendFailures,
+    long RuntimeFaults,
     long ReceivedBytes,
     long SentBytes,
     long ReceivedMessageCount,
