@@ -15,6 +15,8 @@ read this index at session start, then read any note relevant to the current tas
   `todo/` files.
 - [Shared startup and memory layout](shared-startup-and-memory-layout.md) - canonical startup
   instructions and durable project memory live under `.shared/`, with root entry-point stubs.
+- [Server tick performance](server-tick-performance.md) - the movement-slowdown saga (scheduler +
+  GC, S21/S22), what "good" tick timing looks like, and why perf must be measured in Release.
 
 Claude Code may still auto-load notes from its user-level memory directory. That directory should
 contain only a pointer note that directs the agent back to this versioned store.
