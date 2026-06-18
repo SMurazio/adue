@@ -4,6 +4,7 @@ param(
     [string]$HostName = '127.0.0.1',
     [int]$Port = 7777,
     [string]$ConnectionKey = 'local-dev',
+    [string]$AdminNames = '',
     [switch]$NoStop,
     [switch]$SkipBuild
 )
@@ -85,6 +86,13 @@ if (-not $NoStop) {
 }
 
 "Starting MMO server..."
+$effectiveAdminNames = if ([string]::IsNullOrWhiteSpace($AdminNames)) {
+    "Admin,$FirstName,$SecondName"
+} else {
+    $AdminNames
+}
+$env:MMO_ADMIN_NAMES = $effectiveAdminNames
+"Admin names for visual check: $effectiveAdminNames"
 & $startServerScript
 
 if (-not $SkipBuild) {

@@ -50,6 +50,8 @@ public sealed class MmoClient : IDisposable
 
     public ZoneModel? Zone { get; private set; }
 
+    public ClientRole Role { get; private set; } = ClientRole.Player;
+
     public bool IsLoggedIn => State == ClientConnectionState.LoggedIn;
 
     public Guid LocalCharacterId => _localCharacterId;
@@ -224,6 +226,7 @@ public sealed class MmoClient : IDisposable
 
         _localCharacterId = login.CharacterId;
         _loginTile = login.Tile;
+        Role = login.Role;
         State = ClientConnectionState.LoggedIn;
     }
 
