@@ -42,6 +42,16 @@ public partial class MmoClientRoot : Node3D
     private double _nextPerfHudAt;
     private double _lastFrameMs;
     private double _maxFrameMs;
+    private double _lastPollMs;
+    private double _lastRenderStateMs;
+    private double _lastEntitiesMs;
+    private double _lastCameraMs;
+    private double _lastOverlayMs;
+    private double _maxPollMs;
+    private double _maxRenderStateMs;
+    private double _maxEntitiesMs;
+    private double _maxCameraMs;
+    private double _maxOverlayMs;
     private long _frameHitchCount;
     private long _clientGc0Count;
     private long _clientGc1Count;
@@ -52,6 +62,18 @@ public partial class MmoClientRoot : Node3D
     private bool _zoneBuilt;
     private bool _sentStartupChat;
     private bool _perfHudVisible;
+
+    // Per-_Process-section timing (ms), surfaced in the F3 HUD and read by the telemetry channel (T2).
+    internal double LastPollMs => _lastPollMs;
+    internal double LastRenderStateMs => _lastRenderStateMs;
+    internal double LastEntitiesMs => _lastEntitiesMs;
+    internal double LastCameraMs => _lastCameraMs;
+    internal double LastOverlayMs => _lastOverlayMs;
+    internal double MaxPollMs => _maxPollMs;
+    internal double MaxRenderStateMs => _maxRenderStateMs;
+    internal double MaxEntitiesMs => _maxEntitiesMs;
+    internal double MaxCameraMs => _maxCameraMs;
+    internal double MaxOverlayMs => _maxOverlayMs;
 
     [Export] public string Host { get; set; } = ReadString("MMO_HOST", "127.0.0.1");
     [Export] public int Port { get; set; } = ReadInt("MMO_PORT", 7777);
@@ -77,7 +99,10 @@ public partial class MmoClientRoot : Node3D
         _elapsedSeconds += delta;
         var now = TimeSpan.FromSeconds(_elapsedSeconds);
         SampleFrameTiming(delta);
+
+        var tPoll0 = Time.GetTicksUsec();
         _client?.Poll(now);
+        var pollUsec = Time.GetTicksUsec() - tPoll0;
 
         if (_client?.Zone is not null && !_zoneBuilt)
         {
@@ -88,10 +113,32 @@ public partial class MmoClientRoot : Node3D
         SendHeldMovement(now);
         SendStartupChat();
         RequestMetrics(now);
+
+        var t0 = Time.GetTicksUsec();
         SampleRenderStates(now);
+        var t1 = Time.GetTicksUsec();
         UpdateEntities();
+        var t2 = Time.GetTicksUsec();
         UpdateCamera();
+        var t3 = Time.GetTicksUsec();
         UpdateOverlay(now);
+        var t4 = Time.GetTicksUsec();
+
+        RecordSectionTiming(pollUsec, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+    }
+
+    private void RecordSectionTiming(ulong pollUsec, ulong renderStateUsec, ulong entitiesUsec, ulong cameraUsec, ulong overlayUsec)
+    {
+        _lastPollMs = pollUsec / 1000d;
+        _lastRenderStateMs = renderStateUsec / 1000d;
+        _lastEntitiesMs = entitiesUsec / 1000d;
+        _lastCameraMs = cameraUsec / 1000d;
+        _lastOverlayMs = overlayUsec / 1000d;
+        _maxPollMs = Math.Max(_maxPollMs, _lastPollMs);
+        _maxRenderStateMs = Math.Max(_maxRenderStateMs, _lastRenderStateMs);
+        _maxEntitiesMs = Math.Max(_maxEntitiesMs, _lastEntitiesMs);
+        _maxCameraMs = Math.Max(_maxCameraMs, _lastCameraMs);
+        _maxOverlayMs = Math.Max(_maxOverlayMs, _lastOverlayMs);
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -518,6 +565,8 @@ public partial class MmoClientRoot : Node3D
             .Append(FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture))
             .AppendLine("ms");
 
+        AppendSectionRow();
+
         if (_client is not null)
         {
             var md = _client.MovementDebug;
@@ -822,6 +871,29 @@ void fragment() {
         var confirmedTile = debug.LastConfirmedTile?.ToString() ?? "-";
         var render = $"{debug.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{debug.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}";
         return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
+    }
+
+    private void AppendSectionRow()
+    {
+        var maxSection = _maxPollMs;
+        maxSection = Math.Max(maxSection, _maxRenderStateMs);
+        maxSection = Math.Max(maxSection, _maxEntitiesMs);
+        maxSection = Math.Max(maxSection, _maxCameraMs);
+        maxSection = Math.Max(maxSection, _maxOverlayMs);
+
+        _perfText.Append("proc poll/rs/ent/cam/ovl=")
+            .Append(_lastPollMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_lastRenderStateMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_lastEntitiesMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_lastCameraMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append('/')
+            .Append(_lastOverlayMs.ToString("0.0", CultureInfo.InvariantCulture))
+            .Append(" ms (max ")
+            .Append(maxSection.ToString("0.0", CultureInfo.InvariantCulture))
+            .AppendLine(")");
     }
 
     private void AppendPerfRow(string label, double value)
