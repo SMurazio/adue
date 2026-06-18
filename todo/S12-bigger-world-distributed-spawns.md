@@ -28,6 +28,18 @@ never meet ⇒ you see no one. Too small ⇒ everyone always visible (today). Ai
 view, spawns clustered centrally, so a normal play/stress session has players encountering each
 other near the hub while distant ones cull. Tune world size + spawn spread together by feel.
 
+## Stress testing
+
+Synthetic stress clients log in through the same path as real players, so they get distributed
+spawns automatically once the server distributes — no stress-tool change needed for the realistic
+case. This makes stress numbers *representative*: per-client visible count and bandwidth should drop
+vs today, and it finally exercises the AOI cull/despawn paths at scale.
+
+But keep the **clustered worst case** measurable: everyone-on-one-tile is the bandwidth *peak*
+(everyone visible — what the current ~16 kbps/client numbers reflect). Don't lose it. Provide a way
+to force clustering — e.g. a stress profile/flag, or simply a config with a single central spawn
+tile — so we can still measure the ceiling. Net: distributed by default, clustered on demand.
+
 ## Implications to handle
 
 - **ZoneInfo size:** blocked tiles are a row-major bitset (W×H bits). 128×128 = 2 KB, 256×256 = 8 KB
