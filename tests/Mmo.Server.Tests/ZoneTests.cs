@@ -28,4 +28,20 @@ public sealed class ZoneTests
         Assert.True(zone.TryStep(session, Direction8.S, serverTick: 10, stepCooldownTicks: 4));
         Assert.Equal(new TileCoord(2, 3), session.Tile);
     }
+
+    [Fact]
+    public void SpawnPlayerAddsEntityToWorldState()
+    {
+        var session = new ClientSession(null!);
+        var characterId = Guid.NewGuid();
+        var zone = new Zone("test", new TileGrid(8, 8, []), [new TileCoord(2, 2)]);
+
+        var entity = zone.SpawnPlayer(4, characterId, "Player", new TileCoord(3, 3), session);
+
+        Assert.True(zone.World.TryGet(entity.Id, out var found));
+        Assert.Same(entity, found);
+        Assert.Equal(4u, entity.NetworkId);
+        Assert.Equal(new TileCoord(3, 3), entity.Tile);
+        Assert.True(entity.IsDurable);
+    }
 }

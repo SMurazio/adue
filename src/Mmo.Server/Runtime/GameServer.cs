@@ -125,8 +125,16 @@ public sealed class GameServer
 
         if (session.IsAuthenticated)
         {
-            _networkIds.Return(session.NetworkId);
-            SaveTileBestEffort(session);
+            if (_zone.Despawn(session.EntityId!.Value, out var entity))
+            {
+                _networkIds.Return(entity.NetworkId);
+                SaveTileBestEffort(session, entity.Tile);
+            }
+            else
+            {
+                _networkIds.Return(session.NetworkId);
+                SaveTileBestEffort(session);
+            }
         }
 
         _metrics.RecordPeerDisconnected();
@@ -195,7 +203,11 @@ public sealed class GameServer
                     var startedAt = Stopwatch.GetTimestamp();
                     try
                     {
-                        _zone.TryStep(session, move.Direction, _serverTick, _options.StepCooldownTicks);
+                        if (TryGetSessionEntity(session, out var entity)
+                            && _zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks))
+                        {
+                            session.SyncFromEntity(entity);
+                        }
                     }
                     finally
                     {
@@ -242,17 +254,22 @@ public sealed class GameServer
                         return;
                     }
 
+                    var networkId = 0u;
                     try
                     {
                         var role = ResolveRole(login.AccountName, character.DisplayName);
                         var loginTile = ResolveLoginTile(character.Tile);
-                        current.Authenticate(_networkIds.Rent(), character.CharacterId, character.DisplayName, role, character.ZoneId, loginTile);
+                        networkId = _networkIds.Rent();
+                        var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current);
+                        current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId, entity.Tile);
+                        current.AttachEntity(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
-                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, loginTile, ""), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.Tile, ""), DeliveryMethod.ReliableOrdered);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
                     {
+                        _networkIds.Return(networkId);
                         current.LoginInProgress = false;
                         _metrics.RecordLogin(false, Stopwatch.GetElapsedTime(loginStartedAt));
                         TrySend(peer, new LoginResultMessage(false, Guid.Empty, login.DisplayName, ClientRole.Player, _zone.ResolveSpawnTile(Zone.DefaultSpawnTile), "No network id available."), DeliveryMethod.ReliableOrdered);
@@ -303,20 +320,21 @@ public sealed class GameServer
         var authenticated = _sessions.Values
             .Where(session => session.IsAuthenticated)
             .ToArray();
+        var entities = _zone.World.Entities.ToArray();
 
         foreach (var session in authenticated)
         {
-            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, authenticated, tickBudget));
+            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, entities, tickBudget));
         }
     }
 
-    private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<ClientSession> authenticated, TickBudgetRecorder tickBudget)
+    private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<WorldEntity> entities, TickBudgetRecorder tickBudget)
     {
-        IReadOnlyList<ClientSession> visible;
+        IReadOnlyList<WorldEntity> visible;
         HashSet<uint> visibleIds;
         using (tickBudget.Measure(TickBudgetCategory.Aoi))
         {
-            visible = SelectVisibleSessions(session, authenticated);
+            visible = SelectVisibleEntities(session, entities);
             visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
         }
 
@@ -349,12 +367,12 @@ public sealed class GameServer
 
         if (sentPackets > 0)
         {
-            _metrics.RecordSnapshotSent(sentBytes, visibleCount, authenticated.Count);
+            _metrics.RecordSnapshotSent(sentBytes, visibleCount, entities.Count);
         }
 
-        if ((visibleCount < authenticated.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
+        if ((visibleCount < entities.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
         {
-            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{authenticated.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{packets.Count}, bytes={sentBytes}");
+            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{entities.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{packets.Count}, bytes={sentBytes}");
         }
     }
 
@@ -367,43 +385,53 @@ public sealed class GameServer
         }
     }
 
-    private IReadOnlyList<ClientSession> SelectVisibleSessions(
+    private IReadOnlyList<WorldEntity> SelectVisibleEntities(
         ClientSession recipient,
-        IReadOnlyCollection<ClientSession> authenticated)
+        IReadOnlyCollection<WorldEntity> entities)
     {
+        if (!TryGetSessionEntity(recipient, out var recipientEntity))
+        {
+            return [];
+        }
+
         var radiusSquared = _options.InterestRadius * _options.InterestRadius;
-        return authenticated
-            .Where(candidate => candidate.ZoneId == recipient.ZoneId)
+        return entities
             .Select(candidate => new
             {
-                Session = candidate,
-                DistanceSquared = DistanceSquared(recipient, candidate)
+                Entity = candidate,
+                DistanceSquared = DistanceSquared(recipientEntity, candidate)
             })
-            .Where(candidate => candidate.Session.CharacterId == recipient.CharacterId || candidate.DistanceSquared <= radiusSquared)
-            .OrderBy(candidate => SnapshotSortKey(recipient, candidate.Session, candidate.DistanceSquared))
+            .Where(candidate => candidate.Entity.Id == recipientEntity.Id || candidate.DistanceSquared <= radiusSquared)
+            .OrderBy(candidate => SnapshotSortKey(recipient, candidate.Entity, candidate.DistanceSquared))
             .Take(_options.MaxVisibleEntities)
-            .Select(candidate => candidate.Session)
+            .Select(candidate => candidate.Entity)
             .ToArray();
     }
 
     private IReadOnlyList<byte[]> BuildSnapshotPackets(
         ClientSession recipient,
-        IReadOnlyCollection<ClientSession> visible,
+        IReadOnlyCollection<WorldEntity> visible,
         out int visibleCount)
     {
-        var orderedSessions = visible
-            .OrderBy(session => SnapshotSortKey(recipient, session, DistanceSquared(recipient, session)))
+        if (!TryGetSessionEntity(recipient, out var recipientEntity))
+        {
+            visibleCount = 0;
+            return [];
+        }
+
+        var orderedEntities = visible
+            .OrderBy(entity => SnapshotSortKey(recipient, entity, DistanceSquared(recipientEntity, entity)))
             .ToArray();
         var isComplete = recipient.ShouldSendFullSnapshot(_serverTick, SnapshotHeartbeatTicks());
         var payloadSessions = isComplete
-            ? orderedSessions
-            : orderedSessions.Where(session => !recipient.HasSentRevision(session)).ToArray();
+            ? orderedEntities
+            : orderedEntities.Where(entity => !recipient.HasSentRevision(entity)).ToArray();
 
-        recipient.RememberSnapshotEntities(orderedSessions.Select(session => session.NetworkId));
+        recipient.RememberSnapshotEntities(orderedEntities.Select(entity => entity.NetworkId));
 
         if (payloadSessions.Length == 0)
         {
-            visibleCount = orderedSessions.Length;
+            visibleCount = orderedEntities.Length;
             return [];
         }
 
@@ -442,7 +470,7 @@ public sealed class GameServer
             var packet = ProtocolCodec.Encode(new WorldSnapshotMessage(
                 _serverTick,
                 snapshotSequence,
-                orderedSessions.Length,
+                orderedEntities.Length,
                 isComplete,
                 i,
                 chunks.Count,
@@ -462,33 +490,33 @@ public sealed class GameServer
         }
 
         recipient.RememberSnapshotSent(_serverTick, isComplete);
-        visibleCount = orderedSessions.Length;
+        visibleCount = orderedEntities.Length;
         return packets;
     }
 
-    private void EnsureEntitySpawns(ClientSession recipient, IReadOnlyCollection<ClientSession> authenticated)
+    private void EnsureEntitySpawns(ClientSession recipient, IReadOnlyCollection<WorldEntity> authenticated)
     {
-        foreach (var session in authenticated)
+        foreach (var entity in authenticated)
         {
-            if (recipient.KnowsEntity(session.NetworkId))
+            if (recipient.KnowsEntity(entity.NetworkId))
             {
                 continue;
             }
 
             TrySend(recipient.Peer, new EntitySpawnMessage(
-                session.NetworkId,
-                session.CharacterId,
-                EntityKind.Player,
-                session.DisplayName,
-                session.Tile,
-                session.Facing), DeliveryMethod.ReliableOrdered);
-            recipient.RememberKnownEntity(session.NetworkId);
+                entity.NetworkId,
+                entity.CharacterId ?? Guid.Empty,
+                entity.Kind,
+                entity.DisplayName,
+                entity.Tile,
+                entity.Facing), DeliveryMethod.ReliableOrdered);
+            recipient.RememberKnownEntity(entity.NetworkId);
         }
     }
 
-    private static float SnapshotSortKey(ClientSession recipient, ClientSession candidate, float distanceSquared)
+    private static float SnapshotSortKey(ClientSession recipient, WorldEntity candidate, float distanceSquared)
     {
-        if (candidate.CharacterId == recipient.CharacterId)
+        if (recipient.EntityId.HasValue && candidate.Id == recipient.EntityId.Value)
         {
             return -1;
         }
@@ -498,14 +526,14 @@ public sealed class GameServer
             : distanceSquared;
     }
 
-    private static float DistanceSquared(ClientSession a, ClientSession b)
+    private static float DistanceSquared(WorldEntity a, WorldEntity b)
     {
         var dx = b.Tile.X - a.Tile.X;
         var dy = b.Tile.Y - a.Tile.Y;
         return (dx * dx) + (dy * dy);
     }
 
-    private static EntityStateSnapshot ToEntityStateSnapshot(ClientSession session)
+    private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity session)
     {
         return new EntityStateSnapshot(session.NetworkId, session.Tile, session.Facing);
     }
@@ -518,6 +546,17 @@ public sealed class GameServer
     private uint SnapshotHeartbeatTicks()
     {
         return (uint)Math.Max(1, _options.TickRate);
+    }
+
+    private bool TryGetSessionEntity(ClientSession session, out WorldEntity entity)
+    {
+        if (session.EntityId.HasValue)
+        {
+            return _zone.World.TryGet(session.EntityId.Value, out entity);
+        }
+
+        entity = null!;
+        return false;
     }
 
     private TileCoord ResolveLoginTile(TileCoord tile)
@@ -803,9 +842,17 @@ public sealed class GameServer
 
     private void SaveTileBestEffort(ClientSession session)
     {
+        var tile = TryGetSessionEntity(session, out var entity)
+            ? entity.Tile
+            : session.Tile;
+        SaveTileBestEffort(session, tile);
+    }
+
+    private void SaveTileBestEffort(ClientSession session, TileCoord tile)
+    {
         try
         {
-            _characters.SaveTileAsync(session.CharacterId, session.Tile, CancellationToken.None)
+            _characters.SaveTileAsync(session.CharacterId, tile, CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
         }

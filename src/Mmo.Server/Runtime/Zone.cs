@@ -35,6 +35,7 @@ public sealed class Zone
     public int Height => _tileGrid.Height;
     public IReadOnlySet<TileCoord> BlockedTiles => _tileGrid.BlockedTiles;
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
+    public WorldState World { get; } = new();
 
     public static Zone CreateDefault(int width, int height)
     {
@@ -59,5 +60,25 @@ public sealed class Zone
     public bool TryStep(ClientSession session, Direction8 direction, uint serverTick, uint stepCooldownTicks)
     {
         return session.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid);
+    }
+
+    public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks)
+    {
+        return entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid);
+    }
+
+    public WorldEntity SpawnPlayer(
+        uint networkId,
+        Guid characterId,
+        string displayName,
+        TileCoord tile,
+        ClientSession ownerSession)
+    {
+        return World.AddPlayer(networkId, characterId, displayName, ResolveSpawnTile(tile), ownerSession);
+    }
+
+    public bool Despawn(ulong entityId, out WorldEntity entity)
+    {
+        return World.Remove(entityId, out entity);
     }
 }

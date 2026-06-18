@@ -20,6 +20,7 @@ public sealed class ClientSession
     public NetPeer Peer { get; }
     public bool IsAuthenticated { get; private set; }
     public bool LoginInProgress { get; set; }
+    public ulong? EntityId { get; private set; }
     public uint NetworkId { get; private set; }
     public Guid CharacterId { get; private set; }
     public string DisplayName { get; private set; } = "unknown";
@@ -43,6 +44,20 @@ public sealed class ClientSession
         Tile = tile;
         IsAuthenticated = true;
         LoginInProgress = false;
+    }
+
+    public void AttachEntity(WorldEntity entity)
+    {
+        EntityId = entity.Id;
+        SyncFromEntity(entity);
+    }
+
+    public void SyncFromEntity(WorldEntity entity)
+    {
+        NetworkId = entity.NetworkId;
+        Tile = entity.Tile;
+        Facing = entity.Facing;
+        StateRevision = entity.StateRevision;
     }
 
     public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
@@ -123,13 +138,13 @@ public sealed class ClientSession
         return _lastFullSnapshotSentTick == 0 || serverTick - _lastFullSnapshotSentTick >= heartbeatTicks;
     }
 
-    public bool HasSentRevision(ClientSession entity)
+    public bool HasSentRevision(WorldEntity entity)
     {
         return _sentEntityRevisions.TryGetValue(entity.NetworkId, out var revision)
             && revision == entity.StateRevision;
     }
 
-    public void RememberSentRevision(ClientSession entity)
+    public void RememberSentRevision(WorldEntity entity)
     {
         _sentEntityRevisions[entity.NetworkId] = entity.StateRevision;
     }
