@@ -16,7 +16,11 @@ public partial class MmoClientRoot : Node3D
     private Node3D? _wallRoot;
     private Node3D? _entityRoot;
     private Camera3D? _camera;
+    private Label? _statusLabel;
+    private Label? _metricsLabel;
+    private Label? _chatLabel;
     private double _elapsedSeconds;
+    private double _nextMetricsAt;
     private bool _zoneBuilt;
     private bool _sentStartupChat;
 
@@ -29,6 +33,7 @@ public partial class MmoClientRoot : Node3D
     public override void _Ready()
     {
         BuildSceneShell();
+        BuildOverlay();
         _client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
         _client.Connect();
         GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
@@ -48,8 +53,10 @@ public partial class MmoClientRoot : Node3D
 
         SendHeldMovement(now);
         SendStartupChat();
+        RequestMetrics(now);
         UpdateEntities(now);
         UpdateCamera();
+        UpdateOverlay();
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -91,6 +98,30 @@ public partial class MmoClientRoot : Node3D
         };
         _camera.LookAt(Vector3.Zero, Vector3.Up);
         AddChild(_camera);
+    }
+
+    private void BuildOverlay()
+    {
+        var layer = new CanvasLayer { Name = "Overlay" };
+        AddChild(layer);
+
+        _statusLabel = CreateOverlayLabel("Status", new Vector2(12, 10), new Vector2(680, 94), 15);
+        _metricsLabel = CreateOverlayLabel("Metrics", new Vector2(0, 10), new Vector2(650, 330), 13);
+        _chatLabel = CreateOverlayLabel("Chat", new Vector2(12, 0), new Vector2(760, 190), 14);
+
+        _metricsLabel.AnchorLeft = 1f;
+        _metricsLabel.AnchorRight = 1f;
+        _metricsLabel.OffsetLeft = -662f;
+        _metricsLabel.OffsetRight = -12f;
+
+        _chatLabel.AnchorTop = 1f;
+        _chatLabel.AnchorBottom = 1f;
+        _chatLabel.OffsetTop = -202f;
+        _chatLabel.OffsetBottom = -12f;
+
+        layer.AddChild(_statusLabel);
+        layer.AddChild(_metricsLabel);
+        layer.AddChild(_chatLabel);
     }
 
     private void BuildZone(ZoneModel zone)
@@ -211,6 +242,47 @@ public partial class MmoClientRoot : Node3D
         _camera.LookAt(focus, Vector3.Up);
     }
 
+    private void UpdateOverlay()
+    {
+        if (_client is null)
+        {
+            return;
+        }
+
+        if (_statusLabel is not null)
+        {
+            var localTile = _client.LocalTile?.ToString() ?? "(unknown)";
+            var server = _client.Server is null
+                ? "server: pending"
+                : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
+            _statusLabel.Text =
+                $"STATE {PlayerName}  {_client.State}  visible={_client.Entities.Count}  local={localTile}\n" +
+                $"{server}\n" +
+                "WASD is screen-relative. W=up, D=right, S+D=down-right. T sends chat.";
+        }
+
+        if (_metricsLabel is not null)
+        {
+            var metrics = _client.ChatLog
+                .Where(static line => line.Sender == "server" && IsMetricsLine(line.Text))
+                .TakeLast(5)
+                .Select(static line => line.Text);
+            _metricsLabel.Text = "SERVER METRICS\n" + string.Join('\n', metrics);
+        }
+
+        if (_chatLabel is not null)
+        {
+            var chat = _client.ChatLog
+                .Where(static line => !IsMetricsLine(line.Text))
+                .TakeLast(8)
+                .Select(static line => $"{line.Sender}: {line.Text}");
+            var errors = _client.Errors
+                .TakeLast(3)
+                .Select(static error => $"error/{error.Code}: {error.Message}");
+            _chatLabel.Text = "CHAT\n" + string.Join('\n', chat.Concat(errors));
+        }
+    }
+
     private void SendHeldMovement(TimeSpan now)
     {
         if (_client is null || !_client.IsLoggedIn)
@@ -234,6 +306,17 @@ public partial class MmoClientRoot : Node3D
         _nextStepAt[direction.Value] = (now + cadence).TotalSeconds;
     }
 
+    private void RequestMetrics(TimeSpan now)
+    {
+        if (_client?.IsLoggedIn != true || now.TotalSeconds < _nextMetricsAt)
+        {
+            return;
+        }
+
+        _client.SendChat("/metrics");
+        _nextMetricsAt = now.TotalSeconds + 1d;
+    }
+
     private void SendStartupChat()
     {
         var startupChat = System.Environment.GetEnvironmentVariable("MMO_GODOT_STARTUP_CHAT");
@@ -250,18 +333,7 @@ public partial class MmoClientRoot : Node3D
     {
         var x = (Input.IsKeyPressed(Key.D) ? 1 : 0) - (Input.IsKeyPressed(Key.A) ? 1 : 0);
         var y = (Input.IsKeyPressed(Key.S) ? 1 : 0) - (Input.IsKeyPressed(Key.W) ? 1 : 0);
-        return (x, y) switch
-        {
-            (0, -1) => Direction8.N,
-            (1, -1) => Direction8.NE,
-            (1, 0) => Direction8.E,
-            (1, 1) => Direction8.SE,
-            (0, 1) => Direction8.S,
-            (-1, 1) => Direction8.SW,
-            (-1, 0) => Direction8.W,
-            (-1, -1) => Direction8.NW,
-            _ => null
-        };
+        return ScreenRelativeDirectionMapper.FromInputAxes(x, y);
     }
 
     private static Vector3 TileToWorld(TileCoord tile, float y = 0f)
@@ -296,6 +368,29 @@ public partial class MmoClientRoot : Node3D
             AlbedoColor = color,
             Roughness = 0.82f
         };
+    }
+
+    private static Label CreateOverlayLabel(string name, Vector2 position, Vector2 size, int fontSize)
+    {
+        var label = new Label
+        {
+            Name = name,
+            Position = position,
+            Size = size,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart
+        };
+        label.AddThemeFontSizeOverride("font_size", fontSize);
+        label.AddThemeColorOverride("font_color", new Color(0.90f, 0.96f, 1.0f));
+        label.AddThemeColorOverride("font_shadow_color", new Color(0f, 0f, 0f, 0.9f));
+        label.AddThemeConstantOverride("shadow_offset_x", 2);
+        label.AddThemeConstantOverride("shadow_offset_y", 2);
+        return label;
+    }
+
+    private static bool IsMetricsLine(string text)
+    {
+        return text.StartsWith("metrics", StringComparison.OrdinalIgnoreCase)
+            || text.StartsWith("message metrics", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ReadString(string key, string fallback)
