@@ -11,6 +11,7 @@ public sealed class WebClientAssetTests
 
         Assert.Contains("const tileStepTweenMs = 200;", app);
         Assert.Contains("const movementInterpolationDelayMs = tileStepTweenMs;", app);
+        Assert.Contains("const selfMovementInterpolationDelayMs = 0;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const movementChordDelayMs = 70;", app);
         Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
@@ -40,6 +41,9 @@ public sealed class WebClientAssetTests
         Assert.Contains("type: \"moveStep\"", app);
         Assert.Contains("confirmedStepQueue", app);
         Assert.Contains("function startNextConfirmedStep", app);
+        Assert.Contains("function movementInterpolationDelayForEntry", app);
+        Assert.Contains("return entry.isSelf ? selfMovementInterpolationDelayMs : movementInterpolationDelayMs;", app);
+        Assert.Contains("nowMs - next.receivedAt < movementInterpolationDelayForEntry(entry)", app);
         Assert.Contains("entry.renderPosition.lerpVectors(step.from, step.to, alpha);", app);
         Assert.Contains("desiredFocus.copy(self.renderPosition);", app);
         Assert.DoesNotContain("const eased = alpha * alpha", app);

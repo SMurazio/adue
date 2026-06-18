@@ -54,6 +54,7 @@ const tileGridWidth = 64;
 const tileGridHeight = 64;
 const tileStepTweenMs = 200;
 const movementInterpolationDelayMs = tileStepTweenMs;
+const selfMovementInterpolationDelayMs = 0;
 const stepRetryMs = 50;
 const movementChordDelayMs = 70;
 const debugVisibilityRadius = 96;
@@ -1359,7 +1360,7 @@ function sampleEntityPosition(entry, nowMs) {
 
 function startNextConfirmedStep(entry, nowMs, startedAt) {
   const next = entry.confirmedStepQueue[0];
-  if (!next || nowMs - next.receivedAt < movementInterpolationDelayMs) {
+  if (!next || nowMs - next.receivedAt < movementInterpolationDelayForEntry(entry)) {
     return false;
   }
 
@@ -1371,6 +1372,10 @@ function startNextConfirmedStep(entry, nowMs, startedAt) {
     durationMs: tileStepTweenMs
   };
   return true;
+}
+
+function movementInterpolationDelayForEntry(entry) {
+  return entry.isSelf ? selfMovementInterpolationDelayMs : movementInterpolationDelayMs;
 }
 
 function clearHeldMovement() {
