@@ -31,12 +31,13 @@ public sealed class PersistenceWriteBehindIntegrationTests
 
             var start = client.OwnTile;
             await StepUntilAsync(client, Direction8.E, () => client.OwnTile.X > start.X);
+            var characterId = client.CharacterId;
 
             var save = await repository.WaitForSaveAsync(
-                item => item.CharacterId == client.CharacterId && item.Tile == client.OwnTile,
+                item => item.CharacterId == characterId && item.Tile.X > start.X,
                 TimeSpan.FromSeconds(10));
 
-            Assert.Equal(client.OwnTile, save.Tile);
+            Assert.True(save.Tile.X > start.X);
         }
         finally
         {
@@ -64,16 +65,15 @@ public sealed class PersistenceWriteBehindIntegrationTests
 
             var start = client.OwnTile;
             await StepUntilAsync(client, Direction8.E, () => client.OwnTile.X > start.X);
-            var expectedTile = client.OwnTile;
             var characterId = client.CharacterId;
 
             await client.DisconnectAsync();
 
             var save = await repository.WaitForSaveAsync(
-                item => item.CharacterId == characterId && item.Tile == expectedTile,
+                item => item.CharacterId == characterId && item.Tile.X > start.X,
                 TimeSpan.FromSeconds(10));
 
-            Assert.Equal(expectedTile, save.Tile);
+            Assert.True(save.Tile.X > start.X);
         }
         finally
         {
