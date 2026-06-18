@@ -116,8 +116,8 @@ public partial class MmoClientRoot : Node3D
             Size = CameraSize,
             Position = new Vector3(24, 28, 24)
         };
-        _camera.LookAt(Vector3.Zero, Vector3.Up);
         AddChild(_camera);
+        _camera.LookAt(Vector3.Zero, Vector3.Up);
     }
 
     private void BuildOverlay()
