@@ -27,3 +27,11 @@ Albion 3-layer separation in the design doc.)
 - `godot-build.cmd` green; `godot-run.cmd` starts the client headless without crashing.
 - Manual (human): two Godot clients connect to the live server, render the map + each other, move
   and chat. Movement glides smoothly (remotes interpolated).
+
+## Blocked
+
+Headless C# view work was drafted and `godot-build.cmd` is green. `godot-run.cmd` cannot be completed
+in this environment because no Godot .NET executable is configured (`MMO_GODOT` is unset and
+`godot` is not on `PATH`). The remaining acceptance also requires human editor/runtime verification:
+two visible Godot clients need to connect to the live server and be checked by eye for map rendering,
+entity rendering, movement, and chat.
