@@ -209,6 +209,40 @@ The protocol is line-delimited JSON: one `{"cmd":"..."}` request line in, one JS
 The channel never touches the filesystem or shell on behalf of a request; its only disk write is the
 autopilot CSV under `.run\`.
 
+### MCP server (T4): drive the client from Claude Code
+
+`tools\mcp\client-control` is a self-authored MCP server (Node.js, official `@modelcontextprotocol/sdk`,
+stdio) that wraps the same channel as agent tools — a thin proxy with no new client logic. It connects
+only to `127.0.0.1` (loopback, not configurable), opens one fresh connection per request, and exposes:
+`client.move`, `client.stop`, `client.chat`, `client.autopilot`, `client.toggle_perf`,
+`client.toggle_fullscreen`, `client.telemetry`, `client.interp`, `client.entities`, `client.state`,
+`client.ping`. See `tools\mcp\client-control\README.md`.
+
+Install once:
+
+```powershell
+cd tools\mcp\client-control
+npm install
+```
+
+Register it in `.mcp.json` at the repo root (port must match the client's `MMO_DEBUG_CONTROL_PORT`):
+
+```json
+{
+  "mcpServers": {
+    "mmo-client-control": {
+      "command": "node",
+      "args": ["tools/mcp/client-control/server.js"],
+      "env": { "MMO_DEBUG_CONTROL_PORT": "7780" }
+    }
+  }
+}
+```
+
+**Restart Claude Code after registering.** MCP servers load at startup, so the tools only appear in a
+new session — they cannot help the session that builds/registers them. Start the Godot client with
+`MMO_DEBUG_CONTROL_PORT` set (see above) before invoking the tools.
+
 ## Dev Admin Commands
 
 Log in as `Admin` in the browser or console client to use local dev admin commands. This is name-based only for local learning and must be replaced with real authentication before exposing the server outside your machine.
