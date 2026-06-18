@@ -51,6 +51,8 @@ The default SQLite database will create local load-test characters. Delete `data
 
 The near-term channel target is 120-150 connected clients visible in one channel. The server sends reliable entity spawn metadata once, then sends compact unreliable snapshots when visible tile state changes or a heartbeat is due. Between full heartbeat snapshots, incomplete snapshots contain only changed visible tile states and clients merge them into the current visible set.
 
+The server tick loop uses `Stopwatch` deadlines and requests 1 ms Windows timer resolution while running. On Windows this avoids the default coarse timer oversleep that can stretch the nominal 20 Hz / 50 ms tick cadence into uneven 60 ms+ gaps. The loop still polls network events between ticks instead of sleeping for a whole tick interval.
+
 ## Run Server
 
 ```powershell

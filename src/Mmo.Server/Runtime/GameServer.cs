@@ -84,11 +84,22 @@ public sealed class GameServer
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        using var timerResolution = WindowsTimerResolutionScope.Begin();
+        if (timerResolution.IsActive)
+        {
+            Log.Info("Enabled Windows timer resolution: 1ms.");
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            Log.Warn($"Windows timer resolution request failed: result={timerResolution.BeginResult}.");
+        }
+
         _netManager.Start(_options.Port);
         Log.Info($"Server listening on UDP {_options.Port}.");
 
-        var tickInterval = TimeSpan.FromSeconds(1d / _options.TickRate);
-        var nextTickAt = DateTimeOffset.UtcNow;
+        var tickIntervalTimestampTicks = PreciseTickScheduler.TickIntervalTimestampTicks(_options.TickRate);
+        var tickInterval = PreciseTickScheduler.ToTimeSpan(tickIntervalTimestampTicks);
+        var nextTickAt = Stopwatch.GetTimestamp();
         var lastTickStartedAt = 0L;
 
         try
@@ -99,8 +110,8 @@ public sealed class GameServer
                 _syntheticLoad.Poll();
                 DrainMainThreadActions();
 
-                var now = DateTimeOffset.UtcNow;
-                var catchUpTicksThisIteration = CountDueTicks(now, nextTickAt, tickInterval);
+                var now = Stopwatch.GetTimestamp();
+                var catchUpTicksThisIteration = PreciseTickScheduler.CountDueTicks(now, nextTickAt, tickIntervalTimestampTicks);
                 while (now >= nextTickAt)
                 {
                     var tickStartedAt = Stopwatch.GetTimestamp();
@@ -112,7 +123,7 @@ public sealed class GameServer
                     var gen1Before = GC.CollectionCount(1);
                     var gen2Before = GC.CollectionCount(2);
                     var tickBudget = new TickBudgetRecorder();
-                    var scheduleDrift = now - nextTickAt;
+                    var scheduleDrift = Stopwatch.GetElapsedTime(nextTickAt, now);
                     Tick(tickBudget);
                     var tickDuration = Stopwatch.GetElapsedTime(tickStartedAt);
                     var budgetSample = tickBudget.ToSample();
@@ -128,10 +139,10 @@ public sealed class GameServer
                         GC.CollectionCount(1) - gen1Before,
                         GC.CollectionCount(2) - gen2Before,
                         tickInterval);
-                    nextTickAt += tickInterval;
+                    nextTickAt += tickIntervalTimestampTicks;
                 }
 
-                await Task.Delay(1, cancellationToken);
+                await PreciseTickScheduler.WaitUntilNextTickOrPollAsync(nextTickAt, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -962,19 +973,6 @@ public sealed class GameServer
     private static string FormatPeer(NetPeer peer)
     {
         return $"{peer.Address}:{peer.Port}";
-    }
-
-    private static int CountDueTicks(DateTimeOffset now, DateTimeOffset nextTickAt, TimeSpan tickInterval)
-    {
-        var count = 0;
-        var dueAt = nextTickAt;
-        while (now >= dueAt)
-        {
-            count++;
-            dueAt += tickInterval;
-        }
-
-        return count;
     }
 
     private void DrainMainThreadActions()
