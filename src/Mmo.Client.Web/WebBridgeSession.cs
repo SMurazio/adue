@@ -156,7 +156,7 @@ public sealed class WebBridgeSession
     {
         while (_serverPeer is not null && _toServer.TryDequeue(out var message))
         {
-            var delivery = message is MoveInputMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            var delivery = message is MoveInputMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(_serverPeer, message, delivery);
         }
     }
@@ -190,10 +190,12 @@ public sealed class WebBridgeSession
                 });
                 break;
             case WorldSnapshotMessage snapshot:
+                _toServer.Enqueue(new SnapshotAckMessage(snapshot.SnapshotSequence));
                 EnqueueBrowser(new
                 {
                     type = "snapshot",
                     tick = snapshot.ServerTick,
+                    sequence = snapshot.SnapshotSequence,
                     totalEntities = snapshot.TotalEntities,
                     isComplete = snapshot.IsComplete,
                     chunkIndex = snapshot.ChunkIndex,

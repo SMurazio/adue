@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 7;
+    public const byte Version = 8;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -37,6 +37,9 @@ public static class ProtocolCodec
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
                 break;
+            case SnapshotAckMessage value:
+                writer.Write(value.LastSnapshotSequence);
+                break;
             case ServerHelloMessage value:
                 WriteString(writer, value.ServerName);
                 writer.Write(value.ProtocolVersion);
@@ -52,6 +55,7 @@ public static class ProtocolCodec
                 break;
             case WorldSnapshotMessage value:
                 writer.Write(value.ServerTick);
+                writer.Write(value.SnapshotSequence);
                 WriteSnapshotMetadata(writer, value);
                 WriteEntityStates(writer, value.Entities);
                 break;
@@ -105,6 +109,7 @@ public static class ProtocolCodec
             MessageType.LoginRequest => new LoginRequestMessage(ReadString(reader), ReadString(reader)),
             MessageType.MoveInput => new MoveInputMessage(reader.ReadUInt32(), ReadVector(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
+            MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32()),
             MessageType.LoginResult => new LoginResultMessage(
                 reader.ReadBoolean(),
@@ -164,6 +169,7 @@ public static class ProtocolCodec
     private static WorldSnapshotMessage ReadWorldSnapshot(BinaryReader reader)
     {
         var tick = reader.ReadUInt32();
+        var sequence = reader.ReadUInt32();
         var totalEntities = reader.ReadUInt16();
         var isComplete = reader.ReadBoolean();
         var chunkIndex = reader.ReadUInt16();
@@ -179,7 +185,7 @@ public static class ProtocolCodec
             throw new ProtocolException($"Invalid snapshot chunk {chunkIndex}/{chunkCount}.");
         }
 
-        return new WorldSnapshotMessage(tick, totalEntities, isComplete, chunkIndex, chunkCount, entities);
+        return new WorldSnapshotMessage(tick, sequence, totalEntities, isComplete, chunkIndex, chunkCount, entities);
     }
 
     private static IReadOnlyList<EntityStateSnapshot> ReadEntityStates(BinaryReader reader)

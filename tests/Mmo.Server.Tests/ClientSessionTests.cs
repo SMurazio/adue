@@ -18,4 +18,25 @@ public sealed class ClientSessionTests
 
         Assert.Equal(new WorldVector(10, 5), session.Position);
     }
+
+    [Fact]
+    public void AcknowledgeSnapshotKeepsHighestSequence()
+    {
+        var session = new ClientSession(null!);
+
+        session.AcknowledgeSnapshot(3);
+        session.AcknowledgeSnapshot(2);
+        session.AcknowledgeSnapshot(4);
+
+        Assert.Equal(4u, session.LastAcknowledgedSnapshotSequence);
+    }
+
+    [Fact]
+    public void NextSnapshotSequenceIncrementsPerSession()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.Equal(1u, session.NextSnapshotSequence());
+        Assert.Equal(2u, session.NextSnapshotSequence());
+    }
 }

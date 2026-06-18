@@ -179,6 +179,11 @@ public sealed class LoadClient : IDisposable
                 break;
             case WorldSnapshotMessage snapshot:
                 _stats.RecordSnapshot(snapshot.Entities.Count);
+                if (_serverPeer is not null)
+                {
+                    Send(_serverPeer, new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
+                }
+
                 break;
             case ChatBroadcastMessage:
                 _stats.RecordChatBroadcast();

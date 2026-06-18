@@ -7,6 +7,7 @@ public sealed class ClientSession
 {
     private readonly HashSet<uint> _lastSnapshotEntityIds = [];
     private readonly HashSet<uint> _knownEntityIds = [];
+    private uint _nextSnapshotSequence = 1;
 
     public ClientSession(NetPeer peer)
     {
@@ -25,6 +26,7 @@ public sealed class ClientSession
     public WorldVector PendingDirection { get; private set; } = WorldVector.Zero;
     public int LastLatencyMs { get; set; }
     public int BadPacketCount { get; private set; }
+    public uint LastAcknowledgedSnapshotSequence { get; private set; }
 
     public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId, WorldVector position)
     {
@@ -81,6 +83,19 @@ public sealed class ClientSession
         foreach (var networkId in networkIds)
         {
             _lastSnapshotEntityIds.Add(networkId);
+        }
+    }
+
+    public uint NextSnapshotSequence()
+    {
+        return _nextSnapshotSequence++;
+    }
+
+    public void AcknowledgeSnapshot(uint snapshotSequence)
+    {
+        if (snapshotSequence > LastAcknowledgedSnapshotSequence)
+        {
+            LastAcknowledgedSnapshotSequence = snapshotSequence;
         }
     }
 

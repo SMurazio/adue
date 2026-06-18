@@ -198,6 +198,12 @@ public sealed class GameServer
                     HandleChat(session, chat.Text);
                 }
                 break;
+            case SnapshotAckMessage ack:
+                if (session.IsAuthenticated)
+                {
+                    session.AcknowledgeSnapshot(ack.LastSnapshotSequence);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -411,11 +417,13 @@ public sealed class GameServer
         }
 
         var packets = new List<byte[]>(chunks.Count);
+        var snapshotSequence = recipient.NextSnapshotSequence();
         for (var i = 0; i < chunks.Count; i++)
         {
             var chunk = chunks[i];
             var packet = ProtocolCodec.Encode(new WorldSnapshotMessage(
                 _serverTick,
+                snapshotSequence,
                 ordered.Length,
                 true,
                 i,

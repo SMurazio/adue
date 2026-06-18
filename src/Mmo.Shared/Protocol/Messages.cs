@@ -27,6 +27,11 @@ public sealed record ChatSendMessage(string Text) : IProtocolMessage
     public MessageType Type => MessageType.ChatSend;
 }
 
+public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMessage
+{
+    public MessageType Type => MessageType.SnapshotAck;
+}
+
 public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate) : IProtocolMessage
 {
     public MessageType Type => MessageType.ServerHello;
@@ -45,6 +50,7 @@ public sealed record LoginResultMessage(
 
 public sealed record WorldSnapshotMessage(
     uint ServerTick,
+    uint SnapshotSequence,
     int TotalEntities,
     bool IsComplete,
     int ChunkIndex,
@@ -52,7 +58,12 @@ public sealed record WorldSnapshotMessage(
     IReadOnlyList<EntityStateSnapshot> Entities) : IProtocolMessage
 {
     public WorldSnapshotMessage(uint serverTick, IReadOnlyList<EntityStateSnapshot> entities)
-        : this(serverTick, entities.Count, true, 0, 1, entities)
+        : this(serverTick, 0, entities.Count, true, 0, 1, entities)
+    {
+    }
+
+    public WorldSnapshotMessage(uint serverTick, uint snapshotSequence, IReadOnlyList<EntityStateSnapshot> entities)
+        : this(serverTick, snapshotSequence, entities.Count, true, 0, 1, entities)
     {
     }
 
@@ -61,7 +72,17 @@ public sealed record WorldSnapshotMessage(
         int totalEntities,
         bool isComplete,
         IReadOnlyList<EntityStateSnapshot> entities)
-        : this(serverTick, totalEntities, isComplete, 0, 1, entities)
+        : this(serverTick, 0, totalEntities, isComplete, 0, 1, entities)
+    {
+    }
+
+    public WorldSnapshotMessage(
+        uint serverTick,
+        uint snapshotSequence,
+        int totalEntities,
+        bool isComplete,
+        IReadOnlyList<EntityStateSnapshot> entities)
+        : this(serverTick, snapshotSequence, totalEntities, isComplete, 0, 1, entities)
     {
     }
 

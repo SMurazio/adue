@@ -21,6 +21,7 @@ public sealed class ProtocolCodecTests
     {
         var original = new WorldSnapshotMessage(
             42,
+            77,
             120,
             false,
             2,
@@ -33,6 +34,7 @@ public sealed class ProtocolCodecTests
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(original.ServerTick, decoded.ServerTick);
+        Assert.Equal(77u, decoded.SnapshotSequence);
         Assert.Equal(120, decoded.TotalEntities);
         Assert.False(decoded.IsComplete);
         Assert.Equal(2, decoded.ChunkIndex);
@@ -41,6 +43,16 @@ public sealed class ProtocolCodecTests
         Assert.Equal(99u, entity.NetworkId);
         Assert.InRange(entity.Position.X, 1.2f, 1.3f);
         Assert.Equal(-2.5f, entity.Position.Y);
+    }
+
+    [Fact]
+    public void SnapshotAckRoundTrips()
+    {
+        var original = new SnapshotAckMessage(77);
+
+        var decoded = Assert.IsType<SnapshotAckMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(77u, decoded.LastSnapshotSequence);
     }
 
     [Fact]

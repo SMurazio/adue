@@ -6,6 +6,7 @@ public enum MessageType : ushort
     LoginRequest = 2,
     MoveInput = 3,
     ChatSend = 4,
+    SnapshotAck = 5,
 
     ServerHello = 100,
     LoginResult = 101,

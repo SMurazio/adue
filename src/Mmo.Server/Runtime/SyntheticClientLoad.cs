@@ -262,8 +262,13 @@ public sealed class SyntheticClientLoad : IDisposable
                     }
 
                     break;
-                case WorldSnapshotMessage:
+                case WorldSnapshotMessage snapshot:
                     _owner.RecordSnapshot();
+                    if (_serverPeer is not null)
+                    {
+                        Send(_serverPeer, new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
+                    }
+
                     break;
                 case ServerErrorMessage:
                     _owner.RecordServerError();

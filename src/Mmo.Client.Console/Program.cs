@@ -50,6 +50,11 @@ listener.NetworkReceiveEvent += (_, reader, _, _) =>
     try
     {
         var message = ProtocolCodec.Decode(reader.GetRemainingBytes());
+        if (message is WorldSnapshotMessage snapshot)
+        {
+            outgoing.Enqueue(new SnapshotAckMessage(snapshot.SnapshotSequence));
+        }
+
         PrintMessage(message, options.ShowSnapshots, entityNames, ref lastSnapshotPrintedAt);
     }
     catch (Exception exception)
@@ -81,7 +86,7 @@ try
 
         while (serverPeer is not null && outgoing.TryDequeue(out var message))
         {
-            var deliveryMethod = message is MoveInputMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            var deliveryMethod = message is MoveInputMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(serverPeer, message, deliveryMethod);
         }
 
@@ -205,7 +210,7 @@ static void PrintMessage(
                     : $"#{entity.NetworkId}";
                 return $"{name}@({entity.Position.X:0.0},{entity.Position.Y:0.0})";
             }));
-            Console.WriteLine($"tick={snapshot.ServerTick} visible=[{players}]");
+            Console.WriteLine($"tick={snapshot.ServerTick} seq={snapshot.SnapshotSequence} visible=[{players}]");
             break;
         case ChatBroadcastMessage chat:
             Console.WriteLine($"[{chat.Sender}] {chat.Text}");

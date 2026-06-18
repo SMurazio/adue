@@ -169,6 +169,7 @@ public sealed class AoiIntegrationTests
                         OwnPosition = spawn.Position;
                         break;
                     case WorldSnapshotMessage snapshot:
+                        Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         var own = snapshot.Entities.FirstOrDefault(entity => entity.NetworkId == OwnNetworkId);
                         if (own is not null)
                         {
