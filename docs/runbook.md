@@ -98,7 +98,7 @@ Client commands:
 
 The web client also has diagonal movement buttons: `NW`, `NE`, `SW`, and `SE`.
 In the 3D web view, hold right mouse button on the ground to move toward the pointer; release to stop.
-The web renderer interpolates snapshots for smoother motion; the server owns authoritative position.
+The web renderer keeps local movement responsive and renders remote entities through a small snapshot buffer, about 150 ms behind the newest received state. The server owns authoritative position.
 
 Snapshot logging is off by default. Add `--snapshots` to the client command to print once-per-second world snapshots.
 

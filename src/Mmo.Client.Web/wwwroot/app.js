@@ -6,6 +6,7 @@ const state = {
   name: "",
   role: "Player",
   tick: null,
+  snapshotSequence: null,
   connected: false,
   snapshotIsComplete: true,
   snapshotTotalEntities: 0,
@@ -42,7 +43,8 @@ let rightMouseActive = false;
 let rightMouseTarget = null;
 let rightMousePointer = null;
 let lastRightMoveSentAt = 0;
-const interpolationMs = 70;
+const snapshotInterpolationDelayMs = 150;
+const maxEntitySnapshotBuffer = 8;
 const cameraFollowAlpha = 0.14;
 const serverMoveUnitsPerSecond = 5;
 const localCorrectionAlpha = 0.18;
@@ -379,6 +381,7 @@ function handleSnapshotMessage(message) {
   const chunkCount = Math.max(1, message.chunkCount ?? 1);
   const chunkIndex = message.chunkIndex ?? 0;
   const totalEntities = message.totalEntities ?? message.entities.length;
+  const sequence = message.sequence ?? message.tick;
 
   if (state.tick !== null && message.tick < state.tick) {
     return;
@@ -386,7 +389,7 @@ function handleSnapshotMessage(message) {
 
   if (chunkCount === 1) {
     snapshotAssembly = null;
-    applySnapshot(message.tick, totalEntities, message.isComplete ?? true, message.entities);
+    applySnapshot(message.tick, sequence, totalEntities, message.isComplete ?? true, message.entities);
     return;
   }
 
@@ -397,10 +400,12 @@ function handleSnapshotMessage(message) {
   if (
     !snapshotAssembly ||
     snapshotAssembly.tick !== message.tick ||
+    snapshotAssembly.sequence !== sequence ||
     snapshotAssembly.chunkCount !== chunkCount
   ) {
     snapshotAssembly = {
       tick: message.tick,
+      sequence,
       totalEntities,
       isComplete: message.isComplete ?? false,
       chunkCount,
@@ -414,19 +419,20 @@ function handleSnapshotMessage(message) {
 
   if (snapshotAssembly.chunks.every(Boolean)) {
     const entities = snapshotAssembly.chunks.flat();
-    applySnapshot(snapshotAssembly.tick, snapshotAssembly.totalEntities, snapshotAssembly.isComplete, entities);
+    applySnapshot(snapshotAssembly.tick, snapshotAssembly.sequence, snapshotAssembly.totalEntities, snapshotAssembly.isComplete, entities);
     snapshotAssembly = null;
   }
 }
 
-function applySnapshot(tick, totalEntities, isComplete, entities) {
+function applySnapshot(tick, sequence, totalEntities, isComplete, entities) {
   state.tick = tick;
+  state.snapshotSequence = sequence;
   state.entities = hydrateSnapshotEntities(entities);
   state.snapshotIsComplete = isComplete;
   state.snapshotTotalEntities = totalEntities;
-  updateSceneEntities();
+  updateSceneEntities(tick, sequence);
   renderEntities();
-  els.tick.textContent = `tick ${state.tick ?? "-"}`;
+  els.tick.textContent = `tick ${state.tick ?? "-"} / seq ${state.snapshotSequence ?? "-"}`;
   els.entityCount.textContent = state.snapshotIsComplete
     ? `${state.entities.length} entities`
     : `${state.entities.length}/${state.snapshotTotalEntities} entities`;
@@ -592,7 +598,7 @@ function readMetric(line, pattern) {
   return line.match(pattern)?.[1]?.trim() ?? "-";
 }
 
-function updateSceneEntities() {
+function updateSceneEntities(tick, sequence) {
   const self = findSelfEntity(state.entities);
   if (self) {
     desiredFocus.set(self.x, 0, self.y);
@@ -609,8 +615,6 @@ function updateSceneEntities() {
   const now = performance.now();
   for (const entity of state.entities) {
     const entry = getOrCreateEntity(entity);
-    const current = sampleEntityPosition(entry, now).clone();
-    entry.from.copy(current);
     entry.to.set(entity.x, 0, entity.y);
     entry.lastSnapshotAt = now;
     entry.lastSeenAt = now;
@@ -626,8 +630,26 @@ function updateSceneEntities() {
         entry.renderPosition.copy(entry.serverPosition);
         entry.localInitialized = true;
       }
+    } else {
+      addEntitySnapshotSample(entry, tick, sequence, entity.x, entity.y, now);
     }
     setEntityColor(entry, entry.isSelf);
+  }
+}
+
+function addEntitySnapshotSample(entry, tick, sequence, x, y, receivedAt) {
+  const last = entry.snapshotBuffer.at(-1);
+  if (last && last.sequence === sequence) {
+    last.tick = tick;
+    last.x = x;
+    last.y = y;
+    last.receivedAt = receivedAt;
+  } else {
+    entry.snapshotBuffer.push({ tick, sequence, x, y, receivedAt });
+  }
+
+  while (entry.snapshotBuffer.length > maxEntitySnapshotBuffer) {
+    entry.snapshotBuffer.shift();
   }
 }
 
@@ -698,6 +720,7 @@ function getOrCreateEntity(entity) {
     serverPosition: new THREE.Vector3(entity.x, 0, entity.y),
     lastSnapshotAt: performance.now(),
     lastSeenAt: performance.now(),
+    snapshotBuffer: [],
     name: entity.name,
     isSelf: false,
     inLatestSnapshot: true,
@@ -1135,10 +1158,37 @@ function sampleEntityPosition(entry, nowMs) {
     return entry.renderPosition;
   }
 
-  const alpha = Math.min(Math.max((nowMs - entry.lastSnapshotAt) / interpolationMs, 0), 1);
-  const smoothAlpha = alpha * alpha * (3 - (2 * alpha));
-  entry.renderPosition.lerpVectors(entry.from, entry.to, smoothAlpha);
+  const interpolated = interpolateRemoteEntityPosition(entry.snapshotBuffer, nowMs - snapshotInterpolationDelayMs);
+  if (interpolated) {
+    entry.renderPosition.set(interpolated.x, 0, interpolated.y);
+  }
+
   return entry.renderPosition;
+}
+
+function interpolateRemoteEntityPosition(samples, renderTimeMs) {
+  if (samples.length === 0) {
+    return null;
+  }
+
+  if (samples.length === 1 || renderTimeMs <= samples[0].receivedAt) {
+    return samples[0];
+  }
+
+  for (let i = 1; i < samples.length; i++) {
+    const previous = samples[i - 1];
+    const next = samples[i];
+    if (renderTimeMs <= next.receivedAt) {
+      const span = Math.max(1, next.receivedAt - previous.receivedAt);
+      const alpha = THREE.MathUtils.clamp((renderTimeMs - previous.receivedAt) / span, 0, 1);
+      return {
+        x: THREE.MathUtils.lerp(previous.x, next.x, alpha),
+        y: THREE.MathUtils.lerp(previous.y, next.y, alpha)
+      };
+    }
+  }
+
+  return samples.at(-1);
 }
 
 function advanceLocalPlayer(deltaSeconds) {
@@ -1259,7 +1309,7 @@ function animate() {
     const position = sampleEntityPosition(entry, nowMs);
     entry.group.position.copy(position);
     entry.body.rotation.y += 0.015;
-    entry.head.position.y = 1.08 + Math.sin(now * 3 + entry.to.x) * 0.025;
+    entry.head.position.y = 1.08 + Math.sin(now * 3 + entry.renderPosition.x) * 0.025;
     entry.label.lookAt(camera.position);
   }
 
