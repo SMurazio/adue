@@ -1,10 +1,33 @@
 # S23 — Instrument and fix the residual client-side movement stutter
 
-Severity: should-fix. **User-prioritized — after S21+S22 fixed the server, the human still perceives
-stutter in the 2-client Godot view.** The server is proven healthy (S22: `gc=0/0/0`, ~2 ms avg tick,
-a single ~22 ms OS blip/min in Release, even at 120 clients), so the residual stutter is almost
-certainly **client-side or environmental — and we currently have no client-side instrumentation to
-see it.** Localize before fixing; do NOT fix blind.
+Severity: **demoted to fallback (was should-fix).** See the redirect below.
+
+## REDIRECT (new evidence: stutter is SIMULTANEOUS on both clients)
+
+The human reports the stutter happens on **both Godot clients at the same instant**. That rules out
+*independent* per-client GC/render (which would hitch each client at different moments) — it points
+**upstream: the shared server thread or the shared dev machine.** Prime suspect, with direct
+supporting data: the dev launch (`start-server.ps1`) runs the **Debug** server
+(`bin/Debug/...Mmo.Server.dll`), and Debug is exactly the build we proved has inflated tick spikes
+(~33 ms Debug vs one ~22 ms OS blip/min in Release). A stalled server tick delays every client's
+snapshot at once ⇒ simultaneous stutter.
+
+**Order of operations now (do NOT start the client instrumentation below first):**
+1. Confirm via a **Release-server** visual check (this is N16 territory — elevate N16 to should-fix:
+   the dev launch scripts should default to Release, with a Debug opt-in). If the simultaneous
+   stutter largely vanishes ⇒ root cause was the Debug build; this task is likely unnecessary.
+2. If it persists on Release: capture the **server** `tick_hitch` trace during the visual check and
+   check `durationMs`/`driftMs`/`gc` — distinguish OS-preemption (drift) vs GC vs send cadence.
+   Consider a server tick-thread priority bump and/or testing isolated (one client, no editor/stress).
+3. **Only if** the server is confirmed flat during a reproduced stutter does the client-side
+   instrumentation below become the right next step.
+
+## (Fallback) original plan — client-side instrumentation
+
+Severity if reached: should-fix. The server is healthy under load (S22: `gc=0/0/0`, ~2 ms avg tick,
+a single ~22 ms OS blip/min in Release, even at 120 clients). If the stutter survives a Release
+server AND an isolated single client AND a flat server trace, the remaining suspect is the client,
+which currently has **no frame-timing/GC instrumentation.** Localize before fixing; do NOT fix blind.
 
 ## Evidence / gap
 
