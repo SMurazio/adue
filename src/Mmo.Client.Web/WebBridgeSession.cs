@@ -180,7 +180,7 @@ public sealed class WebBridgeSession
         switch (message)
         {
             case ServerHelloMessage hello:
-                EnqueueBrowser(new { type = "serverHello", hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs });
+                EnqueueBrowser(new { type = "serverHello", hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles });
                 break;
             case LoginResultMessage login:
                 EnqueueBrowser(new

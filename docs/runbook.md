@@ -101,7 +101,7 @@ Client commands:
 
 The web client also has diagonal movement buttons: `NW`, `NE`, `SW`, and `SE`.
 In the 3D web view, hold right mouse button on the ground to move toward the pointer; release to stop.
-The web renderer shows the tile grid and blocked wall tiles from the server's `ZoneInfo` message. It tweens local and remote entities only after the server confirms a new tile in a snapshot. The server owns authoritative tile position; there is no client prediction.
+The web renderer shows the tile grid and blocked wall tiles from the server's `ZoneInfo` message. It tweens local and remote entities only after the server confirms a new tile in a snapshot. The debug visibility ring uses the server-advertised `MMO_INTEREST_RADIUS`. The server owns authoritative tile position; there is no client prediction.
 
 Snapshot logging is off by default. Add `--snapshots` to the client command to print once-per-second world snapshots.
 

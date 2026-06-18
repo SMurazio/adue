@@ -4,7 +4,7 @@ The protocol is binary and versioned. It is intentionally small so packet behavi
 
 ## Movement Model
 
-Protocol v11 uses tile-stepped movement. The client sends `MoveStep` with an input sequence and one 8-way `Direction` (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`). The server validates cooldown, world bounds, and blocked tiles, then moves the entity exactly one tile if the step is legal.
+Protocol v12 uses tile-stepped movement. The client sends `MoveStep` with an input sequence and one 8-way `Direction` (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`). The server validates cooldown, world bounds, and blocked tiles, then moves the entity exactly one tile if the step is legal.
 
 Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile coordinates. Entity snapshots also carry facing. Clients tween between confirmed tile centers; there is no client-side prediction. Rationale: [networking-design-plan.md](networking-design-plan.md) section 5a.
 
@@ -13,7 +13,7 @@ Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile 
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `11`
+- `byte` version: `12`
 - `uint16` message type
 - message-specific payload
 
@@ -39,7 +39,7 @@ Between full heartbeat snapshots, `WorldSnapshot` may be incomplete (`isComplete
 
 ## Server Messages
 
-- `ServerHello`: server name, protocol version, tick rate, and authoritative step cooldown in milliseconds.
+- `ServerHello`: server name, protocol version, tick rate, authoritative step cooldown in milliseconds, and server interest radius in tiles.
 - `LoginResult`: accepted/rejected, character id, display name, assigned role, spawn tile, reason.
 - `ZoneInfo`: zone id, width, height, and blocked-tile map. The codec carries blocked tiles as a compact bitset ordered row-major by tile coordinate; clients render the server-provided map instead of duplicating wall seeds.
 - `EntitySpawn`: durable visible-entity metadata: network id, character id, kind, display name, initial tile, and facing.

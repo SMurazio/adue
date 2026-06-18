@@ -15,11 +15,16 @@ public sealed class WebClientAssetTests
         Assert.Contains("let tileStepTweenMs = defaultTileStepTweenMs;", app);
         Assert.Contains("const remoteInterpolationCadenceMultiplier = 2;", app);
         Assert.Contains("let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;", app);
+        Assert.Contains("const defaultDebugVisibilityRadius = 40;", app);
+        Assert.Contains("let debugVisibilityRadius = defaultDebugVisibilityRadius;", app);
         Assert.Contains("function setStepCooldownMs", app);
         Assert.Contains("setStepCooldownMs(message.stepCooldownMs, message.tickRate);", app);
         Assert.Contains("function computeEffectiveStepCadenceMs", app);
         Assert.Contains("Math.ceil(cooldownMs / tickIntervalMs)", app);
         Assert.Contains("movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;", app);
+        Assert.Contains("function setInterestRadiusTiles", app);
+        Assert.Contains("setInterestRadiusTiles(message.interestRadiusTiles);", app);
+        Assert.Contains("debugVisibilityRadius = Number.isFinite(parsed) && parsed > 0", app);
         Assert.Contains("const selfMovementInterpolationDelayMs = 0;", app);
         Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const movementChordDelayMs = 70;", app);
@@ -59,6 +64,7 @@ public sealed class WebClientAssetTests
         Assert.Contains("nowMs - next.receivedAt < movementInterpolationDelayForEntry(entry)", app);
         Assert.Contains("entry.renderPosition.lerpVectors(step.from, step.to, alpha);", app);
         Assert.Contains("desiredFocus.copy(self.renderPosition);", app);
+        Assert.DoesNotContain("const debugVisibilityRadius = 96;", app);
         Assert.DoesNotContain("const eased = alpha * alpha", app);
         Assert.DoesNotContain("function buildBlockedTileSet", app);
         Assert.DoesNotContain("function interpolateRemoteEntityPosition", app);

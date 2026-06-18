@@ -32,7 +32,7 @@ public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMe
     public MessageType Type => MessageType.SnapshotAck;
 }
 
-public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs) : IProtocolMessage
+public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, float InterestRadiusTiles) : IProtocolMessage
 {
     public MessageType Type => MessageType.ServerHello;
 }

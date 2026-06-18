@@ -59,7 +59,8 @@ let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceM
 const selfMovementInterpolationDelayMs = 0;
 const stepRetryMs = 50;
 const movementChordDelayMs = 70;
-const debugVisibilityRadius = 96;
+const defaultDebugVisibilityRadius = 40;
+let debugVisibilityRadius = defaultDebugVisibilityRadius;
 const entityStaleAfterMs = 2500;
 const entityExpireAfterMs = 8000;
 const entityRegistryMaxEntries = 2048;
@@ -395,6 +396,7 @@ function handleMessage(message) {
       break;
     case "serverHello":
       setStepCooldownMs(message.stepCooldownMs, message.tickRate);
+      setInterestRadiusTiles(message.interestRadiusTiles);
       setStatus(`${message.serverName} - ${message.tickRate} ticks/sec`);
       break;
     case "login":
@@ -450,6 +452,13 @@ function computeEffectiveStepCadenceMs(value, tickRate) {
   const tickIntervalMs = 1000 / parsedTickRate;
   const cooldownTicks = Math.max(1, Math.ceil(cooldownMs / tickIntervalMs));
   return cooldownTicks * tickIntervalMs;
+}
+
+function setInterestRadiusTiles(value) {
+  const parsed = Number(value);
+  debugVisibilityRadius = Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : defaultDebugVisibilityRadius;
 }
 
 function handleZoneInfo(message) {
