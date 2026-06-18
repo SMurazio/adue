@@ -77,4 +77,37 @@ public sealed class LogTests
         Assert.DoesNotContain(lines, line => line.Contains("queued-info", StringComparison.Ordinal));
         Assert.Contains(lines, line => line.Contains("[error] must-keep", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void ServerLogWriterDuplicatesAllLinesAndErrorsToFiles()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "mmo-log-tests", Guid.NewGuid().ToString("N"));
+        var logPath = Path.Combine(directory, "server.log");
+        var errorLogPath = Path.Combine(directory, "server.err.log");
+        var console = new List<string>();
+
+        try
+        {
+            var writer = new ServerLogWriter(console.Add, logPath, errorLogPath);
+
+            writer.Write(LogLevel.Info, "info line");
+            writer.Write(LogLevel.Error, "error line");
+
+            Assert.Equal(["info line", "error line"], console);
+            var log = File.ReadAllText(logPath);
+            Assert.Contains("info line", log, StringComparison.Ordinal);
+            Assert.Contains("error line", log, StringComparison.Ordinal);
+
+            var errorLog = File.ReadAllText(errorLogPath);
+            Assert.DoesNotContain("info line", errorLog, StringComparison.Ordinal);
+            Assert.Contains("error line", errorLog, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
 }

@@ -41,6 +41,14 @@ Start the MMO server in the background:
 .\.shared\skills\mmo-dev\scripts\start-server.cmd
 ```
 
+Start the server with file logs while keeping the normal visible server window:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-server.cmd -LogToFile
+```
+
+This writes `.run/server.log` and `.run/server.err.log`.
+
 Start the browser debug client in the background:
 
 ```powershell
@@ -86,6 +94,8 @@ and `GodotB`:
 ```powershell
 .\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
 ```
+
+Add `-LogToFile` to capture the server logs during that visual check.
 
 `godot-run` needs `MMO_GODOT` set to the Godot .NET executable (or `godot` on PATH):
 

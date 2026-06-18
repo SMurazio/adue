@@ -2,7 +2,8 @@ namespace Mmo.Server.Runtime;
 
 public static class Log
 {
-    private static readonly AsyncConsoleLogSink Sink = new(Console.WriteLine);
+    private static readonly ServerLogWriter Writer = ServerLogWriter.FromEnvironment(Console.WriteLine);
+    private static readonly AsyncConsoleLogSink Sink = new(Writer.Write);
 
     public static void Info(string message)
     {
@@ -38,7 +39,7 @@ internal sealed class AsyncConsoleLogSink : IDisposable
 
     private readonly object _gate = new();
     private readonly LinkedList<LogEntry> _entries = new();
-    private readonly Action<string> _write;
+    private readonly Action<LogLevel, string> _write;
     private readonly AutoResetEvent _hasEntries = new(initialState: false);
     private readonly ManualResetEventSlim _drained = new(initialState: true);
     private readonly Thread _worker;
@@ -49,6 +50,11 @@ internal sealed class AsyncConsoleLogSink : IDisposable
     private bool _disposed;
 
     public AsyncConsoleLogSink(Action<string> write, int capacity = DefaultCapacity)
+        : this((_, line) => write(line), capacity)
+    {
+    }
+
+    public AsyncConsoleLogSink(Action<LogLevel, string> write, int capacity = DefaultCapacity)
     {
         if (capacity <= 0)
         {
@@ -158,7 +164,7 @@ internal sealed class AsyncConsoleLogSink : IDisposable
                 return;
             }
 
-            SafeWrite(entry.Format());
+            SafeWrite(entry);
             lock (_gate)
             {
                 _pendingOrWritingCount--;
@@ -194,11 +200,11 @@ internal sealed class AsyncConsoleLogSink : IDisposable
         }
     }
 
-    private void SafeWrite(string line)
+    private void SafeWrite(LogEntry entry)
     {
         try
         {
-            _write(line);
+            _write(entry.Level, entry.Format());
         }
         catch
         {
@@ -222,6 +228,78 @@ internal sealed class AsyncConsoleLogSink : IDisposable
                 LogLevel.Error => "error",
                 _ => "unknown"
             };
+        }
+    }
+}
+
+internal sealed class ServerLogWriter
+{
+    private const string LogFileEnvironmentKey = "MMO_SERVER_LOG_FILE";
+    private const string ErrorLogFileEnvironmentKey = "MMO_SERVER_ERR_LOG_FILE";
+
+    private readonly Action<string> _consoleWrite;
+    private readonly string? _logPath;
+    private readonly string? _errorLogPath;
+    private readonly object _fileGate = new();
+
+    public ServerLogWriter(Action<string> consoleWrite, string? logPath = null, string? errorLogPath = null)
+    {
+        _consoleWrite = consoleWrite ?? throw new ArgumentNullException(nameof(consoleWrite));
+        _logPath = NormalizePath(logPath);
+        _errorLogPath = NormalizePath(errorLogPath);
+    }
+
+    public static ServerLogWriter FromEnvironment(Action<string> consoleWrite)
+    {
+        return new ServerLogWriter(
+            consoleWrite,
+            Environment.GetEnvironmentVariable(LogFileEnvironmentKey),
+            Environment.GetEnvironmentVariable(ErrorLogFileEnvironmentKey));
+    }
+
+    public void Write(LogLevel level, string line)
+    {
+        _consoleWrite(line);
+
+        if (_logPath is null && _errorLogPath is null)
+        {
+            return;
+        }
+
+        lock (_fileGate)
+        {
+            if (_logPath is not null)
+            {
+                TryAppendLine(_logPath, line);
+            }
+
+            if (level == LogLevel.Error && _errorLogPath is not null)
+            {
+                TryAppendLine(_errorLogPath, line);
+            }
+        }
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        return string.IsNullOrWhiteSpace(path) ? null : Path.GetFullPath(path);
+    }
+
+    private static void TryAppendLine(string path, string line)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch
+        {
+            // File logging must never crash the server.
         }
     }
 }

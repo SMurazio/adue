@@ -135,6 +135,7 @@ $runtimeMarkers = @(
     'Mmo.Client.Web.dll',
     'Mmo.Client.Godot',
     'MmoClientGodot',
+    'run-server-window.ps1',
     'run-server-window.cmd',
     'run-web-client-window.cmd',
     'start-server.ps1',

@@ -5,6 +5,9 @@ param(
     [int]$Port = 7777,
     [string]$ConnectionKey = 'local-dev',
     [string]$AdminNames = '',
+    [switch]$LogToFile,
+    [string]$LogPath = '',
+    [string]$ErrorLogPath = '',
     [switch]$NoStop,
     [switch]$SkipBuild
 )
@@ -93,7 +96,20 @@ $effectiveAdminNames = if ([string]::IsNullOrWhiteSpace($AdminNames)) {
 }
 $env:MMO_ADMIN_NAMES = $effectiveAdminNames
 "Admin names for visual check: $effectiveAdminNames"
-& $startServerScript
+$serverArgs = @()
+if ($LogToFile) {
+    $serverArgs += '-LogToFile'
+}
+
+if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    $serverArgs += @('-LogPath', $LogPath)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ErrorLogPath)) {
+    $serverArgs += @('-ErrorLogPath', $ErrorLogPath)
+}
+
+& $startServerScript @serverArgs
 
 if (-not $SkipBuild) {
     "Building Godot client C#..."

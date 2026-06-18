@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0movement-debug-trace.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0movement-debug-trace.ps1" %*

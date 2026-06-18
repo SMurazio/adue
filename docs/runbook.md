@@ -67,6 +67,21 @@ The server tick loop uses `Stopwatch` deadlines and requests 1 ms Windows timer 
 .\.tools\dotnet\dotnet.exe run --project .\src\Mmo.Server\Mmo.Server.csproj
 ```
 
+Preferred script launcher:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-server.cmd
+```
+
+To keep the server window visible and also capture server logs to files:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-server.cmd -LogToFile
+```
+
+This writes `.run\server.log` and error-only `.run\server.err.log`. Use `-LogPath` and
+`-ErrorLogPath` to override those paths.
+
 Useful environment variables:
 
 - `MMO_PORT`
@@ -85,6 +100,8 @@ Useful environment variables:
 - `MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER`: tick hitch threshold as a multiple of tick interval; defaults to `1.5`
 - `MMO_DEBUG_MOVEMENT_TICK_DURATION_MS`: duration-only tick trace threshold; defaults to `15`
 - `MMO_GODOT_FRAME_HITCH_MS`: Godot client frame-hitch trace threshold; defaults to `33.3`
+- `MMO_SERVER_LOG_FILE`: optional server log file path; set by `start-server.cmd -LogToFile`
+- `MMO_SERVER_ERR_LOG_FILE`: optional error-only server log file path; set by `start-server.cmd -LogToFile`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`
