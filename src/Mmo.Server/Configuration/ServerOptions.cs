@@ -23,6 +23,8 @@ public sealed record ServerOptions(
 
     public double DebugMovementHitchThresholdMultiplier { get; init; } = 1.5d;
 
+    public double DebugMovementTickDurationThresholdMs { get; init; } = 15d;
+
     public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
 
     public uint StepCooldownTicks => (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / TickRate)));
@@ -51,7 +53,8 @@ public sealed record ServerOptions(
         {
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
             DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
-            DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d)
+            DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d),
+            DebugMovementTickDurationThresholdMs = ReadDouble("MMO_DEBUG_MOVEMENT_TICK_DURATION_MS", 15d)
         };
 
         options.Validate();
@@ -118,6 +121,11 @@ public sealed record ServerOptions(
         if (DebugMovementHitchThresholdMultiplier < 1d || DebugMovementHitchThresholdMultiplier > 10d)
         {
             throw new InvalidOperationException("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER must be between 1 and 10.");
+        }
+
+        if (DebugMovementTickDurationThresholdMs < 1d || DebugMovementTickDurationThresholdMs > 1000d)
+        {
+            throw new InvalidOperationException("MMO_DEBUG_MOVEMENT_TICK_DURATION_MS must be between 1 and 1000.");
         }
     }
 

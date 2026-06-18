@@ -41,9 +41,7 @@ internal sealed class ServerMovementTrace
         TimeSpan scheduleDrift,
         TickBudgetSample budget,
         int catchUpTicks,
-        int gen0Delta,
-        int gen1Delta,
-        int gen2Delta,
+        GcCollectionSample gc,
         TimeSpan tickInterval)
     {
         if (!Enabled)
@@ -51,20 +49,29 @@ internal sealed class ServerMovementTrace
             return;
         }
 
-        var thresholdMs = tickInterval.TotalMilliseconds * _options.DebugMovementHitchThresholdMultiplier;
-        if (interTickGap.TotalMilliseconds < thresholdMs && tickDuration.TotalMilliseconds < thresholdMs)
+        var gapThresholdMs = tickInterval.TotalMilliseconds * _options.DebugMovementHitchThresholdMultiplier;
+        var gapTriggered = interTickGap.TotalMilliseconds >= gapThresholdMs;
+        var durationTriggered = tickDuration.TotalMilliseconds >= _options.DebugMovementTickDurationThresholdMs;
+        if (!gapTriggered && !durationTriggered)
         {
             return;
         }
 
+        var trigger = gapTriggered && durationTriggered
+            ? "gap+duration"
+            : gapTriggered ? "gap" : "duration";
+        var unbudgetedMs = Math.Max(0, tickDuration.TotalMilliseconds - budget.TotalMs);
+
         _write(
             "mmo_trace side=server event=tick_hitch" +
             $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)}" +
+            $" trigger={trigger}" +
             $" interMs={FormatMs(interTickGap)} durationMs={FormatMs(tickDuration)} driftMs={FormatMs(scheduleDrift)}" +
             $" catchUpTicks={catchUpTicks.ToString(CultureInfo.InvariantCulture)}" +
-            $" gc0={gen0Delta.ToString(CultureInfo.InvariantCulture)} gc1={gen1Delta.ToString(CultureInfo.InvariantCulture)} gc2={gen2Delta.ToString(CultureInfo.InvariantCulture)}" +
+            $" gc0={gc.Gen0.ToString(CultureInfo.InvariantCulture)} gc1={gc.Gen1.ToString(CultureInfo.InvariantCulture)} gc2={gc.Gen2.ToString(CultureInfo.InvariantCulture)}" +
             $" moveMs={FormatMs(budget.MovementMs)} aoiMs={FormatMs(budget.AoiMs)} serMs={FormatMs(budget.SerializeMs)}" +
-            $" netMs={FormatMs(budget.NetworkMs)} persistMs={FormatMs(budget.PersistenceMs)} otherMs={FormatMs(budget.OtherMs)}");
+            $" netMs={FormatMs(budget.NetworkMs)} persistMs={FormatMs(budget.PersistenceMs)} otherMs={FormatMs(budget.OtherMs)}" +
+            $" unbudgetedMs={FormatMs(unbudgetedMs)}");
     }
 
     public void MoveStep(ClientSession session, uint sequence, MovementStepResult result, uint serverTick)

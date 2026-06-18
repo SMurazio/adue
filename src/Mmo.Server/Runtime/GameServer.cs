@@ -101,6 +101,7 @@ public sealed class GameServer
         var tickInterval = PreciseTickScheduler.ToTimeSpan(tickIntervalTimestampTicks);
         var nextTickAt = Stopwatch.GetTimestamp();
         var lastTickStartedAt = 0L;
+        var tickBudget = new TickBudgetRecorder();
 
         try
         {
@@ -122,12 +123,16 @@ public sealed class GameServer
                     var gen0Before = GC.CollectionCount(0);
                     var gen1Before = GC.CollectionCount(1);
                     var gen2Before = GC.CollectionCount(2);
-                    var tickBudget = new TickBudgetRecorder();
+                    tickBudget.Reset();
                     var scheduleDrift = Stopwatch.GetElapsedTime(nextTickAt, now);
                     Tick(tickBudget);
                     var tickDuration = Stopwatch.GetElapsedTime(tickStartedAt);
                     var budgetSample = tickBudget.ToSample();
-                    _metrics.RecordTick(tickDuration, scheduleDrift, budgetSample);
+                    var gcSample = new GcCollectionSample(
+                        GC.CollectionCount(0) - gen0Before,
+                        GC.CollectionCount(1) - gen1Before,
+                        GC.CollectionCount(2) - gen2Before);
+                    _metrics.RecordTick(tickDuration, scheduleDrift, budgetSample, gcSample);
                     _movementTrace.TickHitch(
                         _serverTick,
                         interTickGap,
@@ -135,9 +140,7 @@ public sealed class GameServer
                         scheduleDrift,
                         budgetSample,
                         catchUpTicksThisIteration,
-                        GC.CollectionCount(0) - gen0Before,
-                        GC.CollectionCount(1) - gen1Before,
-                        GC.CollectionCount(2) - gen2Before,
+                        gcSample,
                         tickInterval);
                     nextTickAt += tickIntervalTimestampTicks;
                 }
@@ -441,7 +444,20 @@ public sealed class GameServer
 
         foreach (var session in _authenticatedScratch)
         {
-            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, _entityScratch, tickBudget));
+            TryBroadcastSnapshotToSession(session, _entityScratch, tickBudget);
+        }
+    }
+
+    private void TryBroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<WorldEntity> entities, TickBudgetRecorder tickBudget)
+    {
+        try
+        {
+            BroadcastSnapshotToSession(session, entities, tickBudget);
+        }
+        catch (Exception exception)
+        {
+            _metrics.RecordRuntimeFault();
+            Log.Error($"Runtime fault in snapshot for {session.DisplayName} #{session.NetworkId}.", exception);
         }
     }
 
@@ -477,7 +493,8 @@ public sealed class GameServer
         recipient.CollectSnapshotEntitiesMissingFrom(visibleIds, _despawnScratch);
         foreach (var networkId in _despawnScratch)
         {
-            TrySend(recipient.Peer, new EntityDespawnMessage(_serverTick, networkId), DeliveryMethod.ReliableOrdered);
+            var packet = _messageEncodeBuffer.EncodeEntityDespawn(_serverTick, networkId);
+            TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntityDespawn);
             recipient.ForgetSentRevision(networkId);
         }
     }
@@ -494,6 +511,20 @@ public sealed class GameServer
 
         if (!TryGetSessionEntity(recipient, out var recipientEntity))
         {
+            return;
+        }
+
+        if (_options.MaxVisibleEntities >= entities.Count)
+        {
+            foreach (var candidate in entities)
+            {
+                if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
+                {
+                    destination.Add(candidate);
+                    visibleIds.Add(candidate.NetworkId);
+                }
+            }
+
             return;
         }
 
@@ -574,14 +605,14 @@ public sealed class GameServer
             EncodedPacket packet;
             using (tickBudget.Measure(TickBudgetCategory.Serialize))
             {
-                packet = _snapshotEncodeBuffer.Encode(new WorldSnapshotMessage(
+                packet = _snapshotEncodeBuffer.EncodeWorldSnapshot(
                     _serverTick,
                     snapshotSequence,
                     visible.Count,
                     isComplete,
                     chunkIndex,
                     chunkCount,
-                    _snapshotChunkScratch));
+                    _snapshotChunkScratch);
             }
 
             if (packet.Length > MaxSequencedSnapshotBytes)
@@ -617,13 +648,14 @@ public sealed class GameServer
                 continue;
             }
 
-            TrySend(recipient.Peer, new EntitySpawnMessage(
+            var packet = _messageEncodeBuffer.EncodeEntitySpawn(
                 entity.NetworkId,
                 entity.CharacterId ?? Guid.Empty,
                 entity.Kind,
                 entity.DisplayName,
                 entity.Tile,
-                entity.Facing), DeliveryMethod.ReliableOrdered);
+                entity.Facing);
+            TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
         }
     }
@@ -970,6 +1002,22 @@ public sealed class GameServer
         }
     }
 
+    private bool TrySend(NetPeer peer, EncodedPacket packet, DeliveryMethod deliveryMethod, MessageType messageType)
+    {
+        try
+        {
+            peer.Send(packet.Buffer.AsSpan(0, packet.Length), 0, deliveryMethod);
+            _metrics.RecordSent(messageType, packet.Length);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _metrics.RecordSendFailure();
+            Log.Warn($"Failed to send {messageType} to {FormatPeer(peer)}: {exception.Message}");
+            return false;
+        }
+    }
+
     private static string FormatPeer(NetPeer peer)
     {
         return $"{peer.Address}:{peer.Port}";
@@ -1071,9 +1119,61 @@ internal sealed class ProtocolEncodeBuffer
 
     public EncodedPacket Encode(IProtocolMessage message)
     {
+        Reset();
+        ProtocolCodec.Encode(message, _writer);
+        return Finish();
+    }
+
+    public EncodedPacket EncodeWorldSnapshot(
+        uint serverTick,
+        uint snapshotSequence,
+        int totalEntities,
+        bool isComplete,
+        int chunkIndex,
+        int chunkCount,
+        IReadOnlyList<EntityStateSnapshot> entities)
+    {
+        Reset();
+        ProtocolCodec.EncodeWorldSnapshot(
+            _writer,
+            serverTick,
+            snapshotSequence,
+            totalEntities,
+            isComplete,
+            chunkIndex,
+            chunkCount,
+            entities);
+        return Finish();
+    }
+
+    public EncodedPacket EncodeEntitySpawn(
+        uint networkId,
+        Guid characterId,
+        EntityKind kind,
+        string displayName,
+        TileCoord tile,
+        Direction8 facing)
+    {
+        Reset();
+        ProtocolCodec.EncodeEntitySpawn(_writer, networkId, characterId, kind, displayName, tile, facing);
+        return Finish();
+    }
+
+    public EncodedPacket EncodeEntityDespawn(uint serverTick, uint networkId)
+    {
+        Reset();
+        ProtocolCodec.EncodeEntityDespawn(_writer, serverTick, networkId);
+        return Finish();
+    }
+
+    private void Reset()
+    {
         _stream.Position = 0;
         _stream.SetLength(0);
-        ProtocolCodec.Encode(message, _writer);
+    }
+
+    private EncodedPacket Finish()
+    {
         _writer.Flush();
         return new EncodedPacket(_stream.GetBuffer(), checked((int)_stream.Length));
     }

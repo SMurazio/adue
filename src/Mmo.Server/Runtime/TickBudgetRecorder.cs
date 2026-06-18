@@ -8,6 +8,11 @@ internal sealed class TickBudgetRecorder
 
     public const int TickBudgetCategoryCount = 6;
 
+    public void Reset()
+    {
+        Array.Clear(_elapsedTicks);
+    }
+
     public TickBudgetScope Measure(TickBudgetCategory category)
     {
         return new TickBudgetScope(this, category);

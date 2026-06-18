@@ -24,9 +24,7 @@ public static class ProtocolCodec
 
     public static void Encode(IProtocolMessage message, BinaryWriter writer)
     {
-        writer.Write(Magic);
-        writer.Write(Version);
-        writer.Write((ushort)message.Type);
+        WriteHeader(writer, message.Type);
 
         switch (message)
         {
@@ -63,10 +61,15 @@ public static class ProtocolCodec
                 WriteString(writer, value.Reason);
                 break;
             case WorldSnapshotMessage value:
-                writer.Write(value.ServerTick);
-                writer.Write(value.SnapshotSequence);
-                WriteSnapshotMetadata(writer, value);
-                WriteEntityStates(writer, value.Entities);
+                WriteWorldSnapshotPayload(
+                    writer,
+                    value.ServerTick,
+                    value.SnapshotSequence,
+                    value.TotalEntities,
+                    value.IsComplete,
+                    value.ChunkIndex,
+                    value.ChunkCount,
+                    value.Entities);
                 break;
             case EntitySpawnMessage value:
                 writer.Write(value.NetworkId);
@@ -94,6 +97,45 @@ public static class ProtocolCodec
             default:
                 throw new ProtocolException($"Unsupported message type {message.GetType().Name}.");
         }
+    }
+
+    public static void EncodeWorldSnapshot(
+        BinaryWriter writer,
+        uint serverTick,
+        uint snapshotSequence,
+        int totalEntities,
+        bool isComplete,
+        int chunkIndex,
+        int chunkCount,
+        IReadOnlyList<EntityStateSnapshot> entities)
+    {
+        WriteHeader(writer, MessageType.WorldSnapshot);
+        WriteWorldSnapshotPayload(writer, serverTick, snapshotSequence, totalEntities, isComplete, chunkIndex, chunkCount, entities);
+    }
+
+    public static void EncodeEntitySpawn(
+        BinaryWriter writer,
+        uint networkId,
+        Guid characterId,
+        EntityKind kind,
+        string displayName,
+        TileCoord tile,
+        Direction8 facing)
+    {
+        WriteHeader(writer, MessageType.EntitySpawn);
+        writer.Write(networkId);
+        WriteGuid(writer, characterId);
+        writer.Write((byte)kind);
+        WriteString(writer, displayName);
+        WriteTile(writer, tile);
+        writer.Write((byte)facing);
+    }
+
+    public static void EncodeEntityDespawn(BinaryWriter writer, uint serverTick, uint networkId)
+    {
+        WriteHeader(writer, MessageType.EntityDespawn);
+        writer.Write(serverTick);
+        writer.Write(networkId);
     }
 
     public static IProtocolMessage Decode(ReadOnlySpan<byte> packet)
@@ -238,22 +280,62 @@ public static class ProtocolCodec
         }
     }
 
+    private static void WriteHeader(BinaryWriter writer, MessageType type)
+    {
+        writer.Write(Magic);
+        writer.Write(Version);
+        writer.Write((ushort)type);
+    }
+
+    private static void WriteWorldSnapshotPayload(
+        BinaryWriter writer,
+        uint serverTick,
+        uint snapshotSequence,
+        int totalEntities,
+        bool isComplete,
+        int chunkIndex,
+        int chunkCount,
+        IReadOnlyList<EntityStateSnapshot> entities)
+    {
+        writer.Write(serverTick);
+        writer.Write(snapshotSequence);
+        WriteSnapshotMetadata(writer, totalEntities, isComplete, chunkIndex, chunkCount, entities.Count);
+        WriteEntityStates(writer, entities);
+    }
+
     private static void WriteSnapshotMetadata(BinaryWriter writer, WorldSnapshotMessage snapshot)
     {
-        if (snapshot.TotalEntities < snapshot.Entities.Count || snapshot.TotalEntities > MaxSnapshotEntities)
+        WriteSnapshotMetadata(
+            writer,
+            snapshot.TotalEntities,
+            snapshot.IsComplete,
+            snapshot.ChunkIndex,
+            snapshot.ChunkCount,
+            snapshot.Entities.Count);
+    }
+
+    private static void WriteSnapshotMetadata(
+        BinaryWriter writer,
+        int totalEntities,
+        bool isComplete,
+        int chunkIndex,
+        int chunkCount,
+        int entityCount)
+    {
+        if (totalEntities < entityCount || totalEntities > MaxSnapshotEntities)
         {
-            throw new ProtocolException($"Invalid snapshot total entity count: {snapshot.TotalEntities}.");
+            throw new ProtocolException($"Invalid snapshot total entity count: {totalEntities}.");
         }
 
-        if (snapshot.ChunkCount < 1 || snapshot.ChunkIndex < 0 || snapshot.ChunkIndex >= snapshot.ChunkCount)
+        if (chunkCount < 1 || chunkIndex < 0 || chunkIndex >= chunkCount)
         {
-            throw new ProtocolException($"Invalid snapshot chunk {snapshot.ChunkIndex}/{snapshot.ChunkCount}.");
+            throw new ProtocolException($"Invalid snapshot chunk {chunkIndex}/{chunkCount}.");
         }
 
-        writer.Write((ushort)snapshot.TotalEntities);
-        writer.Write(snapshot.IsComplete);
-        writer.Write((ushort)snapshot.ChunkIndex);
-        writer.Write((ushort)snapshot.ChunkCount);
+        writer.Write((ushort)totalEntities);
+        writer.Write(isComplete);
+        writer.Write((ushort)chunkIndex);
+        writer.Write((ushort)chunkCount);
     }
 
     private static WorldSnapshotMessage ReadWorldSnapshot(BinaryReader reader)

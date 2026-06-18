@@ -18,6 +18,9 @@ public sealed class ServerMetrics
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     private long _tickCount;
+    private long _gcGen0Collections;
+    private long _gcGen1Collections;
+    private long _gcGen2Collections;
     private double _tickTotalMs;
     private double _tickLastMs;
     private double _tickMaxMs;
@@ -53,14 +56,22 @@ public sealed class ServerMetrics
 
     public void RecordTick(TimeSpan elapsed)
     {
-        RecordTick(elapsed, TimeSpan.Zero, TickBudgetSample.Zero);
+        RecordTick(elapsed, TimeSpan.Zero, TickBudgetSample.Zero, GcCollectionSample.Zero);
     }
 
     public void RecordTick(TimeSpan elapsed, TimeSpan scheduleDrift, TickBudgetSample budget)
     {
+        RecordTick(elapsed, scheduleDrift, budget, GcCollectionSample.Zero);
+    }
+
+    public void RecordTick(TimeSpan elapsed, TimeSpan scheduleDrift, TickBudgetSample budget, GcCollectionSample gc)
+    {
         var elapsedMs = elapsed.TotalMilliseconds;
         var driftMs = Math.Max(0, scheduleDrift.TotalMilliseconds);
         _tickCount++;
+        _gcGen0Collections += gc.Gen0;
+        _gcGen1Collections += gc.Gen1;
+        _gcGen2Collections += gc.Gen2;
         _tickTotalMs += elapsedMs;
         _tickLastMs = elapsedMs;
         _tickMaxMs = Math.Max(_tickMaxMs, elapsedMs);
@@ -70,6 +81,9 @@ public sealed class ServerMetrics
 
         var bucket = CurrentBucket();
         bucket.TickCount++;
+        bucket.GcGen0Collections += gc.Gen0;
+        bucket.GcGen1Collections += gc.Gen1;
+        bucket.GcGen2Collections += gc.Gen2;
         bucket.TickTotalMs += elapsedMs;
         bucket.TickMaxMs = Math.Max(bucket.TickMaxMs, elapsedMs);
         bucket.TickScheduleDriftTotalMs += driftMs;
@@ -117,12 +131,17 @@ public sealed class ServerMetrics
 
     public void RecordSent(IProtocolMessage message, int byteCount)
     {
+        RecordSent(message.Type, byteCount);
+    }
+
+    public void RecordSent(MessageType type, int byteCount)
+    {
         _sentBytes += byteCount;
         var bucket = CurrentBucket();
         bucket.SentBytes += byteCount;
         bucket.SentMessageCount++;
 
-        var index = (int)message.Type;
+        var index = (int)type;
         if ((uint)index < MessageTypeCount)
         {
             _sentMessages[index]++;
@@ -206,9 +225,17 @@ public sealed class ServerMetrics
 
     public MetricsSnapshot Capture()
     {
+        return Capture(includeMessageCounts: true);
+    }
+
+    private MetricsSnapshot Capture(bool includeMessageCounts)
+    {
         return new MetricsSnapshot(
             DateTimeOffset.UtcNow - _startedAt,
             _tickCount,
+            _gcGen0Collections,
+            _gcGen1Collections,
+            _gcGen2Collections,
             _tickLastMs,
             _tickCount == 0 ? 0 : _tickTotalMs / _tickCount,
             _tickMaxMs,
@@ -235,13 +262,18 @@ public sealed class ServerMetrics
             _loginRejected,
             _loginAccepted + _loginRejected == 0 ? 0 : _loginTotalMs / (_loginAccepted + _loginRejected),
             _loginMaxMs,
-            (long[])_receivedMessages.Clone(),
-            (long[])_sentMessages.Clone(),
-            (long[])_receivedBytesByType.Clone(),
-            (long[])_sentBytesByType.Clone());
+            includeMessageCounts ? (long[])_receivedMessages.Clone() : Array.Empty<long>(),
+            includeMessageCounts ? (long[])_sentMessages.Clone() : Array.Empty<long>(),
+            includeMessageCounts ? (long[])_receivedBytesByType.Clone() : Array.Empty<long>(),
+            includeMessageCounts ? (long[])_sentBytesByType.Clone() : Array.Empty<long>());
     }
 
     public MetricsWindowSnapshot CaptureWindow(TimeSpan window)
+    {
+        return CaptureWindow(window, includeMessageCounts: true);
+    }
+
+    private MetricsWindowSnapshot CaptureWindow(TimeSpan window, bool includeMessageCounts)
     {
         var now = DateTimeOffset.UtcNow;
         var nowSecond = now.ToUnixTimeSeconds();
@@ -249,9 +281,14 @@ public sealed class ServerMetrics
         var oldestSecond = nowSecond - windowSeconds + 1;
         var effectiveSeconds = Math.Max(0.001, Math.Min(window.TotalSeconds, (now - _startedAt).TotalSeconds));
 
-        var receivedMessages = new long[MessageTypeCount];
-        var sentMessages = new long[MessageTypeCount];
+        var receivedMessages = includeMessageCounts ? new long[MessageTypeCount] : Array.Empty<long>();
+        var sentMessages = includeMessageCounts ? new long[MessageTypeCount] : Array.Empty<long>();
         long tickCount = 0;
+        long moveStepReceived = 0;
+        long chatSendReceived = 0;
+        long gcGen0Collections = 0;
+        long gcGen1Collections = 0;
+        long gcGen2Collections = 0;
         double tickTotalMs = 0;
         double tickMaxMs = 0;
         double tickScheduleDriftTotalMs = 0;
@@ -286,6 +323,9 @@ public sealed class ServerMetrics
             }
 
             tickCount += bucket.TickCount;
+            gcGen0Collections += bucket.GcGen0Collections;
+            gcGen1Collections += bucket.GcGen1Collections;
+            gcGen2Collections += bucket.GcGen2Collections;
             tickTotalMs += bucket.TickTotalMs;
             tickMaxMs = Math.Max(tickMaxMs, bucket.TickMaxMs);
             tickScheduleDriftTotalMs += bucket.TickScheduleDriftTotalMs;
@@ -310,11 +350,16 @@ public sealed class ServerMetrics
             loginRejected += bucket.LoginRejected;
             loginTotalMs += bucket.LoginTotalMs;
             loginMaxMs = Math.Max(loginMaxMs, bucket.LoginMaxMs);
+            moveStepReceived += bucket.ReceivedMessages[(int)MessageType.MoveStep];
+            chatSendReceived += bucket.ReceivedMessages[(int)MessageType.ChatSend];
 
-            for (var i = 0; i < MessageTypeCount; i++)
+            if (includeMessageCounts)
             {
-                receivedMessages[i] += bucket.ReceivedMessages[i];
-                sentMessages[i] += bucket.SentMessages[i];
+                for (var i = 0; i < MessageTypeCount; i++)
+                {
+                    receivedMessages[i] += bucket.ReceivedMessages[i];
+                    sentMessages[i] += bucket.SentMessages[i];
+                }
             }
         }
 
@@ -322,6 +367,11 @@ public sealed class ServerMetrics
             window,
             effectiveSeconds,
             tickCount,
+            moveStepReceived,
+            chatSendReceived,
+            gcGen0Collections,
+            gcGen1Collections,
+            gcGen2Collections,
             tickCount == 0 ? 0 : tickTotalMs / tickCount,
             tickMaxMs,
             tickCount == 0 ? 0 : tickScheduleDriftTotalMs / tickCount,
@@ -353,18 +403,18 @@ public sealed class ServerMetrics
 
     public string FormatStateSummary(int peers, int players, uint serverTick, string syntheticLoadStatus)
     {
-        var snapshot = Capture();
-        return $"metrics state: uptime={FormatDuration(snapshot.Uptime)}, tick={serverTick}, peers={peers}, players={players}, {syntheticLoadStatus}";
+        return $"metrics state: uptime={FormatDuration(DateTimeOffset.UtcNow - _startedAt)}, tick={serverTick}, peers={peers}, players={players}, {syntheticLoadStatus}";
     }
 
     public string FormatWindowSummary(TimeSpan window)
     {
-        var snapshot = CaptureWindow(window);
+        var snapshot = CaptureWindow(window, includeMessageCounts: false);
         var seconds = snapshot.Seconds;
         return $"metrics {FormatWindowLabel(window)}: " +
             $"tick/s={Rate(snapshot.TickCount, seconds):0.0}, " +
             $"tickMs avg/max={snapshot.TickAverageMs:0.00}/{snapshot.TickMaxMs:0.00}, " +
             $"driftMs avg/max={snapshot.TickScheduleDriftAverageMs:0.00}/{snapshot.TickScheduleDriftMaxMs:0.00}, " +
+            $"gc={snapshot.GcGen0Collections}/{snapshot.GcGen1Collections}/{snapshot.GcGen2Collections}, " +
             $"budgetMs move/aoi/ser/net/persist/other={FormatBudget(snapshot.TickBudgetAverageMs)}, " +
             $"snap/s={Rate(snapshot.SnapshotsSent, seconds):0.0}, " +
             $"visible avg/max={snapshot.SnapshotAverageVisibleEntities:0.0}/{snapshot.SnapshotMaxVisibleEntities}, " +
@@ -372,19 +422,20 @@ public sealed class ServerMetrics
             $"culled/s={Rate(snapshot.SnapshotCulled, seconds):0.0}, " +
             $"out={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, in={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
             $"recv/s={Rate(snapshot.ReceivedMessageCount, seconds):0.0}, sent/s={Rate(snapshot.SentMessageCount, seconds):0.0}, " +
-            $"move/s={Rate(Count(snapshot.ReceivedMessages, MessageType.MoveStep), seconds):0.0}, " +
-            $"chat/s={Rate(Count(snapshot.ReceivedMessages, MessageType.ChatSend), seconds):0.0}, " +
+            $"move/s={Rate(snapshot.MoveStepReceived, seconds):0.0}, " +
+            $"chat/s={Rate(snapshot.ChatSendReceived, seconds):0.0}, " +
             $"sendFail/s={Rate(snapshot.SendFailures, seconds):0.0}, bad/s={Rate(snapshot.BadPackets, seconds):0.0}, netErr/s={Rate(snapshot.NetworkErrors, seconds):0.0}, runtimeFault/s={Rate(snapshot.RuntimeFaults, seconds):0.0}, " +
             $"login/s={Rate(snapshot.LoginAccepted + snapshot.LoginRejected, seconds):0.0}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
     }
 
     public string FormatTotalSummary()
     {
-        var snapshot = Capture();
+        var snapshot = Capture(includeMessageCounts: false);
         var seconds = Math.Max(0.001, snapshot.Uptime.TotalSeconds);
         return "metrics total: " +
             $"tickMs last/avg/max={snapshot.TickLastMs:0.00}/{snapshot.TickAverageMs:0.00}/{snapshot.TickMaxMs:0.00}, " +
             $"driftMs avg/max={snapshot.TickScheduleDriftAverageMs:0.00}/{snapshot.TickScheduleDriftMaxMs:0.00}, " +
+            $"gc={snapshot.GcGen0Collections}/{snapshot.GcGen1Collections}/{snapshot.GcGen2Collections}, " +
             $"budgetMs avg={FormatBudget(snapshot.TickBudgetAverageMs)}, budgetMs max={FormatBudget(snapshot.TickBudgetMaxMs)}, " +
             $"snap/s(avg)={Rate(snapshot.SnapshotsSent, seconds):0.0}, snapshots={snapshot.SnapshotsSent}, " +
             $"visible avg/max={snapshot.SnapshotAverageVisibleEntities:0.0}/{snapshot.SnapshotMaxVisibleEntities}, " +
@@ -396,9 +447,8 @@ public sealed class ServerMetrics
 
     public string FormatMessageSummary()
     {
-        var snapshot = Capture();
-        var received = FormatMessageCounts(snapshot.ReceivedMessages);
-        var sent = FormatMessageCounts(snapshot.SentMessages);
+        var received = FormatMessageCounts(_receivedMessages);
+        var sent = FormatMessageCounts(_sentMessages);
         return $"message metrics: received[{received}], sent[{sent}]";
     }
 
@@ -474,17 +524,24 @@ public sealed class ServerMetrics
 
     private static string FormatMessageCounts(IReadOnlyList<long> counts)
     {
-        var parts = new List<string>();
+        var builder = new StringBuilder();
         foreach (MessageType type in Enum.GetValues<MessageType>())
         {
             var index = (int)type;
             if ((uint)index < counts.Count && counts[index] > 0)
             {
-                parts.Add($"{type}={counts[index]}");
+                if (builder.Length > 0)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append(type);
+                builder.Append('=');
+                builder.Append(counts[index]);
             }
         }
 
-        return parts.Count == 0 ? "none" : string.Join(", ", parts);
+        return builder.Length == 0 ? "none" : builder.ToString();
     }
 
     private static double Rate(long count, double seconds)
@@ -516,6 +573,9 @@ public sealed class ServerMetrics
 
         public long Second { get; private set; } = long.MinValue;
         public long TickCount { get; set; }
+        public long GcGen0Collections { get; set; }
+        public long GcGen1Collections { get; set; }
+        public long GcGen2Collections { get; set; }
         public double TickTotalMs { get; set; }
         public double TickMaxMs { get; set; }
         public double TickScheduleDriftTotalMs { get; set; }
@@ -546,6 +606,9 @@ public sealed class ServerMetrics
         {
             Second = second;
             TickCount = 0;
+            GcGen0Collections = 0;
+            GcGen1Collections = 0;
+            GcGen2Collections = 0;
             TickTotalMs = 0;
             TickMaxMs = 0;
             TickScheduleDriftTotalMs = 0;
@@ -577,9 +640,17 @@ public sealed class ServerMetrics
     }
 }
 
+public readonly record struct GcCollectionSample(int Gen0, int Gen1, int Gen2)
+{
+    public static GcCollectionSample Zero { get; } = new(0, 0, 0);
+}
+
 public sealed record MetricsSnapshot(
     TimeSpan Uptime,
     long TickCount,
+    long GcGen0Collections,
+    long GcGen1Collections,
+    long GcGen2Collections,
     double TickLastMs,
     double TickAverageMs,
     double TickMaxMs,
@@ -615,6 +686,11 @@ public sealed record MetricsWindowSnapshot(
     TimeSpan Window,
     double Seconds,
     long TickCount,
+    long MoveStepReceived,
+    long ChatSendReceived,
+    long GcGen0Collections,
+    long GcGen1Collections,
+    long GcGen2Collections,
     double TickAverageMs,
     double TickMaxMs,
     double TickScheduleDriftAverageMs,

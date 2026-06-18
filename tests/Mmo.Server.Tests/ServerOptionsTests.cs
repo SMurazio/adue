@@ -17,7 +17,8 @@ public sealed class ServerOptionsTests
             ["MMO_SPAWN_DISTRIBUTION"] = "clustered",
             ["MMO_DEBUG_MOVEMENT"] = "true",
             ["MMO_DEBUG_MOVEMENT_WATCH"] = "Alice,Bob",
-            ["MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER"] = "2.25"
+            ["MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER"] = "2.25",
+            ["MMO_DEBUG_MOVEMENT_TICK_DURATION_MS"] = "12.5"
         });
 
         var options = ServerOptions.FromEnvironment();
@@ -33,6 +34,7 @@ public sealed class ServerOptionsTests
         Assert.Contains("Alice", options.DebugMovementWatchNames);
         Assert.Contains("Bob", options.DebugMovementWatchNames);
         Assert.Equal(2.25d, options.DebugMovementHitchThresholdMultiplier);
+        Assert.Equal(12.5d, options.DebugMovementTickDurationThresholdMs);
     }
 
     [Fact]
@@ -51,6 +53,7 @@ public sealed class ServerOptionsTests
         Assert.False(options.DebugMovement);
         Assert.Empty(options.DebugMovementWatchNames);
         Assert.Equal(1.5d, options.DebugMovementHitchThresholdMultiplier);
+        Assert.Equal(15d, options.DebugMovementTickDurationThresholdMs);
     }
 
     [Fact]
@@ -112,7 +115,8 @@ public sealed class ServerOptionsTests
             "MMO_ADMIN_NAMES",
             "MMO_DEBUG_MOVEMENT",
             "MMO_DEBUG_MOVEMENT_WATCH",
-            "MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER"
+            "MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER",
+            "MMO_DEBUG_MOVEMENT_TICK_DURATION_MS"
         ];
 
         private readonly Dictionary<string, string?> _original = new(StringComparer.Ordinal);

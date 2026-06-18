@@ -51,7 +51,7 @@ The default SQLite database will create local load-test characters. Delete `data
 
 The near-term channel target is 120-150 connected clients visible in one channel. The server sends reliable entity spawn metadata once, then sends compact unreliable snapshots when visible tile state changes or a heartbeat is due. Between full heartbeat snapshots, incomplete snapshots contain only changed visible tile states and clients merge them into the current visible set.
 
-The server tick loop uses `Stopwatch` deadlines and requests 1 ms Windows timer resolution while running. On Windows this avoids the default coarse timer oversleep that can stretch the nominal 20 Hz / 50 ms tick cadence into uneven 60 ms+ gaps. The loop still polls network events between ticks instead of sleeping for a whole tick interval.
+The server tick loop uses `Stopwatch` deadlines and requests 1 ms Windows timer resolution while running. On Windows this avoids the default coarse timer oversleep that can stretch the nominal 20 Hz / 50 ms tick cadence into uneven 60 ms+ gaps. The loop still polls network events between ticks instead of sleeping for a whole tick interval. The server project enables server GC and concurrent GC. Use `/metrics` to watch `gc=gen0/gen1/gen2` counts alongside tick max and drift when validating movement hitches.
 
 ## Run Server
 
@@ -75,6 +75,7 @@ Useful environment variables:
 - `MMO_DEBUG_MOVEMENT`: off by default; set to `1` to log server tick hitches plus watched/admin movement steps
 - `MMO_DEBUG_MOVEMENT_WATCH`: optional comma-separated watched names or character ids for movement-step/snapshot trace
 - `MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER`: tick hitch threshold as a multiple of tick interval; defaults to `1.5`
+- `MMO_DEBUG_MOVEMENT_TICK_DURATION_MS`: duration-only tick trace threshold; defaults to `15`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`

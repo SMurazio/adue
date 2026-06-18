@@ -115,6 +115,58 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void DirectServerEncodersMatchProtocolDecoder()
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        ProtocolCodec.EncodeWorldSnapshot(
+            writer,
+            42,
+            77,
+            120,
+            false,
+            2,
+            6,
+            [new EntityStateSnapshot(99, new TileCoord(12, -25), Direction8.NE)]);
+        writer.Flush();
+        var snapshot = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(stream.ToArray()));
+        Assert.Equal(42u, snapshot.ServerTick);
+        Assert.Equal(77u, snapshot.SnapshotSequence);
+        Assert.Equal(120, snapshot.TotalEntities);
+        Assert.False(snapshot.IsComplete);
+        Assert.Equal(2, snapshot.ChunkIndex);
+        Assert.Equal(6, snapshot.ChunkCount);
+
+        stream.Position = 0;
+        stream.SetLength(0);
+        ProtocolCodec.EncodeEntityDespawn(writer, 123, 99);
+        writer.Flush();
+        var despawn = Assert.IsType<EntityDespawnMessage>(ProtocolCodec.Decode(stream.ToArray()));
+        Assert.Equal(123u, despawn.ServerTick);
+        Assert.Equal(99u, despawn.NetworkId);
+
+        var characterId = Guid.NewGuid();
+        stream.Position = 0;
+        stream.SetLength(0);
+        ProtocolCodec.EncodeEntitySpawn(
+            writer,
+            7,
+            characterId,
+            EntityKind.Player,
+            "Direct",
+            new TileCoord(3, 4),
+            Direction8.SW);
+        writer.Flush();
+        var spawn = Assert.IsType<EntitySpawnMessage>(ProtocolCodec.Decode(stream.ToArray()));
+        Assert.Equal(7u, spawn.NetworkId);
+        Assert.Equal(characterId, spawn.CharacterId);
+        Assert.Equal("Direct", spawn.DisplayName);
+        Assert.Equal(new TileCoord(3, 4), spawn.Tile);
+        Assert.Equal(Direction8.SW, spawn.Facing);
+    }
+
+    [Fact]
     public void ZoneInfoRoundTrips()
     {
         var original = new ZoneInfoMessage(

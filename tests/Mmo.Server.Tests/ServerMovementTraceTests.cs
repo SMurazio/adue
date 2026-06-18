@@ -19,13 +19,12 @@ public sealed class ServerMovementTraceTests
             scheduleDrift: TimeSpan.FromMilliseconds(40),
             budget: new TickBudgetSample(1, 2, 3, 4, 5, 6),
             catchUpTicks: 2,
-            gen0Delta: 1,
-            gen1Delta: 0,
-            gen2Delta: 0,
+            gc: new GcCollectionSample(1, 0, 0),
             tickInterval: TimeSpan.FromMilliseconds(50));
 
         var line = Assert.Single(lines);
         Assert.Contains("event=tick_hitch", line);
+        Assert.Contains("trigger=gap", line);
         Assert.Contains("interMs=90", line);
         Assert.Contains("driftMs=40", line);
         Assert.Contains("catchUpTicks=2", line);
@@ -36,6 +35,7 @@ public sealed class ServerMovementTraceTests
         Assert.Contains("netMs=4", line);
         Assert.Contains("persistMs=5", line);
         Assert.Contains("otherMs=6", line);
+        Assert.Contains("unbudgetedMs=0", line);
     }
 
     [Fact]
@@ -51,12 +51,34 @@ public sealed class ServerMovementTraceTests
             TimeSpan.FromMilliseconds(40),
             TickBudgetSample.Zero,
             2,
-            0,
-            0,
-            0,
+            GcCollectionSample.Zero,
             TimeSpan.FromMilliseconds(50));
 
         Assert.Empty(lines);
+    }
+
+    [Fact]
+    public void TickHitchTraceEmitsDurationTriggerBelowGapThreshold()
+    {
+        var lines = new List<string>();
+        var trace = new ServerMovementTrace(CreateOptions() with { DebugMovement = true }, lines.Add);
+
+        trace.TickHitch(
+            42,
+            TimeSpan.FromMilliseconds(50),
+            TimeSpan.FromMilliseconds(16),
+            TimeSpan.Zero,
+            TickBudgetSample.Zero,
+            1,
+            new GcCollectionSample(0, 1, 1),
+            TimeSpan.FromMilliseconds(50));
+
+        var line = Assert.Single(lines);
+        Assert.Contains("trigger=duration", line);
+        Assert.Contains("durationMs=16", line);
+        Assert.Contains("gc1=1", line);
+        Assert.Contains("gc2=1", line);
+        Assert.Contains("unbudgetedMs=16", line);
     }
 
     private static ServerOptions CreateOptions()
