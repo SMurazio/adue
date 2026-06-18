@@ -14,6 +14,7 @@ public partial class MmoClientRoot : Node3D
     private readonly List<EntityRenderState> _renderStates = [];
     private readonly HashSet<uint> _seenEntityIds = [];
     private readonly List<uint> _staleEntityIds = [];
+    private readonly List<string> _chatRows = [];
 
     private MmoClient? _client;
     private Node3D? _worldRoot;
@@ -26,6 +27,16 @@ public partial class MmoClientRoot : Node3D
     private LineEdit? _chatInput;
     private double _elapsedSeconds;
     private double _nextMetricsAt;
+    private double _nextOverlayAt;
+    private double _lastFrameMs;
+    private double _maxFrameMs;
+    private long _frameHitchCount;
+    private long _clientGc0Count;
+    private long _clientGc1Count;
+    private long _clientGc2Count;
+    private int _lastGc0;
+    private int _lastGc1;
+    private int _lastGc2;
     private bool _zoneBuilt;
     private bool _sentStartupChat;
 
@@ -34,11 +45,15 @@ public partial class MmoClientRoot : Node3D
     [Export] public string ConnectionKey { get; set; } = ReadString("MMO_CONNECTION_KEY", "local-dev");
     [Export] public string PlayerName { get; set; } = ReadString("MMO_PLAYER_NAME", $"Godot{Random.Shared.Next(1000, 9999)}");
     [Export] public float CameraSize { get; set; } = 28f;
+    [Export] public double FrameHitchThresholdMs { get; set; } = ReadDouble("MMO_GODOT_FRAME_HITCH_MS", 33.3d);
 
     public override void _Ready()
     {
         BuildSceneShell();
         BuildOverlay();
+        _lastGc0 = GC.CollectionCount(0);
+        _lastGc1 = GC.CollectionCount(1);
+        _lastGc2 = GC.CollectionCount(2);
         _client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
         _client.Connect();
         GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
@@ -48,6 +63,7 @@ public partial class MmoClientRoot : Node3D
     {
         _elapsedSeconds += delta;
         var now = TimeSpan.FromSeconds(_elapsedSeconds);
+        SampleFrameTiming(delta);
         _client?.Poll(now);
 
         if (_client?.Zone is not null && !_zoneBuilt)
@@ -62,7 +78,7 @@ public partial class MmoClientRoot : Node3D
         SampleRenderStates(now);
         UpdateEntities();
         UpdateCamera();
-        UpdateOverlay();
+        UpdateOverlay(now);
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -210,6 +226,32 @@ public partial class MmoClientRoot : Node3D
         _client?.CopyRenderStatesTo(_renderStates, now);
     }
 
+    private void SampleFrameTiming(double delta)
+    {
+        var currentGc0 = GC.CollectionCount(0);
+        var currentGc1 = GC.CollectionCount(1);
+        var currentGc2 = GC.CollectionCount(2);
+        var gc0 = currentGc0 - _lastGc0;
+        var gc1 = currentGc1 - _lastGc1;
+        var gc2 = currentGc2 - _lastGc2;
+        _lastGc0 = currentGc0;
+        _lastGc1 = currentGc1;
+        _lastGc2 = currentGc2;
+        _clientGc0Count += gc0;
+        _clientGc1Count += gc1;
+        _clientGc2Count += gc2;
+
+        _lastFrameMs = Math.Max(0, delta * 1000d);
+        _maxFrameMs = Math.Max(_maxFrameMs, _lastFrameMs);
+        if (_lastFrameMs < FrameHitchThresholdMs)
+        {
+            return;
+        }
+
+        _frameHitchCount++;
+        _client?.RecordFrameHitch(_lastFrameMs, gc0, gc1, gc2);
+    }
+
     private void UpdateEntities()
     {
         if (_entityRoot is null)
@@ -231,7 +273,7 @@ public partial class MmoClientRoot : Node3D
             node.Position = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
             if (_entityLabels.TryGetValue(state.NetworkId, out var label))
             {
-                label.Text = state.DisplayName;
+                SetTextIfChanged(label, state.DisplayName);
             }
         }
 
@@ -301,12 +343,19 @@ public partial class MmoClientRoot : Node3D
         _camera.LookAt(focus, Vector3.Up);
     }
 
-    private void UpdateOverlay()
+    private void UpdateOverlay(TimeSpan now)
     {
         if (_client is null)
         {
             return;
         }
+
+        if (now.TotalSeconds < _nextOverlayAt)
+        {
+            return;
+        }
+
+        _nextOverlayAt = now.TotalSeconds + 0.1d;
 
         if (_statusLabel is not null)
         {
@@ -314,29 +363,24 @@ public partial class MmoClientRoot : Node3D
             var server = _client.Server is null
                 ? "server: pending"
                 : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
-            var movementDebug = _client.DebugMovementEnabled ? "\n" + FormatMovementDebug(_client.MovementDebug) : "";
-            _statusLabel.Text =
+            var movementDebug = _client.DebugMovementEnabled
+                ? "\n" + FormatMovementDebug(_client.MovementDebug) + "\n" + FormatFrameDebug()
+                : "";
+            SetTextIfChanged(_statusLabel,
                 $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
                 $"{server}\n" +
                 "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat." +
-                movementDebug;
+                movementDebug);
         }
 
         if (_metricsLabel is not null)
         {
-            _metricsLabel.Text = FormatMetrics(_client);
+            SetTextIfChanged(_metricsLabel, FormatMetrics(_client));
         }
 
         if (_chatLabel is not null)
         {
-            var chat = _client.ChatLog
-                .Where(static line => !IsMetricsLine(line.Text) && !IsCommandDenied(line.Text))
-                .TakeLast(8)
-                .Select(static line => $"{line.Sender}: {line.Text}");
-            var errors = _client.Errors
-                .TakeLast(3)
-                .Select(static error => $"error/{error.Code}: {error.Message}");
-            _chatLabel.Text = "CHAT\n" + string.Join('\n', chat.Concat(errors));
+            SetTextIfChanged(_chatLabel, FormatChat(_client));
         }
     }
 
@@ -472,6 +516,22 @@ public partial class MmoClientRoot : Node3D
         return label;
     }
 
+    private static void SetTextIfChanged(Label label, string value)
+    {
+        if (!string.Equals(label.Text, value, StringComparison.Ordinal))
+        {
+            label.Text = value;
+        }
+    }
+
+    private static void SetTextIfChanged(Label3D label, string value)
+    {
+        if (!string.Equals(label.Text, value, StringComparison.Ordinal))
+        {
+            label.Text = value;
+        }
+    }
+
     private static bool IsMetricsLine(string text)
     {
         return text.StartsWith("metrics", StringComparison.OrdinalIgnoreCase)
@@ -527,6 +587,35 @@ public partial class MmoClientRoot : Node3D
         return string.Join('\n', rows);
     }
 
+    private string FormatChat(MmoClient client)
+    {
+        _chatRows.Clear();
+        var chatLog = client.ChatLog;
+        for (var i = chatLog.Count - 1; i >= 0 && _chatRows.Count < 8; i--)
+        {
+            var line = chatLog[i];
+            if (IsMetricsLine(line.Text) || IsCommandDenied(line.Text))
+            {
+                continue;
+            }
+
+            _chatRows.Add($"{line.Sender}: {line.Text}");
+        }
+
+        _chatRows.Reverse();
+        var errors = client.Errors;
+        var firstError = Math.Max(0, errors.Count - 3);
+        for (var i = firstError; i < errors.Count; i++)
+        {
+            var error = errors[i];
+            _chatRows.Add($"error/{error.Code}: {error.Message}");
+        }
+
+        return _chatRows.Count == 0
+            ? "CHAT"
+            : "CHAT\n" + string.Join('\n', _chatRows);
+    }
+
     private static string FormatMovementDebug(MovementDebugSnapshot debug)
     {
         var sent = debug.LastSentDirection.HasValue
@@ -537,12 +626,23 @@ public partial class MmoClientRoot : Node3D
         return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
     }
 
+    private string FormatFrameDebug()
+    {
+        return $"FRAME ms={_lastFrameMs.ToString("0.0", CultureInfo.InvariantCulture)}/{_maxFrameMs.ToString("0.0", CultureInfo.InvariantCulture)} hitches={_frameHitchCount} threshold={FrameHitchThresholdMs.ToString("0.0", CultureInfo.InvariantCulture)} gc={_clientGc0Count}/{_clientGc1Count}/{_clientGc2Count}";
+    }
+
     private static string LastMetric(MmoClient client, string prefix)
     {
-        return client.ChatLog
-            .Where(line => line.Sender == "server" && line.Text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            .Select(static line => line.Text)
-            .LastOrDefault() ?? "";
+        for (var i = client.ChatLog.Count - 1; i >= 0; i--)
+        {
+            var line = client.ChatLog[i];
+            if (line.Sender == "server" && line.Text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return line.Text;
+            }
+        }
+
+        return "";
     }
 
     private static string Metric(string line, string key)
@@ -578,5 +678,12 @@ public partial class MmoClientRoot : Node3D
     private static int ReadInt(string key, int fallback)
     {
         return int.TryParse(System.Environment.GetEnvironmentVariable(key), out var value) ? value : fallback;
+    }
+
+    private static double ReadDouble(string key, double fallback)
+    {
+        return double.TryParse(System.Environment.GetEnvironmentVariable(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : fallback;
     }
 }

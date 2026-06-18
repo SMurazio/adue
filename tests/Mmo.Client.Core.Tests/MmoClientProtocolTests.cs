@@ -193,10 +193,36 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _, debugMovement: false, lines.Add);
 
         client.SendMoveStep(Direction8.E);
+        client.RecordFrameHitch(40, 1, 0, 0);
 
         Assert.False(client.DebugMovementEnabled);
         Assert.Equal(0u, client.MovementDebug.LastSentSequence);
         Assert.Empty(lines);
+    }
+
+    [Fact]
+    public void MovementDebugTraceRecordsFrameHitchContextWhenEnabled()
+    {
+        var lines = new List<string>();
+        using var client = CreateClient(out _, debugMovement: true, lines.Add);
+        var characterId = Guid.NewGuid();
+
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S));
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
+
+        client.RecordFrameHitch(42.5, 1, 2, 3);
+
+        var line = Assert.Single(lines, line => line.Contains("event=frame_hitch", StringComparison.Ordinal));
+        Assert.Contains("durationMs=42.5", line);
+        Assert.Contains("gc0=1", line);
+        Assert.Contains("gc1=2", line);
+        Assert.Contains("gc2=3", line);
+        Assert.Contains("queueDepth=", line);
+        Assert.Contains("cadenceMs=150", line);
+        Assert.Contains("visible=1", line);
+        Assert.Contains("state=LoggedIn", line);
     }
 
     private static MmoClient CreateClient(out List<IProtocolMessage> outbound, bool debugMovement = false, Action<string>? traceSink = null)

@@ -85,6 +85,29 @@ internal sealed class ClientMovementTrace
             $" render={renderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{renderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}");
     }
 
+    public void FrameHitch(
+        double durationMs,
+        int gc0,
+        int gc1,
+        int gc2,
+        int visibleEntities,
+        ClientConnectionState state)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        _write(
+            "mmo_trace side=client event=frame_hitch" +
+            $" ts={Timestamp(now)} durationMs={durationMs.ToString("0.###", CultureInfo.InvariantCulture)}" +
+            $" gc0={gc0.ToString(CultureInfo.InvariantCulture)} gc1={gc1.ToString(CultureInfo.InvariantCulture)} gc2={gc2.ToString(CultureInfo.InvariantCulture)}" +
+            $" queueDepth={Snapshot.QueueDepth.ToString(CultureInfo.InvariantCulture)} cadenceMs={Snapshot.EffectiveCadenceMs.ToString("0.###", CultureInfo.InvariantCulture)}" +
+            $" latencyMs={Snapshot.LastLatencyMs.ToString(CultureInfo.InvariantCulture)} visible={visibleEntities.ToString(CultureInfo.InvariantCulture)} state={state}" +
+            $" render={Snapshot.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{Snapshot.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}");
+    }
+
     private static bool ReadBool(string key, bool fallback)
     {
         var value = Environment.GetEnvironmentVariable(key);

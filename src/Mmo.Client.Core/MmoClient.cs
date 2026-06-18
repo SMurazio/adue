@@ -174,6 +174,11 @@ public sealed class MmoClient : IDisposable
         Send(new ChatSendMessage(text), DeliveryMethod.ReliableOrdered);
     }
 
+    public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
+    {
+        _movementTrace.FrameHitch(durationMs, gc0, gc1, gc2, EntityCount, State);
+    }
+
     public void Dispose()
     {
         if (_disposed)

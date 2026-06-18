@@ -84,6 +84,7 @@ Useful environment variables:
 - `MMO_DEBUG_MOVEMENT_WATCH`: optional comma-separated watched names or character ids for movement-step/snapshot trace
 - `MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER`: tick hitch threshold as a multiple of tick interval; defaults to `1.5`
 - `MMO_DEBUG_MOVEMENT_TICK_DURATION_MS`: duration-only tick trace threshold; defaults to `15`
+- `MMO_GODOT_FRAME_HITCH_MS`: Godot client frame-hitch trace threshold; defaults to `33.3`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`
@@ -128,7 +129,7 @@ Use the headless trace harness when movement visibly stalls and you need a corre
 .\.shared\skills\mmo-dev\scripts\movement-debug-trace.cmd
 ```
 
-The harness enables `MMO_DEBUG_MOVEMENT`, runs an in-process server plus two `Mmo.Client.Core` clients, and prints structured `mmo_trace` lines for send -> validate/apply -> snapshot -> confirm. In live Godot runs, setting `MMO_DEBUG_MOVEMENT=1` also adds compact movement fields to the top-left overlay.
+The harness enables `MMO_DEBUG_MOVEMENT`, runs an in-process server plus two `Mmo.Client.Core` clients, and prints structured `mmo_trace` lines for send -> validate/apply -> snapshot -> confirm. In live Godot runs, setting `MMO_DEBUG_MOVEMENT=1` also adds compact movement and frame fields to the top-left overlay. Godot frame hitches emit `mmo_trace side=client event=frame_hitch` with frame duration, client GC deltas, interpolation queue depth, cadence, latency, visible entity count, and render position. Use those fields to separate client GC, interpolation starvation, and engine/frame-pacing stalls.
 
 ## Dev Admin Commands
 
