@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Text;
 using Godot;
 using Mmo.Client.Core;
 using Mmo.Shared.Domain;
 
-public partial class MmoClientRoot : Node3D
+public partial class MmoClientRoot : Node3D, IControlHost
 {
     private readonly Dictionary<uint, MeshInstance3D> _entityNodes = [];
     private readonly Dictionary<uint, Label3D> _entityLabels = [];
@@ -63,6 +64,25 @@ public partial class MmoClientRoot : Node3D
     private bool _sentStartupChat;
     private bool _perfHudVisible;
 
+    // Debug control channel (T2). Null unless MMO_DEBUG_CONTROL_PORT is set; absent => zero behavior change.
+    private DebugControlChannel? _controlChannel;
+
+    // Injected movement: a direction held for a fixed duration, sent on the same cadence as real input.
+    // _injectedSingleStep latches a one-shot step (move with durationMs<=0) that clears once it fires.
+    private Direction8? _injectedDirection;
+    private double _injectedUntilSeconds;
+    private bool _injectedSingleStep;
+
+    // Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
+    private Direction8[]? _autopilotPattern;
+    private double _autopilotEndsAtSeconds;
+    private double _autopilotLegSeconds;
+    private int _autopilotLegIndex;
+    private StreamWriter? _frameCsv;
+    private int _frameCsvGc0;
+    private int _frameCsvGc1;
+    private int _frameCsvGc2;
+
     // Per-_Process-section timing (ms), surfaced in the F3 HUD and read by the telemetry channel (T2).
     internal double LastPollMs => _lastPollMs;
     internal double LastRenderStateMs => _lastRenderStateMs;
@@ -92,6 +112,8 @@ public partial class MmoClientRoot : Node3D
         _client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
         _client.Connect();
         GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
+
+        _controlChannel = DebugControlChannel.TryCreate(this);
     }
 
     public override void _Process(double delta)
@@ -102,6 +124,7 @@ public partial class MmoClientRoot : Node3D
 
         var tPoll0 = Time.GetTicksUsec();
         _client?.Poll(now);
+        _controlChannel?.Poll();
         var pollUsec = Time.GetTicksUsec() - tPoll0;
 
         if (_client?.Zone is not null && !_zoneBuilt)
@@ -110,6 +133,7 @@ public partial class MmoClientRoot : Node3D
             _zoneBuilt = true;
         }
 
+        AdvanceAutopilot(now);
         SendHeldMovement(now);
         SendStartupChat();
         RequestMetrics(now);
@@ -125,6 +149,7 @@ public partial class MmoClientRoot : Node3D
         var t4 = Time.GetTicksUsec();
 
         RecordSectionTiming(pollUsec, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+        AppendFrameCsvRow();
     }
 
     private void RecordSectionTiming(ulong pollUsec, ulong renderStateUsec, ulong entitiesUsec, ulong cameraUsec, ulong overlayUsec)
@@ -182,6 +207,8 @@ public partial class MmoClientRoot : Node3D
 
     public override void _ExitTree()
     {
+        _controlChannel?.Dispose();
+        CloseFrameCsv();
         _client?.Dispose();
     }
 
@@ -591,7 +618,11 @@ public partial class MmoClientRoot : Node3D
             return;
         }
 
-        var direction = CurrentDirection();
+        // Real keyboard input takes priority; an injected (debug-channel) direction fills in otherwise.
+        // Either way movement goes out through the same SendMoveStep path and per-direction cadence gate.
+        var keyboard = CurrentDirection();
+        var injected = keyboard.HasValue ? null : CurrentInjectedDirection();
+        var direction = keyboard ?? injected;
         if (!direction.HasValue)
         {
             return;
@@ -605,6 +636,13 @@ public partial class MmoClientRoot : Node3D
 
         _client.SendMoveStep(direction.Value);
         _nextStepAt[direction.Value] = (now + cadence).TotalSeconds;
+
+        // A one-shot injected step is consumed the moment it actually fires.
+        if (injected.HasValue && _injectedSingleStep)
+        {
+            _injectedDirection = null;
+            _injectedSingleStep = false;
+        }
     }
 
     private void RequestMetrics(TimeSpan now)
@@ -656,6 +694,261 @@ public partial class MmoClientRoot : Node3D
             _chatInput.Text = "";
             _chatInput.ReleaseFocus();
         }
+    }
+
+    // ---- Debug control channel host (IControlHost) -------------------------------------------
+    // All members below run on the main thread: the channel is polled from _Process, so every host
+    // call originates inside the render loop. No locking is required.
+
+    void IControlHost.BeginManualMove(Direction8 direction, double durationMs)
+    {
+        // durationMs <= 0 => a single step (one cadence-gated SendMoveStep); otherwise hold for the window.
+        StopAutopilot();
+        _injectedDirection = direction;
+        _injectedSingleStep = durationMs <= 0;
+        _injectedUntilSeconds = durationMs > 0 ? _elapsedSeconds + (durationMs / 1000d) : 0;
+    }
+
+    void IControlHost.StopMovement()
+    {
+        _injectedDirection = null;
+        _injectedSingleStep = false;
+        _injectedUntilSeconds = 0;
+        StopAutopilot();
+    }
+
+    void IControlHost.SendChat(string text)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.Length > 0)
+        {
+            _client?.SendChat(trimmed);
+        }
+    }
+
+    void IControlHost.TogglePerfHud()
+    {
+        TogglePerfHud();
+    }
+
+    void IControlHost.ToggleFullscreen()
+    {
+        var mode = DisplayServer.WindowGetMode();
+        DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.ExclusiveFullscreen
+            ? DisplayServer.WindowMode.Windowed
+            : DisplayServer.WindowMode.ExclusiveFullscreen);
+    }
+
+    bool IControlHost.TryBeginAutopilot(string pattern, double durationMs, out string error)
+    {
+        var legs = ResolveAutopilotPattern(pattern);
+        if (legs is null)
+        {
+            error = $"unknown pattern '{pattern}' (square|line|zigzag|circle)";
+            return false;
+        }
+
+        var duration = durationMs > 0 ? durationMs : 30000d;
+        _autopilotPattern = legs;
+        _autopilotLegIndex = 0;
+        _injectedSingleStep = false;
+        _autopilotEndsAtSeconds = _elapsedSeconds + (duration / 1000d);
+        // Each leg lasts long enough to walk a few tiles before turning; scales with the step cadence.
+        var cadenceSeconds = (_client?.Server?.EffectiveStepCadenceMs ?? 150d) / 1000d;
+        _autopilotLegSeconds = _elapsedSeconds + Math.Max(cadenceSeconds * 4d, 0.5d);
+        _injectedDirection = legs[0];
+        _injectedUntilSeconds = _autopilotEndsAtSeconds;
+        OpenFrameCsv();
+        error = string.Empty;
+        return true;
+    }
+
+    ControlTelemetry IControlHost.ReadTelemetry()
+    {
+        return new ControlTelemetry(
+            Performance.GetMonitor(Performance.Monitor.TimeFps),
+            _lastFrameMs,
+            _maxFrameMs,
+            _lastPollMs,
+            _lastRenderStateMs,
+            _lastEntitiesMs,
+            _lastCameraMs,
+            _lastOverlayMs,
+            _maxPollMs,
+            _maxRenderStateMs,
+            _maxEntitiesMs,
+            _maxCameraMs,
+            _maxOverlayMs,
+            _clientGc0Count,
+            _clientGc1Count,
+            _clientGc2Count,
+            _frameHitchCount);
+    }
+
+    MovementDebugSnapshot IControlHost.ReadMovementDebug()
+    {
+        return _client?.MovementDebug ?? MovementDebugSnapshot.Empty;
+    }
+
+    IReadOnlyList<EntityRenderState> IControlHost.ReadEntities()
+    {
+        // _renderStates is refreshed each frame in SampleRenderStates; returning it directly avoids an
+        // extra copy on the (rare) query path. The channel serializes synchronously before the next frame.
+        return _renderStates;
+    }
+
+    ControlState IControlHost.ReadState()
+    {
+        return new ControlState(
+            _client?.State.ToString() ?? "Disconnected",
+            _client?.IsLoggedIn ?? false,
+            _client?.Role.ToString() ?? ClientRole.Player.ToString(),
+            _client?.Zone?.ZoneId ?? string.Empty,
+            _client?.EntityCount ?? 0,
+            _client?.LocalTile?.ToString() ?? string.Empty);
+    }
+
+    private Direction8? CurrentInjectedDirection()
+    {
+        if (!_injectedDirection.HasValue)
+        {
+            return null;
+        }
+
+        // A held injected move expires at its window end (autopilot keeps refreshing _injectedUntilSeconds).
+        // A single-step move has no window and is cleared by SendHeldMovement once it fires.
+        if (!_injectedSingleStep && _elapsedSeconds > _injectedUntilSeconds)
+        {
+            _injectedDirection = null;
+            return null;
+        }
+
+        return _injectedDirection;
+    }
+
+    private void AdvanceAutopilot(TimeSpan now)
+    {
+        if (_autopilotPattern is null)
+        {
+            return;
+        }
+
+        if (_elapsedSeconds >= _autopilotEndsAtSeconds)
+        {
+            StopAutopilot();
+            return;
+        }
+
+        if (_elapsedSeconds >= _autopilotLegSeconds)
+        {
+            _autopilotLegIndex = (_autopilotLegIndex + 1) % _autopilotPattern.Length;
+            _injectedDirection = _autopilotPattern[_autopilotLegIndex];
+            var cadenceSeconds = (_client?.Server?.EffectiveStepCadenceMs ?? 150d) / 1000d;
+            _autopilotLegSeconds = _elapsedSeconds + Math.Max(cadenceSeconds * 4d, 0.5d);
+        }
+
+        _injectedUntilSeconds = _autopilotEndsAtSeconds;
+    }
+
+    private void StopAutopilot()
+    {
+        _autopilotPattern = null;
+        _autopilotEndsAtSeconds = 0;
+        _autopilotLegSeconds = 0;
+        _autopilotLegIndex = 0;
+        if (_injectedDirection.HasValue)
+        {
+            _injectedDirection = null;
+            _injectedUntilSeconds = 0;
+        }
+
+        CloseFrameCsv();
+    }
+
+    private static Direction8[]? ResolveAutopilotPattern(string pattern)
+    {
+        return pattern.Trim().ToLowerInvariant() switch
+        {
+            "square" => [Direction8.N, Direction8.E, Direction8.S, Direction8.W],
+            "line" => [Direction8.E, Direction8.W],
+            "zigzag" => [Direction8.NE, Direction8.SE],
+            "circle" => [Direction8.N, Direction8.NE, Direction8.E, Direction8.SE, Direction8.S, Direction8.SW, Direction8.W, Direction8.NW],
+            _ => null
+        };
+    }
+
+    private void OpenFrameCsv()
+    {
+        CloseFrameCsv();
+        try
+        {
+            // res:// is src/Mmo.Client.Godot; the gitignored .run/ lives at the repo root (two levels up).
+            // GlobalizePath gives an absolute path independent of the process working directory.
+            var runDir = ProjectSettings.GlobalizePath("res://../../.run");
+            Directory.CreateDirectory(runDir);
+            _frameCsv = new StreamWriter(Path.Combine(runDir, "client-frames.csv"), append: false)
+            {
+                AutoFlush = false
+            };
+            _frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2");
+            _frameCsvGc0 = GC.CollectionCount(0);
+            _frameCsvGc1 = GC.CollectionCount(1);
+            _frameCsvGc2 = GC.CollectionCount(2);
+        }
+        catch (IOException exception)
+        {
+            GD.PushWarning($"Could not open .run/client-frames.csv: {exception.Message}");
+            _frameCsv = null;
+        }
+    }
+
+    private void AppendFrameCsvRow()
+    {
+        if (_frameCsv is null)
+        {
+            return;
+        }
+
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+        var dGc0 = gc0 - _frameCsvGc0;
+        var dGc1 = gc1 - _frameCsvGc1;
+        var dGc2 = gc2 - _frameCsvGc2;
+        _frameCsvGc0 = gc0;
+        _frameCsvGc1 = gc1;
+        _frameCsvGc2 = gc2;
+
+        var row = string.Create(CultureInfo.InvariantCulture,
+            $"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2}");
+        try
+        {
+            _frameCsv.WriteLine(row);
+        }
+        catch (IOException)
+        {
+            CloseFrameCsv();
+        }
+    }
+
+    private void CloseFrameCsv()
+    {
+        if (_frameCsv is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _frameCsv.Flush();
+            _frameCsv.Dispose();
+        }
+        catch (IOException)
+        {
+            // Best effort.
+        }
+
+        _frameCsv = null;
     }
 
     private static Direction8? CurrentDirection()
