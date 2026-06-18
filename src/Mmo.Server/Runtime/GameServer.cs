@@ -216,10 +216,9 @@ public sealed class GameServer
                     var startedAt = Stopwatch.GetTimestamp();
                     try
                     {
-                        if (TryGetSessionEntity(session, out var entity)
-                            && _zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks))
+                        if (TryGetSessionEntity(session, out var entity))
                         {
-                            session.SyncFromEntity(entity);
+                            _zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks);
                         }
                     }
                     finally
@@ -274,7 +273,7 @@ public sealed class GameServer
                         var loginTile = ResolveLoginTile(character.Tile);
                         networkId = _networkIds.Rent();
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current);
-                        current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId, entity.Tile);
+                        current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
                         TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.Tile, ""), DeliveryMethod.ReliableOrdered);
@@ -562,9 +561,9 @@ public sealed class GameServer
         return (dx * dx) + (dy * dy);
     }
 
-    private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity session)
+    private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
-        return new EntityStateSnapshot(session.NetworkId, session.Tile, session.Facing);
+        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing);
     }
 
     private static int EstimateEntityStateBytes()
@@ -880,10 +879,10 @@ public sealed class GameServer
 
     private void SaveTileBestEffort(ClientSession session)
     {
-        var tile = TryGetSessionEntity(session, out var entity)
-            ? entity.Tile
-            : session.Tile;
-        SaveTileBestEffort(session, tile);
+        if (TryGetSessionEntity(session, out var entity))
+        {
+            SaveTileBestEffort(session, entity.Tile);
+        }
     }
 
     private void SaveTileBestEffort(ClientSession session, TileCoord tile)

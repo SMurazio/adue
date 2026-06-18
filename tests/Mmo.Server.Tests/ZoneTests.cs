@@ -19,14 +19,17 @@ public sealed class ZoneTests
     public void TryStepValidatesAgainstOwnedTileGrid()
     {
         var session = new ClientSession(null!);
-        session.Authenticate(1, Guid.NewGuid(), "Player", ClientRole.Player, Zone.DefaultId, new TileCoord(2, 2));
+        var characterId = Guid.NewGuid();
+        session.Authenticate(1, characterId, "Player", ClientRole.Player, Zone.DefaultId);
         var zone = new Zone("test", new TileGrid(8, 8, [new TileCoord(3, 2)]), [new TileCoord(2, 2)]);
+        var entity = zone.SpawnPlayer(1, characterId, "Player", new TileCoord(2, 2), session);
+        session.AttachEntity(entity);
 
-        Assert.False(zone.TryStep(session, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(2, 2), session.Tile);
+        Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
+        Assert.Equal(new TileCoord(2, 2), entity.Tile);
 
-        Assert.True(zone.TryStep(session, Direction8.S, serverTick: 10, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(2, 3), session.Tile);
+        Assert.True(zone.TryStep(entity, Direction8.S, serverTick: 10, stepCooldownTicks: 4));
+        Assert.Equal(new TileCoord(2, 3), entity.Tile);
     }
 
     [Fact]

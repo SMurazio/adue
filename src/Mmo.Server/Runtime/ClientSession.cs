@@ -9,7 +9,6 @@ public sealed class ClientSession
     private readonly HashSet<uint> _knownEntityIds = [];
     private readonly Dictionary<uint, uint> _sentEntityRevisions = [];
     private uint _nextSnapshotSequence = 1;
-    private uint? _lastStepTick;
     private uint _lastFullSnapshotSentTick;
 
     public ClientSession(NetPeer peer)
@@ -26,22 +25,17 @@ public sealed class ClientSession
     public string DisplayName { get; private set; } = "unknown";
     public ClientRole Role { get; private set; } = ClientRole.Player;
     public string ZoneId { get; private set; } = "sandbox";
-    public TileCoord Tile { get; private set; } = TileGrid.DefaultSpawnTile;
-    public Direction8 Facing { get; private set; } = Direction8.S;
-    public uint LastStepTick => _lastStepTick ?? 0;
-    public uint StateRevision { get; private set; } = 1;
     public int LastLatencyMs { get; set; }
     public int BadPacketCount { get; private set; }
     public uint LastAcknowledgedSnapshotSequence { get; private set; }
 
-    public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId, TileCoord tile)
+    public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId)
     {
         NetworkId = networkId;
         CharacterId = characterId;
         DisplayName = displayName;
         Role = role;
         ZoneId = zoneId;
-        Tile = tile;
         IsAuthenticated = true;
         LoginInProgress = false;
     }
@@ -49,37 +43,7 @@ public sealed class ClientSession
     public void AttachEntity(WorldEntity entity)
     {
         EntityId = entity.Id;
-        SyncFromEntity(entity);
-    }
-
-    public void SyncFromEntity(WorldEntity entity)
-    {
         NetworkId = entity.NetworkId;
-        Tile = entity.Tile;
-        Facing = entity.Facing;
-        StateRevision = entity.StateRevision;
-    }
-
-    public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
-    {
-        if (_lastStepTick.HasValue && serverTick - _lastStepTick.Value < stepCooldownTicks)
-        {
-            return false;
-        }
-
-        var delta = direction.Delta();
-        var target = Tile.Offset(delta.X, delta.Y);
-        // TODO: reject diagonal corner-cutting once tiles can carry richer collision flags.
-        if (!grid.IsWalkable(target))
-        {
-            return false;
-        }
-
-        Tile = target;
-        Facing = direction;
-        _lastStepTick = serverTick;
-        StateRevision++;
-        return true;
     }
 
     public int RecordBadPacket()
