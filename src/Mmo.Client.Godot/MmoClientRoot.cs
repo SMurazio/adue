@@ -109,6 +109,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
         _lastGc0 = GC.CollectionCount(0);
         _lastGc1 = GC.CollectionCount(1);
         _lastGc2 = GC.CollectionCount(2);
+        // MMO_DEBUG_FRAME_LOG: dump per-frame telemetry to .run/client-frames-<player>.csv during
+        // normal (human) play. No socket/listener, so no firewall prompt; the agent reads the file.
+        if (!string.IsNullOrWhiteSpace(ReadString("MMO_DEBUG_FRAME_LOG", string.Empty)))
+        {
+            OpenFrameCsv();
+        }
         _client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
         _client.Connect();
         GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
@@ -628,7 +634,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
             return;
         }
 
-        var cadence = TimeSpan.FromMilliseconds(_client.Server?.EffectiveStepCadenceMs ?? 150d);
+        // Send at the server tick rate, NOT the step cadence: throttling sends to the 150ms step
+        // cadence beat against the server's own ~150ms step cooldown (two unsynchronized clocks),
+        // producing uneven step intervals so the fixed-cadence tween froze between steps. Feeding a
+        // move every tick lets the server pace steps evenly on its cooldown (extra moves are dropped
+        // server-side by the cooldown), matching the tween.
+        var tickMs = _client.Server is { TickRate: > 0 } server ? 1000d / server.TickRate : 50d;
+        var cadence = TimeSpan.FromMilliseconds(tickMs);
         if (_nextStepAt.TryGetValue(direction.Value, out var nextAt) && now.TotalSeconds < nextAt)
         {
             return;
@@ -886,7 +898,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
             // GlobalizePath gives an absolute path independent of the process working directory.
             var runDir = ProjectSettings.GlobalizePath("res://../../.run");
             Directory.CreateDirectory(runDir);
-            _frameCsv = new StreamWriter(Path.Combine(runDir, "client-frames.csv"), append: false)
+            var safeName = string.Concat((PlayerName ?? "client").Split(Path.GetInvalidFileNameChars()));
+            if (safeName.Length == 0) { safeName = "client"; }
+            _frameCsv = new StreamWriter(Path.Combine(runDir, $"client-frames-{safeName}.csv"), append: false)
             {
                 AutoFlush = false
             };
