@@ -48,4 +48,17 @@ public sealed class WorldStateTests
 
         Assert.Equal([first, second], buffer);
     }
+
+    [Fact]
+    public void AddTransientCreatesNonDurableEntityWithoutSessionOrCharacter()
+    {
+        var state = new WorldState();
+
+        var entity = state.AddTransient(44, EntityKind.Resource, "Marker", new TileCoord(10, 8), Direction8.S);
+
+        Assert.Equal(EntityKind.Resource, entity.Kind);
+        Assert.False(entity.IsDurable);
+        Assert.Null(entity.CharacterId);
+        Assert.Null(entity.OwnerSession);
+    }
 }

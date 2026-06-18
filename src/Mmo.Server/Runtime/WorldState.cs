@@ -39,6 +39,28 @@ public sealed class WorldState
         return entity;
     }
 
+    public WorldEntity AddTransient(
+        uint networkId,
+        EntityKind kind,
+        string displayName,
+        TileCoord tile,
+        Direction8 facing)
+    {
+        var entity = new WorldEntity(
+            _nextEntityId++,
+            networkId,
+            kind,
+            tile,
+            facing,
+            displayName,
+            characterId: null,
+            ownerSession: null,
+            isDurable: false);
+
+        _entities.Add(entity.Id, entity);
+        return entity;
+    }
+
     public bool TryGet(ulong entityId, out WorldEntity entity)
     {
         return _entities.TryGetValue(entityId, out entity!);

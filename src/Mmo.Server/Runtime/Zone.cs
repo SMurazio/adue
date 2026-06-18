@@ -77,6 +77,21 @@ public sealed class Zone
         return World.AddPlayer(networkId, characterId, displayName, ResolveSpawnTile(tile), ownerSession);
     }
 
+    public WorldEntity SpawnTransient(
+        uint networkId,
+        EntityKind kind,
+        string displayName,
+        TileCoord tile,
+        Direction8 facing)
+    {
+        if (!IsWalkable(tile))
+        {
+            throw new ArgumentException($"Transient spawn tile {tile} is not walkable.", nameof(tile));
+        }
+
+        return World.AddTransient(networkId, kind, displayName, tile, facing);
+    }
+
     public bool Despawn(ulong entityId, out WorldEntity entity)
     {
         return World.Remove(entityId, out entity);

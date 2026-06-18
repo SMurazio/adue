@@ -20,6 +20,8 @@ public sealed class GameServer
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
+    private static readonly TileCoord PlaceholderEntityTile = new(10, 8);
+    private const string PlaceholderEntityName = "Ancient Marker";
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
 
     private readonly ServerOptions _options;
@@ -53,6 +55,7 @@ public sealed class GameServer
         _characters = characters;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles);
+        _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, PlaceholderEntityTile, Direction8.S);
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
