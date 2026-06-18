@@ -17,6 +17,13 @@ public static class ProtocolCodec
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
 
+        Encode(message, writer);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    public static void Encode(IProtocolMessage message, BinaryWriter writer)
+    {
         writer.Write(Magic);
         writer.Write(Version);
         writer.Write((ushort)message.Type);
@@ -86,9 +93,6 @@ public static class ProtocolCodec
             default:
                 throw new ProtocolException($"Unsupported message type {message.GetType().Name}.");
         }
-
-        writer.Flush();
-        return stream.ToArray();
     }
 
     public static IProtocolMessage Decode(ReadOnlySpan<byte> packet)

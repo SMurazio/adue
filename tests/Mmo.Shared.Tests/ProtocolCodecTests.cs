@@ -1,5 +1,6 @@
 using Mmo.Shared.Domain;
 using Mmo.Shared.Protocol;
+using System.Text;
 using Xunit;
 
 namespace Mmo.Shared.Tests;
@@ -160,5 +161,25 @@ public sealed class ProtocolCodecTests
         packet[0] = 0;
 
         Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(packet));
+    }
+
+    [Fact]
+    public void EncodeCanReuseWriterBuffer()
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+
+        ProtocolCodec.Encode(new ChatSendMessage("first payload"), writer);
+        writer.Flush();
+
+        stream.Position = 0;
+        stream.SetLength(0);
+        ProtocolCodec.Encode(new MoveStepMessage(42, Direction8.NW), writer);
+        writer.Flush();
+
+        var packet = stream.ToArray();
+        var decoded = Assert.IsType<MoveStepMessage>(ProtocolCodec.Decode(packet));
+        Assert.Equal(42u, decoded.Sequence);
+        Assert.Equal(Direction8.NW, decoded.Direction);
     }
 }
