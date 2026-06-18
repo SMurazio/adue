@@ -10,6 +10,7 @@ public sealed record ServerOptions(
     int WorldWidthTiles,
     int WorldHeightTiles,
     int StepCooldownMs,
+    int PersistenceCheckpointSeconds,
     float InterestRadius,
     int MaxVisibleEntities,
     SpawnDistribution SpawnDistribution,
@@ -18,6 +19,10 @@ public sealed record ServerOptions(
     public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
 
     public uint StepCooldownTicks => (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / TickRate)));
+
+    public TimeSpan PersistenceCheckpointInterval => TimeSpan.FromSeconds(PersistenceCheckpointSeconds);
+
+    public uint PersistenceCheckpointTicks => (uint)Math.Max(1, PersistenceCheckpointSeconds * TickRate);
 
     public static ServerOptions FromEnvironment()
     {
@@ -31,6 +36,7 @@ public sealed record ServerOptions(
             ReadInt("MMO_WORLD_WIDTH_TILES", 128),
             ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
             ReadInt("MMO_STEP_COOLDOWN_MS", 140),
+            ReadInt("MMO_PERSISTENCE_CHECKPOINT_SECONDS", 15),
             ReadFloat("MMO_INTEREST_RADIUS", 40f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
@@ -70,6 +76,11 @@ public sealed record ServerOptions(
         if (StepCooldownMs < 50 || StepCooldownMs > 5000)
         {
             throw new InvalidOperationException("MMO_STEP_COOLDOWN_MS must be between 50 and 5000.");
+        }
+
+        if (PersistenceCheckpointSeconds < 1 || PersistenceCheckpointSeconds > 3600)
+        {
+            throw new InvalidOperationException("MMO_PERSISTENCE_CHECKPOINT_SECONDS must be between 1 and 3600.");
         }
 
         if (InterestRadius <= 0)

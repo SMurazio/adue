@@ -133,6 +133,7 @@ public sealed class MmoClientIntegrationTests
             64,
             64,
             50,
+            15,
             30,
             150,
             SpawnDistribution.Clustered,

@@ -40,7 +40,8 @@ Clients tween between confirmed tile centers over the step duration; there is no
 - Load or create persisted characters.
 - Own player tile coordinates, facing, and movement cooldown.
 - Evaluate snapshots at the configured tick rate and send changed state or heartbeat snapshots.
-- Persist character tile coordinates on disconnect.
+- Mark durable player tile changes dirty and queue write-behind persistence checkpoints.
+- Flush queued character tile saves on disconnect and shutdown.
 
 ## Client Responsibilities
 
@@ -97,6 +98,8 @@ The current server already follows the early form of this model:
 - Login/database work runs asynchronously.
 - Completed login work is returned through `_mainThreadActions`.
 - The server loop owns movement, snapshots, and session mutation.
+- Durable player tile writes are queued to a background persistence worker; periodic checkpoints
+  enqueue dirty player tiles without doing database I/O on the simulation thread.
 
 Next hardening steps:
 

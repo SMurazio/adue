@@ -13,6 +13,7 @@ public sealed class ServerOptionsTests
             ["MMO_WORLD_WIDTH_TILES"] = "96",
             ["MMO_WORLD_HEIGHT_TILES"] = "80",
             ["MMO_STEP_COOLDOWN_MS"] = "250",
+            ["MMO_PERSISTENCE_CHECKPOINT_SECONDS"] = "30",
             ["MMO_SPAWN_DISTRIBUTION"] = "clustered"
         });
 
@@ -22,6 +23,8 @@ public sealed class ServerOptionsTests
         Assert.Equal(80, options.WorldHeightTiles);
         Assert.Equal(250, options.StepCooldownMs);
         Assert.Equal(TimeSpan.FromMilliseconds(250), options.StepCooldown);
+        Assert.Equal(30, options.PersistenceCheckpointSeconds);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.PersistenceCheckpointInterval);
         Assert.Equal(SpawnDistribution.Clustered, options.SpawnDistribution);
     }
 
@@ -34,6 +37,7 @@ public sealed class ServerOptionsTests
 
         Assert.Equal(40f, options.InterestRadius);
         Assert.Equal(140, options.StepCooldownMs);
+        Assert.Equal(15, options.PersistenceCheckpointSeconds);
         Assert.Equal(128, options.WorldWidthTiles);
         Assert.Equal(128, options.WorldHeightTiles);
         Assert.Equal(SpawnDistribution.Distributed, options.SpawnDistribution);
@@ -65,6 +69,19 @@ public sealed class ServerOptionsTests
         Assert.Contains("MMO_STEP_COOLDOWN_MS", exception.Message);
     }
 
+    [Fact]
+    public void FromEnvironmentRejectsInvalidPersistenceCheckpoint()
+    {
+        using var _ = new EnvironmentScope(new Dictionary<string, string?>
+        {
+            ["MMO_PERSISTENCE_CHECKPOINT_SECONDS"] = "0"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(ServerOptions.FromEnvironment);
+
+        Assert.Contains("MMO_PERSISTENCE_CHECKPOINT_SECONDS", exception.Message);
+    }
+
     private sealed class EnvironmentScope : IDisposable
     {
         private static readonly string[] Keys =
@@ -78,6 +95,7 @@ public sealed class ServerOptionsTests
             "MMO_WORLD_WIDTH_TILES",
             "MMO_WORLD_HEIGHT_TILES",
             "MMO_STEP_COOLDOWN_MS",
+            "MMO_PERSISTENCE_CHECKPOINT_SECONDS",
             "MMO_INTEREST_RADIUS",
             "MMO_MAX_VISIBLE_ENTITIES",
             "MMO_SPAWN_DISTRIBUTION",

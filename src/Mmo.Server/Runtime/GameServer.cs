@@ -26,6 +26,7 @@ public sealed class GameServer
 
     private readonly ServerOptions _options;
     private readonly ICharacterRepository _characters;
+    private readonly PersistenceWriteBehindWorker _persistence;
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _netManager;
     private readonly Dictionary<NetPeer, ClientSession> _sessions = new();
@@ -46,14 +47,18 @@ public sealed class GameServer
     private readonly VisibleEntityComparer _visibleEntityComparer = new();
     private readonly ProtocolEncodeBuffer _messageEncodeBuffer = new();
     private readonly ProtocolEncodeBuffer _snapshotEncodeBuffer = new();
+    private readonly Dictionary<Guid, PendingTileSave> _dirtyDurableTiles = [];
 
     private uint _serverTick;
+    private uint _nextPersistenceCheckpointTick;
     private long _pendingMovementElapsedTicks;
 
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
         _options = options;
         _characters = characters;
+        _persistence = new PersistenceWriteBehindWorker(characters);
+        _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles, options.SpawnDistribution);
         _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
@@ -110,7 +115,9 @@ public sealed class GameServer
         }
         finally
         {
-            PersistConnectedPlayers();
+            QueueConnectedPlayersForPersistence();
+            await _persistence.FlushAsync(CancellationToken.None);
+            await _persistence.DisposeAsync();
             _syntheticLoad.Stop();
             _netManager.Stop();
             Log.Info("Server stopped.");
@@ -142,12 +149,12 @@ public sealed class GameServer
             if (_zone.Despawn(session.EntityId!.Value, out var entity))
             {
                 _networkIds.Return(entity.NetworkId);
-                SaveTileBestEffort(session, entity.Tile);
+                QueueTileSave(session, entity.Tile);
             }
             else
             {
                 _networkIds.Return(session.NetworkId);
-                SaveTileBestEffort(session);
+                QueueTileSave(session);
             }
         }
 
@@ -219,7 +226,10 @@ public sealed class GameServer
                     {
                         if (TryGetSessionEntity(session, out var entity))
                         {
-                            _zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks);
+                            if (_zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks))
+                            {
+                                MarkDirtyDurableTile(entity);
+                            }
                         }
                     }
                     finally
@@ -317,6 +327,11 @@ public sealed class GameServer
     {
         _serverTick++;
         tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
+
+        using (tickBudget.Measure(TickBudgetCategory.Persistence))
+        {
+            CheckpointDirtyDurableTiles();
+        }
 
         BroadcastSnapshot(tickBudget);
 
@@ -896,35 +911,63 @@ public sealed class GameServer
         return elapsedTicks;
     }
 
-    private void PersistConnectedPlayers()
+    private void MarkDirtyDurableTile(WorldEntity entity)
+    {
+        if (!entity.IsDurable || !entity.CharacterId.HasValue)
+        {
+            return;
+        }
+
+        _dirtyDurableTiles[entity.CharacterId.Value] = new PendingTileSave(
+            entity.CharacterId.Value,
+            entity.DisplayName,
+            entity.Tile);
+    }
+
+    private void CheckpointDirtyDurableTiles()
+    {
+        if (_serverTick < _nextPersistenceCheckpointTick)
+        {
+            return;
+        }
+
+        _nextPersistenceCheckpointTick = _serverTick + _options.PersistenceCheckpointTicks;
+        if (_dirtyDurableTiles.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var save in _dirtyDurableTiles.Values)
+        {
+            _persistence.EnqueueTile(save.CharacterId, save.DisplayName, save.Tile);
+        }
+
+        _dirtyDurableTiles.Clear();
+    }
+
+    private void QueueConnectedPlayersForPersistence()
     {
         foreach (var session in _sessions.Values.Where(session => session.IsAuthenticated))
         {
-            SaveTileBestEffort(session);
+            QueueTileSave(session);
         }
     }
 
-    private void SaveTileBestEffort(ClientSession session)
+    private void QueueTileSave(ClientSession session)
     {
         if (TryGetSessionEntity(session, out var entity))
         {
-            SaveTileBestEffort(session, entity.Tile);
+            QueueTileSave(session, entity.Tile);
         }
     }
 
-    private void SaveTileBestEffort(ClientSession session, TileCoord tile)
+    private void QueueTileSave(ClientSession session, TileCoord tile)
     {
-        try
-        {
-            _characters.SaveTileAsync(session.CharacterId, tile, CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
-        }
-        catch (Exception exception)
-        {
-            Log.Error($"Failed to persist {session.DisplayName}", exception);
-        }
+        _dirtyDurableTiles.Remove(session.CharacterId);
+        _persistence.EnqueueTile(session.CharacterId, session.DisplayName, tile);
     }
+
+    private readonly record struct PendingTileSave(Guid CharacterId, string DisplayName, TileCoord Tile);
 }
 
 internal readonly record struct EncodedPacket(byte[] Buffer, int Length);

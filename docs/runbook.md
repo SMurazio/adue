@@ -66,6 +66,7 @@ Useful environment variables:
 - `MMO_WORLD_WIDTH_TILES`: tile-grid width; defaults to `128`
 - `MMO_WORLD_HEIGHT_TILES`: tile-grid height; defaults to `128`
 - `MMO_STEP_COOLDOWN_MS`: per-entity step cooldown; defaults to `140`
+- `MMO_PERSISTENCE_CHECKPOINT_SECONDS`: async write-behind checkpoint interval for dirty player tiles; defaults to `15`
 - `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `40`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
 - `MMO_SPAWN_DISTRIBUTION`: `distributed` by default; use `clustered` to force worst-case all-visible spawn tests
