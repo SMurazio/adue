@@ -78,8 +78,10 @@ public sealed class GameServer
                 while (now >= nextTickAt)
                 {
                     var tickStartedAt = Stopwatch.GetTimestamp();
-                    Tick((float)tickInterval.TotalSeconds);
-                    _metrics.RecordTick(Stopwatch.GetElapsedTime(tickStartedAt));
+                    var tickBudget = new TickBudgetRecorder();
+                    var scheduleDrift = now - nextTickAt;
+                    Tick((float)tickInterval.TotalSeconds, tickBudget);
+                    _metrics.RecordTick(Stopwatch.GetElapsedTime(tickStartedAt), scheduleDrift, tickBudget.ToSample());
                     nextTickAt += tickInterval;
                 }
 
@@ -257,32 +259,38 @@ public sealed class GameServer
         });
     }
 
-    private void Tick(float deltaSeconds)
+    private void Tick(float deltaSeconds, TickBudgetRecorder tickBudget)
     {
-        _runtimeGuard.TryRun("tick", () => TickCore(deltaSeconds));
+        _runtimeGuard.TryRun("tick", () => TickCore(deltaSeconds, tickBudget));
     }
 
-    private void TickCore(float deltaSeconds)
+    private void TickCore(float deltaSeconds, TickBudgetRecorder tickBudget)
     {
         _serverTick++;
 
-        foreach (var session in _sessions.Values)
+        using (tickBudget.Measure(TickBudgetCategory.Movement))
         {
-            if (session.IsAuthenticated)
+            foreach (var session in _sessions.Values)
             {
-                session.Advance(deltaSeconds, _options.MovementUnitsPerSecond, _options.WorldBounds);
+                if (session.IsAuthenticated)
+                {
+                    session.Advance(deltaSeconds, _options.MovementUnitsPerSecond, _options.WorldBounds);
+                }
             }
         }
 
-        BroadcastSnapshot();
+        BroadcastSnapshot(tickBudget);
 
         if (_serverTick % (uint)(_options.TickRate * 10) == 0)
         {
-            Log.Info($"tick={_serverTick} peers={_sessions.Count} players={_sessions.Values.Count(x => x.IsAuthenticated)}");
+            using (tickBudget.Measure(TickBudgetCategory.Other))
+            {
+                Log.Info($"tick={_serverTick} peers={_sessions.Count} players={_sessions.Values.Count(x => x.IsAuthenticated)}");
+            }
         }
     }
 
-    private void BroadcastSnapshot()
+    private void BroadcastSnapshot(TickBudgetRecorder tickBudget)
     {
         var authenticated = _sessions.Values
             .Where(session => session.IsAuthenticated)
@@ -290,25 +298,44 @@ public sealed class GameServer
 
         foreach (var session in authenticated)
         {
-            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, authenticated));
+            _runtimeGuard.TryRun($"snapshot for {session.DisplayName} #{session.NetworkId}", () => BroadcastSnapshotToSession(session, authenticated, tickBudget));
         }
     }
 
-    private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<ClientSession> authenticated)
+    private void BroadcastSnapshotToSession(ClientSession session, IReadOnlyCollection<ClientSession> authenticated, TickBudgetRecorder tickBudget)
     {
-        var visible = SelectVisibleSessions(session, authenticated);
-        var visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
-        SendEntityDespawns(session, visibleIds);
-        EnsureEntitySpawns(session, visible);
-        var packets = BuildSnapshotPackets(session, visible, out var visibleCount);
+        IReadOnlyList<ClientSession> visible;
+        HashSet<uint> visibleIds;
+        using (tickBudget.Measure(TickBudgetCategory.Aoi))
+        {
+            visible = SelectVisibleSessions(session, authenticated);
+            visibleIds = visible.Select(entity => entity.NetworkId).ToHashSet();
+        }
+
+        using (tickBudget.Measure(TickBudgetCategory.Network))
+        {
+            SendEntityDespawns(session, visibleIds);
+            EnsureEntitySpawns(session, visible);
+        }
+
+        IReadOnlyList<byte[]> packets;
+        int visibleCount;
+        using (tickBudget.Measure(TickBudgetCategory.Serialize))
+        {
+            packets = BuildSnapshotPackets(session, visible, out visibleCount);
+        }
+
         var sentBytes = 0;
         var sentPackets = 0;
-        foreach (var packet in packets)
+        using (tickBudget.Measure(TickBudgetCategory.Network))
         {
-            if (TrySend(session.Peer, packet, DeliveryMethod.Unreliable))
+            foreach (var packet in packets)
             {
-                sentBytes += packet.Length;
-                sentPackets++;
+                if (TrySend(session.Peer, packet, DeliveryMethod.Unreliable))
+                {
+                    sentBytes += packet.Length;
+                    sentPackets++;
+                }
             }
         }
 

@@ -12,6 +12,8 @@ public sealed class ServerMetrics
     private readonly long[] _sentMessages = new long[MessageTypeCount];
     private readonly long[] _receivedBytesByType = new long[MessageTypeCount];
     private readonly long[] _sentBytesByType = new long[MessageTypeCount];
+    private readonly double[] _tickBudgetTotalMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
+    private readonly double[] _tickBudgetMaxMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
     private readonly MetricBucket[] _buckets = new MetricBucket[WindowBucketCount];
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
@@ -19,6 +21,8 @@ public sealed class ServerMetrics
     private double _tickTotalMs;
     private double _tickLastMs;
     private double _tickMaxMs;
+    private double _tickScheduleDriftTotalMs;
+    private double _tickScheduleDriftMaxMs;
     private long _peersConnected;
     private long _peersDisconnected;
     private long _networkErrors;
@@ -32,6 +36,8 @@ public sealed class ServerMetrics
     private long _snapshotCulled;
     private long _snapshotVisibleEntities;
     private long _snapshotMaxVisibleEntities;
+    private long _snapshotClientByteSamples;
+    private long _snapshotClientBytesMax;
     private long _loginAccepted;
     private long _loginRejected;
     private double _loginTotalMs;
@@ -47,16 +53,28 @@ public sealed class ServerMetrics
 
     public void RecordTick(TimeSpan elapsed)
     {
+        RecordTick(elapsed, TimeSpan.Zero, TickBudgetSample.Zero);
+    }
+
+    public void RecordTick(TimeSpan elapsed, TimeSpan scheduleDrift, TickBudgetSample budget)
+    {
         var elapsedMs = elapsed.TotalMilliseconds;
+        var driftMs = Math.Max(0, scheduleDrift.TotalMilliseconds);
         _tickCount++;
         _tickTotalMs += elapsedMs;
         _tickLastMs = elapsedMs;
         _tickMaxMs = Math.Max(_tickMaxMs, elapsedMs);
+        _tickScheduleDriftTotalMs += driftMs;
+        _tickScheduleDriftMaxMs = Math.Max(_tickScheduleDriftMaxMs, driftMs);
+        AddTickBudget(_tickBudgetTotalMs, _tickBudgetMaxMs, budget);
 
         var bucket = CurrentBucket();
         bucket.TickCount++;
         bucket.TickTotalMs += elapsedMs;
         bucket.TickMaxMs = Math.Max(bucket.TickMaxMs, elapsedMs);
+        bucket.TickScheduleDriftTotalMs += driftMs;
+        bucket.TickScheduleDriftMaxMs = Math.Max(bucket.TickScheduleDriftMaxMs, driftMs);
+        AddTickBudget(bucket.TickBudgetTotalMs, bucket.TickBudgetMaxMs, budget);
     }
 
     public void RecordPeerConnected()
@@ -120,6 +138,8 @@ public sealed class ServerMetrics
         _snapshotBytes += byteCount;
         _snapshotVisibleEntities += visibleEntities;
         _snapshotMaxVisibleEntities = Math.Max(_snapshotMaxVisibleEntities, visibleEntities);
+        _snapshotClientByteSamples++;
+        _snapshotClientBytesMax = Math.Max(_snapshotClientBytesMax, byteCount);
 
         var bucket = CurrentBucket();
         bucket.SentBytes += byteCount;
@@ -128,6 +148,8 @@ public sealed class ServerMetrics
         bucket.SnapshotBytes += byteCount;
         bucket.SnapshotVisibleEntities += visibleEntities;
         bucket.SnapshotMaxVisibleEntities = Math.Max(bucket.SnapshotMaxVisibleEntities, visibleEntities);
+        bucket.SnapshotClientByteSamples++;
+        bucket.SnapshotClientBytesMax = Math.Max(bucket.SnapshotClientBytesMax, byteCount);
 
         var index = (int)MessageType.WorldSnapshot;
         _sentMessages[index]++;
@@ -190,6 +212,10 @@ public sealed class ServerMetrics
             _tickLastMs,
             _tickCount == 0 ? 0 : _tickTotalMs / _tickCount,
             _tickMaxMs,
+            _tickCount == 0 ? 0 : _tickScheduleDriftTotalMs / _tickCount,
+            _tickScheduleDriftMaxMs,
+            AverageBudget(_tickBudgetTotalMs, _tickCount),
+            MaxBudget(_tickBudgetMaxMs),
             _peersConnected,
             _peersDisconnected,
             _networkErrors,
@@ -203,6 +229,8 @@ public sealed class ServerMetrics
             _snapshotCulled,
             _snapshotsSent == 0 ? 0 : (double)_snapshotVisibleEntities / _snapshotsSent,
             _snapshotMaxVisibleEntities,
+            _snapshotClientByteSamples == 0 ? 0 : (double)_snapshotBytes / _snapshotClientByteSamples,
+            _snapshotClientBytesMax,
             _loginAccepted,
             _loginRejected,
             _loginAccepted + _loginRejected == 0 ? 0 : _loginTotalMs / (_loginAccepted + _loginRejected),
@@ -226,6 +254,10 @@ public sealed class ServerMetrics
         long tickCount = 0;
         double tickTotalMs = 0;
         double tickMaxMs = 0;
+        double tickScheduleDriftTotalMs = 0;
+        double tickScheduleDriftMaxMs = 0;
+        var tickBudgetTotalMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
+        var tickBudgetMaxMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
         long networkErrors = 0;
         long badPackets = 0;
         long sendFailures = 0;
@@ -239,6 +271,8 @@ public sealed class ServerMetrics
         long snapshotCulled = 0;
         long snapshotVisibleEntities = 0;
         long snapshotMaxVisibleEntities = 0;
+        long snapshotClientByteSamples = 0;
+        long snapshotClientBytesMax = 0;
         long loginAccepted = 0;
         long loginRejected = 0;
         double loginTotalMs = 0;
@@ -254,6 +288,9 @@ public sealed class ServerMetrics
             tickCount += bucket.TickCount;
             tickTotalMs += bucket.TickTotalMs;
             tickMaxMs = Math.Max(tickMaxMs, bucket.TickMaxMs);
+            tickScheduleDriftTotalMs += bucket.TickScheduleDriftTotalMs;
+            tickScheduleDriftMaxMs = Math.Max(tickScheduleDriftMaxMs, bucket.TickScheduleDriftMaxMs);
+            AddTickBudget(tickBudgetTotalMs, tickBudgetMaxMs, bucket.TickBudgetTotalMs, bucket.TickBudgetMaxMs);
             networkErrors += bucket.NetworkErrors;
             badPackets += bucket.BadPackets;
             sendFailures += bucket.SendFailures;
@@ -267,6 +304,8 @@ public sealed class ServerMetrics
             snapshotCulled += bucket.SnapshotCulled;
             snapshotVisibleEntities += bucket.SnapshotVisibleEntities;
             snapshotMaxVisibleEntities = Math.Max(snapshotMaxVisibleEntities, bucket.SnapshotMaxVisibleEntities);
+            snapshotClientByteSamples += bucket.SnapshotClientByteSamples;
+            snapshotClientBytesMax = Math.Max(snapshotClientBytesMax, bucket.SnapshotClientBytesMax);
             loginAccepted += bucket.LoginAccepted;
             loginRejected += bucket.LoginRejected;
             loginTotalMs += bucket.LoginTotalMs;
@@ -285,6 +324,10 @@ public sealed class ServerMetrics
             tickCount,
             tickCount == 0 ? 0 : tickTotalMs / tickCount,
             tickMaxMs,
+            tickCount == 0 ? 0 : tickScheduleDriftTotalMs / tickCount,
+            tickScheduleDriftMaxMs,
+            AverageBudget(tickBudgetTotalMs, tickCount),
+            MaxBudget(tickBudgetMaxMs),
             networkErrors,
             badPackets,
             sendFailures,
@@ -298,6 +341,8 @@ public sealed class ServerMetrics
             snapshotCulled,
             snapshotsSent == 0 ? 0 : (double)snapshotVisibleEntities / snapshotsSent,
             snapshotMaxVisibleEntities,
+            snapshotClientByteSamples == 0 ? 0 : (double)snapshotBytes / snapshotClientByteSamples,
+            snapshotClientBytesMax,
             loginAccepted,
             loginRejected,
             loginAccepted + loginRejected == 0 ? 0 : loginTotalMs / (loginAccepted + loginRejected),
@@ -319,8 +364,11 @@ public sealed class ServerMetrics
         return $"metrics {FormatWindowLabel(window)}: " +
             $"tick/s={Rate(snapshot.TickCount, seconds):0.0}, " +
             $"tickMs avg/max={snapshot.TickAverageMs:0.00}/{snapshot.TickMaxMs:0.00}, " +
+            $"driftMs avg/max={snapshot.TickScheduleDriftAverageMs:0.00}/{snapshot.TickScheduleDriftMaxMs:0.00}, " +
+            $"budgetMs move/aoi/ser/net/persist/other={FormatBudget(snapshot.TickBudgetAverageMs)}, " +
             $"snap/s={Rate(snapshot.SnapshotsSent, seconds):0.0}, " +
             $"visible avg/max={snapshot.SnapshotAverageVisibleEntities:0.0}/{snapshot.SnapshotMaxVisibleEntities}, " +
+            $"clientBytes avg/max={snapshot.SnapshotClientBytesAverage:0.0}/{snapshot.SnapshotClientBytesMax}, " +
             $"culled/s={Rate(snapshot.SnapshotCulled, seconds):0.0}, " +
             $"out={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, in={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
             $"recv/s={Rate(snapshot.ReceivedMessageCount, seconds):0.0}, sent/s={Rate(snapshot.SentMessageCount, seconds):0.0}, " +
@@ -336,8 +384,11 @@ public sealed class ServerMetrics
         var seconds = Math.Max(0.001, snapshot.Uptime.TotalSeconds);
         return "metrics total: " +
             $"tickMs last/avg/max={snapshot.TickLastMs:0.00}/{snapshot.TickAverageMs:0.00}/{snapshot.TickMaxMs:0.00}, " +
+            $"driftMs avg/max={snapshot.TickScheduleDriftAverageMs:0.00}/{snapshot.TickScheduleDriftMaxMs:0.00}, " +
+            $"budgetMs avg={FormatBudget(snapshot.TickBudgetAverageMs)}, budgetMs max={FormatBudget(snapshot.TickBudgetMaxMs)}, " +
             $"snap/s(avg)={Rate(snapshot.SnapshotsSent, seconds):0.0}, snapshots={snapshot.SnapshotsSent}, " +
             $"visible avg/max={snapshot.SnapshotAverageVisibleEntities:0.0}/{snapshot.SnapshotMaxVisibleEntities}, " +
+            $"clientBytes avg/max={snapshot.SnapshotClientBytesAverage:0.0}/{snapshot.SnapshotClientBytesMax}, " +
             $"outAvg={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, inAvg={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
             $"sendFail={snapshot.SendFailures}, badPackets={snapshot.BadPackets}, netErr={snapshot.NetworkErrors}, runtimeFaults={snapshot.RuntimeFaults}, " +
             $"login={snapshot.LoginAccepted}/{snapshot.LoginRejected}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
@@ -368,6 +419,57 @@ public sealed class ServerMetrics
     {
         var index = (int)type;
         return (uint)index < counts.Count ? counts[index] : 0;
+    }
+
+    private static void AddTickBudget(double[] totals, double[] maxes, TickBudgetSample budget)
+    {
+        for (var i = 0; i < TickBudgetRecorder.TickBudgetCategoryCount; i++)
+        {
+            var value = budget.Get((TickBudgetCategory)i);
+            totals[i] += value;
+            maxes[i] = Math.Max(maxes[i], value);
+        }
+    }
+
+    private static void AddTickBudget(double[] totals, double[] maxes, IReadOnlyList<double> sourceTotals, IReadOnlyList<double> sourceMaxes)
+    {
+        for (var i = 0; i < TickBudgetRecorder.TickBudgetCategoryCount; i++)
+        {
+            totals[i] += sourceTotals[i];
+            maxes[i] = Math.Max(maxes[i], sourceMaxes[i]);
+        }
+    }
+
+    private static TickBudgetSample AverageBudget(IReadOnlyList<double> totals, long tickCount)
+    {
+        if (tickCount <= 0)
+        {
+            return TickBudgetSample.Zero;
+        }
+
+        return new TickBudgetSample(
+            totals[(int)TickBudgetCategory.Movement] / tickCount,
+            totals[(int)TickBudgetCategory.Aoi] / tickCount,
+            totals[(int)TickBudgetCategory.Serialize] / tickCount,
+            totals[(int)TickBudgetCategory.Network] / tickCount,
+            totals[(int)TickBudgetCategory.Persistence] / tickCount,
+            totals[(int)TickBudgetCategory.Other] / tickCount);
+    }
+
+    private static TickBudgetSample MaxBudget(IReadOnlyList<double> maxes)
+    {
+        return new TickBudgetSample(
+            maxes[(int)TickBudgetCategory.Movement],
+            maxes[(int)TickBudgetCategory.Aoi],
+            maxes[(int)TickBudgetCategory.Serialize],
+            maxes[(int)TickBudgetCategory.Network],
+            maxes[(int)TickBudgetCategory.Persistence],
+            maxes[(int)TickBudgetCategory.Other]);
+    }
+
+    private static string FormatBudget(TickBudgetSample budget)
+    {
+        return $"{budget.MovementMs:0.00}/{budget.AoiMs:0.00}/{budget.SerializeMs:0.00}/{budget.NetworkMs:0.00}/{budget.PersistenceMs:0.00}/{budget.OtherMs:0.00}";
     }
 
     private static string FormatMessageCounts(IReadOnlyList<long> counts)
@@ -416,6 +518,10 @@ public sealed class ServerMetrics
         public long TickCount { get; set; }
         public double TickTotalMs { get; set; }
         public double TickMaxMs { get; set; }
+        public double TickScheduleDriftTotalMs { get; set; }
+        public double TickScheduleDriftMaxMs { get; set; }
+        public readonly double[] TickBudgetTotalMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
+        public readonly double[] TickBudgetMaxMs = new double[TickBudgetRecorder.TickBudgetCategoryCount];
         public long NetworkErrors { get; set; }
         public long BadPackets { get; set; }
         public long SendFailures { get; set; }
@@ -429,6 +535,8 @@ public sealed class ServerMetrics
         public long SnapshotCulled { get; set; }
         public long SnapshotVisibleEntities { get; set; }
         public long SnapshotMaxVisibleEntities { get; set; }
+        public long SnapshotClientByteSamples { get; set; }
+        public long SnapshotClientBytesMax { get; set; }
         public long LoginAccepted { get; set; }
         public long LoginRejected { get; set; }
         public double LoginTotalMs { get; set; }
@@ -440,6 +548,8 @@ public sealed class ServerMetrics
             TickCount = 0;
             TickTotalMs = 0;
             TickMaxMs = 0;
+            TickScheduleDriftTotalMs = 0;
+            TickScheduleDriftMaxMs = 0;
             NetworkErrors = 0;
             BadPackets = 0;
             SendFailures = 0;
@@ -453,10 +563,14 @@ public sealed class ServerMetrics
             SnapshotCulled = 0;
             SnapshotVisibleEntities = 0;
             SnapshotMaxVisibleEntities = 0;
+            SnapshotClientByteSamples = 0;
+            SnapshotClientBytesMax = 0;
             LoginAccepted = 0;
             LoginRejected = 0;
             LoginTotalMs = 0;
             LoginMaxMs = 0;
+            Array.Clear(TickBudgetTotalMs);
+            Array.Clear(TickBudgetMaxMs);
             Array.Clear(ReceivedMessages);
             Array.Clear(SentMessages);
         }
@@ -469,6 +583,10 @@ public sealed record MetricsSnapshot(
     double TickLastMs,
     double TickAverageMs,
     double TickMaxMs,
+    double TickScheduleDriftAverageMs,
+    double TickScheduleDriftMaxMs,
+    TickBudgetSample TickBudgetAverageMs,
+    TickBudgetSample TickBudgetMaxMs,
     long PeersConnected,
     long PeersDisconnected,
     long NetworkErrors,
@@ -482,6 +600,8 @@ public sealed record MetricsSnapshot(
     long SnapshotCulled,
     double SnapshotAverageVisibleEntities,
     long SnapshotMaxVisibleEntities,
+    double SnapshotClientBytesAverage,
+    long SnapshotClientBytesMax,
     long LoginAccepted,
     long LoginRejected,
     double LoginAverageMs,
@@ -497,6 +617,10 @@ public sealed record MetricsWindowSnapshot(
     long TickCount,
     double TickAverageMs,
     double TickMaxMs,
+    double TickScheduleDriftAverageMs,
+    double TickScheduleDriftMaxMs,
+    TickBudgetSample TickBudgetAverageMs,
+    TickBudgetSample TickBudgetMaxMs,
     long NetworkErrors,
     long BadPackets,
     long SendFailures,
@@ -510,6 +634,8 @@ public sealed record MetricsWindowSnapshot(
     long SnapshotCulled,
     double SnapshotAverageVisibleEntities,
     long SnapshotMaxVisibleEntities,
+    double SnapshotClientBytesAverage,
+    long SnapshotClientBytesMax,
     long LoginAccepted,
     long LoginRejected,
     double LoginAverageMs,

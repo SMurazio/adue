@@ -119,7 +119,7 @@ Commands are sent as chat messages:
 - `/stress stop`: stop the in-process synthetic clients
 
 The server clamps `/stress start` to at most 200 synthetic clients and durations from 5 seconds to 10 minutes.
-Use `/metrics` before and during stress runs to spot regressions before they become crashes.
+Use `/metrics` before and during stress runs to spot regressions before they become crashes. Metrics include tick rate, tick duration, schedule drift, category budget buckets (`movement / AOI / serialize / network / persistence / other`), average/max per-client snapshot bytes, total bandwidth, message counts, login timing, and fault counters.
 
 ## Reset Local Database
 
