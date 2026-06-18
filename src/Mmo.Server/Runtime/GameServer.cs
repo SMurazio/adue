@@ -22,6 +22,7 @@ public sealed class GameServer
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
     private static readonly TileCoord PlaceholderEntityTile = new(10, 8);
     private const string PlaceholderEntityName = "Ancient Marker";
+    private const float InterestExitHysteresisTiles = 1f;
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
 
     private readonly ServerOptions _options;
@@ -419,10 +420,14 @@ public sealed class GameServer
         }
 
         var radiusSquared = _options.InterestRadius * _options.InterestRadius;
+        var exitRadius = _options.InterestRadius + InterestExitHysteresisTiles;
+        var exitRadiusSquared = exitRadius * exitRadius;
         foreach (var candidate in entities)
         {
             var distanceSquared = DistanceSquared(recipientEntity, candidate);
-            if (candidate.Id == recipientEntity.Id || distanceSquared <= radiusSquared)
+            if (candidate.Id == recipientEntity.Id
+                || distanceSquared <= radiusSquared
+                || (recipient.WasInLastSnapshot(candidate.NetworkId) && distanceSquared <= exitRadiusSquared))
             {
                 _visibleCandidateScratch.Add(new VisibleEntity(candidate, SnapshotSortKey(recipient, candidate, distanceSquared)));
             }

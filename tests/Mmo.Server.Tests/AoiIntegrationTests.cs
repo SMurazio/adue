@@ -70,9 +70,23 @@ public sealed class AoiIntegrationTests
                 () => observer.Messages.OfType<EntitySpawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
                 outsideClient);
+            await WaitUntilAsync(
+                () => observer.Messages
+                    .OfType<WorldSnapshotMessage>()
+                    .SelectMany(message => message.Entities)
+                    .Any(entity => entity.NetworkId == outsideNetworkId),
+                observer,
+                outsideClient);
 
             observer.ClearMessages();
             await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 14, observer);
+            await PollForAsync(TimeSpan.FromMilliseconds(300), observer, outsideClient);
+            Assert.DoesNotContain(
+                observer.Messages.OfType<EntityDespawnMessage>(),
+                message => message.NetworkId == outsideNetworkId);
+
+            observer.ClearMessages();
+            await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= 15, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
