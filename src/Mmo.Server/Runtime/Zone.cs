@@ -81,6 +81,16 @@ public sealed class Zone
         return entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid);
     }
 
+    public bool TryStep(
+        WorldEntity entity,
+        Direction8 direction,
+        uint serverTick,
+        uint stepCooldownTicks,
+        out MovementStepResult result)
+    {
+        return entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
+    }
+
     public WorldEntity SpawnPlayer(
         uint networkId,
         Guid characterId,

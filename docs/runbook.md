@@ -70,6 +70,9 @@ Useful environment variables:
 - `MMO_INTEREST_RADIUS`: server-side AOI radius in tiles; defaults to `40`
 - `MMO_MAX_VISIBLE_ENTITIES`: per-client snapshot budget after AOI sorting; defaults to `150`
 - `MMO_SPAWN_DISTRIBUTION`: `distributed` by default; use `clustered` to force worst-case all-visible spawn tests
+- `MMO_DEBUG_MOVEMENT`: off by default; set to `1` to log server tick hitches plus watched/admin movement steps
+- `MMO_DEBUG_MOVEMENT_WATCH`: optional comma-separated watched names or character ids for movement-step/snapshot trace
+- `MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER`: tick hitch threshold as a multiple of tick interval; defaults to `1.5`
 - `MMO_DB_PROVIDER`: `sqlite` by default, `postgres` later
 - `MMO_DB`
 - `MMO_MIGRATIONS_PATH`
@@ -105,6 +108,16 @@ In the 3D web view, hold right mouse button on the ground to move toward the poi
 The web renderer shows the tile grid and blocked wall tiles from the server's `ZoneInfo` message. It tweens local and remote entities only after the server confirms a new tile in a snapshot. The debug visibility ring uses the server-advertised `MMO_INTEREST_RADIUS`. The server owns authoritative tile position; there is no client prediction.
 
 Snapshot logging is off by default. Add `--snapshots` to the client command to print once-per-second world snapshots.
+
+## Movement Debug Trace
+
+Use the headless trace harness when movement visibly stalls and you need a correlated server/client timeline without Godot:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\movement-debug-trace.cmd
+```
+
+The harness enables `MMO_DEBUG_MOVEMENT`, runs an in-process server plus two `Mmo.Client.Core` clients, and prints structured `mmo_trace` lines for send -> validate/apply -> snapshot -> confirm. In live Godot runs, setting `MMO_DEBUG_MOVEMENT=1` also adds compact movement fields to the top-left overlay.
 
 ## Dev Admin Commands
 

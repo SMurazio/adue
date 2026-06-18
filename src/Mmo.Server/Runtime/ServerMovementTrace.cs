@@ -1,0 +1,129 @@
+using System.Globalization;
+using Mmo.Server.Configuration;
+using Mmo.Shared.Domain;
+
+namespace Mmo.Server.Runtime;
+
+internal sealed class ServerMovementTrace
+{
+    private readonly ServerOptions _options;
+    private readonly Action<string> _write;
+
+    public ServerMovementTrace(ServerOptions options, Action<string>? write = null)
+    {
+        _options = options;
+        _write = write ?? Log.Info;
+    }
+
+    public bool Enabled => _options.DebugMovement;
+
+    public bool ShouldTrace(ClientSession session)
+    {
+        if (!Enabled || !session.IsAuthenticated)
+        {
+            return false;
+        }
+
+        return session.Role == ClientRole.Admin
+            || _options.DebugMovementWatchNames.Contains(session.DisplayName)
+            || _options.DebugMovementWatchNames.Contains(session.CharacterId.ToString());
+    }
+
+    public bool ShouldTrace(WorldEntity entity)
+    {
+        return entity.OwnerSession is not null && ShouldTrace(entity.OwnerSession);
+    }
+
+    public void TickHitch(
+        uint serverTick,
+        TimeSpan interTickGap,
+        TimeSpan tickDuration,
+        TimeSpan scheduleDrift,
+        TickBudgetSample budget,
+        int catchUpTicks,
+        int gen0Delta,
+        int gen1Delta,
+        int gen2Delta,
+        TimeSpan tickInterval)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var thresholdMs = tickInterval.TotalMilliseconds * _options.DebugMovementHitchThresholdMultiplier;
+        if (interTickGap.TotalMilliseconds < thresholdMs && tickDuration.TotalMilliseconds < thresholdMs)
+        {
+            return;
+        }
+
+        _write(
+            "mmo_trace side=server event=tick_hitch" +
+            $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)}" +
+            $" interMs={FormatMs(interTickGap)} durationMs={FormatMs(tickDuration)} driftMs={FormatMs(scheduleDrift)}" +
+            $" catchUpTicks={catchUpTicks.ToString(CultureInfo.InvariantCulture)}" +
+            $" gc0={gen0Delta.ToString(CultureInfo.InvariantCulture)} gc1={gen1Delta.ToString(CultureInfo.InvariantCulture)} gc2={gen2Delta.ToString(CultureInfo.InvariantCulture)}" +
+            $" moveMs={FormatMs(budget.MovementMs)} aoiMs={FormatMs(budget.AoiMs)} serMs={FormatMs(budget.SerializeMs)}" +
+            $" netMs={FormatMs(budget.NetworkMs)} persistMs={FormatMs(budget.PersistenceMs)} otherMs={FormatMs(budget.OtherMs)}");
+    }
+
+    public void MoveStep(ClientSession session, uint sequence, MovementStepResult result, uint serverTick)
+    {
+        if (!ShouldTrace(session))
+        {
+            return;
+        }
+
+        _write(
+            "mmo_trace side=server event=move_step" +
+            $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)} player={Quote(session.DisplayName)}" +
+            $" seq={sequence.ToString(CultureInfo.InvariantCulture)} dir={result.Direction}" +
+            $" from={FormatTile(result.From)} target={FormatTile(result.Target)} result={FormatTile(result.Result)}" +
+            $" cooldown={FormatBool(result.CooldownElapsed)} walkable={FormatBool(result.TargetWalkable)}" +
+            $" accepted={FormatBool(result.Accepted)} reason={result.Reason}");
+    }
+
+    public void SnapshotCarried(ClientSession recipient, WorldEntity entity, uint snapshotSequence, uint serverTick, int chunkIndex, int chunkCount)
+    {
+        if (!ShouldTrace(entity))
+        {
+            return;
+        }
+
+        _write(
+            "mmo_trace side=server event=snapshot_carry" +
+            $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)} snapshot={snapshotSequence.ToString(CultureInfo.InvariantCulture)}" +
+            $" player={Quote(entity.DisplayName)} recipient={Quote(recipient.DisplayName)} networkId={entity.NetworkId.ToString(CultureInfo.InvariantCulture)}" +
+            $" tile={FormatTile(entity.Tile)} facing={entity.Facing} chunk={chunkIndex + 1}/{chunkCount}");
+    }
+
+    private static string Timestamp()
+    {
+        return DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatMs(TimeSpan value)
+    {
+        return FormatMs(value.TotalMilliseconds);
+    }
+
+    private static string FormatMs(double value)
+    {
+        return value.ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatTile(TileCoord tile)
+    {
+        return $"{tile.X.ToString(CultureInfo.InvariantCulture)},{tile.Y.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    private static string FormatBool(bool value)
+    {
+        return value ? "true" : "false";
+    }
+
+    private static string Quote(string value)
+    {
+        return "\"" + value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+    }
+}

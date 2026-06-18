@@ -21,6 +21,12 @@ public sealed class TileInterpolator
 
     public RenderPosition RenderPosition => _renderPosition;
 
+    public int QueueDepth => _confirmedTiles.Count + (_activeStep is null ? 0 : 1);
+
+    public double StepDurationMs => _stepDurationMs;
+
+    public double InterpolationDelayMs => _interpolationDelayMs;
+
     public void UpdateCadence(double stepDurationMs, double interpolationDelayMs)
     {
         _stepDurationMs = Math.Max(1, stepDurationMs);

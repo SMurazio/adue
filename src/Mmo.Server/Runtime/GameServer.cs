@@ -34,6 +34,7 @@ public sealed class GameServer
     private readonly SyntheticClientLoad _syntheticLoad = new();
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
+    private readonly ServerMovementTrace _movementTrace;
     private readonly NetworkIdPool _networkIds = new();
     private readonly Zone _zone;
     private readonly List<ClientSession> _authenticatedScratch = [];
@@ -60,6 +61,7 @@ public sealed class GameServer
         _persistence = new PersistenceWriteBehindWorker(characters);
         _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
+        _movementTrace = new ServerMovementTrace(options);
         _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles, options.SpawnDistribution);
         _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
         _netManager = new NetManager(_listener)
@@ -87,6 +89,7 @@ public sealed class GameServer
 
         var tickInterval = TimeSpan.FromSeconds(1d / _options.TickRate);
         var nextTickAt = DateTimeOffset.UtcNow;
+        var lastTickStartedAt = 0L;
 
         try
         {
@@ -97,13 +100,34 @@ public sealed class GameServer
                 DrainMainThreadActions();
 
                 var now = DateTimeOffset.UtcNow;
+                var catchUpTicksThisIteration = CountDueTicks(now, nextTickAt, tickInterval);
                 while (now >= nextTickAt)
                 {
                     var tickStartedAt = Stopwatch.GetTimestamp();
+                    var interTickGap = lastTickStartedAt == 0
+                        ? TimeSpan.Zero
+                        : Stopwatch.GetElapsedTime(lastTickStartedAt, tickStartedAt);
+                    lastTickStartedAt = tickStartedAt;
+                    var gen0Before = GC.CollectionCount(0);
+                    var gen1Before = GC.CollectionCount(1);
+                    var gen2Before = GC.CollectionCount(2);
                     var tickBudget = new TickBudgetRecorder();
                     var scheduleDrift = now - nextTickAt;
                     Tick(tickBudget);
-                    _metrics.RecordTick(Stopwatch.GetElapsedTime(tickStartedAt), scheduleDrift, tickBudget.ToSample());
+                    var tickDuration = Stopwatch.GetElapsedTime(tickStartedAt);
+                    var budgetSample = tickBudget.ToSample();
+                    _metrics.RecordTick(tickDuration, scheduleDrift, budgetSample);
+                    _movementTrace.TickHitch(
+                        _serverTick,
+                        interTickGap,
+                        tickDuration,
+                        scheduleDrift,
+                        budgetSample,
+                        catchUpTicksThisIteration,
+                        GC.CollectionCount(0) - gen0Before,
+                        GC.CollectionCount(1) - gen1Before,
+                        GC.CollectionCount(2) - gen2Before,
+                        tickInterval);
                     nextTickAt += tickInterval;
                 }
 
@@ -226,10 +250,12 @@ public sealed class GameServer
                     {
                         if (TryGetSessionEntity(session, out var entity))
                         {
-                            if (_zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks))
+                            if (_zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks, out var result))
                             {
                                 MarkDirtyDurableTile(entity);
                             }
+
+                            _movementTrace.MoveStep(session, move.Sequence, result, _serverTick);
                         }
                     }
                     finally
@@ -526,7 +552,12 @@ public sealed class GameServer
             var end = Math.Min(start + maxEntitiesPerPacket, _payloadEntityScratch.Count);
             for (var i = start; i < end; i++)
             {
-                _snapshotChunkScratch.Add(ToEntityStateSnapshot(_payloadEntityScratch[i]));
+                var entity = _payloadEntityScratch[i];
+                _snapshotChunkScratch.Add(ToEntityStateSnapshot(entity));
+                if (_movementTrace.Enabled)
+                {
+                    _movementTrace.SnapshotCarried(recipient, entity, snapshotSequence, _serverTick, chunkIndex, chunkCount);
+                }
             }
 
             EncodedPacket packet;
@@ -931,6 +962,19 @@ public sealed class GameServer
     private static string FormatPeer(NetPeer peer)
     {
         return $"{peer.Address}:{peer.Port}";
+    }
+
+    private static int CountDueTicks(DateTimeOffset now, DateTimeOffset nextTickAt, TimeSpan tickInterval)
+    {
+        var count = 0;
+        var dueAt = nextTickAt;
+        while (now >= dueAt)
+        {
+            count++;
+            dueAt += tickInterval;
+        }
+
+        return count;
     }
 
     private void DrainMainThreadActions()

@@ -12,12 +12,17 @@ public sealed class WorldEntityMovementTests
         var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
         var grid = new TileGrid(16, 16, []);
 
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid);
+        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
 
         Assert.True(moved);
         Assert.Equal(new TileCoord(9, 7), entity.Tile);
         Assert.Equal(Direction8.NE, entity.Facing);
         Assert.Equal(2u, entity.StateRevision);
+        Assert.True(result.Accepted);
+        Assert.Equal("accepted", result.Reason);
+        Assert.Equal(new TileCoord(8, 8), result.From);
+        Assert.Equal(new TileCoord(9, 7), result.Target);
+        Assert.Equal(entity.Tile, result.Result);
     }
 
     [Fact]
@@ -27,12 +32,14 @@ public sealed class WorldEntityMovementTests
         var grid = new TileGrid(16, 16, []);
 
         Assert.True(entity.TryStep(Direction8.E, 10, 4, grid));
-        var moved = entity.TryStep(Direction8.E, 12, 4, grid);
+        var moved = entity.TryStep(Direction8.E, 12, 4, grid, out var result);
 
         Assert.False(moved);
         Assert.Equal(new TileCoord(9, 8), entity.Tile);
         Assert.Equal(Direction8.E, entity.Facing);
         Assert.Equal(2u, entity.StateRevision);
+        Assert.False(result.CooldownElapsed);
+        Assert.Equal("cooldown", result.Reason);
     }
 
     [Fact]
@@ -41,12 +48,14 @@ public sealed class WorldEntityMovementTests
         var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
         var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
 
-        var moved = entity.TryStep(Direction8.E, 10, 4, grid);
+        var moved = entity.TryStep(Direction8.E, 10, 4, grid, out var result);
 
         Assert.False(moved);
         Assert.Equal(new TileCoord(8, 8), entity.Tile);
         Assert.Equal(Direction8.S, entity.Facing);
         Assert.Equal(1u, entity.StateRevision);
+        Assert.False(result.TargetWalkable);
+        Assert.Equal("blocked", result.Reason);
     }
 
     [Fact]
@@ -55,11 +64,12 @@ public sealed class WorldEntityMovementTests
         var entity = CreateEntity(tile: new TileCoord(0, 0), facing: Direction8.S);
         var grid = new TileGrid(16, 16, []);
 
-        var moved = entity.TryStep(Direction8.N, 10, 4, grid);
+        var moved = entity.TryStep(Direction8.N, 10, 4, grid, out var result);
 
         Assert.False(moved);
         Assert.Equal(new TileCoord(0, 0), entity.Tile);
         Assert.Equal(1u, entity.StateRevision);
+        Assert.Equal("out_of_bounds", result.Reason);
     }
 
     [Fact]

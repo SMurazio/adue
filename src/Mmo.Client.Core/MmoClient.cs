@@ -18,6 +18,7 @@ public sealed class MmoClient : IDisposable
     private readonly HashSet<uint> _snapshotVisibleScratch = [];
     private readonly List<uint> _staleEntityScratch = [];
     private readonly long _startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+    private readonly ClientMovementTrace _movementTrace;
 
     private NetPeer? _serverPeer;
     private PendingSnapshot? _pendingSnapshot;
@@ -29,8 +30,14 @@ public sealed class MmoClient : IDisposable
     private bool _disposed;
 
     public MmoClient(ClientConnectionOptions options)
+        : this(options, ClientMovementTrace.FromEnvironment())
+    {
+    }
+
+    internal MmoClient(ClientConnectionOptions options, ClientMovementTrace movementTrace)
     {
         _options = options;
+        _movementTrace = movementTrace;
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -44,6 +51,7 @@ public sealed class MmoClient : IDisposable
             State = ClientConnectionState.Disconnected;
         };
         _listener.NetworkErrorEvent += (_, error) => _errors.Add(new ClientError("network", error.ToString()));
+        _listener.NetworkLatencyUpdateEvent += (_, latency) => _movementTrace.UpdateLatency(latency);
         _listener.NetworkReceiveEvent += OnNetworkReceive;
     }
 
@@ -72,6 +80,10 @@ public sealed class MmoClient : IDisposable
     public IReadOnlyList<ClientError> Errors => _errors;
 
     public int EntityCount => _entities.Count;
+
+    public bool DebugMovementEnabled => _movementTrace.Enabled;
+
+    public MovementDebugSnapshot MovementDebug => _movementTrace.Snapshot;
 
     public IReadOnlyList<ReplicatedEntity> Entities => _entities.Values.Select(static entity => entity.ToSnapshot()).ToArray();
 
@@ -153,6 +165,7 @@ public sealed class MmoClient : IDisposable
     {
         var sequence = ++_moveSequence;
         Send(new MoveStepMessage(sequence, direction), DeliveryMethod.Sequenced);
+        _movementTrace.MoveSent(sequence, direction);
         return sequence;
     }
 
@@ -313,7 +326,18 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence);
+            if (confirmation.TileChanged)
+            {
+                _movementTrace.TileConfirmed(
+                    state.NetworkId,
+                    state.Tile,
+                    sequence,
+                    DateTimeOffset.UtcNow,
+                    confirmation.QueueDepth,
+                    confirmation.EffectiveCadenceMs,
+                    confirmation.RenderPosition);
+            }
         }
 
         if (isComplete)
@@ -505,12 +529,18 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public void ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence)
         {
+            var previousTile = Tile;
             Tile = tile;
             Facing = facing;
             LastSeenSnapshotSequence = snapshotSequence;
             _interpolator.Confirm(tile, receivedAt);
+            return new EntityConfirmationDebug(
+                tile != previousTile,
+                _interpolator.QueueDepth,
+                _interpolator.StepDurationMs,
+                _interpolator.RenderPosition);
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
@@ -528,6 +558,12 @@ public sealed class MmoClient : IDisposable
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, _interpolator.Sample(now), Tile, Facing, IsLocal);
         }
     }
+
+    private readonly record struct EntityConfirmationDebug(
+        bool TileChanged,
+        int QueueDepth,
+        double EffectiveCadenceMs,
+        RenderPosition RenderPosition);
 
     private sealed class PendingSnapshot
     {

@@ -1,0 +1,113 @@
+using System.Globalization;
+using Mmo.Shared.Domain;
+
+namespace Mmo.Client.Core;
+
+internal sealed class ClientMovementTrace
+{
+    private readonly Action<string> _write;
+
+    public ClientMovementTrace(bool enabled, Action<string>? write = null)
+    {
+        Enabled = enabled;
+        _write = write ?? Console.WriteLine;
+    }
+
+    public bool Enabled { get; }
+
+    public MovementDebugSnapshot Snapshot { get; private set; } = MovementDebugSnapshot.Empty;
+
+    public static ClientMovementTrace FromEnvironment()
+    {
+        return new ClientMovementTrace(ReadBool("MMO_DEBUG_MOVEMENT", false));
+    }
+
+    public void UpdateLatency(int latency)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        Snapshot = Snapshot with { LastLatencyMs = latency };
+    }
+
+    public void MoveSent(uint sequence, Direction8 direction)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var sentAt = DateTimeOffset.UtcNow;
+        Snapshot = Snapshot with
+        {
+            LastSentSequence = sequence,
+            LastSentDirection = direction,
+            LastSentAtUtc = sentAt
+        };
+
+        _write(
+            "mmo_trace side=client event=move_sent" +
+            $" ts={Timestamp(sentAt)} seq={sequence.ToString(CultureInfo.InvariantCulture)} dir={direction}");
+    }
+
+    public void TileConfirmed(
+        uint networkId,
+        TileCoord tile,
+        uint snapshotSequence,
+        DateTimeOffset arrivedAt,
+        int queueDepth,
+        double effectiveCadenceMs,
+        RenderPosition renderPosition)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        Snapshot = Snapshot with
+        {
+            LastConfirmedNetworkId = networkId,
+            LastConfirmedTile = tile,
+            LastConfirmedSnapshotSequence = snapshotSequence,
+            LastConfirmedAtUtc = arrivedAt,
+            QueueDepth = queueDepth,
+            EffectiveCadenceMs = effectiveCadenceMs,
+            RenderPosition = renderPosition
+        };
+
+        _write(
+            "mmo_trace side=client event=tile_confirmed" +
+            $" ts={Timestamp(arrivedAt)} networkId={networkId.ToString(CultureInfo.InvariantCulture)}" +
+            $" snapshot={snapshotSequence.ToString(CultureInfo.InvariantCulture)} tile={FormatTile(tile)}" +
+            $" queueDepth={queueDepth.ToString(CultureInfo.InvariantCulture)} cadenceMs={effectiveCadenceMs.ToString("0.###", CultureInfo.InvariantCulture)}" +
+            $" render={renderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{renderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}");
+    }
+
+    private static bool ReadBool(string key, bool fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(key);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "1" or "true" or "yes" or "on" => true,
+            "0" or "false" or "no" or "off" => false,
+            _ => fallback
+        };
+    }
+
+    private static string Timestamp(DateTimeOffset timestamp)
+    {
+        return timestamp.ToString("O", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatTile(TileCoord tile)
+    {
+        return $"{tile.X.ToString(CultureInfo.InvariantCulture)},{tile.Y.ToString(CultureInfo.InvariantCulture)}";
+    }
+}

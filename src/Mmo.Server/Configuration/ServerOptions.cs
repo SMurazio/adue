@@ -16,6 +16,13 @@ public sealed record ServerOptions(
     SpawnDistribution SpawnDistribution,
     IReadOnlySet<string> AdminNames)
 {
+    public bool DebugMovement { get; init; }
+
+    public IReadOnlySet<string> DebugMovementWatchNames { get; init; } =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    public double DebugMovementHitchThresholdMultiplier { get; init; } = 1.5d;
+
     public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
 
     public uint StepCooldownTicks => (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / TickRate)));
@@ -40,7 +47,12 @@ public sealed record ServerOptions(
             ReadFloat("MMO_INTEREST_RADIUS", 40f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
-            ReadSet("MMO_ADMIN_NAMES", "Admin"));
+            ReadSet("MMO_ADMIN_NAMES", "Admin"))
+        {
+            DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
+            DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
+            DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d)
+        };
 
         options.Validate();
         return options;
@@ -102,6 +114,11 @@ public sealed record ServerOptions(
         {
             throw new InvalidOperationException("MMO_MIGRATIONS_PATH cannot be empty.");
         }
+
+        if (DebugMovementHitchThresholdMultiplier < 1d || DebugMovementHitchThresholdMultiplier > 10d)
+        {
+            throw new InvalidOperationException("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER must be between 1 and 10.");
+        }
     }
 
     private static string ReadString(string key, string fallback)
@@ -120,6 +137,28 @@ public sealed record ServerOptions(
     {
         var value = Environment.GetEnvironmentVariable(key);
         return float.TryParse(value, out var parsed) ? parsed : fallback;
+    }
+
+    private static double ReadDouble(string key, double fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(key);
+        return double.TryParse(value, out var parsed) ? parsed : fallback;
+    }
+
+    private static bool ReadBool(string key, bool fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(key);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "1" or "true" or "yes" or "on" => true,
+            "0" or "false" or "no" or "off" => false,
+            _ => fallback
+        };
     }
 
     private static IReadOnlySet<string> ReadSet(string key, string fallback)

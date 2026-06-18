@@ -14,7 +14,10 @@ public sealed class ServerOptionsTests
             ["MMO_WORLD_HEIGHT_TILES"] = "80",
             ["MMO_STEP_COOLDOWN_MS"] = "250",
             ["MMO_PERSISTENCE_CHECKPOINT_SECONDS"] = "30",
-            ["MMO_SPAWN_DISTRIBUTION"] = "clustered"
+            ["MMO_SPAWN_DISTRIBUTION"] = "clustered",
+            ["MMO_DEBUG_MOVEMENT"] = "true",
+            ["MMO_DEBUG_MOVEMENT_WATCH"] = "Alice,Bob",
+            ["MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER"] = "2.25"
         });
 
         var options = ServerOptions.FromEnvironment();
@@ -26,6 +29,10 @@ public sealed class ServerOptionsTests
         Assert.Equal(30, options.PersistenceCheckpointSeconds);
         Assert.Equal(TimeSpan.FromSeconds(30), options.PersistenceCheckpointInterval);
         Assert.Equal(SpawnDistribution.Clustered, options.SpawnDistribution);
+        Assert.True(options.DebugMovement);
+        Assert.Contains("Alice", options.DebugMovementWatchNames);
+        Assert.Contains("Bob", options.DebugMovementWatchNames);
+        Assert.Equal(2.25d, options.DebugMovementHitchThresholdMultiplier);
     }
 
     [Fact]
@@ -41,6 +48,9 @@ public sealed class ServerOptionsTests
         Assert.Equal(128, options.WorldWidthTiles);
         Assert.Equal(128, options.WorldHeightTiles);
         Assert.Equal(SpawnDistribution.Distributed, options.SpawnDistribution);
+        Assert.False(options.DebugMovement);
+        Assert.Empty(options.DebugMovementWatchNames);
+        Assert.Equal(1.5d, options.DebugMovementHitchThresholdMultiplier);
     }
 
     [Fact]
@@ -99,7 +109,10 @@ public sealed class ServerOptionsTests
             "MMO_INTEREST_RADIUS",
             "MMO_MAX_VISIBLE_ENTITIES",
             "MMO_SPAWN_DISTRIBUTION",
-            "MMO_ADMIN_NAMES"
+            "MMO_ADMIN_NAMES",
+            "MMO_DEBUG_MOVEMENT",
+            "MMO_DEBUG_MOVEMENT_WATCH",
+            "MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER"
         ];
 
         private readonly Dictionary<string, string?> _original = new(StringComparer.Ordinal);

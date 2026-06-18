@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using Godot;
 using Mmo.Client.Core;
 using Mmo.Shared.Domain;
@@ -124,7 +125,7 @@ public partial class MmoClientRoot : Node3D
         var layer = new CanvasLayer { Name = "Overlay" };
         AddChild(layer);
 
-        _statusLabel = CreateOverlayLabel("Status", new Vector2(12, 10), new Vector2(680, 94), 15);
+        _statusLabel = CreateOverlayLabel("Status", new Vector2(12, 10), new Vector2(760, 124), 15);
         _metricsLabel = CreateOverlayLabel("Metrics", new Vector2(0, 10), new Vector2(650, 330), 13);
         _chatLabel = CreateOverlayLabel("Chat", new Vector2(12, 0), new Vector2(760, 164), 14);
         _chatInput = new LineEdit
@@ -313,10 +314,12 @@ public partial class MmoClientRoot : Node3D
             var server = _client.Server is null
                 ? "server: pending"
                 : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
+            var movementDebug = _client.DebugMovementEnabled ? "\n" + FormatMovementDebug(_client.MovementDebug) : "";
             _statusLabel.Text =
                 $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
                 $"{server}\n" +
-                "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat.";
+                "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat." +
+                movementDebug;
         }
 
         if (_metricsLabel is not null)
@@ -522,6 +525,16 @@ public partial class MmoClientRoot : Node3D
         }
 
         return string.Join('\n', rows);
+    }
+
+    private static string FormatMovementDebug(MovementDebugSnapshot debug)
+    {
+        var sent = debug.LastSentDirection.HasValue
+            ? $"{debug.LastSentDirection.Value}#{debug.LastSentSequence}"
+            : "-";
+        var confirmedTile = debug.LastConfirmedTile?.ToString() ?? "-";
+        var render = $"{debug.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{debug.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}";
+        return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
     }
 
     private static string LastMetric(MmoClient client, string prefix)

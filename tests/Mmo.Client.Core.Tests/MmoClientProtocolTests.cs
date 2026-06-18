@@ -160,11 +160,52 @@ public sealed class MmoClientProtocolTests
         Assert.False(client.TryGetEntity(9, out _));
     }
 
-    private static MmoClient CreateClient(out List<IProtocolMessage> outbound)
+    [Fact]
+    public void MovementDebugTraceRecordsSentAndConfirmedTileWhenEnabled()
+    {
+        var lines = new List<string>();
+        using var client = CreateClient(out var outbound, debugMovement: true, lines.Add);
+        var characterId = Guid.NewGuid();
+
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S));
+
+        var sequence = client.SendMoveStep(Direction8.E);
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
+
+        Assert.Contains(outbound.OfType<MoveStepMessage>(), move => move.Sequence == sequence && move.Direction == Direction8.E);
+        Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
+        Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
+        Assert.Equal(9u, client.MovementDebug.LastConfirmedNetworkId);
+        Assert.Equal(new TileCoord(6, 5), client.MovementDebug.LastConfirmedTile);
+        Assert.Equal(3u, client.MovementDebug.LastConfirmedSnapshotSequence);
+        Assert.True(client.MovementDebug.QueueDepth > 0);
+        Assert.Equal(150d, client.MovementDebug.EffectiveCadenceMs);
+        Assert.Contains(lines, line => line.Contains("event=move_sent", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("event=tile_confirmed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MovementDebugTraceIsSilentWhenDisabled()
+    {
+        var lines = new List<string>();
+        using var client = CreateClient(out _, debugMovement: false, lines.Add);
+
+        client.SendMoveStep(Direction8.E);
+
+        Assert.False(client.DebugMovementEnabled);
+        Assert.Equal(0u, client.MovementDebug.LastSentSequence);
+        Assert.Empty(lines);
+    }
+
+    private static MmoClient CreateClient(out List<IProtocolMessage> outbound, bool debugMovement = false, Action<string>? traceSink = null)
     {
         outbound = [];
         var captured = outbound;
-        var client = new MmoClient(new ClientConnectionOptions("127.0.0.1", 1, "test", "account", "display"));
+        var client = new MmoClient(
+            new ClientConnectionOptions("127.0.0.1", 1, "test", "account", "display"),
+            new ClientMovementTrace(debugMovement, traceSink));
         client.OutboundSinkForTests = (message, _) => captured.Add(message);
         return client;
     }

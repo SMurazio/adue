@@ -41,8 +41,29 @@ public sealed class WorldEntity
 
     public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
     {
+        return TryStep(direction, serverTick, stepCooldownTicks, grid, out _);
+    }
+
+    public bool TryStep(
+        Direction8 direction,
+        uint serverTick,
+        uint stepCooldownTicks,
+        TileGrid grid,
+        out MovementStepResult result)
+    {
         if (_lastStepTick.HasValue && serverTick - _lastStepTick.Value < stepCooldownTicks)
         {
+            var cooldownDelta = direction.Delta();
+            var cooldownTarget = Tile.Offset(cooldownDelta.X, cooldownDelta.Y);
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                cooldownTarget,
+                CooldownElapsed: false,
+                grid.IsWalkable(cooldownTarget),
+                Accepted: false,
+                "cooldown",
+                Tile);
             return false;
         }
 
@@ -51,13 +72,32 @@ public sealed class WorldEntity
         // TODO: reject diagonal corner-cutting once tiles can carry richer collision flags.
         if (!grid.IsWalkable(target))
         {
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                target,
+                CooldownElapsed: true,
+                TargetWalkable: false,
+                Accepted: false,
+                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
+                Tile);
             return false;
         }
 
+        var from = Tile;
         Tile = target;
         Facing = direction;
         _lastStepTick = serverTick;
         StateRevision++;
+        result = new MovementStepResult(
+            direction,
+            from,
+            target,
+            CooldownElapsed: true,
+            TargetWalkable: true,
+            Accepted: true,
+            "accepted",
+            Tile);
         return true;
     }
 }
