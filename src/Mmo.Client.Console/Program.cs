@@ -25,6 +25,9 @@ NetPeer? serverPeer = null;
 uint inputSequence = 0;
 DateTimeOffset lastSnapshotPrintedAt = DateTimeOffset.MinValue;
 var entityNames = new Dictionary<uint, string>();
+// Per-entity absolute state, reconstructed from delta-coded snapshot rows (S47b) so --show-snapshots
+// prints real positions instead of the raw row (which carries only the changed fields).
+var entityStates = new Dictionary<uint, (TileCoord Tile, Direction8 Facing, bool Depleted)>();
 
 listener.PeerConnectedEvent += peer =>
 {
@@ -55,7 +58,7 @@ listener.NetworkReceiveEvent += (_, reader, _, _) =>
             outgoing.Enqueue(new SnapshotAckMessage(snapshot.SnapshotSequence));
         }
 
-        PrintMessage(message, options.ShowSnapshots, entityNames, ref lastSnapshotPrintedAt);
+        PrintMessage(message, options.ShowSnapshots, entityNames, entityStates, ref lastSnapshotPrintedAt);
     }
     catch (Exception exception)
     {
@@ -175,6 +178,7 @@ static void PrintMessage(
     IProtocolMessage message,
     bool showSnapshots,
     Dictionary<uint, string> entityNames,
+    Dictionary<uint, (TileCoord Tile, Direction8 Facing, bool Depleted)> entityStates,
     ref DateTimeOffset lastSnapshotPrintedAt)
 {
     switch (message)
@@ -189,8 +193,10 @@ static void PrintMessage(
             break;
         case EntitySpawnMessage spawn:
             entityNames[spawn.NetworkId] = spawn.DisplayName;
+            entityStates[spawn.NetworkId] = (spawn.Tile, spawn.Facing, false);
             break;
         case EntityDespawnMessage despawn:
+            entityStates.Remove(despawn.NetworkId);
             if (showSnapshots && entityNames.TryGetValue(despawn.NetworkId, out var despawnedName))
             {
                 Console.WriteLine($"left interest: {despawnedName} #{despawn.NetworkId}");
@@ -200,6 +206,28 @@ static void PrintMessage(
             if (!showSnapshots)
             {
                 break;
+            }
+
+            // Resolve EVERY snapshot's delta-coded rows so the per-entity state stays current; printing is
+            // throttled, but a skipped step would desync the reconstructed position.
+            foreach (var entity in snapshot.Entities)
+            {
+                entityStates.TryGetValue(entity.NetworkId, out var current);
+                var tile = current.Tile;
+                if (entity.HasAbsolutePosition)
+                {
+                    tile = entity.Tile;
+                }
+                else if (entity.HasStepPosition)
+                {
+                    var delta = entity.Step.Delta();
+                    tile = current.Tile.Offset(delta.X, delta.Y);
+                }
+
+                entityStates[entity.NetworkId] = (
+                    tile,
+                    entity.HasFacing ? entity.Facing : current.Facing,
+                    entity.HasDepleted ? entity.Depleted : current.Depleted);
             }
 
             var now = DateTimeOffset.UtcNow;
@@ -214,7 +242,8 @@ static void PrintMessage(
                 var name = entityNames.TryGetValue(entity.NetworkId, out var knownName)
                     ? knownName
                     : $"#{entity.NetworkId}";
-                return $"{name}@({entity.Tile.X},{entity.Tile.Y}) {entity.Facing}";
+                var resolved = entityStates[entity.NetworkId];
+                return $"{name}@({resolved.Tile.X},{resolved.Tile.Y}) {resolved.Facing}";
             }));
             Console.WriteLine($"tick={snapshot.ServerTick} seq={snapshot.SnapshotSequence} visible=[{players}]");
             break;

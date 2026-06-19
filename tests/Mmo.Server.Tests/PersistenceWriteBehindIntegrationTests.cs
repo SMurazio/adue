@@ -165,6 +165,9 @@ public sealed class PersistenceWriteBehindIntegrationTests
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
         private readonly string _name;
+
+        // Resolves delta-coded snapshot rows (S47b) to absolute state so OwnTile tracks step deltas too.
+        private readonly SnapshotRowResolver _resolver = new();
         private NetPeer? _serverPeer;
         private uint _moveSequence;
         private bool _disposed;
@@ -270,15 +273,16 @@ public sealed class PersistenceWriteBehindIntegrationTests
                     case EntitySpawnMessage spawn when spawn.DisplayName == _name:
                         OwnNetworkId = spawn.NetworkId;
                         OwnTile = spawn.Tile;
+                        _resolver.Seed(spawn.NetworkId, spawn.Tile, spawn.Facing);
                         break;
                     case WorldSnapshotMessage snapshot:
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         foreach (var entity in snapshot.Entities)
                         {
+                            var resolved = _resolver.Apply(entity);
                             if (entity.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = entity.Tile;
-                                break;
+                                OwnTile = resolved.Tile;
                             }
                         }
 
