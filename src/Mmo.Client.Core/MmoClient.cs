@@ -29,6 +29,11 @@ public sealed class MmoClient : IDisposable
     private readonly ClientMovementTrace _movementTrace;
     private readonly ClientInventory _inventory = new();
 
+    // Acks the highest *contiguously*-received snapshot sequence (S47a), not the latest one seen, so the
+    // server never advances a viewer's acked baseline past a sequence the client missed under UDP
+    // loss/reorder — the prerequisite that makes S47b's cumulative step-deltas safe.
+    private readonly SnapshotContiguityTracker _contiguity = new();
+
     private NetPeer? _serverPeer;
     private PendingSnapshot? _pendingSnapshot;
     private uint? _lastAppliedSnapshotSequence;
@@ -359,7 +364,7 @@ public sealed class MmoClient : IDisposable
         if (snapshot.ChunkCount <= 1)
         {
             ApplySnapshot(snapshot.ServerTick, snapshot.SnapshotSequence, snapshot.IsComplete, snapshot.Entities);
-            AcknowledgeAppliedSnapshot(snapshot.SnapshotSequence);
+            AcknowledgeAppliedSnapshot(snapshot.SnapshotSequence, snapshot.IsComplete);
             return;
         }
 
@@ -384,7 +389,7 @@ public sealed class MmoClient : IDisposable
             _pendingSnapshot.Sequence,
             _pendingSnapshot.IsFullSnapshot,
             _pendingSnapshot.Entities);
-        AcknowledgeAppliedSnapshot(_pendingSnapshot.Sequence);
+        AcknowledgeAppliedSnapshot(_pendingSnapshot.Sequence, _pendingSnapshot.IsFullSnapshot);
         _pendingSnapshot = null;
     }
 
@@ -447,9 +452,20 @@ public sealed class MmoClient : IDisposable
         _lastAppliedSnapshotSequence = sequence;
     }
 
-    private void AcknowledgeAppliedSnapshot(uint snapshotSequence)
+    // A snapshot just applied. Record it as received and ack the highest contiguously-received sequence
+    // (the top of the gap-free prefix), NOT the just-applied one: if an earlier sequence was dropped, the
+    // contiguous cursor stalls at the gap and the server won't advance the baseline past it. With no loss
+    // the contiguous cursor equals the latest sequence, so this is a no-op vs. the old behavior. The ack is
+    // Sequenced (droppable): a lost ack just means the server re-includes still-unacked entities next tick.
+    //
+    // isComplete marks a FULL (re-baseline / AOI-entry) snapshot: it re-establishes the whole visible set
+    // from scratch, so any earlier gap is irrelevant. The tracker jumps the cursor to it, which is what
+    // unstalls a permanently-lost middle sequence — the server's 2 s force-re-baseline sends exactly such a
+    // complete snapshot, and acking ITS sequence lets the server stop re-baselining and converge.
+    private void AcknowledgeAppliedSnapshot(uint snapshotSequence, bool isComplete)
     {
-        Send(new SnapshotAckMessage(snapshotSequence), DeliveryMethod.Sequenced);
+        var contiguous = _contiguity.Observe(snapshotSequence, isComplete);
+        Send(new SnapshotAckMessage(contiguous), DeliveryMethod.Sequenced);
     }
 
     private void PruneStalePlaceholders(uint currentSequence)
