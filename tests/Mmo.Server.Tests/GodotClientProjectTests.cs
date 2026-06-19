@@ -56,14 +56,17 @@ public sealed class GodotClientProjectTests
         Assert.Contains("Name = \"WallTiles\"", root);
         Assert.DoesNotContain("Name = $\"Wall_{tile.X}_{tile.Y}\"", root);
         Assert.Contains("private readonly BoxMesh _wallMesh", root);
-        Assert.Contains("private readonly CapsuleMesh _entityMesh", root);
-        // Entity materials are reused from cached fields, never allocated per entity/frame (the player
-        // assignment is now nested in a resource-vs-player ternary, but still references the cached fields).
-        Assert.Contains("state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial", root);
-        // Resource nodes (S39) likewise reuse a cached mesh + cached available/depleted materials.
-        Assert.Contains("private readonly BoxMesh _resourceMesh", root);
-        Assert.Contains("private readonly StandardMaterial3D _resourceAvailableMaterial", root);
-        Assert.Contains("private readonly StandardMaterial3D _resourceDepletedMaterial", root);
+
+        // Entity-resource reuse moved into the visual classes (S61): BoxVisual caches its mesh + materials
+        // as STATIC readonly fields shared across every instance — never allocated per entity/frame.
+        var box = File.ReadAllText(FindGodotSource(Path.Combine("Visuals", "BoxVisual.cs")));
+        Assert.Contains("static readonly CapsuleMesh EntityMesh", box);
+        Assert.Contains("static readonly BoxMesh ResourceMesh", box);
+        Assert.Contains("static readonly StandardMaterial3D LocalEntityMaterial", box);
+        Assert.Contains("static readonly StandardMaterial3D RemoteEntityMaterial", box);
+        Assert.Contains("static readonly StandardMaterial3D ResourceAvailableMaterial", box);
+        Assert.Contains("static readonly StandardMaterial3D ResourceDepletedMaterial", box);
+        Assert.Contains("_body.Mesh = _isResource ? ResourceMesh : EntityMesh", box);
     }
 
     [Fact]

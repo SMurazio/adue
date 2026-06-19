@@ -1,0 +1,70 @@
+using Godot;
+using Mmo.Client.Core;
+using Mmo.Shared.Domain;
+
+namespace Mmo.Client.Godot.Visuals;
+
+// The placeholder primitive: a capsule for players/NPCs that have no model, a chunky box for resources that
+// have no model yet (Plant), and the forward-compatible fallback for any unknown archetype or a failed asset
+// load. Behaviour is lifted verbatim from MmoClientRoot's old CreateEntityNode box path: resources read as
+// scenery (box, green/grey by availability, hidden when depleted); players/NPCs read as avatars (capsule,
+// blue local / orange remote).
+public sealed partial class BoxVisual : EntityVisual
+{
+    // Shared meshes/materials — built once per visual. Distinct mesh + colour so a resource box is
+    // unmistakable from a player capsule at a glance (same values as the pre-refactor consts).
+    private static readonly CapsuleMesh EntityMesh = new() { Radius = 0.28f, Height = 0.9f };
+    private static readonly BoxMesh ResourceMesh = new() { Size = new Vector3(0.7f, 0.7f, 0.7f) };
+    private static readonly StandardMaterial3D LocalEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
+    private static readonly StandardMaterial3D RemoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
+    // Available = lush green; depleted = dim grey (also hidden when depleted, but the material keeps it
+    // readable if a future build shows stumps instead of hiding them).
+    private static readonly StandardMaterial3D ResourceAvailableMaterial = Material(new Color(0.32f, 0.78f, 0.30f));
+    private static readonly StandardMaterial3D ResourceDepletedMaterial = Material(new Color(0.28f, 0.30f, 0.28f));
+
+    private MeshInstance3D _body = null!;
+
+    protected override float LabelHeight => _isResource ? 1.3f : 0.9f;
+
+    private bool _isResource;
+
+    protected override void BuildChildren()
+    {
+        _body = new MeshInstance3D { Name = "Body" };
+        AddChild(_body);
+    }
+
+    protected override void OnAcquire(EntityRenderState state)
+    {
+        _isResource = state.Kind == EntityKind.Resource;
+        _body.Mesh = _isResource ? ResourceMesh : EntityMesh;
+        ApplyMaterial(state);
+        _body.Visible = !(_isResource && state.Depleted);
+    }
+
+    protected override void OnUpdate(EntityRenderState state, double now)
+    {
+        if (!_isResource)
+        {
+            return;
+        }
+
+        // Box-rendered resources (Plant, or a Rock/Tree that fell back to the box): drive availability purely
+        // off the replicated Depleted bit — hide + grey a harvested node; restore (show + green) when the
+        // server respawns it. No prediction.
+        _body.Visible = !state.Depleted;
+        _body.MaterialOverride = state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial;
+    }
+
+    private void ApplyMaterial(EntityRenderState state)
+    {
+        _body.MaterialOverride = _isResource
+            ? (state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial)
+            : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial);
+    }
+
+    private static StandardMaterial3D Material(Color color)
+    {
+        return new StandardMaterial3D { AlbedoColor = color, Roughness = 0.82f };
+    }
+}

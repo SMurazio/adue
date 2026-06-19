@@ -5,137 +5,28 @@ using System.IO;
 using System.Text;
 using Godot;
 using Mmo.Client.Core;
+using Mmo.Client.Godot.Visuals;
 using Mmo.Shared.Domain;
 
 public partial class MmoClientRoot : Node3D, IControlHost
 {
-	// Entity visuals are heterogeneous now: resources stay a MeshInstance3D box; players are a Node3D
-	// wrapper holding the instanced character model (see PlayerModelVisual). The dict holds the common
-	// Node3D base so both lifecycles (spawn/position/despawn) share one path.
-	private readonly Dictionary<uint, Node3D> _entityNodes = [];
-	private readonly Dictionary<uint, Label3D> _entityLabels = [];
-	// Per-player rig state: the model child node (rotated for facing), its AnimationPlayer + resolved
-	// walk clip, and the movement tracker that drives walk-vs-idle. Keyed by entity NetworkId; entries
-	// are removed alongside _entityNodes on despawn.
-	private readonly Dictionary<uint, PlayerModelVisual> _playerVisuals = [];
+	// Stage-1 refactor (S61): all entity rendering now lives in the EntityVisual hierarchy behind an
+	// EntityRenderer + factory (src/Mmo.Client.Godot/Visuals/). MmoClientRoot keeps the render-state buffer
+	// (which TryHarvest + the debug-control channel also read) and the world shell, and drives the renderer.
 	private readonly HashSet<TileCoord> _renderedBlockedTiles = [];
 	private readonly List<EntityRenderState> _renderStates = [];
-	private readonly HashSet<uint> _seenEntityIds = [];
-	private readonly List<uint> _staleEntityIds = [];
 	private readonly List<string> _chatRows = [];
 	private readonly StringBuilder _perfText = new(768);
 	private readonly BoxMesh _wallMesh = new() { Size = new Vector3(0.92f, 0.85f, 0.92f) };
-	private readonly CapsuleMesh _entityMesh = new() { Radius = 0.28f, Height = 0.9f };
-	// Resource nodes use a chunky box so they read as scenery, not avatars (capsules). Distinct mesh +
-	// colour so a node is unmistakable from a player at a glance.
-	private readonly BoxMesh _resourceMesh = new() { Size = new Vector3(0.7f, 0.7f, 0.7f) };
 	private readonly StandardMaterial3D _groundMaterial = Material(new Color(0.08f, 0.12f, 0.13f));
 	private readonly StandardMaterial3D _wallMaterial = Material(new Color(0.45f, 0.50f, 0.53f));
-	private readonly StandardMaterial3D _localEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
-	private readonly StandardMaterial3D _remoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
-	// Available = lush green; depleted = dim grey (and the node is also hidden when depleted, but the
-	// material keeps it readable if a future build chooses to show stumps instead of hiding them).
-	private readonly StandardMaterial3D _resourceAvailableMaterial = Material(new Color(0.32f, 0.78f, 0.30f));
-	private readonly StandardMaterial3D _resourceDepletedMaterial = Material(new Color(0.28f, 0.30f, 0.28f));
 
-	// ---- S54 player character model ---------------------------------------------------------------
-	// The rigged humanoid that replaces the player capsule. Loaded once, instanced per Player entity.
-	private const string PlayerModelPath = "res://content/characters/ProvaPersonaggioWalkLoop.glb";
-
-	// TUNABLE (human eyeballs on relaunch). Character-Creator / Tripo rigs commonly import at real-world
-	// Model native height is 1.086 units; the grid is 1 unit = 1 tile (human ~1.7m on a 1m grid), so scale
-	// ~1.6 renders it ~1.74 tiles tall. If the model is huge -> shrink; tiny -> grow.
-	private const float PlayerModelScale = 1.6f;
-
-	// TUNABLE. glTF/Godot forward is -Z; a Direction8 of N maps to -Z in our world (tile delta (0,-1)).
-	// If the model's mesh faces +Z (away from the look direction) or sideways, correct it here in degrees
-	// (e.g. 180 if it faces backwards, +/-90 if sideways). 0 = trust the model's authored forward.
-	// 180: play-test showed the rig facing front-to-back relative to movement.
-	private const float ModelForwardOffsetDegrees = 180f;
-
-	// Vertical offset for the model root so the feet sit on the ground plane (y=0). Most rigs are authored
-	// with the origin at the feet; if it floats or sinks, nudge here. TUNABLE.
-	private const float PlayerModelYOffset = 0f;
-
-	// Keep the walk animation playing for this long after the last detected positional change, so the
-	// brief idle gap between server-confirmed tile steps does not stutter the walk loop on/off. TUNABLE.
-	private const double PlayerWalkHoldSeconds = 0.2d;
-
-	// A tile step is ~1 unit; treat per-frame displacement above this (squared) as "moving". Small enough
-	// to catch slow interpolation, large enough to ignore float jitter at rest.
-	private const double PlayerMovingEpsilonSquared = 0.0000004d; // ~(0.0006 unit/frame)
-
-	// S55 AnimationTree state-machine node names. The Idle state plays the rig's T-pose (placeholder idle,
-	// human-OK'd); the Walk state plays the resolved walk loop. State names are also the Travel() targets.
-	private const string AnimStateIdle = "Idle";
-	private const string AnimStateWalk = "Walk";
-
-	// Cross-fade time (seconds) on the Idle<->Walk transitions so the rig blends instead of snapping between
-	// a standing pose and the stride. ~0.12-0.15s reads as a quick, natural settle. TUNABLE.
-	private const float PlayerAnimCrossFadeSeconds = 0.13f;
-
-	// ---- S55 name labels --------------------------------------------------------------------------
-	// The model renders ~PlayerModelScale * native-height (1.086) ≈ 1.74 tiles tall, so park the name just
-	// above the head. Derived from PlayerModelScale so it tracks scale changes (1.6 -> ~1.96). TUNABLE.
-	// Field (not const) so the S60 admin tuning panel can adjust label height live.
-	private float _playerLabelHeight = PlayerModelScale * 1.4f;
-	// Constant on-screen text size (FixedSize) so distant players stay readable; pixel size tuned for crisp
-	// glyphs without the label ballooning. Outline gives contrast on any background. TUNABLE (play-test:
-	// shrunk from 0.0018 — was bigger than the character). Field for live S60 panel tuning.
-	private float _playerLabelPixelSize = 0.0005f;
-	private const int PlayerLabelFontSize = 64;
-	private const int PlayerLabelOutlineSize = 14;
-
-	// Loaded lazily on first player spawn so a build with no players never pays the load. Null + a logged
-	// warning if the resource is missing/unloadable; players then fall back to the capsule mesh.
-	private PackedScene? _playerModelScene;
-	private bool _playerModelLoadAttempted;
-	private bool _playerModelLoadFailed;
-
-	// ---- S58 rock resource models -----------------------------------------------------------------
-	// Rock gatherables (server DisplayName "Rock") render as one of three static GLBs instead of the box.
-	// Tree/Plant keep the box (no models yet). The variant is chosen by NetworkId % 3 so it is deterministic
-	// and identical across clients. Models are origin-centered, so each needs a +Y offset (≈ -Ymin × scale)
-	// to drop the base onto the ground plane (y=0). All three PackedScenes are loaded once and cached.
-	//
-	// FRAGILITY (called out for review): there is no resource-subtype field in the protocol — "is this a
-	// Rock?" is inferred purely from the replicated DisplayName string. If the server ever renames "Rock"
-	// or localizes display names, this detection silently falls back to the box. The clean fix would be a
-	// kind/subtype field, but that is a server/protocol change and out of scope for this Godot-only task.
-	private const string RockDisplayName = "Rock";
-
-	// One entry per model (path, scale, Y-offset). Scale/Y-offset are TUNABLE — human eyeballs on relaunch.
-	// Native bounds (grid = 1 unit/tile), and the first-guess sizing rationale:
-	//   moss      H 0.64, Ymin −0.32 → scale 1.25 ≈ 0.80 tile tall; Yoff = 0.32 × 1.25 = 0.40
-	//   floating  H 0.98, Ymin −0.49 → scale 0.85 ≈ 0.83 tile tall; Yoff = 0.49 × 0.85 ≈ 0.42 (a "floating"
-	//             monolith; trimmed to 0.38 so it hovers slightly off the ground on purpose)
-	//   engraved  H 1.91, Ymin −0.96 → scale 0.70 ≈ 1.34 tile tall (the "L"/large one, intentionally biggest);
-	//             Yoff = 0.96 × 0.70 ≈ 0.67
-	// One exported scale applied to ALL rock models — tweak live in the Godot inspector. Each model's
-	// *GroundOffset is its base offset (-Ymin) at scale 1; it's multiplied by RockModelScale so the rock
-	// stays sitting on the floor at any scale.
+	// Live-tunable presentation params shared with the visuals (label pixel size/height, rock scale). The S60
+	// admin panel mutates these; the renderer pushes label changes onto live visuals. The rock model scale
+	// stays an [Export] for inspector tweaking, mirrored into _tuning at _Ready and on each panel apply.
 	[Export] public float RockModelScale { get; set; } = 4f;
-	private const string RockMossPath = "res://content/resources/M_Rock_Moss_Overgrowth.glb";
-	private const float RockMossGroundOffset = 0.32f;
-	private const string RockFloatingPath = "res://content/resources/M_Rock_Floating_Monolith.glb";
-	private const float RockFloatingGroundOffset = 0.49f;
-	private const string RockEngravedPath = "res://content/resources/M_Rock_Engraved_Monolith_L.glb";
-	private const float RockEngravedGroundOffset = 0.96f;
-
-	// Name label height above a rock wrapper. The tallest variant (engraved) reaches ~1.34 tiles, so park the
-	// label a touch above that so it clears every variant. TUNABLE.
-	private const float RockLabelHeight = 1.5f;
-
-	// The three rock scenes, loaded once on first rock spawn and cached. A failed load is logged once and the
-	// rock then falls back to the box (same posture as the player model fallback).
-	private readonly PackedScene?[] _rockModelScenes = new PackedScene?[3];
-	private bool _rockModelsLoadAttempted;
-	private bool _rockModelsLoadFailed;
-
-	// The instanced GLB child of each rock wrapper, keyed by NetworkId, so UpdateEntities can hide/show it on
-	// the Depleted bit (the box path keys off `node is MeshInstance3D`, which a wrapper is not). Entries are
-	// removed alongside _entityNodes on despawn.
-	private readonly Dictionary<uint, Node3D> _rockVisuals = [];
+	private readonly VisualTuning _tuning = new();
+	private EntityRenderer? _renderer;
 
 	private MmoClient? _client;
 	private Node3D? _worldRoot;
@@ -523,6 +414,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_worldRoot.AddChild(_wallRoot);
 		_worldRoot.AddChild(_entityRoot);
 
+		// Seed the shared tuning from the exported rock scale, then stand up the entity renderer over the
+		// entity root. All per-frame entity spawn/update/despawn flows through it (S61).
+		_tuning.RockModelScale = RockModelScale;
+		_renderer = new EntityRenderer(_entityRoot, _tuning);
+
 		var light = new DirectionalLight3D
 		{
 			Name = "Sun",
@@ -808,516 +704,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_client?.RecordFrameHitch(_lastFrameMs, gc0, gc1, gc2);
 	}
 
+	// S61: all entity spawn/position/facing/animation/depleted/label work now lives in the EntityVisual
+	// hierarchy behind the EntityRenderer. This just hands it the per-frame render states (the same buffer
+	// TryHarvest and the debug-control channel read) plus the elapsed-seconds clock the walk-hold latch uses.
 	private void UpdateEntities()
 	{
-		if (_entityRoot is null)
-		{
-			return;
-		}
-
-		_seenEntityIds.Clear();
-		foreach (var state in _renderStates)
-		{
-			_seenEntityIds.Add(state.NetworkId);
-			if (!_entityNodes.TryGetValue(state.NetworkId, out var node))
-			{
-				node = CreateEntityNode(state);
-				_entityNodes[state.NetworkId] = node;
-				_entityRoot.AddChild(node);
-			}
-
-			node.Position = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
-			// Name label tracks availability: hide it when the node is harvested (the model/box already hides)
-			// and show it again on respawn, so a mined node leaves no floating "Rock" label.
-			if (state.Kind == EntityKind.Resource && _entityLabels.TryGetValue(state.NetworkId, out var resourceLabel))
-			{
-				resourceLabel.Visible = !state.Depleted;
-			}
-			if (state.Kind == EntityKind.Resource && _rockVisuals.TryGetValue(state.NetworkId, out var rockModel))
-			{
-				// Rock rendered as a GLB wrapper (no box mesh to recolour): drive availability off the same
-				// replicated Depleted bit — hide the model when harvested, show it again on respawn. No
-				// prediction. We hide rather than grey because a static GLB has no shared override material.
-				rockModel.Visible = !state.Depleted;
-			}
-			else if (state.Kind == EntityKind.Resource && node is MeshInstance3D resourceNode)
-			{
-				// Box-rendered resources (Tree/Plant, or a Rock that fell back to the box): drive node
-				// availability purely off the replicated Depleted bit — hide a harvested node and grey it;
-				// restore (show + green) when the server respawns it. No prediction.
-				resourceNode.Visible = !state.Depleted;
-				resourceNode.MaterialOverride = state.Depleted ? _resourceDepletedMaterial : _resourceAvailableMaterial;
-			}
-			else if (_playerVisuals.TryGetValue(state.NetworkId, out var visual))
-			{
-				// Players: face the movement direction and play the walk loop while moving, idle otherwise.
-				// "Moving" is inferred purely from the interpolated render position changing (the same
-				// position that drives node.Position above) — no movement/interp logic is touched here.
-				UpdatePlayerModel(visual, state);
-			}
-
-			if (_entityLabels.TryGetValue(state.NetworkId, out var label))
-			{
-				SetTextIfChanged(label, state.DisplayName);
-			}
-		}
-
-		_staleEntityIds.Clear();
-		foreach (var networkId in _entityNodes.Keys)
-		{
-			if (!_seenEntityIds.Contains(networkId))
-			{
-				_staleEntityIds.Add(networkId);
-			}
-		}
-
-		foreach (var stale in _staleEntityIds)
-		{
-			// QueueFree on the wrapper frees the instanced model (and its AnimationPlayer) and the label
-			// child with it; dropping the _playerVisuals entry releases our last reference to the rig.
-			_entityNodes[stale].QueueFree();
-			_entityNodes.Remove(stale);
-			_entityLabels.Remove(stale);
-			_playerVisuals.Remove(stale);
-			// QueueFree on the wrapper frees the instanced rock GLB child with it; drop our reference too.
-			_rockVisuals.Remove(stale);
-		}
-	}
-
-	private Node3D CreateEntityNode(EntityRenderState state)
-	{
-		// Players render as the instanced character model (with a fallback to the capsule if the model
-		// could not be loaded); resources stay a flat-shaded box.
-		if (state.Kind == EntityKind.Player)
-		{
-			var playerNode = TryCreatePlayerNode(state);
-			if (playerNode is not null)
-			{
-				return playerNode;
-			}
-		}
-		else if (state.Kind == EntityKind.Resource && state.DisplayName == RockDisplayName)
-		{
-			var rockNode = TryCreateRockNode(state);
-			if (rockNode is not null)
-			{
-				return rockNode;
-			}
-		}
-
-		var isResource = state.Kind == EntityKind.Resource;
-		var body = new MeshInstance3D
-		{
-			Name = $"Entity_{state.NetworkId}",
-			Mesh = isResource ? _resourceMesh : _entityMesh,
-			MaterialOverride = isResource
-				? (state.Depleted ? _resourceDepletedMaterial : _resourceAvailableMaterial)
-				: (state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial),
-			Visible = !(isResource && state.Depleted)
-		};
-
-		AttachLabel(body, state, isResource ? 1.3f : 0.9f);
-		return body;
-	}
-
-	// Builds the player wrapper: a Node3D positioned by the interpolator (like the old capsule), holding
-	// the instanced GLB as a child so we can scale/rotate the model without touching the wrapper's
-	// interp-driven Position. Returns null if the model resource is unavailable so the caller falls back
-	// to the capsule. Registers a PlayerModelVisual for per-frame facing + walk-animation driving.
-	private Node3D? TryCreatePlayerNode(EntityRenderState state)
-	{
-		var scene = LoadPlayerModelScene();
-		if (scene is null || scene.Instantiate() is not Node3D model)
-		{
-			return null;
-		}
-
-		var wrapper = new Node3D { Name = $"Entity_{state.NetworkId}" };
-		model.Name = "Model";
-		model.Scale = new Vector3(PlayerModelScale, PlayerModelScale, PlayerModelScale);
-		model.Position = new Vector3(0f, PlayerModelYOffset, 0f);
-		wrapper.AddChild(model);
-
-		var animationPlayer = FindAnimationPlayer(model);
-		var walkClip = ResolveWalkClip(animationPlayer);
-		var idleClip = ResolveIdleClip(animationPlayer);
-		var stateMachine = BuildAnimationTree(model, animationPlayer, idleClip, walkClip);
-		var visual = new PlayerModelVisual(model, stateMachine)
-		{
-			LastPosition = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y),
-			// The state machine auto-starts in the first-added node (Idle), so seed the latch to match; the
-			// first detected movement then Travels to Walk and a stop Travels back to Idle.
-			CurrentState = stateMachine is null ? null : AnimStateIdle
-		};
-		_playerVisuals[state.NetworkId] = visual;
-		ApplyFacing(visual, state.Facing);
-
-		// Name label sits above the head (_playerLabelHeight, derived from the model scale), outlined and
-		// rendered on top so it never z-fights with or hides behind the rig, and FixedSize so it stays a
-		// constant readable size at distance.
-		AttachPlayerLabel(wrapper, state);
-		return wrapper;
-	}
-
-	// Builds a Rock wrapper (S58): a Node3D positioned by the interpolator, holding one of three static rock
-	// GLBs as a scaled + Y-offset child so the base sits on the ground. The variant is NetworkId % 3 so it is
-	// deterministic and identical across clients. Registers the model child in _rockVisuals so the Depleted
-	// bit can hide/show it. Returns null if the chosen scene is unavailable so the caller falls back to the box.
-	private Node3D? TryCreateRockNode(EntityRenderState state)
-	{
-		// NetworkId % 3 doesn't vary: the server assigns resource ids so every Rock shares the same residue
-		// (always the same model). Mix the id so the variant AND the yaw are well-distributed yet
-		// deterministic (identical across clients).
-		var hash = MixId(state.NetworkId);
-		var variant = (int)(hash % 3u);
-		var scene = LoadRockModelScene(variant);
-		if (scene is null || scene.Instantiate() is not Node3D model)
-		{
-			return null;
-		}
-
-		var groundOffset = variant switch
-		{
-			0 => RockMossGroundOffset,
-			1 => RockFloatingGroundOffset,
-			_ => RockEngravedGroundOffset
-		};
-
-		var wrapper = new Node3D { Name = $"Entity_{state.NetworkId}" };
-		model.Name = "Model";
-		model.Scale = new Vector3(RockModelScale, RockModelScale, RockModelScale);
-		// Ground offset scales with the model so the base stays on the floor at any RockModelScale.
-		model.Position = new Vector3(0f, groundOffset * RockModelScale, 0f);
-		// Deterministic per-node spin around up so rocks don't all face the same way (decorrelated from the
-		// variant by dividing out the % 3).
-		model.RotationDegrees = new Vector3(0f, (hash / 3u) % 360u, 0f);
-		// Start hidden if the node spawns already depleted; UpdateEntities keeps it in sync thereafter.
-		model.Visible = !state.Depleted;
-		wrapper.AddChild(model);
-		_rockVisuals[state.NetworkId] = model;
-
-		// Keep the S57 name label above the node (above the tallest variant so it clears every rock).
-		AttachLabel(wrapper, state, RockLabelHeight);
-		return wrapper;
-	}
-
-	// Avalanche bit-mix (Murmur-style) so a sequential / type-clustered NetworkId yields well-distributed
-	// derived values (rock variant + yaw). Deterministic — same id gives the same result on every client.
-	private static uint MixId(uint id)
-	{
-		id ^= id >> 16;
-		id *= 0x7feb352du;
-		id ^= id >> 15;
-		id *= 0x846ca68bu;
-		id ^= id >> 16;
-		return id;
-	}
-
-	// Loads (once) and caches the rock PackedScene for the given variant (0=moss, 1=floating, 2=engraved).
-	// A failed load is logged a single time and disables all rock models for the session, so rocks then fall
-	// back to the box rather than re-attempting/spamming the log (same posture as the player model fallback).
-	private PackedScene? LoadRockModelScene(int variant)
-	{
-		if (_rockModelsLoadFailed)
-		{
-			return null;
-		}
-
-		if (!_rockModelsLoadAttempted)
-		{
-			_rockModelsLoadAttempted = true;
-			_rockModelScenes[0] = GD.Load<PackedScene>(RockMossPath);
-			_rockModelScenes[1] = GD.Load<PackedScene>(RockFloatingPath);
-			_rockModelScenes[2] = GD.Load<PackedScene>(RockEngravedPath);
-			if (_rockModelScenes[0] is null || _rockModelScenes[1] is null || _rockModelScenes[2] is null)
-			{
-				_rockModelsLoadFailed = true;
-				GD.PushWarning("S58: could not load one or more rock models; rocks fall back to the box.");
-				return null;
-			}
-		}
-
-		return _rockModelScenes[variant];
-	}
-
-	private void AttachLabel(Node3D parent, EntityRenderState state, float height)
-	{
-		// Same small, outlined, render-on-top, constant-size styling as the player label (S57) so
-		// gatherables/NPCs match — just at the caller-supplied height above the object.
-		var label = new Label3D
-		{
-			Name = "Name",
-			Text = state.DisplayName,
-			Position = new Vector3(0, height, 0),
-			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-			FixedSize = true,
-			PixelSize = _playerLabelPixelSize,
-			FontSize = PlayerLabelFontSize,
-			OutlineSize = PlayerLabelOutlineSize,
-			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
-			NoDepthTest = true
-		};
-		parent.AddChild(label);
-		_entityLabels[state.NetworkId] = label;
-	}
-
-	// Player name label (S55): above the head, dark outline for contrast, NoDepthTest so it always renders
-	// on top of the rig, and FixedSize for a constant on-screen size that stays crisp at distance.
-	private void AttachPlayerLabel(Node3D parent, EntityRenderState state)
-	{
-		var label = new Label3D
-		{
-			Name = "Name",
-			Text = state.DisplayName,
-			Position = new Vector3(0, _playerLabelHeight, 0),
-			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-			FixedSize = true,
-			PixelSize = _playerLabelPixelSize,
-			FontSize = PlayerLabelFontSize,
-			OutlineSize = PlayerLabelOutlineSize,
-			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
-			NoDepthTest = true
-		};
-		parent.AddChild(label);
-		_entityLabels[state.NetworkId] = label;
-	}
-
-	// Loads (once) the player model PackedScene. Failures are logged a single time; subsequent player
-	// spawns then silently fall back to the capsule rather than re-attempting/spamming the log.
-	private PackedScene? LoadPlayerModelScene()
-	{
-		if (_playerModelLoadFailed)
-		{
-			return null;
-		}
-
-		if (_playerModelLoadAttempted)
-		{
-			return _playerModelScene;
-		}
-
-		_playerModelLoadAttempted = true;
-		_playerModelScene = GD.Load<PackedScene>(PlayerModelPath);
-		if (_playerModelScene is null)
-		{
-			_playerModelLoadFailed = true;
-			GD.PushWarning($"S54: could not load player model '{PlayerModelPath}'; falling back to capsule.");
-		}
-
-		return _playerModelScene;
-	}
-
-	private static AnimationPlayer? FindAnimationPlayer(Node node)
-	{
-		if (node is AnimationPlayer player)
-		{
-			return player;
-		}
-
-		foreach (var child in node.GetChildren())
-		{
-			if (FindAnimationPlayer(child) is AnimationPlayer found)
-			{
-				return found;
-			}
-		}
-
-		return null;
-	}
-
-	// Robustly pick the walk clip out of the instanced AnimationPlayer's library: prefer a name that
-	// looks like the walk loop ("catwalk"/"loop"/"walk"), otherwise the first clip that is NOT the
-	// T-pose, and set it to loop. Returns null (logged once) if there is no usable non-T-pose clip, in
-	// which case the model simply stands still — no crash.
-	private static string? ResolveWalkClip(AnimationPlayer? player)
-	{
-		if (player is null)
-		{
-			GD.PushWarning("S54: player model has no AnimationPlayer; rig will not animate.");
-			return null;
-		}
-
-		var clips = player.GetAnimationList();
-		string? firstNonTPose = null;
-		foreach (var name in clips)
-		{
-			if (IsTPoseClip(name))
-			{
-				continue;
-			}
-
-			firstNonTPose ??= name;
-			var lower = name.ToLowerInvariant();
-			if (lower.Contains("catwalk") || lower.Contains("loop") || lower.Contains("walk"))
-			{
-				SetClipLooping(player, name);
-				return name;
-			}
-		}
-
-		if (firstNonTPose is not null)
-		{
-			SetClipLooping(player, firstNonTPose);
-			return firstNonTPose;
-		}
-
-		GD.PushWarning("S54: no non-T-pose animation found on the player model; rig will not walk.");
-		return null;
-	}
-
-	private static bool IsTPoseClip(string name)
-	{
-		var lower = name.ToLowerInvariant();
-		return lower.Contains("t-pose") || lower.Contains("tpose") || lower.Contains("t_pose");
-	}
-
-	private static void SetClipLooping(AnimationPlayer player, string clipName)
-	{
-		// GetAnimation returns the shared Animation resource; forcing its loop mode makes Play() loop it
-		// regardless of how the clip was authored/imported.
-		var animation = player.GetAnimation(clipName);
-		if (animation is not null)
-		{
-			animation.LoopMode = Animation.LoopModeEnum.Linear;
-		}
-	}
-
-	// Resolve the idle clip: the placeholder idle is the rig's T-pose (the human OK'd it for now). Prefer a
-	// clip whose name reads as a T-pose, otherwise fall back to the first available clip. Looped so the
-	// state machine holds the pose. Null (no animation player / no clips) leaves the rig un-animated; the
-	// AnimationTree build guards for that.
-	private static string? ResolveIdleClip(AnimationPlayer? player)
-	{
-		if (player is null)
-		{
-			return null;
-		}
-
-		var clips = player.GetAnimationList();
-		string? first = null;
-		foreach (var name in clips)
-		{
-			first ??= name;
-			if (IsTPoseClip(name))
-			{
-				SetClipLooping(player, name);
-				return name;
-			}
-		}
-
-		if (first is not null)
-		{
-			SetClipLooping(player, first);
-		}
-
-		return first;
-	}
-
-	// Build an AnimationTree driving an AnimationNodeStateMachine with two states (Idle, Walk) that
-	// cross-fade between each other, reading from the rig's instanced AnimationPlayer. Returns the live
-	// state-machine playback so the per-frame driver can Travel() between states; returns null (logged
-	// once via the resolvers) if the player/clips are missing, in which case the rig simply stands still.
-	// The AnimationTree is parented to the model so QueueFree on despawn frees it with the rig.
-	private static AnimationNodeStateMachinePlayback? BuildAnimationTree(
-		Node3D model, AnimationPlayer? player, string? idleClip, string? walkClip)
-	{
-		if (player is null || idleClip is null || walkClip is null)
-		{
-			GD.PushWarning("S55: missing AnimationPlayer or idle/walk clip; player rig will not animate.");
-			return null;
-		}
-
-		var idleNode = new AnimationNodeAnimation { Animation = idleClip };
-		var walkNode = new AnimationNodeAnimation { Animation = walkClip };
-
-		var stateMachine = new AnimationNodeStateMachine();
-		stateMachine.AddNode(AnimStateIdle, idleNode);
-		stateMachine.AddNode(AnimStateWalk, walkNode);
-
-		// Cross-fade both directions so neither stop nor start snaps. Immediate switch mode lets Travel()
-		// trigger the transition the moment the moving/idle signal flips, blended over the xfade time.
-		stateMachine.AddTransition(AnimStateIdle, AnimStateWalk, MakeCrossFadeTransition());
-		stateMachine.AddTransition(AnimStateWalk, AnimStateIdle, MakeCrossFadeTransition());
-
-		var tree = new AnimationTree
-		{
-			Name = "AnimTree",
-			TreeRoot = stateMachine
-		};
-		model.AddChild(tree);
-		// AnimPlayer is a NodePath relative to the AnimationTree; resolve it now that the tree is parented
-		// under the model alongside (an ancestor of) the AnimationPlayer.
-		tree.AnimPlayer = tree.GetPathTo(player);
-		tree.Active = true;
-
-		// The state-machine playback object drives Travel() between states; it lives at this parameter path.
-		return tree.Get("parameters/playback").As<AnimationNodeStateMachinePlayback>();
-	}
-
-	private static AnimationNodeStateMachineTransition MakeCrossFadeTransition()
-	{
-		return new AnimationNodeStateMachineTransition
-		{
-			XfadeTime = PlayerAnimCrossFadeSeconds,
-			SwitchMode = AnimationNodeStateMachineTransition.SwitchModeEnum.Immediate,
-			AdvanceMode = AnimationNodeStateMachineTransition.AdvanceModeEnum.Disabled
-		};
-	}
-
-	// Per-frame player rig update: detect movement from the interpolated render position, play/stop the
-	// walk loop accordingly (with a short hold to bridge the idle gap between confirmed tile steps), and
-	// rotate the model to the entity's 8-way facing.
-	private void UpdatePlayerModel(PlayerModelVisual visual, EntityRenderState state)
-	{
-		var position = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
-		var moved = position.DistanceSquaredTo(visual.LastPosition) > PlayerMovingEpsilonSquared;
-		visual.LastPosition = position;
-		if (moved)
-		{
-			visual.MovingUntilSeconds = _elapsedSeconds + PlayerWalkHoldSeconds;
-		}
-
-		var moving = _elapsedSeconds <= visual.MovingUntilSeconds;
-		DrivePlayerAnimation(visual, moving);
-		ApplyFacing(visual, state.Facing);
-	}
-
-	private static void DrivePlayerAnimation(PlayerModelVisual visual, bool moving)
-	{
-		if (visual.StateMachine is null)
-		{
-			return;
-		}
-
-		// Latch to the target state and only Travel() on a change. When the render position stops changing
-		// (no rubber-band now that prediction landed) the moving signal latches false, so the state machine
-		// cross-fades into Idle and holds the standing pose — killing the old mid-stride freeze.
-		var target = moving ? AnimStateWalk : AnimStateIdle;
-		if (visual.CurrentState == target)
-		{
-			return;
-		}
-
-		visual.StateMachine.Travel(target);
-		visual.CurrentState = target;
-	}
-
-	// Rotate the model so its forward axis points along the entity's 8-way Facing. Direction8 maps to a
-	// tile delta; we convert that to a world heading (X=tileX, Z=tileY) and yaw the model to it, plus the
-	// tunable ModelForwardOffsetDegrees correction for the rig's authored forward axis.
-	private static void ApplyFacing(PlayerModelVisual visual, Direction8 facing)
-	{
-		var delta = facing.Delta();
-		if (delta.X == 0 && delta.Y == 0)
-		{
-			return;
-		}
-
-		// Godot's default model forward is -Z. A yaw θ about +Y turns -Z into (-sinθ, 0, -cosθ); solving
-		// that to equal the world heading (delta.X, delta.Y) gives θ = atan2(-x, -y). So N (delta 0,-1)
-		// yields 0 (no rotation, already facing -Z), E (1,0) yields -90°, S (0,1) yields 180°, etc.
-		var yaw = Mathf.Atan2(-delta.X, -delta.Y);
-		visual.Model.Rotation = new Vector3(0f, yaw + Mathf.DegToRad(ModelForwardOffsetDegrees), 0f);
+		_renderer?.Sync(_renderStates, _elapsedSeconds);
 	}
 
 	private void UpdateCamera()
@@ -1539,9 +931,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneInterestRadius, serverRadius);
 		SetField(_tuneCameraZoomMin, _cameraSizeMin);
 		SetField(_tuneCameraZoomMax, _cameraSizeMax);
-		SetField(_tuneRockScale, RockModelScale);
-		SetField(_tuneLabelPixelSize, _playerLabelPixelSize);
-		SetField(_tuneLabelHeight, _playerLabelHeight);
+		SetField(_tuneRockScale, _tuning.RockModelScale);
+		SetField(_tuneLabelPixelSize, _tuning.LabelPixelSize);
+		SetField(_tuneLabelHeight, _tuning.PlayerLabelHeight);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1589,45 +981,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		if (TryReadField(_tuneRockScale, out var rockScale))
 		{
-			RockModelScale = Mathf.Clamp((float)rockScale, 0.1f, 50f);
+			// Mirror onto both the shared tuning (the visuals read this) and the [Export] (inspector parity).
+			_tuning.RockModelScale = Mathf.Clamp((float)rockScale, 0.1f, 50f);
+			RockModelScale = _tuning.RockModelScale;
 		}
 
 		if (TryReadField(_tuneLabelPixelSize, out var pixelSize))
 		{
-			_playerLabelPixelSize = Mathf.Clamp((float)pixelSize, 0.0001f, 0.02f);
+			_tuning.LabelPixelSize = Mathf.Clamp((float)pixelSize, 0.0001f, 0.02f);
 		}
 
 		if (TryReadField(_tuneLabelHeight, out var labelHeight))
 		{
-			_playerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
+			_tuning.PlayerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
 		}
 
 		// Push the new label pixel-size/height onto every existing label so the change is visible without
-		// requiring a respawn. Rock scale takes effect on the next rock spawn (rescaling live wrappers would
-		// also need to re-offset each variant's ground position — left to respawn for v1 simplicity).
-		ApplyLabelTuningToExisting();
+		// requiring a respawn (the renderer walks its live visuals). Rock scale takes effect on the next rock
+		// spawn / pool-acquire (ModelVisual re-reads the live scale on acquire).
+		_renderer?.ApplyLabelTuningToExisting();
 
 		ShowInteractFeedback("Tuning applied.");
-	}
-
-	// Re-applies the current label pixel-size to every live label and the player-label height to player
-	// labels. Resource labels keep their per-kind height (set at spawn); only the pixel-size is uniform.
-	private void ApplyLabelTuningToExisting()
-	{
-		foreach (var label in _entityLabels.Values)
-		{
-			label.PixelSize = _playerLabelPixelSize;
-		}
-
-		foreach (var (networkId, label) in _entityLabels)
-		{
-			// Player labels sit at _playerLabelHeight; resource labels are positioned at their own height in
-			// AttachLabel, so only nudge labels whose owner is a tracked player rig.
-			if (_playerVisuals.ContainsKey(networkId))
-			{
-				label.Position = new Vector3(0f, _playerLabelHeight, 0f);
-			}
-		}
 	}
 
 	private static bool TryReadField(LineEdit? field, out double value)
@@ -2370,20 +1744,5 @@ void fragment() {
 		return double.TryParse(System.Environment.GetEnvironmentVariable(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
 			? value
 			: fallback;
-	}
-
-	// Mutable per-player rig state. Reference type so the dict entry is updated in place each frame.
-	// Holds the model child node (rotated for facing), the AnimationTree state-machine playback that
-	// cross-fades Idle<->Walk (null when the rig lacks an AnimationPlayer/clips — guarded everywhere), the
-	// last-Traveled state so the driver only issues Travel() on a change, and the movement tracker driving
-	// the walk/idle switch. The wrapper Node3D (interp-driven) is the dict's _entityNodes value, not stored
-	// here, so freeing the wrapper on despawn frees the model, its AnimationPlayer and the AnimationTree.
-	private sealed class PlayerModelVisual(Node3D model, AnimationNodeStateMachinePlayback? stateMachine)
-	{
-		public Node3D Model { get; } = model;
-		public AnimationNodeStateMachinePlayback? StateMachine { get; } = stateMachine;
-		public string? CurrentState { get; set; }
-		public Vector3 LastPosition { get; set; }
-		public double MovingUntilSeconds { get; set; }
 	}
 }
