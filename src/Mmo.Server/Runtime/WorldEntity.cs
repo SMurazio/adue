@@ -4,7 +4,14 @@ namespace Mmo.Server.Runtime;
 
 public sealed class WorldEntity
 {
-    private uint? _lastStepTick;
+    // The earliest server tick at which this entity's next movement action (step OR turn) may fire. Null =
+    // never acted, so the first action is always eligible. An ACCEPTED step sets it to serverTick + the full
+    // step cooldown; a TURN (S63) sets it to serverTick + the (much smaller) turn delay, so whipping the
+    // facing rotates quickly instead of paying a whole step cooldown, while a turn still costs a beat (it is
+    // never instant — that would let rapid direction changes move the entity). This single field replaces the
+    // old _lastStepTick gate: storing the next-eligible tick directly (rather than backdating _lastStepTick by
+    // cooldown - turnDelay) is underflow-safe near tick 0 and keeps the predictor mirror trivial.
+    private uint? _nextEligibleTick;
 
     public WorldEntity(
         ulong id,
@@ -125,19 +132,23 @@ public sealed class WorldEntity
         return true;
     }
 
-    public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
+    public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, uint turnDelayTicks, TileGrid grid)
     {
-        return TryStep(direction, serverTick, stepCooldownTicks, grid, out _);
+        return TryStep(direction, serverTick, stepCooldownTicks, turnDelayTicks, grid, out _);
     }
 
     public bool TryStep(
         Direction8 direction,
         uint serverTick,
         uint stepCooldownTicks,
+        uint turnDelayTicks,
         TileGrid grid,
         out MovementStepResult result)
     {
-        if (_lastStepTick.HasValue && serverTick - _lastStepTick.Value < stepCooldownTicks)
+        // Gate on the next-eligible tick (set by the previous step/turn). A step that arrives early — before
+        // its cooldown OR a turn's shorter turn-delay has elapsed — is dropped, unchanged from the pre-S63
+        // cooldown behaviour for accepted steps.
+        if (_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value)
         {
             var cooldownDelta = direction.Delta();
             var cooldownTarget = Tile.Offset(cooldownDelta.X, cooldownDelta.Y);
@@ -153,14 +164,19 @@ public sealed class WorldEntity
             return false;
         }
 
-        // Turn-then-move (UO, S59): a step in a direction we don't already face just TURNS to face it —
-        // consumes the cooldown and re-replicates Facing (StateRevision bump), but does NOT move the tile.
-        // Only a step in the current facing direction actually moves (below). Turning is always allowed
-        // (you may face a wall). This makes rapid direction changes a clean pivot instead of a zigzag.
+        // Turn-then-move (UO, S59) + turn delay (S63): a step in a direction we don't already face just TURNS
+        // to face it — costs only the turn delay (set below) and re-replicates Facing (StateRevision bump),
+        // but does NOT move the tile. Only a step in the current facing direction actually moves (below).
+        // Turning is always allowed (you may face a wall). This makes rapid direction changes a clean pivot
+        // instead of a zigzag, and the small turn delay keeps a whip rotating in place without moving.
         if (direction != Facing)
         {
             Facing = direction;
-            _lastStepTick = serverTick;
+            // S63: a turn costs only the (small) turn delay, NOT a full step cooldown. The next step/turn is
+            // eligible after turnDelayTicks, so settling on a direction steps at the normal cadence but a whip
+            // rotates quickly. Still a beat (turnDelayTicks is clamped >= 0; 0 would make turns instant, which
+            // the tuning clamp/quantisation guards against — default 80 ms quantises to >= 1 tick).
+            _nextEligibleTick = serverTick + turnDelayTicks;
             StateRevision++;
             result = new MovementStepResult(
                 direction,
@@ -195,7 +211,7 @@ public sealed class WorldEntity
         var from = Tile;
         Tile = target;
         Facing = direction;
-        _lastStepTick = serverTick;
+        _nextEligibleTick = serverTick + stepCooldownTicks;
         StateRevision++;
         result = new MovementStepResult(
             direction,

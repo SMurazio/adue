@@ -242,8 +242,13 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
-        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
+        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay());
     }
+
+    // Resolves the predictor's turn delay (ms): the ServerHello-advertised, tick-quantised value so the
+    // predicted turn cost matches the server's TurnDelayTicks exactly. Falls back to the 80 ms default until
+    // ServerHello lands (same default ServerOptions/the predictor ctor use).
+    private double ResolveTurnDelay() => Server?.EffectiveTurnDelayMs ?? 80d;
 
     // Drops the local entity reference and its predictor (local despawn / AOI exit / logout). Nulling the
     // predictor lets EnsurePredictor re-attach a fresh one (anchored to the new confirmed tile) when the
@@ -285,6 +290,22 @@ public sealed class MmoClient : IDisposable
     public void SendAdminSetTuning(string key, double value)
     {
         Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+    }
+
+    // S63: live-applies a turn delay (ms) to the LOCAL predictor so the F4 panel can retune the turn feel in
+    // lockstep with the server. The value is tick-quantised the same way the server quantises TurnDelayTicks
+    // (via MovementCadence.EffectiveTurnDelayMs) so client and server agree to the tick. The F4 handler also
+    // sends move.turnDelayMs to the server via AdminSetTuning; this keeps the predictor matched. Clamped to
+    // the same [0, 1000] ms registry bound before quantisation.
+    public void SetLocalTurnDelayMs(double turnDelayMs)
+    {
+        var clamped = Math.Clamp(turnDelayMs, 0d, 1000d);
+        var tickRate = Server?.TickRate ?? 20;
+        var quantised = MovementCadence.EffectiveTurnDelayMs((int)Math.Round(clamped, MidpointRounding.AwayFromZero), tickRate);
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.SetPredictorTurnDelay(quantised);
+        }
     }
 
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
@@ -431,8 +452,12 @@ public sealed class MmoClient : IDisposable
 
     private void HandleServerHello(ServerHelloMessage hello)
     {
-        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles);
+        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.TurnDelayMs, hello.InterestRadiusTiles);
         RefreshInterpolatorCadence();
+        // S63: adopt the advertised turn delay if the predictor is already attached (ServerHello can arrive
+        // after the local entity spawned in a re-hello). New predictors seed it via EnsurePredictor.
+        _entities.TryGetValue(LocalNetworkId ?? 0, out var local);
+        local?.SetPredictorTurnDelay(ResolveTurnDelay());
     }
 
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
@@ -801,10 +826,17 @@ public sealed class MmoClient : IDisposable
         // step-tween (the buffered interpolator is bypassed for the local player). Anchored to the current
         // confirmed tile + facing. Returns the predictor so the client can feed it held intent and tick it.
         // Idempotent: returns the existing one if already set.
-        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable)
+        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double turnDelayMs)
         {
-            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable);
+            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, turnDelayMs);
             return _predictor;
+        }
+
+        // S63: live-retunes the predictor's turn delay (F4 move.turnDelayMs). No-op if no predictor (the local
+        // entity isn't predicting yet); EnsurePredictor seeds the current value when it attaches.
+        public void SetPredictorTurnDelay(double turnDelayMs)
+        {
+            _predictor?.SetTurnDelay(turnDelayMs);
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)

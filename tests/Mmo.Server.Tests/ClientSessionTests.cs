@@ -218,7 +218,7 @@ public sealed class ClientSessionTests
         var tick = 0u;
         while (entity.StateRevision < revision)
         {
-            entity.TryStep(entity.Facing == Direction8.S ? Direction8.N : Direction8.S, tick, 0, grid);
+            entity.TryStep(entity.Facing == Direction8.S ? Direction8.N : Direction8.S, tick, 0, 0, grid);
             tick++;
         }
 

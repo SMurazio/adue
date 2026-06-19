@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 17;
+    public const byte Version = 18;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -65,6 +65,7 @@ public static class ProtocolCodec
                 writer.Write(value.ProtocolVersion);
                 writer.Write(value.TickRate);
                 writer.Write(value.StepCooldownMs);
+                writer.Write(value.TurnDelayMs);
                 writer.Write(value.InterestRadiusTiles);
                 break;
             case LoginResultMessage value:
@@ -188,7 +189,7 @@ public static class ProtocolCodec
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
             MessageType.InventoryUpdate => ReadInventoryUpdate(reader),
-            MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle()),
+            MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle()),
             MessageType.LoginResult => new LoginResultMessage(
                 reader.ReadBoolean(),
                 ReadGuid(reader),

@@ -44,14 +44,21 @@ public sealed class LocalPlayerPredictor
     private bool _moving;
     private Direction8 _direction;
     private double _cadenceMs;
+    // S63: wall-clock cost of a turn (facing change with no tile move). A turn advances the next-step schedule
+    // by THIS, not a full cadence, so whipping the cursor rotates quickly while settling steps at the normal
+    // cadence. Sourced from ServerHello (EffectiveTurnDelayMs, tick-quantised) so it matches the server's
+    // TurnDelayTicks exactly — a mismatch here reintroduces the S56 rapid-direction-change snap. Always >= 1ms
+    // (a turn is never instant).
+    private double _turnDelayMs;
     // Wall-clock time at which the next step's cooldown elapses. Null = no step pending (idle). Stepping
     // advances this by exactly one cadence per step.
     private TimeSpan? _nextStepAt;
-    // Wall-clock time of the last ACCEPTED step (mirrors the server's _lastStepTick). Null until the first
-    // step. SURVIVES a stop so a quick stop->start respects the cadence already consumed and never
-    // double-steps; gates SetIntent's fresh-start scheduling so a fresh press steps only once the cadence
-    // since the last step has elapsed (immediately when idle long enough, matching the server).
-    private TimeSpan? _lastStepAt;
+    // Wall-clock time at which the next action (step OR turn) becomes eligible — the mirror of the server's
+    // WorldEntity._nextEligibleTick. Null until the first action. An accepted step advances it by one cadence;
+    // a turn advances it by the (smaller) turn delay (S63). SURVIVES a stop so a quick stop->start respects
+    // the time already consumed and never double-steps; gates SetIntent's fresh-start scheduling so a fresh
+    // press fires only once this time has arrived (immediately when idle long enough, matching the server).
+    private TimeSpan? _nextEligibleAt;
 
     // ---- Present-time render tween (the snappy part; NOT a playout buffer) ------------------------------
     // The local player is rendered by sampling THIS tween at the current wall-clock time — old tile center ->
@@ -63,12 +70,15 @@ public sealed class LocalPlayerPredictor
     private double _tweenDurationMs;
     private RenderPosition _renderPosition;
 
-    public LocalPlayerPredictor(TileCoord initialTile, Direction8 facing, double cadenceMs, Func<TileCoord, bool> isWalkable)
+    // turnDelayMs defaults to 80 (the server's ServerOptions default) for the legacy 4-arg callers/tests; the
+    // client passes the ServerHello-advertised, tick-quantised value so prediction stays in lockstep.
+    public LocalPlayerPredictor(TileCoord initialTile, Direction8 facing, double cadenceMs, Func<TileCoord, bool> isWalkable, double turnDelayMs = 80d)
     {
         _isWalkable = isWalkable ?? throw new ArgumentNullException(nameof(isWalkable));
         _predictedTile = initialTile;
         _facing = facing;
         _cadenceMs = Math.Max(1, cadenceMs);
+        _turnDelayMs = Math.Max(1, turnDelayMs);
         var at = RenderPosition.FromTile(initialTile);
         _renderFrom = at;
         _renderTo = at;
@@ -87,6 +97,8 @@ public sealed class LocalPlayerPredictor
 
     public double CadenceMs => _cadenceMs;
 
+    public double TurnDelayMs => _turnDelayMs;
+
     // The present-time render position for the local player: where the avatar is shown RIGHT NOW. Advanced by
     // Tick (per accepted step) and Reconcile (retarget on divergence); read via Sample(now).
     public RenderPosition RenderPosition => _renderPosition;
@@ -99,16 +111,24 @@ public sealed class LocalPlayerPredictor
         _cadenceMs = Math.Max(1, cadenceMs);
     }
 
+    // S63: adopts a new turn delay immediately (ServerHello arrival / live F4 tuning of move.turnDelayMs). The
+    // next pending step keeps its already-scheduled time; subsequent turns use the new delay. Kept in lockstep
+    // with the server's TurnDelayTicks (the caller passes the tick-quantised EffectiveTurnDelayMs).
+    public void SetTurnDelay(double turnDelayMs)
+    {
+        _turnDelayMs = Math.Max(1, turnDelayMs);
+    }
+
     // Records the held movement intent (the same state the client sends as a MoveIntent). The step schedule
-    // mirrors the server's cooldown EXACTLY (Mmo.Server.Runtime.WorldEntity.TryStep): a step is due one full
-    // cadence after the last ACCEPTED step, and a direction change updates the held direction but does NOT
-    // bring the next step earlier. So:
+    // mirrors the server's gate EXACTLY (Mmo.Server.Runtime.WorldEntity.TryStep): the next action is due at
+    // _nextEligibleAt (one cadence after the last accepted step, or one turn-delay after the last turn), and a
+    // direction change updates the held direction but does NOT bring the next step earlier. So:
     //   * A fresh start from idle is naturally prompt: no step is scheduled (_nextStepAt is null) and the
-    //     last step was long ago, so we arm the first step at `now` and Tick fires it immediately — matching
+    //     last action was long ago, so we arm the first step at `now` and Tick fires it immediately — matching
     //     the server, whose cooldown elapsed while the entity stood idle.
-    //   * A quick stop->start does NOT double-step: keyup leaves _lastStepAt intact, so a re-press re-arms the
-    //     next step at `_lastStepAt + cadence`, respecting the cadence already consumed by the last step
-    //     (the server's _lastStepTick survives the stop and gates the next step the same way).
+    //   * A quick stop->start does NOT double-step: keyup leaves _nextEligibleAt intact, so a re-press re-arms
+    //     the next step at that already-computed time, respecting the cadence/turn-delay already consumed
+    //     (the server's _nextEligibleTick survives the stop and gates the next action the same way).
     //   * Rapid direction flips while moving keep the running schedule untouched, so the prediction produces
     //     the SAME step count/timing as the server instead of out-stepping it and snapping back.
     // On keyup (moving=false) forward projection stops at once and the avatar holds at the predicted tile
@@ -117,16 +137,13 @@ public sealed class LocalPlayerPredictor
     {
         if (moving)
         {
-            // Arm the next step only on a true idle->moving transition, and schedule it on the server's rule:
-            // a full cadence after the last accepted step. If the last step is already a cadence (or more) in
-            // the past — the genuine fresh-start case — that clamps to `now` and the first tile fires
-            // immediately; a quick stop->start lands later, exactly when the cadence since the last step
-            // elapses. A direction change while already moving never reschedules (no early step on a flip).
+            // Arm the next step only on a true idle->moving transition, at the server's next-eligible time. If
+            // that time is already in the past — the genuine fresh-start case — it clamps to `now` and the
+            // first tile fires immediately; a quick stop->start lands later, exactly when the time consumed by
+            // the last action elapses. A direction change while already moving never reschedules.
             if (!_moving)
             {
-                var dueAt = _lastStepAt is { } last
-                    ? last + TimeSpan.FromMilliseconds(_cadenceMs)
-                    : now;
+                var dueAt = _nextEligibleAt ?? now;
                 _nextStepAt = dueAt < now ? now : dueAt;
             }
 
@@ -158,14 +175,17 @@ public sealed class LocalPlayerPredictor
             // loop; the next snapshot re-bases anyway. 8 mirrors the interpolator's per-sample step cap.
             for (var i = 0; i < 8 && now >= _nextStepAt.Value; i++)
             {
-                // Turn-then-move (S59): a step in a direction we don't already face just TURNS (consumes the
-                // cooldown, no tile move) — mirrors WorldEntity.TryStep. Only a step in the facing direction
-                // moves, so rapid direction flips become clean turns, not zigzag moves.
+                // Turn-then-move (S59) + turn delay (S63): a step in a direction we don't already face just
+                // TURNS (no tile move) — mirrors WorldEntity.TryStep. The next step/turn is freed after the
+                // TURN DELAY, not a full cadence, so whipping the cursor rotates quickly while settling steps
+                // at the normal cadence. _nextEligibleAt advances to the same time (mirrors the server stamping
+                // _nextEligibleTick = turnTick + turnDelay) so a stop->start after a turn re-arms from the
+                // turn, not an older step.
                 if (_direction != _facing)
                 {
                     _facing = _direction;
-                    _lastStepAt = _nextStepAt.Value;
-                    _nextStepAt = _nextStepAt.Value + TimeSpan.FromMilliseconds(_cadenceMs);
+                    _nextStepAt = _nextStepAt.Value + TimeSpan.FromMilliseconds(_turnDelayMs);
+                    _nextEligibleAt = _nextStepAt;
                     continue;
                 }
 
@@ -185,10 +205,11 @@ public sealed class LocalPlayerPredictor
                 // so back-to-back steps glide continuously) toward the new tile center, over one cadence,
                 // beginning at the step's scheduled time so a late frame doesn't shorten the tween.
                 StartTween(SampleInternal(now), RenderPosition.FromTile(target), _nextStepAt.Value, _cadenceMs);
-                // Record this accepted step's scheduled time (the server stamps _lastStepTick on accept) so a
-                // later stop->start re-arms a full cadence after it, never sooner.
-                _lastStepAt = _nextStepAt.Value;
+                // Advance the schedule by a full cadence and record the next-eligible time (the server stamps
+                // _nextEligibleTick = stepTick + cooldown on accept) so a later stop->start re-arms a full
+                // cadence after it, never sooner.
                 _nextStepAt = _nextStepAt.Value + TimeSpan.FromMilliseconds(_cadenceMs);
+                _nextEligibleAt = _nextStepAt;
                 changed = true;
             }
         }
@@ -231,12 +252,12 @@ public sealed class LocalPlayerPredictor
         var correction = ChebyshevDistance(_predictedTile, confirmedTile);
         _predictedTile = confirmedTile;
         // Re-arm: the very next predicted step happens a full cadence after the correction so we don't
-        // immediately re-diverge from the freshly anchored truth. Anchor _lastStepAt at the correction time
-        // too, so a stop->start after a reconcile respects the cadence from here (consistent with Tick).
-        _lastStepAt = now;
+        // immediately re-diverge from the freshly anchored truth. Anchor _nextEligibleAt at now + cadence too,
+        // so a stop->start after a reconcile respects the cadence from here (consistent with Tick).
+        _nextEligibleAt = now + TimeSpan.FromMilliseconds(_cadenceMs);
         if (_moving)
         {
-            _nextStepAt = now + TimeSpan.FromMilliseconds(_cadenceMs);
+            _nextStepAt = _nextEligibleAt;
         }
 
         var confirmedPos = RenderPosition.FromTile(confirmedTile);

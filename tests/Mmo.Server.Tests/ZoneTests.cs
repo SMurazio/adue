@@ -28,13 +28,13 @@ public sealed class ZoneTests
 
         // Face east first (a step in a new direction just turns), then a MOVE into the blocked (3,2) tile is
         // rejected and the entity stays put.
-        zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4);
-        Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 14, stepCooldownTicks: 4));
+        zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4, turnDelayTicks: 2);
+        Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 14, stepCooldownTicks: 4, turnDelayTicks: 2));
         Assert.Equal(new TileCoord(2, 2), entity.Tile);
 
         // Face south, then a valid move into the open tile succeeds.
-        zone.TryStep(entity, Direction8.S, serverTick: 18, stepCooldownTicks: 4);
-        Assert.True(zone.TryStep(entity, Direction8.S, serverTick: 22, stepCooldownTicks: 4));
+        zone.TryStep(entity, Direction8.S, serverTick: 18, stepCooldownTicks: 4, turnDelayTicks: 2);
+        Assert.True(zone.TryStep(entity, Direction8.S, serverTick: 22, stepCooldownTicks: 4, turnDelayTicks: 2));
         Assert.Equal(new TileCoord(2, 3), entity.Tile);
     }
 

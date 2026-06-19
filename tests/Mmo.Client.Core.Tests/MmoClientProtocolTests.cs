@@ -135,7 +135,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _);
 
         client.HandleMessageForTests(Snapshot(1, isComplete: true, State(7, 0, 0)));
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 300, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 300, 80, 30));
         client.HandleMessageForTests(Snapshot(2, isComplete: false, State(7, 1, 0)));
 
         var render = Assert.Single(client.GetRenderStates(TimeSpan.FromMilliseconds(200)));
@@ -168,7 +168,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out var outbound, debugMovement: true, lines.Add);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 80, 30));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
 
@@ -212,7 +212,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _, debugMovement: true, lines.Add);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 80, 30));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
@@ -238,7 +238,7 @@ public sealed class MmoClientProtocolTests
 
         // Global cadence is 140ms (=150ms quantised), but this entity's spawn advertises a 70ms cooldown
         // (=100ms quantised), so its tween must use the per-entity cadence, not the global.
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 80, 30));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 70));
 
@@ -257,7 +257,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 200, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 200, 80, 30));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
 
         // A snapshot-created placeholder (no EntitySpawn yet) carries no per-entity cooldown, so it tweens

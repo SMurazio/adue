@@ -111,7 +111,7 @@ public sealed class WorldEntitySpeedTests
         {
             // March a CONSTANT direction so every accepted step moves (turn-then-move: a direction change just
             // turns). The entity faces E from the start, and 40 ticks of E stays within the 256-wide grid.
-            if (entity.TryStep(Direction8.E, tick, cooldown, grid))
+            if (entity.TryStep(Direction8.E, tick, cooldown, turnDelayTicks: 1, grid))
             {
                 steps++;
             }

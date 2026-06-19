@@ -61,6 +61,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _tuningPanelVisible;
 	private bool _tuningFieldsSeeded;
 	private LineEdit? _tuneStepCooldownMs;
+	private LineEdit? _tuneTurnDelayMs;
 	private LineEdit? _tuneInterestRadius;
 	private LineEdit? _tuneCameraZoomMin;
 	private LineEdit? _tuneCameraZoomMax;
@@ -566,6 +567,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		serverHeader.Text = "— server (sent on Apply) —";
 		rows.AddChild(serverHeader);
 		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs");
+		_tuneTurnDelayMs = AddTuningField(rows, "move.turnDelayMs");
 		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius");
 
 		var localHeader = CreateOverlayLabel("TuningLocalHeader", 12);
@@ -926,8 +928,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void SeedTuningFields()
 	{
 		var serverStep = _client?.Server?.StepCooldownMs ?? 140;
+		var serverTurnDelay = _client?.Server?.TurnDelayMs ?? 80;
 		var serverRadius = _client?.Server?.InterestRadiusTiles ?? 35f;
 		SetField(_tuneStepCooldownMs, serverStep);
+		SetField(_tuneTurnDelayMs, serverTurnDelay);
 		SetField(_tuneInterestRadius, serverRadius);
 		SetField(_tuneCameraZoomMin, _cameraSizeMin);
 		SetField(_tuneCameraZoomMax, _cameraSizeMax);
@@ -958,6 +962,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_tuneStepCooldownMs, out var stepMs))
 		{
 			_client.SendAdminSetTuning("move.stepCooldownMs", stepMs);
+		}
+
+		// S63 turn delay — send to the server (move.turnDelayMs) AND apply the same value to the LOCAL
+		// predictor so server and prediction stay in lockstep (a mismatch reintroduces the S56 snap). The
+		// client tick-quantises it the same way the server does.
+		if (TryReadField(_tuneTurnDelayMs, out var turnDelayMs))
+		{
+			_client.SendAdminSetTuning("move.turnDelayMs", turnDelayMs);
+			_client.SetLocalTurnDelayMs(turnDelayMs);
 		}
 
 		if (TryReadField(_tuneInterestRadius, out var radius))

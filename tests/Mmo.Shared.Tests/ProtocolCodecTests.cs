@@ -139,7 +139,7 @@ public sealed class ProtocolCodecTests
     [Fact]
     public void ServerHelloRoundTripsStepCooldownAndInterestRadius()
     {
-        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 40.5f);
+        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 80, 40.5f);
 
         var decoded = Assert.IsType<ServerHelloMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -147,6 +147,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(ProtocolCodec.Version, decoded.ProtocolVersion);
         Assert.Equal(20, decoded.TickRate);
         Assert.Equal(140, decoded.StepCooldownMs);
+        Assert.Equal(80, decoded.TurnDelayMs);
         Assert.Equal(40.5f, decoded.InterestRadiusTiles);
     }
 
@@ -186,9 +187,9 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsSeventeen()
+    public void ProtocolVersionIsEighteen()
     {
-        Assert.Equal(17, ProtocolCodec.Version);
+        Assert.Equal(18, ProtocolCodec.Version);
     }
 
     [Fact]

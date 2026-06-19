@@ -9,7 +9,7 @@ namespace Mmo.Server.Tests;
 // gating + live effect is covered by AdminTuningIntegrationTests.
 public sealed class ServerTuningTests
 {
-    private static ServerOptions Options(int stepCooldownMs = 140, float interestRadius = 35f) =>
+    private static ServerOptions Options(int stepCooldownMs = 140, float interestRadius = 35f, int turnDelayMs = 80) =>
         new(
             7777,
             20,
@@ -24,15 +24,47 @@ public sealed class ServerTuningTests
             interestRadius,
             150,
             SpawnDistribution.Distributed,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+        {
+            TurnDelayMs = turnDelayMs
+        };
 
     [Fact]
     public void SeedsFromOptions()
     {
-        var tuning = new ServerTuning(Options(stepCooldownMs: 200, interestRadius: 40f));
+        var tuning = new ServerTuning(Options(stepCooldownMs: 200, interestRadius: 40f, turnDelayMs: 60));
 
         Assert.Equal(200, tuning.StepCooldownMs);
         Assert.Equal(40f, tuning.InterestRadius);
+        Assert.Equal(60, tuning.TurnDelayMs);
+    }
+
+    [Fact]
+    public void TurnDelayTicksMatchesOptionsDerivation()
+    {
+        var options = Options(turnDelayMs: 80);
+        var tuning = new ServerTuning(options);
+
+        Assert.Equal(options.TurnDelayTicks, tuning.TurnDelayTicks);
+    }
+
+    [Fact]
+    public void AppliesTurnDelayAndClampsToBounds()
+    {
+        var tuning = new ServerTuning(Options());
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.TurnDelayMsKey, 120d, out var applied));
+        Assert.Equal(120, tuning.TurnDelayMs);
+        Assert.Equal(120d, applied);
+
+        // Below the [0, 1000] floor clamps to 0; above the ceiling clamps to 1000.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.TurnDelayMsKey, -10d, out var low));
+        Assert.Equal(0, tuning.TurnDelayMs);
+        Assert.Equal(0d, low);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.TurnDelayMsKey, 99999d, out var high));
+        Assert.Equal(1000, tuning.TurnDelayMs);
+        Assert.Equal(1000d, high);
     }
 
     [Fact]

@@ -68,7 +68,7 @@ public sealed record InventoryUpdateMessage(IReadOnlyList<ItemStack> ChangedStac
     public MessageType Type => MessageType.InventoryUpdate;
 }
 
-public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, float InterestRadiusTiles) : IProtocolMessage
+public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, int TurnDelayMs, float InterestRadiusTiles) : IProtocolMessage
 {
     public MessageType Type => MessageType.ServerHello;
 }

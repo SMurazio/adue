@@ -20,12 +20,18 @@ public sealed class ServerTuning
     {
         _tickRate = options.TickRate;
         StepCooldownMs = options.StepCooldownMs;
+        TurnDelayMs = options.TurnDelayMs;
         InterestRadius = options.InterestRadius;
     }
 
     // Global base step cooldown in ms. The step loop derives the per-entity effective cadence from
     // StepCooldownTicks (below); changing this live changes everyone's base walk speed on the next step.
     public int StepCooldownMs { get; set; }
+
+    // S63 turn delay in ms. A turn (facing change with no tile move) frees the next step/turn after this,
+    // not after the full step cooldown. Read each step from TurnDelayTicks (below); changing it live retunes
+    // the turn feel on the next turn.
+    public int TurnDelayMs { get; set; }
 
     // AOI interest radius in tiles. Read each AOI pass (snapshot selection + interact validation).
     public float InterestRadius { get; set; }
@@ -34,4 +40,10 @@ public sealed class ServerTuning
     // stay tick-quantised identically to the startup value (default value byte-for-byte unchanged).
     public uint StepCooldownTicks =>
         (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / _tickRate)));
+
+    // Turn delay in TICKS, derived exactly like ServerOptions.TurnDelayTicks (Ceiling, Max(1, …)) so a live
+    // change stays tick-quantised identically to the startup value and to the client predictor — keeping the
+    // turn path in lockstep. Always >= 1 tick, so a turn is never instant.
+    public uint TurnDelayTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(TurnDelayMs / (1000d / _tickRate)));
 }
