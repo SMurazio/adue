@@ -160,7 +160,8 @@ public sealed class ProtocolCodecTests
             EntityKind.Player,
             "PlayerOne",
             new TileCoord(12, 25),
-            Direction8.W);
+            Direction8.W,
+            StepCooldownMs: 70);
 
         var decoded = Assert.IsType<EntitySpawnMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -170,6 +171,24 @@ public sealed class ProtocolCodecTests
         Assert.Equal("PlayerOne", decoded.DisplayName);
         Assert.Equal(new TileCoord(12, 25), decoded.Tile);
         Assert.Equal(Direction8.W, decoded.Facing);
+        Assert.Equal((ushort)70, decoded.StepCooldownMs);
+    }
+
+    [Fact]
+    public void MovementSpeedChangedRoundTrips()
+    {
+        var original = new MovementSpeedChangedMessage(99, 70);
+
+        var decoded = Assert.IsType<MovementSpeedChangedMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(99u, decoded.NetworkId);
+        Assert.Equal((ushort)70, decoded.StepCooldownMs);
+    }
+
+    [Fact]
+    public void ProtocolVersionIsSixteen()
+    {
+        Assert.Equal(16, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -225,7 +244,8 @@ public sealed class ProtocolCodecTests
             EntityKind.Player,
             "Direct",
             new TileCoord(3, 4),
-            Direction8.SW);
+            Direction8.SW,
+            stepCooldownMs: 140);
         writer.Flush();
         var spawn = Assert.IsType<EntitySpawnMessage>(ProtocolCodec.Decode(stream.ToArray()));
         Assert.Equal(7u, spawn.NetworkId);
@@ -233,6 +253,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal("Direct", spawn.DisplayName);
         Assert.Equal(new TileCoord(3, 4), spawn.Tile);
         Assert.Equal(Direction8.SW, spawn.Facing);
+        Assert.Equal((ushort)140, spawn.StepCooldownMs);
     }
 
     [Fact]

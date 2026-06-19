@@ -42,6 +42,44 @@ public sealed class WorldEntity
     public ClientSession? OwnerSession { get; }
     public bool IsDurable { get; }
 
+    // Per-entity movement-speed stat. 1.0 (the default) means "move at the server's base step cadence",
+    // identical to pre-S51 behaviour. >1 = faster (shorter effective cooldown), <1 = slower. The
+    // effective per-step cooldown is derived from this in EffectiveStepCooldownTicks/Ms and clamped, so a
+    // silly multiplier can never break the tick loop. Speed buffs/slows/mounts later just set this.
+    public double SpeedMultiplier { get; private set; } = 1.0;
+
+    // Sets the speed multiplier, guarding against non-positive / non-finite values (which would otherwise
+    // produce a zero or NaN cooldown). Returns true if the value actually changed, so the caller only
+    // re-replicates the cadence when it really moved.
+    public bool TrySetSpeedMultiplier(double multiplier)
+    {
+        if (!double.IsFinite(multiplier) || multiplier <= 0)
+        {
+            return false;
+        }
+
+        if (multiplier == SpeedMultiplier)
+        {
+            return false;
+        }
+
+        SpeedMultiplier = multiplier;
+        return true;
+    }
+
+    // Derives this entity's effective per-step cooldown in TICKS from the server's base cooldown and the
+    // speed multiplier, clamped to the configured [minTicks, maxTicks] tick bounds (mirrors the ms clamp).
+    // Default multiplier 1.0 returns baseStepCooldownTicks unchanged ⇒ behaviour parity with pre-S51. The
+    // clamp guarantees the tick loop always advances (>= 1 tick) regardless of how extreme the multiplier is.
+    public uint EffectiveStepCooldownTicks(uint baseStepCooldownTicks, uint minTicks, uint maxTicks)
+    {
+        var scaled = baseStepCooldownTicks / SpeedMultiplier;
+        // Round to the nearest tick; never below 1 (a zero cooldown would let an entity step every tick and
+        // is meaningless on a tick-quantised loop).
+        var ticks = (long)Math.Max(1, Math.Round(scaled, MidpointRounding.AwayFromZero));
+        return (uint)Math.Clamp(ticks, (long)minTicks, (long)maxTicks);
+    }
+
     // Durable per-character inventory (server-memory truth, write-behind persisted). Present only on
     // durable player entities; null for transient/world entities.
     public Inventory? Inventory { get; }

@@ -121,9 +121,20 @@ public sealed record EntitySpawnMessage(
     EntityKind Kind,
     string DisplayName,
     TileCoord Tile,
-    Direction8 Facing) : IProtocolMessage
+    Direction8 Facing,
+    ushort StepCooldownMs) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntitySpawn;
+}
+
+// Reliable-ordered notice that an entity's effective step cadence changed mid-session (a speed buff
+// applied/removed, /speed dev command, etc.). Sent to every viewer whose AOI currently includes the
+// entity so the client can retune that entity's tween cadence. Speed is kept OFF the hot WorldSnapshot
+// path — cadence changes are rare relative to position updates — and rides this reliable message
+// instead, like spawn/despawn. StepCooldownMs is the entity's clamped effective per-step cooldown.
+public sealed record MovementSpeedChangedMessage(uint NetworkId, ushort StepCooldownMs) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MovementSpeedChanged;
 }
 
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage

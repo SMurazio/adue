@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 15;
+    public const byte Version = 16;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -89,6 +89,11 @@ public static class ProtocolCodec
                 WriteString(writer, value.DisplayName);
                 WriteTile(writer, value.Tile);
                 writer.Write((byte)value.Facing);
+                writer.Write(value.StepCooldownMs);
+                break;
+            case MovementSpeedChangedMessage value:
+                writer.Write(value.NetworkId);
+                writer.Write(value.StepCooldownMs);
                 break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
@@ -131,7 +136,8 @@ public static class ProtocolCodec
         EntityKind kind,
         string displayName,
         TileCoord tile,
-        Direction8 facing)
+        Direction8 facing,
+        ushort stepCooldownMs)
     {
         WriteHeader(writer, MessageType.EntitySpawn);
         writer.Write(networkId);
@@ -140,6 +146,7 @@ public static class ProtocolCodec
         WriteString(writer, displayName);
         WriteTile(writer, tile);
         writer.Write((byte)facing);
+        writer.Write(stepCooldownMs);
     }
 
     public static void EncodeEntityDespawn(BinaryWriter writer, uint serverTick, uint networkId)
@@ -193,7 +200,9 @@ public static class ProtocolCodec
                 (EntityKind)reader.ReadByte(),
                 ReadString(reader),
                 ReadTile(reader),
-                ReadDirection(reader)),
+                ReadDirection(reader),
+                reader.ReadUInt16()),
+            MessageType.MovementSpeedChanged => new MovementSpeedChangedMessage(reader.ReadUInt32(), reader.ReadUInt16()),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")

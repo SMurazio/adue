@@ -8,12 +8,14 @@ Movement is tile-stepped (the model landed at v9; the wire has since advanced �
 
 Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile coordinates. Entity snapshots also carry facing. Clients tween between confirmed tile centers; there is no client-side prediction. Rationale: [networking-design-plan.md](networking-design-plan.md) section 5a.
 
+Step cadence is **per-entity** (S51, v16). Each `WorldEntity` carries a `SpeedMultiplier` (default `1.0`); the server derives an effective step cooldown (base cooldown ÷ multiplier, clamped to the configured min/max) and the tick loop paces that entity at its own effective cooldown rather than a single global one. Default `1.0` is byte-for-byte identical to the previous single-cadence behaviour. The cooldown is advertised on `EntitySpawn` and re-advertised via `MovementSpeedChanged` when it changes; the client tweens each entity at its advertised cadence, falling back to the `ServerHello` global when an entity carries no explicit value. This is still server-authoritative and prediction-free — only the cadence varies. The admin-gated `/speed <multiplier>` dev command sets the caller's own multiplier to exercise it end-to-end (item/buff-driven speed is a separate follow-up).
+
 ## Packet Envelope
 
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `15` (current shipped — keep in sync with `ProtocolCodec.Version`; v15 replaced the per-step `MoveStep` stream with a held-direction `MoveIntent`, S43)
+- `byte` version: `16` (current shipped — keep in sync with `ProtocolCodec.Version`; v16 added per-entity movement speed — an effective step cooldown on `EntitySpawn` plus the reliable `MovementSpeedChanged` message, S51; v15 replaced the per-step `MoveStep` stream with a held-direction `MoveIntent`, S43)
 - `uint16` message type
 - message-specific payload
 
@@ -43,7 +45,8 @@ Between full heartbeat snapshots, `WorldSnapshot` may be incomplete (`isComplete
 - `ServerHello`: server name, protocol version, tick rate, authoritative step cooldown in milliseconds, and server interest radius in tiles.
 - `LoginResult`: accepted/rejected, character id, display name, assigned role, spawn tile, reason.
 - `ZoneInfo`: zone id, width, height, and a **procedural-terrain descriptor** — `int32 seed`, `int32 genVersion`, and `uint64 contentHash`. Static terrain is content, not state: rather than shipping the blocked-tile list, the server ships the seed and the client regenerates the identical map locally via the shared deterministic `TerrainGenerator` (`(width, height, seed, genVersion) -> blocked tiles`). The client compares its locally-computed hash to `contentHash` as a drift/tamper check and logs loudly on mismatch; the server remains authoritative for movement. Login terrain cost is constant regardless of map size. `genVersion` lets the generator algorithm change later without a silent mismatch.
-- `EntitySpawn`: durable visible-entity metadata: network id, character id, kind, display name, initial tile, and facing.
+- `EntitySpawn`: durable visible-entity metadata: network id, character id, kind, display name, initial tile, facing, and the entity's **effective step cooldown in milliseconds** (`uint16`, S51) so a viewer knows the entity's movement cadence the moment it sees it. The cooldown is the server's clamped per-entity value (base cooldown ÷ the entity's speed multiplier, clamped to the configured min/max), tick-quantised so it round-trips to the same tick count the client re-derives. Default speed (multiplier 1.0) yields the global cadence.
+- `MovementSpeedChanged`: reliable-ordered notice (`uint32 networkId`, `uint16 stepCooldownMs`, S51) that an entity's effective step cadence changed mid-session (a speed buff/slow/mount applied or removed; the `/speed` dev command). Sent to every viewer whose area of interest currently includes the entity. Movement speed is kept **off** the hot `WorldSnapshot` path — cadence changes are rare relative to position updates — and rides this reliable message instead, like spawn/despawn. The client retunes that entity's tween cadence to the new cooldown (still no prediction; just confirmed-step tweening at the right speed).
 - `EntityDespawn`: server tick plus network id for an entity that left the client's current area of interest.
 - `WorldSnapshot`: server tick, per-client snapshot sequence, and compact visible entity state. Each entity state is `ushort networkId`, `int16 tileX`, `int16 tileY`, `byte facing`, `byte depleted` (the resource-node availability flag — false for players and all non-resource entities).
 - `InteractResult`: success flag plus a short reason code (`too_far`, `depleted`, `not_resource`, `no_target`, `inventory_full`, `rate_limited`, …; empty on success). Sent to the requesting owner only.

@@ -263,7 +263,10 @@ public sealed class MmoClient : IDisposable
                 HandleZoneInfo(zone);
                 break;
             case EntitySpawnMessage spawn:
-                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, spawn.Tile, spawn.Facing);
+                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, spawn.Tile, spawn.Facing, spawn.StepCooldownMs);
+                break;
+            case MovementSpeedChangedMessage speed:
+                HandleMovementSpeedChanged(speed);
                 break;
             case EntityDespawnMessage despawn:
                 _entities.Remove(despawn.NetworkId);
@@ -491,18 +494,28 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // stepCooldownMs is the entity's server-advertised effective cadence (from EntitySpawn); null on the
+    // snapshot-created placeholder path, where the entity tweens at the ServerHello global until its real
+    // EntitySpawn arrives. A 0 cooldown is treated as "absent" (no spawn has supplied a real value yet).
     private ClientEntity UpsertEntity(
         uint networkId,
         Guid characterId,
         EntityKind kind,
         string displayName,
         TileCoord tile,
-        Direction8 facing)
+        Direction8 facing,
+        ushort? stepCooldownMs = null)
     {
         var isLocal = characterId != Guid.Empty && characterId == _localCharacterId;
+        var effectiveCooldown = stepCooldownMs is > 0 ? stepCooldownMs : null;
         if (_entities.TryGetValue(networkId, out var existing))
         {
             existing.UpdateMetadata(characterId, kind, displayName, isLocal);
+            if (effectiveCooldown.HasValue)
+            {
+                existing.SetStepCooldownMs(effectiveCooldown.Value, ResolveCadence(effectiveCooldown), existing.IsLocal);
+            }
+
             // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
             // last snapshot set rather than resetting a known-depleted node to available.
             existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, existing.Depleted);
@@ -522,7 +535,8 @@ public sealed class MmoClient : IDisposable
             tile,
             facing,
             isLocal,
-            CreateInterpolator(tile, isLocal));
+            CreateInterpolator(tile, isLocal, effectiveCooldown),
+            effectiveCooldown);
         _entities[networkId] = entity;
         if (isLocal)
         {
@@ -532,19 +546,48 @@ public sealed class MmoClient : IDisposable
         return entity;
     }
 
+    private void HandleMovementSpeedChanged(MovementSpeedChangedMessage speed)
+    {
+        if (!_entities.TryGetValue(speed.NetworkId, out var entity))
+        {
+            return;
+        }
+
+        // A 0 cooldown means "fall back to the global cadence" (clear any per-entity override).
+        ushort? cooldown = speed.StepCooldownMs > 0 ? speed.StepCooldownMs : null;
+        entity.SetStepCooldownMs(cooldown, ResolveCadence(cooldown), entity.IsLocal);
+    }
+
+    // Resolves the tween step duration (ms) for a given per-entity cooldown: the entity's own advertised
+    // cooldown when present, else the ServerHello global. Mirrors the server's tick-quantised derivation so
+    // client and server cadence stay in lockstep (no tween starvation/overrun).
+    private double ResolveCadence(ushort? stepCooldownMs)
+    {
+        var tickRate = Server?.TickRate ?? 20;
+        if (stepCooldownMs is > 0)
+        {
+            return MovementCadence.EffectiveStepCadenceMs(stepCooldownMs.Value, tickRate);
+        }
+
+        return Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
+    }
+
+    // Recomputes every entity's tween cadence. Each entity keeps its OWN advertised cooldown if it has one
+    // (per-entity speed, S51) and only falls back to the ServerHello global when it doesn't — so a global
+    // refresh (e.g. ServerHello arriving) never clobbers a per-entity cadence.
     private void RefreshInterpolatorCadence()
     {
-        var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
         foreach (var entity in _entities.Values)
         {
+            var cadence = ResolveCadence(entity.StepCooldownMs);
             var delay = cadence * (entity.IsLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
             entity.UpdateInterpolationCadence(cadence, delay);
         }
     }
 
-    private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal)
+    private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal, ushort? stepCooldownMs)
     {
-        var cadence = Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
+        var cadence = ResolveCadence(stepCooldownMs);
         var delay = cadence * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
         return new TileInterpolator(initialTile, cadence, delay);
     }
@@ -582,7 +625,8 @@ public sealed class MmoClient : IDisposable
             TileCoord tile,
             Direction8 facing,
             bool isLocal,
-            TileInterpolator interpolator)
+            TileInterpolator interpolator,
+            ushort? stepCooldownMs)
         {
             NetworkId = networkId;
             CharacterId = characterId;
@@ -592,6 +636,7 @@ public sealed class MmoClient : IDisposable
             Facing = facing;
             IsLocal = isLocal;
             _interpolator = interpolator;
+            StepCooldownMs = stepCooldownMs;
         }
 
         public uint NetworkId { get; }
@@ -607,6 +652,11 @@ public sealed class MmoClient : IDisposable
         public Direction8 Facing { get; private set; }
 
         public bool IsLocal { get; private set; }
+
+        // The entity's server-advertised effective step cooldown in ms (S51). Null = no per-entity value yet
+        // (a snapshot-created placeholder); the entity then tweens at the ServerHello global cadence. Set by
+        // EntitySpawn and MovementSpeedChanged. A 0 from the wire is normalised to null upstream.
+        public ushort? StepCooldownMs { get; private set; }
 
         // Resource-node availability replicated via the AOI snapshot Depleted bit. Always false for
         // players/NPCs (the server never sets it for them). Carried separately from the interpolated
@@ -649,6 +699,17 @@ public sealed class MmoClient : IDisposable
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
         {
             _interpolator.UpdateCadence(stepDurationMs, interpolationDelayMs);
+        }
+
+        // Applies a per-entity cadence (from EntitySpawn / MovementSpeedChanged). stepCooldownMs null clears
+        // the override (the entity reverts to the global cadence the caller resolved). cadenceMs is the
+        // already-resolved tween step duration; the interpolation delay is derived from it the same way as
+        // CreateInterpolator (local vs remote playout buffer multiplier).
+        public void SetStepCooldownMs(ushort? stepCooldownMs, double cadenceMs, bool isLocal)
+        {
+            StepCooldownMs = stepCooldownMs;
+            var delay = cadenceMs * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
+            _interpolator.UpdateCadence(cadenceMs, delay);
         }
 
         public ReplicatedEntity ToSnapshot()

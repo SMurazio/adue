@@ -18,5 +18,6 @@ public enum MessageType : ushort
     EntityDespawn = 106,
     ZoneInfo = 107,
     InteractResult = 108,
-    InventoryUpdate = 109
+    InventoryUpdate = 109,
+    MovementSpeedChanged = 110
 }

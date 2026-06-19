@@ -23,6 +23,12 @@ public sealed class GameServer
     private const float InterestExitHysteresisTiles = 1f;
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
 
+    // Effective per-entity step cooldown is clamped to this ms range — the same [50, 5000] ms bounds the
+    // global StepCooldownMs is validated against — so an arbitrary SpeedMultiplier (e.g. /speed 0.001 or
+    // /speed 10000) can never produce a degenerate cadence that stalls or floods the tick loop. (S51)
+    private const int MinEffectiveStepCooldownMs = 50;
+    private const int MaxEffectiveStepCooldownMs = 5000;
+
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
     // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
@@ -806,7 +812,8 @@ public sealed class GameServer
                 entity.Kind,
                 entity.DisplayName,
                 entity.Tile,
-                entity.Facing);
+                entity.Facing,
+                EffectiveStepCooldownMs(entity));
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
         }
@@ -1136,7 +1143,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -1172,6 +1179,9 @@ public sealed class GameServer
                 break;
             case "stress":
                 HandleStressCommand(sender, parts);
+                break;
+            case "speed":
+                HandleSpeedCommand(sender, parts);
                 break;
             default:
                 SendSystem(sender, $"unknown command: /{command}. Try /help.");
@@ -1216,6 +1226,71 @@ public sealed class GameServer
         _syntheticLoad.Start(clientCount, duration, _options.Port, _options.ConnectionKey);
         SendSystem(sender, $"stress started: clients={clientCount}, duration={FormatDuration(duration)}.");
         Log.Info($"{sender.DisplayName} started synthetic load: clients={clientCount}, duration={FormatDuration(duration)}.");
+    }
+
+    // Admin dev command (v1 way to exercise S51): /speed <multiplier> sets the CALLER's own entity speed
+    // multiplier, the server recomputes its effective cadence, and a MovementSpeedChanged is replicated to
+    // every viewer whose AOI currently includes the caller. /speed 1 resets to the base cadence. Item/buff-
+    // driven speed is a separate follow-up; this command is just the hook to see varying cadence end-to-end.
+    private void HandleSpeedCommand(ClientSession sender, string[] parts)
+    {
+        if (parts.Length < 2 ||
+            !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var multiplier))
+        {
+            SendSystem(sender, "usage: /speed <multiplier> (e.g. /speed 2, /speed 0.5, /speed 1 to reset).");
+            return;
+        }
+
+        if (!double.IsFinite(multiplier) || multiplier <= 0)
+        {
+            SendSystem(sender, "speed: multiplier must be a positive number.");
+            return;
+        }
+
+        if (!TryGetSessionEntity(sender, out var entity))
+        {
+            SendSystem(sender, "speed: no controllable entity.");
+            return;
+        }
+
+        var changed = entity.TrySetSpeedMultiplier(multiplier);
+        var effectiveMs = EffectiveStepCooldownMs(entity);
+        if (changed)
+        {
+            BroadcastMovementSpeedChanged(entity, effectiveMs);
+        }
+
+        SendSystem(
+            sender,
+            $"speed: multiplier={entity.SpeedMultiplier:0.###}, effective step cooldown={effectiveMs}ms"
+                + (changed ? "." : " (unchanged)."));
+        Log.Info($"{sender.DisplayName} set speed multiplier {entity.SpeedMultiplier:0.###} (cooldown={effectiveMs}ms).");
+    }
+
+    // Replicates an entity's new effective cadence to every authenticated viewer whose AOI currently
+    // includes it (the entity's owner included). Reliable-ordered, like spawn/despawn — speed stays OFF the
+    // hot snapshot path. Only viewers that already know the entity are notified; a viewer that has not yet
+    // been sent the EntitySpawn will receive the up-to-date cadence in that spawn instead.
+    private void BroadcastMovementSpeedChanged(WorldEntity entity, ushort stepCooldownMs)
+    {
+        var message = new MovementSpeedChangedMessage(entity.NetworkId, stepCooldownMs);
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated || !session.KnowsEntity(entity.NetworkId))
+            {
+                continue;
+            }
+
+            if (!TryGetSessionEntity(session, out var viewerEntity))
+            {
+                continue;
+            }
+
+            if (IsEntityInInterest(viewerEntity, entity, session, _options.InterestRadius))
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
     }
 
     private string FormatWho()
@@ -1377,6 +1452,34 @@ public sealed class GameServer
         return elapsedTicks;
     }
 
+    // Minimum/maximum effective step cooldown expressed in TICKS, derived once from the ms clamp and the
+    // configured tick rate. The per-entity cadence (base ÷ speed multiplier) is clamped to this range so a
+    // silly multiplier can never break the tick loop. (S51)
+    private uint MinEffectiveStepCooldownTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(MinEffectiveStepCooldownMs / (1000d / _options.TickRate)));
+
+    private uint MaxEffectiveStepCooldownTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(MaxEffectiveStepCooldownMs / (1000d / _options.TickRate)));
+
+    // The entity's clamped effective step cooldown in TICKS (what the step loop enforces) — base cooldown
+    // ÷ the entity's speed multiplier, clamped to the tick bounds. Default multiplier 1.0 returns the
+    // global StepCooldownTicks unchanged (behaviour parity with pre-S51).
+    private uint EffectiveStepCooldownTicks(WorldEntity entity) =>
+        entity.EffectiveStepCooldownTicks(
+            _options.StepCooldownTicks,
+            MinEffectiveStepCooldownTicks,
+            MaxEffectiveStepCooldownTicks);
+
+    // The entity's effective step cooldown in MS for the wire (EntitySpawn / MovementSpeedChanged). Derived
+    // from the effective TICKS so it round-trips to the same tick count when the client re-quantises it via
+    // MovementCadence.EffectiveStepCadenceMs — keeping server and client cadence in lockstep. Clamped to a
+    // ushort (the wire field); the ms clamp keeps it well within range.
+    private ushort EffectiveStepCooldownMs(WorldEntity entity)
+    {
+        var ms = EffectiveStepCooldownTicks(entity) * (1000d / _options.TickRate);
+        return (ushort)Math.Clamp((int)Math.Round(ms, MidpointRounding.AwayFromZero), 1, ushort.MaxValue);
+    }
+
     // Per-tick held-movement stepping. For every authenticated session whose intent is "moving", attempt
     // exactly one tile step in the held direction. WorldEntity.TryStep enforces the per-entity cooldown,
     // bounds, and walkability (the same validation as before) — a session that is still inside its
@@ -1406,7 +1509,7 @@ public sealed class GameServer
             }
 
             var direction = session.MoveIntentDirection;
-            if (_zone.TryStep(entity, direction, _serverTick, _options.StepCooldownTicks, out var result))
+            if (_zone.TryStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), out var result))
             {
                 MarkDirtyDurableTile(entity);
             }
@@ -1568,10 +1671,11 @@ internal sealed class ProtocolEncodeBuffer
         EntityKind kind,
         string displayName,
         TileCoord tile,
-        Direction8 facing)
+        Direction8 facing,
+        ushort stepCooldownMs)
     {
         Reset();
-        ProtocolCodec.EncodeEntitySpawn(_writer, networkId, characterId, kind, displayName, tile, facing);
+        ProtocolCodec.EncodeEntitySpawn(_writer, networkId, characterId, kind, displayName, tile, facing, stepCooldownMs);
         return Finish();
     }
 
