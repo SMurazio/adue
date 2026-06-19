@@ -77,11 +77,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// ---- S55 name labels --------------------------------------------------------------------------
 	// The model renders ~PlayerModelScale * native-height (1.086) ≈ 1.74 tiles tall, so park the name just
 	// above the head. Derived from PlayerModelScale so it tracks scale changes (1.6 -> ~1.96). TUNABLE.
-	private const float PlayerLabelHeight = PlayerModelScale * 1.4f;
+	// Field (not const) so the S60 admin tuning panel can adjust label height live.
+	private float _playerLabelHeight = PlayerModelScale * 1.4f;
 	// Constant on-screen text size (FixedSize) so distant players stay readable; pixel size tuned for crisp
 	// glyphs without the label ballooning. Outline gives contrast on any background. TUNABLE (play-test:
-	// shrunk from 0.0018 — was bigger than the character).
-	private const float PlayerLabelPixelSize = 0.0005f;
+	// shrunk from 0.0018 — was bigger than the character). Field for live S60 panel tuning.
+	private float _playerLabelPixelSize = 0.0005f;
 	private const int PlayerLabelFontSize = 64;
 	private const int PlayerLabelOutlineSize = 14;
 
@@ -143,8 +144,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Camera3D? _camera;
 	// Mouse-wheel zoom: live orthographic size (smaller = zoomed in), clamped. Seeded from CameraSize.
 	private float _cameraSize = 28f;
-	private const float CameraSizeMin = 8f;
-	private const float CameraSizeMax = 30f;
+	// Zoom clamp bounds — fields (not consts) so the S60 admin tuning panel can widen/narrow the zoom range
+	// live. The wheel-zoom clamp in _UnhandledInput reads these each scroll.
+	private float _cameraSizeMin = 8f;
+	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
@@ -157,6 +160,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _inventoryLabel;
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
+
+	// ---- S60 admin live-tuning panel --------------------------------------------------------------
+	// F4 toggles this admin-only panel of labeled fields + Apply. Client-local fields (camera zoom range,
+	// rock scale, label pixel-size/height) apply instantly to local state/nodes; server fields
+	// (move.stepCooldownMs, aoi.interestRadius) ride AdminSetTuning to the server, which admin-gates +
+	// clamps. Dev tool, not shipped UI — built once, shown only for an Admin session.
+	private PanelContainer? _tuningPanel;
+	private bool _tuningPanelVisible;
+	private bool _tuningFieldsSeeded;
+	private LineEdit? _tuneStepCooldownMs;
+	private LineEdit? _tuneInterestRadius;
+	private LineEdit? _tuneCameraZoomMin;
+	private LineEdit? _tuneCameraZoomMax;
+	private LineEdit? _tuneRockScale;
+	private LineEdit? _tuneLabelPixelSize;
+	private LineEdit? _tuneLabelHeight;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -326,13 +345,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			if (wheel.ButtonIndex == MouseButton.WheelUp)
 			{
-				_cameraSize = Mathf.Clamp(_cameraSize - CameraZoomStep, CameraSizeMin, CameraSizeMax);
+				_cameraSize = Mathf.Clamp(_cameraSize - CameraZoomStep, _cameraSizeMin, _cameraSizeMax);
 				GetViewport().SetInputAsHandled();
 				return;
 			}
 			if (wheel.ButtonIndex == MouseButton.WheelDown)
 			{
-				_cameraSize = Mathf.Clamp(_cameraSize + CameraZoomStep, CameraSizeMin, CameraSizeMax);
+				_cameraSize = Mathf.Clamp(_cameraSize + CameraZoomStep, _cameraSizeMin, _cameraSizeMax);
 				GetViewport().SetInputAsHandled();
 				return;
 			}
@@ -346,6 +365,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.F3)
 		{
 			ToggleDebugOverlay();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// F4: admin-only live tuning panel (S60). Ignored for non-admins (panel never shows). Not consumed
+		// while typing in chat so 'F4' can't be swallowed mid-message — but F4 isn't a text key anyway.
+		if (key.Keycode == Key.F4)
+		{
+			ToggleTuningPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -608,6 +636,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chatInput.TextSubmitted += OnChatSubmitted;
 		inputMargin.AddChild(_chatInput);
 
+		BuildTuningPanel(layer);
+
 		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
 		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
 		_perfPanel.Visible = false;
@@ -620,6 +650,70 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(inventoryPanel);
 		layer.AddChild(toastPanel);
 		layer.AddChild(inputPanel);
+	}
+
+	// S60: the admin tuning panel (F4). Centered-left, hidden until F4 is pressed by an Admin session. Each
+	// row is a label + a LineEdit; one Apply button at the bottom applies every field at once (client-local
+	// fields instantly, server fields via AdminSetTuning). Fields are seeded on first open with the current
+	// known values (camera/rock/label from local state; server params from ServerHello / last-applied).
+	private void BuildTuningPanel(CanvasLayer layer)
+	{
+		// Center-left, below the status panel and to the right of the perf HUD so F3 + F4 panels don't overlap.
+		var panel = CreateOverlayPanel("TuningPanel", new Vector2(490, 154), new Vector2(360, 380));
+		var rows = CreatePanelVBox(panel);
+
+		var title = CreateOverlayLabel("TuningTitle", 15);
+		title.Text = "ADMIN TUNING (F4)";
+		rows.AddChild(title);
+
+		var serverHeader = CreateOverlayLabel("TuningServerHeader", 12);
+		serverHeader.Text = "— server (sent on Apply) —";
+		rows.AddChild(serverHeader);
+		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs");
+		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius");
+
+		var localHeader = CreateOverlayLabel("TuningLocalHeader", 12);
+		localHeader.Text = "— client-local (instant) —";
+		rows.AddChild(localHeader);
+		_tuneCameraZoomMin = AddTuningField(rows, "camera.zoomMin");
+		_tuneCameraZoomMax = AddTuningField(rows, "camera.zoomMax");
+		_tuneRockScale = AddTuningField(rows, "rock.modelScale");
+		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize");
+		_tuneLabelHeight = AddTuningField(rows, "label.height");
+
+		var apply = new Button { Name = "TuningApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnTuningApplyPressed;
+		rows.AddChild(apply);
+
+		panel.Visible = false;
+		_tuningPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// One labeled input row (label : LineEdit) inside the tuning panel. Returns the LineEdit so the caller
+	// can seed/read it. Enter in any field also applies all (same as the Apply button) for quick iteration.
+	private LineEdit AddTuningField(VBoxContainer parent, string label)
+	{
+		var row = new HBoxContainer { Name = $"Row_{label}" };
+		row.AddThemeConstantOverride("separation", 8);
+
+		var caption = CreateOverlayLabel($"Cap_{label}", 13);
+		caption.Text = label;
+		caption.CustomMinimumSize = new Vector2(170, 0);
+		row.AddChild(caption);
+
+		var edit = new LineEdit
+		{
+			Name = $"Edit_{label}",
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+		};
+		edit.AddThemeFontSizeOverride("font_size", 13);
+		edit.TextSubmitted += _ => OnTuningApplyPressed();
+		row.AddChild(edit);
+
+		parent.AddChild(row);
+		return edit;
 	}
 
 	private void BuildZone(ZoneModel zone)
@@ -858,7 +952,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_playerVisuals[state.NetworkId] = visual;
 		ApplyFacing(visual, state.Facing);
 
-		// Name label sits above the head (PlayerLabelHeight, derived from the model scale), outlined and
+		// Name label sits above the head (_playerLabelHeight, derived from the model scale), outlined and
 		// rendered on top so it never z-fights with or hides behind the rig, and FixedSize so it stays a
 		// constant readable size at distance.
 		AttachPlayerLabel(wrapper, state);
@@ -957,7 +1051,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			Position = new Vector3(0, height, 0),
 			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
 			FixedSize = true,
-			PixelSize = PlayerLabelPixelSize,
+			PixelSize = _playerLabelPixelSize,
 			FontSize = PlayerLabelFontSize,
 			OutlineSize = PlayerLabelOutlineSize,
 			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
@@ -975,10 +1069,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			Name = "Name",
 			Text = state.DisplayName,
-			Position = new Vector3(0, PlayerLabelHeight, 0),
+			Position = new Vector3(0, _playerLabelHeight, 0),
 			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
 			FixedSize = true,
-			PixelSize = PlayerLabelPixelSize,
+			PixelSize = _playerLabelPixelSize,
 			FontSize = PlayerLabelFontSize,
 			OutlineSize = PlayerLabelOutlineSize,
 			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
@@ -1405,6 +1499,146 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// toggle feels instant instead of waiting up to ~0.1s for the next throttle window.
 		_nextPerfHudAt = 0;
 		_nextOverlayAt = 0;
+	}
+
+	// F4: toggle the admin live-tuning panel (S60). Admin-only — for a non-admin (or pre-login) session the
+	// panel never shows. Fields are seeded with current known values on first open of an authenticated admin
+	// session so the human sees real starting points (and so server params reflect ServerHello).
+	private void ToggleTuningPanel()
+	{
+		if (_tuningPanel is null)
+		{
+			return;
+		}
+
+		if (_client?.Role != ClientRole.Admin)
+		{
+			// Non-admin: keep it hidden and give a quiet hint rather than silently doing nothing.
+			ShowInteractFeedback("Tuning panel requires Admin role.");
+			return;
+		}
+
+		_tuningPanelVisible = !_tuningPanelVisible;
+		if (_tuningPanelVisible && !_tuningFieldsSeeded)
+		{
+			SeedTuningFields();
+			_tuningFieldsSeeded = true;
+		}
+
+		_tuningPanel.Visible = _tuningPanelVisible;
+	}
+
+	// Seed each field with the current value: server params from ServerHello (the server's startup truth),
+	// client-local params from the live local state/consts. Only called once on first open (re-seeding would
+	// stomp values the human has typed but not yet applied).
+	private void SeedTuningFields()
+	{
+		var serverStep = _client?.Server?.StepCooldownMs ?? 140;
+		var serverRadius = _client?.Server?.InterestRadiusTiles ?? 35f;
+		SetField(_tuneStepCooldownMs, serverStep);
+		SetField(_tuneInterestRadius, serverRadius);
+		SetField(_tuneCameraZoomMin, _cameraSizeMin);
+		SetField(_tuneCameraZoomMax, _cameraSizeMax);
+		SetField(_tuneRockScale, RockModelScale);
+		SetField(_tuneLabelPixelSize, _playerLabelPixelSize);
+		SetField(_tuneLabelHeight, _playerLabelHeight);
+	}
+
+	private static void SetField(LineEdit? field, double value)
+	{
+		if (field is not null)
+		{
+			field.Text = value.ToString("0.######", CultureInfo.InvariantCulture);
+		}
+	}
+
+	// Apply-all: parse every field; client-local fields take effect instantly (clamped/updated in place),
+	// server fields are sent via AdminSetTuning (the server admin-gates + clamps authoritatively). Invalid
+	// (unparseable) fields are skipped with a toast so a typo in one field never blocks the others.
+	private void OnTuningApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		// Server group — send the raw value; the server clamps to its registry bounds and applies live.
+		if (TryReadField(_tuneStepCooldownMs, out var stepMs))
+		{
+			_client.SendAdminSetTuning("move.stepCooldownMs", stepMs);
+		}
+
+		if (TryReadField(_tuneInterestRadius, out var radius))
+		{
+			_client.SendAdminSetTuning("aoi.interestRadius", radius);
+		}
+
+		// Client-local group — apply instantly. Camera zoom range is clamped sane; the live _cameraSize is
+		// re-clamped into the new range so a tighter range snaps the current zoom in immediately.
+		if (TryReadField(_tuneCameraZoomMin, out var zoomMin))
+		{
+			_cameraSizeMin = Mathf.Clamp((float)zoomMin, 1f, 200f);
+		}
+
+		if (TryReadField(_tuneCameraZoomMax, out var zoomMax))
+		{
+			_cameraSizeMax = Mathf.Clamp((float)zoomMax, _cameraSizeMin, 400f);
+		}
+
+		_cameraSize = Mathf.Clamp(_cameraSize, _cameraSizeMin, _cameraSizeMax);
+
+		if (TryReadField(_tuneRockScale, out var rockScale))
+		{
+			RockModelScale = Mathf.Clamp((float)rockScale, 0.1f, 50f);
+		}
+
+		if (TryReadField(_tuneLabelPixelSize, out var pixelSize))
+		{
+			_playerLabelPixelSize = Mathf.Clamp((float)pixelSize, 0.0001f, 0.02f);
+		}
+
+		if (TryReadField(_tuneLabelHeight, out var labelHeight))
+		{
+			_playerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
+		}
+
+		// Push the new label pixel-size/height onto every existing label so the change is visible without
+		// requiring a respawn. Rock scale takes effect on the next rock spawn (rescaling live wrappers would
+		// also need to re-offset each variant's ground position — left to respawn for v1 simplicity).
+		ApplyLabelTuningToExisting();
+
+		ShowInteractFeedback("Tuning applied.");
+	}
+
+	// Re-applies the current label pixel-size to every live label and the player-label height to player
+	// labels. Resource labels keep their per-kind height (set at spawn); only the pixel-size is uniform.
+	private void ApplyLabelTuningToExisting()
+	{
+		foreach (var label in _entityLabels.Values)
+		{
+			label.PixelSize = _playerLabelPixelSize;
+		}
+
+		foreach (var (networkId, label) in _entityLabels)
+		{
+			// Player labels sit at _playerLabelHeight; resource labels are positioned at their own height in
+			// AttachLabel, so only nudge labels whose owner is a tracked player rig.
+			if (_playerVisuals.ContainsKey(networkId))
+			{
+				label.Position = new Vector3(0f, _playerLabelHeight, 0f);
+			}
+		}
+	}
+
+	private static bool TryReadField(LineEdit? field, out double value)
+	{
+		value = 0d;
+		if (field is null)
+		{
+			return false;
+		}
+
+		return double.TryParse(field.Text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
 	}
 
 	private void UpdatePerfHud(TimeSpan now)

@@ -279,6 +279,14 @@ public sealed class MmoClient : IDisposable
         Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
     }
 
+    // S60 admin live-tuning: ask the server to set a tuning key (e.g. "move.stepCooldownMs") to a value.
+    // Reliable-ordered. The server admin-gates and clamps/validates; a non-admin send is silently ignored
+    // server-side. No client-side prediction — the panel just shows the value it sent.
+    public void SendAdminSetTuning(string key, double value)
+    {
+        Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+    }
+
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
     {
         _movementTrace.FrameHitch(durationMs, gc0, gc1, gc2, EntityCount, State);

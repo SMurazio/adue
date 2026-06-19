@@ -186,9 +186,20 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsSixteen()
+    public void ProtocolVersionIsSeventeen()
     {
-        Assert.Equal(16, ProtocolCodec.Version);
+        Assert.Equal(17, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void AdminSetTuningRoundTrips()
+    {
+        var original = new AdminSetTuningMessage("move.stepCooldownMs", 123.5d);
+
+        var decoded = Assert.IsType<AdminSetTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal("move.stepCooldownMs", decoded.Key);
+        Assert.Equal(123.5d, decoded.Value);
     }
 
     [Fact]

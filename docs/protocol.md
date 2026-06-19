@@ -15,7 +15,7 @@ Step cadence is **per-entity** (S51, v16). Each `WorldEntity` carries a `SpeedMu
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `16` (current shipped — keep in sync with `ProtocolCodec.Version`; v16 added per-entity movement speed — an effective step cooldown on `EntitySpawn` plus the reliable `MovementSpeedChanged` message, S51; v15 replaced the per-step `MoveStep` stream with a held-direction `MoveIntent`, S43)
+- `byte` version: `17` (current shipped — keep in sync with `ProtocolCodec.Version`; v17 added the admin live-tuning message `AdminSetTuning`, S60; v16 added per-entity movement speed — an effective step cooldown on `EntitySpawn` plus the reliable `MovementSpeedChanged` message, S51; v15 replaced the per-step `MoveStep` stream with a held-direction `MoveIntent`, S43)
 - `uint16` message type
 - message-specific payload
 
@@ -39,6 +39,7 @@ Between full heartbeat snapshots, `WorldSnapshot` may be incomplete (`isComplete
 - `ChatSend`: text chat for the current zone. Slash-prefixed text is interpreted as a server command after authentication.
 - `SnapshotAck`: latest `WorldSnapshot` sequence received by the client.
 - `InteractRequest`: network id of the target entity (generic verb; harvest is the first resolution). The server validates authentication, AOI-visibility, and ≤1-tile adjacency before resolving.
+- `AdminSetTuning` (v17, S60): `string key`, `double value` — an admin-only request to set a live server tuning param. Reliable-ordered. The server **requires the session to be Admin** (the same role gate as `/speed` and `/metrics`); a non-admin request is **ignored** (logged, no reply, no disconnect). The key is looked up in a server-side registry that clamps/validates and applies it to a mutable runtime tuning holder (`ServerTuning`, seeded from `ServerOptions` at startup); an unknown/invalid key is ignored + logged. Starter keys: `move.stepCooldownMs` (global base step cooldown, clamped to `[50, 5000]` ms — the same bound `ServerOptions` validates) and `aoi.interestRadius` (clamped to `[1, 512]` tiles). The change takes effect on the next AOI pass / step; nothing is persisted (the panel finds values, defaults are baked in afterwards). There is no echo message in v1 — the client shows the value it sent; the server logs the post-clamp authoritative value.
 
 ## Server Messages
 

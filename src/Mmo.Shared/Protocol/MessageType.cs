@@ -8,6 +8,7 @@ public enum MessageType : ushort
     ChatSend = 4,
     SnapshotAck = 5,
     InteractRequest = 6,
+    AdminSetTuning = 7,
 
     ServerHello = 100,
     LoginResult = 101,

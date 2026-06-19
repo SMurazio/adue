@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 16;
+    public const byte Version = 17;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -42,6 +42,10 @@ public static class ProtocolCodec
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
+                break;
+            case AdminSetTuningMessage value:
+                WriteString(writer, value.Key);
+                writer.Write(value.Value);
                 break;
             case SnapshotAckMessage value:
                 writer.Write(value.LastSnapshotSequence);
@@ -179,6 +183,7 @@ public static class ProtocolCodec
             MessageType.LoginRequest => new LoginRequestMessage(ReadString(reader), ReadString(reader)),
             MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadBoolean(), ReadDirection(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
+            MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),

@@ -32,6 +32,16 @@ public sealed record ChatSendMessage(string Text) : IProtocolMessage
     public MessageType Type => MessageType.ChatSend;
 }
 
+// S60 admin live-tuning: a generic "set this server param to this value" verb, reliable-ordered. Key is a
+// short registry key (e.g. "move.stepCooldownMs", "aoi.interestRadius"); Value is the desired value (the
+// server clamps/validates against the registry). The server REQUIRES the session to be Admin — a non-admin
+// request is ignored. Generalizes the bespoke /speed command into a data-driven panel knob. Ephemeral by
+// design: nothing is persisted; the panel finds values, the Orchestrator bakes winners into defaults.
+public sealed record AdminSetTuningMessage(string Key, double Value) : IProtocolMessage
+{
+    public MessageType Type => MessageType.AdminSetTuning;
+}
+
 public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMessage
 {
     public MessageType Type => MessageType.SnapshotAck;

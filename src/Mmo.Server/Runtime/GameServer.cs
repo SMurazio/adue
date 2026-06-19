@@ -36,6 +36,9 @@ public sealed class GameServer
     private static readonly TimeSpan MoveIntentKeepaliveTimeout = TimeSpan.FromSeconds(1);
 
     private readonly ServerOptions _options;
+    // S60 live-tuning holder, seeded from _options. The game loop reads the tunable params (step cooldown,
+    // interest radius) through THIS, not _options, so an admin AdminSetTuning can change them mid-run.
+    private readonly ServerTuning _tuning;
     private readonly ICharacterRepository _characters;
     private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
     private readonly ResourceNodeRegistry _resourceNodes;
@@ -75,8 +78,10 @@ public sealed class GameServer
     // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
     // the exact set. It MUST cover the interest EXIT radius (interest radius + hysteresis), so a
     // hysteresis-retained entity sitting between the entry and exit radius is never dropped — dropping
-    // one would be both a visible bug and an anti-cheat hole. Computed once from the configured radius.
-    private readonly int _aoiQueryRadiusTiles;
+    // one would be both a visible bug and an anti-cheat hole. Derived from the LIVE interest radius and
+    // recomputed whenever AdminSetTuning changes it (S60); the entity-grid cell size stays fixed (a pure
+    // perf knob — correctness is independent of it, the query box just grows to cover a larger radius).
+    private int _aoiQueryRadiusTiles;
 
     private uint _serverTick;
     private uint _nextPersistenceCheckpointTick;
@@ -87,7 +92,8 @@ public sealed class GameServer
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
         _options = options;
-        _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(options.InterestRadius);
+        _tuning = new ServerTuning(options);
+        _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(_tuning.InterestRadius);
         _characters = characters;
         _persistence = new PersistenceWriteBehindWorker(characters);
         _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
@@ -329,6 +335,12 @@ public sealed class GameServer
                     HandleInteract(session, interact.TargetNetworkId);
                 }
                 break;
+            case AdminSetTuningMessage tuning:
+                if (session.IsAuthenticated)
+                {
+                    HandleAdminSetTuning(session, tuning.Key, tuning.Value);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -561,7 +573,7 @@ public sealed class GameServer
 
         if ((visibleCount < entities.Count || sentPackets > 1) && _serverTick % (uint)(_options.TickRate * 5) == 0)
         {
-            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{entities.Count}, radius={_options.InterestRadius:0.#}, chunks={sentPackets}/{chunkCount}, bytes={sentBytes}");
+            Log.Info($"snapshot for {session.DisplayName}: visible={visibleCount}/{entities.Count}, radius={_tuning.InterestRadius:0.#}, chunks={sentPackets}/{chunkCount}, bytes={sentBytes}");
         }
     }
 
@@ -604,7 +616,7 @@ public sealed class GameServer
         {
             foreach (var candidate in _aoiCandidateScratch)
             {
-                if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
+                if (IsEntityInInterest(recipientEntity, candidate, recipient, _tuning.InterestRadius))
                 {
                     destination.Add(candidate);
                     visibleIds.Add(candidate.NetworkId);
@@ -617,7 +629,7 @@ public sealed class GameServer
         foreach (var candidate in _aoiCandidateScratch)
         {
             var distanceSquared = DistanceSquared(recipientEntity, candidate);
-            if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
+            if (IsEntityInInterest(recipientEntity, candidate, recipient, _tuning.InterestRadius))
             {
                 _visibleCandidateScratch.Add(new VisibleEntity(candidate, SnapshotSortKey(recipient, candidate, distanceSquared)));
             }
@@ -1061,7 +1073,7 @@ public sealed class GameServer
                 continue;
             }
 
-            if (IsEntityInInterest(actor, candidate, session, _options.InterestRadius))
+            if (IsEntityInInterest(actor, candidate, session, _tuning.InterestRadius))
             {
                 target = candidate;
                 return true;
@@ -1267,6 +1279,37 @@ public sealed class GameServer
         Log.Info($"{sender.DisplayName} set speed multiplier {entity.SpeedMultiplier:0.###} (cooldown={effectiveMs}ms).");
     }
 
+    // S60 live-tuning handler. ADMIN-GATED (the same role check as /speed and /metrics): a non-admin
+    // request is ignored and logged, never applied. An admin request is looked up in the registry, which
+    // clamps/validates and applies it to the mutable ServerTuning holder live; the next AOI pass / step
+    // reads the new value. Unknown keys are ignored + logged. No echo message in v1 — the client shows the
+    // value it sent (note: post-clamp authoritative value is only in the server log). No persistence.
+    private void HandleAdminSetTuning(ClientSession sender, string key, double value)
+    {
+        if (sender.Role != ClientRole.Admin)
+        {
+            Log.Warn($"Denied AdminSetTuning from non-admin {sender.DisplayName}: {key}={value}.");
+            return;
+        }
+
+        if (!ServerTuningRegistry.TryApply(_tuning, key, value, out var applied))
+        {
+            Log.Warn($"Ignored AdminSetTuning from {sender.DisplayName}: unknown/invalid key '{key}' (value {value}).");
+            return;
+        }
+
+        // Interest radius feeds the precomputed AOI query box; recompute it so a larger live radius still
+        // gathers the full candidate superset (a smaller one just queries a tighter box). Cheap + only on
+        // apply, never per tick. Step cooldown needs no recompute — StepCooldownTicks derives it on read.
+        if (key == ServerTuningRegistry.InterestRadiusKey)
+        {
+            _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(_tuning.InterestRadius);
+        }
+
+        SendSystem(sender, $"tuning: {key} = {ServerTuningRegistry.Format(applied)} (applied live).");
+        Log.Info($"{sender.DisplayName} set tuning {key}={ServerTuningRegistry.Format(applied)} (requested {value}).");
+    }
+
     // Replicates an entity's new effective cadence to every authenticated viewer whose AOI currently
     // includes it (the entity's owner included). Reliable-ordered, like spawn/despawn — speed stays OFF the
     // hot snapshot path. Only viewers that already know the entity are notified; a viewer that has not yet
@@ -1286,7 +1329,7 @@ public sealed class GameServer
                 continue;
             }
 
-            if (IsEntityInInterest(viewerEntity, entity, session, _options.InterestRadius))
+            if (IsEntityInInterest(viewerEntity, entity, session, _tuning.InterestRadius))
             {
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
@@ -1466,7 +1509,7 @@ public sealed class GameServer
     // global StepCooldownTicks unchanged (behaviour parity with pre-S51).
     private uint EffectiveStepCooldownTicks(WorldEntity entity) =>
         entity.EffectiveStepCooldownTicks(
-            _options.StepCooldownTicks,
+            _tuning.StepCooldownTicks,
             MinEffectiveStepCooldownTicks,
             MaxEffectiveStepCooldownTicks);
 
