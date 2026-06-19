@@ -117,6 +117,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// _lastSentMoving/_lastSentDirection track what the server currently believes; the server's keepalive
 	// timeout (~1 s) is the safety net if the keepalive itself is dropped.
 	private const double MoveIntentKeepaliveSeconds = 0.5;
+
+	// S64 mouse-heading feel constants. Dead-zone: ~0.6 tile (between the S64 0.5–0.75 guidance) — inside it the
+	// held octant is kept so the heading doesn't whip when the cursor sits on/near the player. Hysteresis: 6° of
+	// octant stickiness past the boundary before switching, killing flicker between two adjacent octants.
+	private const double MouseHeadingDeadZoneTiles = 0.6;
+	private const double MouseHeadingHysteresisDegrees = 6.0;
 	private bool _lastSentMoving;
 	private Direction8 _lastSentDirection;
 	private double _nextMoveIntentKeepaliveAt;
@@ -325,12 +331,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// S56 hold-to-walk-toward-cursor (UO control). Returns the heading to hold while the RIGHT mouse button is
-	// down: ray the cursor onto the ground plane -> cursor tile, then the nearest-of-8 direction from the
-	// PREDICTED local tile (what the player sees) toward it. Returns null when the button is up, when there is
-	// no pickable ground tile, or when the cursor is on the player's own tile (no heading -> the caller sends
-	// moving:false / holds). Called every frame from SendHeldMovement, below WASD in priority. Holding the
-	// button also clears any debug-injected/autopilot motion so the two input sources never fight.
+	// S64 hold-to-walk-toward-cursor (UO control). Returns the heading to hold while the RIGHT mouse button is
+	// down. The heading is derived from a CONTINUOUS world vector — the local player's smooth rendered position
+	// (the predictor's tweened sample, what the avatar is drawn at) toward the continuous cursor ground-plane
+	// hit point — NOT from the integer predicted tile and NOT from a tile-rounded cursor. CursorHeading applies
+	// a dead-zone (cursor on/near the player -> no heading, so the avatar stops instead of whipping) and octant
+	// hysteresis (don't flicker between adjacent octants on the boundary). Returns null when the button is up,
+	// before login, when there is no local render position yet, when the ground ray misses, OR when the cursor
+	// is inside the dead-zone (caller emits moving:false). Called every frame from SendHeldMovement, below WASD
+	// in priority. Holding the button also clears any debug-injected/autopilot motion so the two never fight.
 	private Direction8? CurrentMouseHeading()
 	{
 		if (!Input.IsMouseButtonPressed(MouseButton.Right))
@@ -343,13 +352,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return null;
 		}
 
-		if ((_client.PredictedLocalTile ?? _client.LocalTile) is not TileCoord from)
+		// The local player's CONTINUOUS rendered world position — the same predictor-tweened sample the avatar
+		// is drawn at and the camera follows (UpdateCamera reads it identically). NOT the integer predicted tile,
+		// so the heading origin no longer jumps a tile per step or shifts on reconcile.
+		if (!TryGetLocalRenderPosition(out var playerX, out var playerZ))
 		{
 			return null;
 		}
 
 		var screenPosition = GetViewport().GetMousePosition();
-		if (!TryPickGroundTile(screenPosition, out var cursorTile))
+		if (!TryPickGroundPoint(screenPosition, out var hit))
 		{
 			return null;
 		}
@@ -363,19 +375,53 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			StopAutopilot();
 		}
 
-		// Same tile as the player -> no heading; the caller emits moving:false (stop) for this frame.
-		return CursorHeading.FromTileDelta(from, cursorTile);
+		// World axes: +X = east, +Z = south (the tile grid's screen-down maps to world Z). The dead-zone holds
+		// the previous heading when the cursor sits on/near the player; hysteresis stops boundary flicker. The
+		// "last heading" we feed is what we are currently holding (_lastSentDirection while moving) so the
+		// stickiness is measured against the octant actually in effect.
+		var dx = hit.X - playerX;
+		var dy = hit.Z - playerZ;
+		return CursorHeading.FromWorldVector(
+			dx,
+			dy,
+			_lastSentMoving ? _lastSentDirection : (Direction8?)null,
+			MouseHeadingDeadZoneTiles,
+			MouseHeadingHysteresisDegrees);
 	}
 
-	// Projects the mouse position onto the y=0 ground plane (the tile plane) via the camera ray and
-	// rounds to the nearest tile. The orthographic camera looks down at the world from a fixed offset, so
-	// a ray/plane intersection is exact. Returns false only if the ray is parallel to / pointing away
-	// from the ground; bounds/walkability of the resulting tile are checked by the caller via the
-	// pathfinder. NOTE FOR VISUAL CHECK: pick accuracy depends on this projection — verify the
-	// tile the avatar walks to matches the tile under the cursor across the screen.
-	private bool TryPickGroundTile(Vector2 screenPosition, out TileCoord tile)
+	// The local player's continuous rendered world position (X = east, Z = south) from the per-frame render
+	// states — for the local entity this is the predictor's smooth tween (what the avatar is drawn at), exactly
+	// the position UpdateCamera focuses on. Returns false before the local entity has a render state this frame.
+	private bool TryGetLocalRenderPosition(out float x, out float z)
 	{
-		tile = default;
+		x = 0f;
+		z = 0f;
+		if (_client?.LocalNetworkId is not uint localNetworkId)
+		{
+			return false;
+		}
+
+		foreach (var state in _renderStates)
+		{
+			if (state.NetworkId == localNetworkId)
+			{
+				x = (float)state.Position.X;
+				z = (float)state.Position.Y;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	// Projects the mouse position onto the y=0 ground plane (the tile plane) via the camera ray, returning the
+	// CONTINUOUS hit point (NOT rounded to a tile) so S64 can build a smooth player->cursor heading vector. The
+	// orthographic camera looks down from a fixed offset, so the ray/plane intersection is exact. Returns false
+	// only if the ray is parallel to / pointing away from the ground. NOTE FOR VISUAL CHECK: pick accuracy
+	// depends on this projection — verify the avatar walks toward the world point under the cursor.
+	private bool TryPickGroundPoint(Vector2 screenPosition, out Vector3 hit)
+	{
+		hit = default;
 		if (_camera is null)
 		{
 			return false;
@@ -394,8 +440,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return false;
 		}
 
-		var hit = origin + (direction * distance);
-		tile = new TileCoord(Mathf.RoundToInt(hit.X), Mathf.RoundToInt(hit.Z));
+		hit = origin + (direction * distance);
 		return true;
 	}
 

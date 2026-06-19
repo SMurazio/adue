@@ -34,6 +34,87 @@ public static class CursorHeading
         return SectorToDirection[sector];
     }
 
+    // S64: the held heading from a CONTINUOUS world vector (player render position -> cursor hit point), with a
+    // dead-zone and octant hysteresis so it stays stable. This replaces the S56 FromTileDelta path, which
+    // quantised BOTH endpoints to integer tiles (origin = the integer predicted tile that jumps a tile per step
+    // and shifts on reconcile; cursor = a rounded tile that flickers octant on tiny moves near the player).
+    //
+    // dx/dy are CONTINUOUS world-plane deltas (+X=east, +Y=south), NOT tile counts. `lastHeading` is the
+    // currently-held octant (or null if none). Returns:
+    //   * null (no heading -> caller stops) when the vector magnitude is within `deadZoneTiles` — the cursor
+    //     sits on/near the player, so emit no octant rather than whipping a near-zero atan2 around. Returning
+    //     null (not lastHeading) lets the player STOP the avatar by parking the cursor on it, matching the prior
+    //     on-own-tile stop behaviour and avoiding overshoot oscillation. (This is the deliberate "stop" arm of
+    //     the spec's "hold previous / stop"; flip to `lastHeading` for a keep-walking-until-released feel.)
+    //   * otherwise the nearest-of-8 octant, BUT only switches away from `lastHeading` once the cursor crosses
+    //     the octant boundary by more than `hysteresisDegrees` — within that margin the previous octant is held,
+    //     killing the boundary flicker between two adjacent directions.
+    //
+    // Pure + allocation-free so the octant / dead-zone / hysteresis logic unit-tests headlessly.
+    public static Direction8? FromWorldVector(
+        double dx,
+        double dy,
+        Direction8? lastHeading,
+        double deadZoneTiles,
+        double hysteresisDegrees)
+    {
+        // Dead-zone: too close to the player to define a stable heading -> no heading (caller stops/holds-still).
+        var magnitude = Math.Sqrt((dx * dx) + (dy * dy));
+        if (magnitude < deadZoneTiles)
+        {
+            return null;
+        }
+
+        // Angle in the world plane (0 = east, +90° = south because +Y is down), normalised to [0, 360).
+        var degrees = Math.Atan2(dy, dx) * (180.0 / Math.PI);
+        if (degrees < 0)
+        {
+            degrees += 360.0;
+        }
+
+        var sector = ((int)Math.Round(degrees / 45.0) % 8 + 8) % 8;
+        var nearest = SectorToDirection[sector];
+
+        // Hysteresis: if we already hold an octant, only switch once the cursor is more than `hysteresisDegrees`
+        // past the boundary into the new octant. Each octant centre is sector*45°; the boundary toward the
+        // neighbour sits at ±22.5°. We require the angle to be `hysteresisDegrees` BEYOND that boundary (i.e.
+        // within 22.5° - hysteresis of the new centre) before committing, so a cursor parked on the boundary
+        // keeps the old heading instead of flickering.
+        if (lastHeading is { } held && held != nearest)
+        {
+            var lastSector = DirectionToSector(held);
+            var deltaToLast = AngularDistanceDegrees(degrees, lastSector * 45.0);
+            // Hold the previous octant while still within (22.5° + hysteresis) of its centre — i.e. the cursor
+            // has not yet moved a full half-sector PLUS the sticky margin away from where it was committed.
+            if (deltaToLast <= 22.5 + hysteresisDegrees)
+            {
+                return held;
+            }
+        }
+
+        return nearest;
+    }
+
+    // Smallest absolute angular distance (degrees) between two angles, accounting for wrap at 360°.
+    private static double AngularDistanceDegrees(double a, double b)
+    {
+        var diff = Math.Abs(a - b) % 360.0;
+        return diff > 180.0 ? 360.0 - diff : diff;
+    }
+
+    private static int DirectionToSector(Direction8 direction)
+    {
+        for (var i = 0; i < SectorToDirection.Length; i++)
+        {
+            if (SectorToDirection[i] == direction)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
     // sector 0 = east (0°), increasing clockwise in screen space (+Y down): 1=SE(45°), 2=S(90°), 3=SW(135°),
     // 4=W(180°), 5=NW(-135°/225°), 6=N(-90°/270°), 7=NE(-45°/315°).
     private static readonly Direction8[] SectorToDirection =
