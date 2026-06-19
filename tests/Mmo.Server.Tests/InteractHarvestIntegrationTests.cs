@@ -292,7 +292,15 @@ public sealed class InteractHarvestIntegrationTests
             var node2 = await ResolveSpawnedNodeAsync(second, placement);
             await WaitUntilAsync(() => second.LatestDepletedState(node2.NetworkId) == false, TimeSpan.FromSeconds(12), second);
             second.SendInteract(node2.NetworkId);
-            await WaitUntilAsync(() => second.InventoryUpdates.Any(u => u.ChangedStacks.Any(s => s.TemplateKey == "wood")), second);
+            // With S49, the takeover session also receives a login snapshot carrying the handed-off
+            // wood:1, so we cannot stop at the first wood update — wait for the post-harvest total to
+            // actually reach 2 (the handed-off 1 + the re-harvested 1).
+            await WaitUntilAsync(
+                () => second.InventoryUpdates
+                    .SelectMany(u => u.ChangedStacks)
+                    .Where(s => s.TemplateKey == "wood")
+                    .Any(s => s.Quantity == 2),
+                second);
 
             var woodTotal = second.InventoryUpdates
                 .SelectMany(u => u.ChangedStacks)
@@ -300,6 +308,96 @@ public sealed class InteractHarvestIntegrationTests
                 .Select(s => s.Quantity)
                 .Max();
             Assert.Equal(2, woodTotal);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task LoginSendsPersistedInventorySnapshotBeforeAnyHarvest()
+    {
+        // S49: a character with persisted items must receive a full InventoryUpdate snapshot on login
+        // (fresh-login path), so the client panel reflects the persisted contents immediately — without
+        // any harvest delta. Pre-seed two stacks via the production persistence path, then assert they
+        // arrive on the InventoryUpdate the client gets at login.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString);
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var character = await repository.LoadOrCreateAsync("Stocked", "Stocked", CancellationToken.None);
+        await repository.SaveItemsAsync(
+            character.CharacterId,
+            [new ItemStack("wood", 12), new ItemStack("stone", 5)],
+            CancellationToken.None);
+
+        var server = new GameServer(options, repository);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var client = new IntegrationClient("Stocked");
+            client.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
+
+            // The inventory snapshot must arrive at login, before the client has issued any interact.
+            await WaitUntilAsync(() => client.InventoryUpdates.Any(), client);
+            Assert.Empty(client.InteractResults);
+
+            var snapshot = client.InventoryUpdates.First();
+            Assert.Contains(snapshot.ChangedStacks, s => s.TemplateKey == "wood" && s.Quantity == 12);
+            Assert.Contains(snapshot.ChangedStacks, s => s.TemplateKey == "stone" && s.Quantity == 5);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task TakeoverLoginSendsTheHandedOffInventorySnapshot()
+    {
+        // S49 (takeover path): when a second session takes over an existing character, it must also receive
+        // a full inventory snapshot on login. Pre-seed items, log a first session in, then take it over and
+        // assert the taking-over session is sent the inventory the entity ends up with — before any harvest.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString);
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var character = await repository.LoadOrCreateAsync("Takeover", "Takeover", CancellationToken.None);
+        await repository.SaveItemsAsync(
+            character.CharacterId,
+            [new ItemStack("wood", 7)],
+            CancellationToken.None);
+
+        var server = new GameServer(options, repository);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var first = new IntegrationClient("Takeover");
+            first.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => first.IsLoggedIn && first.OwnNetworkId != 0, first);
+            await WaitUntilAsync(() => first.InventoryUpdates.Any(), first);
+
+            using var second = new IntegrationClient("Takeover");
+            second.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(
+                () => second.IsLoggedIn && second.OwnNetworkId != 0 && second.CharacterId == first.CharacterId,
+                second,
+                first);
+
+            // The taking-over session receives the inventory snapshot on login, no harvest involved.
+            await WaitUntilAsync(() => second.InventoryUpdates.Any(), second, first);
+            Assert.Empty(second.InteractResults);
+            Assert.Contains(second.InventoryUpdates.First().ChangedStacks, s => s.TemplateKey == "wood" && s.Quantity == 7);
         }
         finally
         {

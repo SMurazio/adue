@@ -369,6 +369,17 @@ public sealed class GameServer
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
                         TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.Tile, ""), DeliveryMethod.ReliableOrdered);
                         TrySend(peer, CreateZoneInfoMessage(), DeliveryMethod.ReliableOrdered);
+                        // Send a full inventory snapshot so the client panel reflects the persisted (or
+                        // handed-off, on takeover) contents immediately — otherwise it stays empty until the
+                        // next harvest delta. Covers both login paths: `inventory` is whatever the entity was
+                        // spawned with. Snapshot() yields only non-empty stacks; skip the send entirely when
+                        // the inventory is empty — a fresh character's panel is already empty, so an empty
+                        // update is a pointless packet.
+                        var snapshot = inventory.Snapshot();
+                        if (snapshot.Count > 0)
+                        {
+                            SendInventoryUpdate(current, snapshot);
+                        }
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
