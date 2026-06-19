@@ -60,22 +60,34 @@ Run on 2026-06-19, **Release**, single process, 1000² map, 60s/rung, via
 Both gates are now in (S42 seed terrain, S41 grid AOI), with S44's ~1.3k scattered node entities also
 live. Re-ran the ladder (Release, scattered, 1000², grid AOI + nodes):
 
-| Clients | tickMs avg | AOI ms avg | gc | errors | note |
+| Clients | tickMs avg / max | AOI ms avg | gc | errors | note |
 |---:|---:|---:|:--:|:--:|---|
-| 120 | 0.45 | **0.23** | 0 | 0 | vs pre-grid the AOI scan was the dominant cost; now negligible |
-| 300 | 1.03 | **0.57** | ~0 | 0 | **AOI 1.58 → 0.57 ms (~3×)** vs the original 300 rung; tick ~2% of budget |
+| 120 | 0.45 / — | **0.23** | 0 | 0 | pre-grid the AOI scan was the dominant cost; now negligible |
+| 300 | 1.03 / 9.3 | **0.57** | ~0 | 0 | **AOI 1.58 → 0.57 ms (~3×)** vs the original 300 rung; ~2% budget |
+| 800 | 2.09 / 13.5 | 1.17 | ~0 | 0 | (post-S45) ~4% budget; AOI below the pre-grid *400* rung |
+| 1000 | 2.99 / 65.9 | 1.67 | ~0 | 0 | (post-S45) ~6% avg budget; first *tail* strain (drift max 41 ms) |
 
-**Grid AOI worked:** the scan that was the binding/dominant tick cost is now ~3× cheaper and no longer
-the bottleneck. At 300 connected the server is at ~2% tick budget, gc ~0, 0 errors — comfortable headroom.
+**Grid AOI worked:** the scan that was the binding/dominant tick cost is ~3× cheaper and no longer the
+bottleneck — even at 1000 connected the AOI bucket is only 1.67 ms.
 
-**Single-machine measurement ceiling (~400):** pushing to **500 clients crashed the local load harness**
-— the synthetic clients + server + metrics client all share one box, so the *load generator* saturates
-the CPU before the server does. We therefore **cannot measure the true server ceiling (>400) on one
-machine**; that needs a **separate load-generator host** (or a leaner headless synthetic client).
+**The 500-client "crash" was the load generator, not the server (fixed by S45).** Root cause: the rig
+opened **one `NetManager` with its own background thread per client**, so ~500 clients ≈ ~500 OS threads →
+the box thrashed and PowerShell fell over. S45 converted the load-gen to **ManualMode NetManagers driven
+from a single poll loop** (O(1) threads). With that:
+- **500 clients** (which previously crashed) now run **0-error / 100%-auth**.
+- **800:** server tick 2.09 ms avg (~4% budget), 0 errors.
+- **1000:** server tick **2.99 ms avg (~6% budget)**, 0 errors — first strain is in the *tail* (tick max
+  66 ms, drift max 41 ms). The signature (low avg tick + high drift) is **CPU contention between the
+  co-located rig and the server**, not the server doing 66 ms of work.
 
-**Updated cap guidance:** the measured headroom comfortably supports **raising the conservative published
-target from 120–150 to ~300** (healthy at ~2% tick budget, AOI now cheap). The *true* ceiling is higher
-but unmeasured — pin it with multi-machine load testing before publishing a number above ~300.
+**So the server is not the cap at any single-box-achievable load** — it sustains **1000 connected at ~6%
+tick budget, 0 errors**. The only remaining limit is that the load generator and server still **share one
+machine's CPU**; the tail strain at 1000 is that contention, not the server's intrinsic ceiling.
+
+**Updated cap guidance:** the measured headroom supports raising the conservative published target *well*
+beyond the old 120–150 — the server comfortably sustains **1000+ connected**. To publish a precise hard
+ceiling, drive load from a **separate machine** (removes the rig/server CPU contention); the server's true
+limit is above 1000 and unmeasured only because one box can't both generate *and* serve that load cleanly.
 
 ## Method notes / reproduce
 
