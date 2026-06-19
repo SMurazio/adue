@@ -30,6 +30,21 @@ target architecture); this is just Stage 1.
    input/camera/HUD for now (Stage 4 splits those). Move the per-archetype asset consts (rock paths/scale/
    offset, player scale, label sizes) to live with their visual class for now (the `VisualCatalog` is Stage 3).
 
+## Build it pool-ready + forward-compatible (from the design's cross-cutting pass)
+- **`EntityVisual` lifecycle is `Acquire / Reset / Release`**, not just create/free. `EntityRenderer` keeps
+  a small **pool per archetype** and reuses a released visual instead of `QueueFree` (AOI churn is constant;
+  re-instancing skinned GLBs thrashes). A `Reset(state)` returns a visual to a clean reusable state.
+- **Factory is forward-compatible**: an unknown type / a failed asset load → fall back to `BoxVisual` +
+  log once, never crash (already the player/rock posture — keep it).
+- **`SpriteVisual`** handles its own depth/alpha/billboard explicitly (the 2.5D house) — we hit label
+  z-fighting before (`NoDepthTest`); make the sprite's sorting deliberate, with tunable consts.
+- **Presentation-only**: visuals READ the computed `EntityRenderState` (position/facing/depleted) and hold
+  NO game logic — interpolation/prediction stay in `Mmo.Client.Core`. Don't move any Core logic into Godot.
+- Put the new files under **`src/Mmo.Client.Godot/Visuals/`** (one responsibility per file) per the design's
+  folder layout — not back into `MmoClientRoot.cs`.
+- Add a **`Reset()` seam** on `EntityRenderer` (release all visuals) for a future zone change — wire it
+  even if unused now.
+
 ## Constraints
 - **Behavior-preserving**: players animate + turn as today, rocks render varied + grounded + hide when
   depleted, labels above heads, mouse-wheel zoom, harvest, click/keyboard movement, the F3/F4 panels —

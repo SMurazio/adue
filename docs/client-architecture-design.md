@@ -74,6 +74,56 @@ abstracts "what model/scene for this archetype," each visual can *later* be back
 (loaded as a `PackedScene`) without touching call sites — incremental, not a rewrite. This is where
 editor-authored art (and an artist workflow) plugs in.
 
+## Cross-cutting concerns (the "did we think of everything" pass)
+Easy to forget, expensive to retrofit — so the structure accounts for them up front even where the
+implementation lands later:
+
+- **Visual pooling / reuse.** Entities enter/leave AOI constantly, and instancing a skinned GLB per spawn
+  is costly (GC + setup). `EntityRenderer` keeps a small **pool per archetype**: a despawned visual is
+  reset and parked for reuse, not `QueueFree`d, so AOI-boundary churn doesn't thrash. The `EntityVisual`
+  lifecycle is therefore **`Acquire / Reset / Release`**, not just create/free.
+- **Presentation-only visuals (strict layering).** A visual NEVER holds game logic or owns simulation
+  state. `Mmo.Client.Core` (`MmoClient`, interpolator, predictor) owns all state and computes the per-frame
+  `EntityRenderState`; a visual only *reads* it. This keeps Godot swappable and the logic testable, and is
+  why prediction/interpolation stay in Core.
+- **Extensible entity-state contract.** `EntityRenderState` is what visuals read, and it WILL grow (health,
+  buffs, selection/highlight, equipment, one-shot anim triggers like gather/attack, name colour). Keep it
+  an **additive** record so a new field never breaks a visual; visuals read only what they need. (Some
+  needs the server to send it — a Stage-2+ protocol concern.)
+- **Transient / effect visuals (non-entity).** Harvest feedback, hit sparks, telegraphs, floating numbers,
+  particles — world visuals with NO `NetworkId`. Plan an **`EffectsLayer`** (one-shot, self-freeing
+  visuals) separate from the entity renderer. Not built now; the seam is reserved.
+- **2.5D sprite/3D mixing.** `Sprite3D` billboards (the house) mixed with 3D models need explicit handling
+  of depth sorting, transparency/alpha and render order (we already hit this with labels → `NoDepthTest`).
+  `SpriteVisual` defines its sorting/alpha behaviour; the catalog carries per-sprite billboard / Y-anchor /
+  alpha settings.
+- **Forward-compatible dispatch.** The factory handles an **unknown `VisualArchetype`** (new content /
+  version skew) by falling back to `BoxVisual` + logging — never crash. Same for a missing/failed asset
+  load (already the player/rock posture).
+- **Centralised coordinate space.** Tile↔world conversion + the 2.5D iso projection live in ONE helper
+  (`WorldSpace`), not scattered, so the projection is consistent and tweakable in one place.
+- **Idiomatic, rebindable input.** Stage-4 input uses Godot's **InputMap** (named actions: `move_up`,
+  `harvest`, `toggle_debug`, …) defined in `project.godot`, not hardcoded keycodes — rebindable and clean.
+- **Zone/scene resettability.** Anticipate multiple maps: `EntityRenderer` + the world view **tear down and
+  rebuild** on a zone change (release all visuals, clear terrain) without leaking — a `Reset()` seam.
+- **HUD as Control classes.** UI follows the same rule: each panel a `Control` class (later a `.tscn`),
+  bound read-only to Core data (inventory ← `MmoClient.Inventory`). The S60 `TuningPanel` extracts first.
+
+## Folder / namespace layout (you asked about file management)
+```
+src/Mmo.Client.Godot/
+  MmoClientRoot.cs                 // thin composition root (shrinks each stage)
+  Visuals/                         // EntityVisual base + subclasses + factory + (Stage 3) VisualCatalog
+    EntityVisual.cs PlayerVisual.cs ModelVisual.cs SpriteVisual.cs BoxVisual.cs
+    EntityVisualFactory.cs EntityRenderer.cs
+  Camera/  CameraController.cs
+  Input/   InputController.cs              // + Godot InputMap actions
+  Hud/     HudOverlay.cs TuningPanel.cs InventoryPanel.cs ...
+  World/   WorldSpace.cs EffectsLayer.cs   // tile<->world, transient effects
+  content/ resources/ props/ sprites/ characters/   // assets (already there)
+```
+One responsibility per file, grouped by concern — the opposite of today's single 1700-line file.
+
 ## Staging (behavior-preserving; each stage ships, is reviewed, stays green)
 - **Stage 1 — entity-visual hierarchy + factory + `EntityRenderer`.** Lift all entity rendering out of
   `MmoClientRoot` into `EntityVisual` subclasses + an `EntityRenderer`, preserving current behavior (and the
