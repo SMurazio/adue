@@ -110,17 +110,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	//             monolith; trimmed to 0.38 so it hovers slightly off the ground on purpose)
 	//   engraved  H 1.91, Ymin −0.96 → scale 0.70 ≈ 1.34 tile tall (the "L"/large one, intentionally biggest);
 	//             Yoff = 0.96 × 0.70 ≈ 0.67
+	// One exported scale applied to ALL rock models — tweak live in the Godot inspector. Each model's
+	// *GroundOffset is its base offset (-Ymin) at scale 1; it's multiplied by RockModelScale so the rock
+	// stays sitting on the floor at any scale.
+	[Export] public float RockModelScale { get; set; } = 4f;
 	private const string RockMossPath = "res://content/resources/M_Rock_Moss_Overgrowth.glb";
-	private const float RockMossScale = 1.0f;
-	private const float RockMossYOffset = 0.32f;
-
+	private const float RockMossGroundOffset = 0.32f;
 	private const string RockFloatingPath = "res://content/resources/M_Rock_Floating_Monolith.glb";
-	private const float RockFloatingScale = 1.0f;
-	private const float RockFloatingYOffset = 0.49f;
-
+	private const float RockFloatingGroundOffset = 0.49f;
 	private const string RockEngravedPath = "res://content/resources/M_Rock_Engraved_Monolith_L.glb";
-	private const float RockEngravedScale = 1.0f;
-	private const float RockEngravedYOffset = 0.96f;
+	private const float RockEngravedGroundOffset = 0.96f;
 
 	// Name label height above a rock wrapper. The tallest variant (engraved) reaches ~1.34 tiles, so park the
 	// label a touch above that so it clears every variant. TUNABLE.
@@ -883,17 +882,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return null;
 		}
 
-		var (scale, yOffset) = variant switch
+		var groundOffset = variant switch
 		{
-			0 => (RockMossScale, RockMossYOffset),
-			1 => (RockFloatingScale, RockFloatingYOffset),
-			_ => (RockEngravedScale, RockEngravedYOffset)
+			0 => RockMossGroundOffset,
+			1 => RockFloatingGroundOffset,
+			_ => RockEngravedGroundOffset
 		};
 
 		var wrapper = new Node3D { Name = $"Entity_{state.NetworkId}" };
 		model.Name = "Model";
-		model.Scale = new Vector3(scale, scale, scale);
-		model.Position = new Vector3(0f, yOffset, 0f);
+		model.Scale = new Vector3(RockModelScale, RockModelScale, RockModelScale);
+		// Ground offset scales with the model so the base stays on the floor at any RockModelScale.
+		model.Position = new Vector3(0f, groundOffset * RockModelScale, 0f);
 		// Deterministic per-node spin around up so rocks don't all face the same way (decorrelated from the
 		// variant by dividing out the % 3).
 		model.RotationDegrees = new Vector3(0f, (hash / 3u) % 360u, 0f);
