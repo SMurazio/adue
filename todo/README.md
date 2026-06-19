@@ -20,9 +20,10 @@ through them and removes them as they land.
 
 `S` before `N` is the baseline, but several `S` items are live at once, so the active order is:
 
-1. **Optimization / scaling track (do first):** `S36a` chunked terrain (login bandwidth) → `S41`
-   grid/spatial-hash AOI (the AOI-scan cost) → `S36b` Godot per-chunk render+cull. These are the
-   measured scaling gates from `docs/capacity-ladder-study.md`.
+1. **Optimization / scaling track (do first):** `S42` seed-based terrain (ship the map, not the tiles —
+   replaced the abandoned S36a streaming approach) → `S41` grid/spatial-hash AOI (the AOI-scan cost) →
+   `S36b` Godot per-chunk render+cull. These are the measured scaling gates from
+   `docs/capacity-ladder-study.md` + the 2026-06-19 terrain pivot.
 2. **Gameplay UI:** `S39` gather client UI (makes the S37/S38 loop playable). Deprioritized behind the
    optimization track per direction.
 3. **Feel-polish (need a human at the machine):** `N21` MoveStep send-rate, `S28` VSync/stutter.

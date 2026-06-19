@@ -1,8 +1,23 @@
 # Terrain & Map Design — chunked world, tile types, authoring
 
-Status: design note / decision record. Captures the model behind chunked terrain (S36) and the open
-decisions for "more interesting maps." Principle: build the **chunk seam** now (reversible, extensible);
-defer tile-types and the authoring pipeline until needed — don't build it all up front.
+Status: design note / decision record.
+
+> **DECISION (2026-06-19): static terrain is CONTENT, not state — ship it with the client; stream only
+> DYNAMIC terrain.** The "Current state" problem analysis below stands, but the **network-streaming
+> solution (the chunk model / old S36 / S36a) is superseded.** Static terrain does NOT go on the wire:
+> the map is procedural, so we **ship the seed** (server sends `dims + seed + genVersion + hash`; client
+> regenerates the identical map locally via a shared deterministic generator; server keeps its
+> authoritative copy and validates a hash). For *authored* maps later, ship the map **file** with the
+> client + a version/hash — same wire shape. Login terrain cost becomes ~constant regardless of map size
+> or obstacle density. Only **dynamic** terrain (destructible/doors/player-built) streams, as AOI-gated
+> state deltas. This is **S42**. The chunk model still applies to **client-side** loading/render culling
+> (S36b) and to a future map-file format — but not to streaming static tiles. The abandoned chunked-
+> streaming implementation is preserved on branch `wip/s36a-chunked-streaming` (salvage the Godot
+> per-chunk render + RLE if useful).
+
+Captures the model behind terrain and the open decisions for "more interesting maps." Principle: build
+the **chunk seam** for client-side render/load now (reversible, extensible); defer tile-types and the
+authoring pipeline until needed — don't build it all up front.
 
 ## Current state (and why it doesn't scale to interesting maps)
 

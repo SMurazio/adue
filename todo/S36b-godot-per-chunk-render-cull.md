@@ -1,26 +1,32 @@
 # S36b — Godot per-chunk terrain render + culling
 
 Severity: should-fix for big/dense worlds. **Split from the original S36** (Orchestrator decision).
-**Depends on S36a** (chunked terrain on the wire). See `docs/terrain-and-map-design.md`.
+**Depends on S42** (seed-based terrain — the client now generates the map locally; this renders it).
+See `docs/terrain-and-map-design.md`.
+
+> Re-pointed after the 2026-06-19 terrain pivot: the source of the map is no longer streamed
+> `TerrainChunk`s (that approach was abandoned — see `wip/s36a-chunked-streaming`) but the **locally
+> generated** map from S42. This task is unchanged in spirit — subdivide that local map into render
+> chunks and cull by view. Salvage the Godot per-chunk render from the wip branch if useful.
 
 ## Why
 
-Even after S36a bounds terrain *bandwidth* by AOI, the Godot client still renders walls as **one global
-wall MultiMesh with no culling**. With dense interior maps that is a ~hundreds-of-K-instance mesh
-(~millions of tris/frame, mostly off-screen). Rendered primitives must be bounded by **view**, not by
-map size.
+Even with terrain shipped cheaply (S42), the Godot client renders walls as **one global wall MultiMesh
+with no culling**. With dense interior maps that is a ~hundreds-of-K-instance mesh (~millions of
+tris/frame, mostly off-screen). Rendered primitives must be bounded by **view**, not by map size.
 
 ## Scope (THIS task = Godot client rendering only)
 
 Replace the single global wall MultiMesh with **per-chunk rendering** that culls and frees independently.
-No protocol/server changes (S36a already streams chunks).
+No protocol/server changes — the map is already available locally (S42); this just subdivides it for
+rendering.
 
-1. **A dictionary of loaded chunks** keyed by `(chunkX, chunkY)`; each chunk owns **its own wall
-   MultiMesh / node**, built from that chunk's `tileData` (received via S36a's `TerrainChunk`).
+1. **A dictionary of render chunks** keyed by `(chunkX, chunkY)`, each a fixed tile block of the
+   locally-generated map; each chunk owns **its own wall MultiMesh / node**, built from that chunk's
+   tiles.
 2. **Cull per chunk:** a per-chunk node lets Godot frustum-cull automatically; additionally distance-cull
    chunks beyond the view/AOI (hide or free). Off-view chunks must not contribute draw primitives.
-3. **Free chunks** that leave range (and rebuild on re-entry from cached/`re-sent` chunk data). If S36a
-   deferred server-side chunk *unload*, client-side hide/free by distance is still required here.
+3. **Free chunks** that leave range and rebuild on re-entry (re-derive from the local map — no refetch).
 4. Remove the old single global wall MultiMesh path.
 
 ## Files
@@ -39,6 +45,6 @@ No protocol/server changes (S36a already streams chunks).
   reviews.
 
 ## Notes
-- This is the client-perf half; verification is partly **visual** (Godot), so it is isolated from S36a's
-  headlessly-testable wire/bandwidth half on purpose.
+- This is the client-perf half; verification is partly **visual** (Godot), so it is isolated from S42's
+  headlessly-testable seed/bandwidth half on purpose.
 - Watch chunk node churn (don't thrash create/free at a boundary — add hysteresis like the AOI spawn path).
