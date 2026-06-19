@@ -205,6 +205,7 @@ public sealed record ServerOptions(
         {
             "distributed" => SpawnDistribution.Distributed,
             "clustered" or "cluster" => SpawnDistribution.Clustered,
+            "scattered" or "scatter" => SpawnDistribution.Scattered,
             _ => fallback
         };
     }

@@ -38,6 +38,19 @@ public sealed class ServerOptionsTests
     }
 
     [Fact]
+    public void FromEnvironmentReadsScatteredSpawnDistribution()
+    {
+        using var _ = new EnvironmentScope(new Dictionary<string, string?>
+        {
+            ["MMO_SPAWN_DISTRIBUTION"] = "scattered"
+        });
+
+        var options = ServerOptions.FromEnvironment();
+
+        Assert.Equal(SpawnDistribution.Scattered, options.SpawnDistribution);
+    }
+
+    [Fact]
     public void FromEnvironmentUsesProductionSizedDefaults()
     {
         using var _ = new EnvironmentScope(new Dictionary<string, string?>());

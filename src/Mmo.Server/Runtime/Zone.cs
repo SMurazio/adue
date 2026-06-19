@@ -129,12 +129,56 @@ public sealed class Zone
             return [center];
         }
 
+        if (spawnDistribution == SpawnDistribution.Scattered)
+        {
+            return CreateScatteredSpawnTiles(tileGrid, center);
+        }
+
         var spawnTiles = new List<TileCoord>();
         const int spreadTiles = 32;
         const int spacingTiles = 4;
         for (var y = center.Y - spreadTiles; y <= center.Y + spreadTiles; y += spacingTiles)
         {
             for (var x = center.X - spreadTiles; x <= center.X + spreadTiles; x += spacingTiles)
+            {
+                var tile = new TileCoord(x, y);
+                if (tileGrid.IsWalkable(tile))
+                {
+                    spawnTiles.Add(tile);
+                }
+            }
+        }
+
+        if (spawnTiles.Count == 0)
+        {
+            spawnTiles.Add(center);
+        }
+
+        return spawnTiles;
+    }
+
+    // Distributes spawn tiles in an even grid spanning the whole walkable map, so clients spread
+    // across the world (and AOI actually filters) instead of crowding the fixed central patch that
+    // Distributed seeds. Spacing scales with map size so the spawn count stays roughly constant
+    // (~16 points per axis) regardless of how large the world is. Blocked tiles are skipped.
+    private static IReadOnlyList<TileCoord> CreateScatteredSpawnTiles(TileGrid tileGrid, TileCoord center)
+    {
+        // The outermost ring (x/y == 0 or width/height - 1) is always blocked border, so inset by 1.
+        const int margin = 1;
+        const int targetPointsPerAxis = 16;
+
+        var minX = margin;
+        var maxX = tileGrid.Width - 1 - margin;
+        var minY = margin;
+        var maxY = tileGrid.Height - 1 - margin;
+
+        var spacingX = Math.Max(1, (maxX - minX) / targetPointsPerAxis);
+        var spacingY = Math.Max(1, (maxY - minY) / targetPointsPerAxis);
+
+        var spawnTiles = new List<TileCoord>();
+        for (var y = minY; y <= maxY; y += spacingY)
+        {
+            for (var x = minX; x <= maxX; x += spacingX)
             {
                 var tile = new TileCoord(x, y);
                 if (tileGrid.IsWalkable(tile))

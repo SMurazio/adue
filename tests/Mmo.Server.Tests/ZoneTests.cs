@@ -69,6 +69,42 @@ public sealed class ZoneTests
     }
 
     [Fact]
+    public void CreateDefaultScatteredSpreadsSpawnsAcrossWholeMap()
+    {
+        const int size = 1000;
+        var zone = Zone.CreateDefault(size, size, SpawnDistribution.Scattered);
+
+        Assert.True(zone.SpawnTiles.Count > 1);
+        Assert.All(zone.SpawnTiles, tile => Assert.True(zone.IsWalkable(tile)));
+
+        var minX = zone.SpawnTiles.Min(tile => tile.X);
+        var maxX = zone.SpawnTiles.Max(tile => tile.X);
+        var minY = zone.SpawnTiles.Min(tile => tile.Y);
+        var maxY = zone.SpawnTiles.Max(tile => tile.Y);
+
+        // Spawns must reach near both edges of the map, not be confined to the central +/-32 patch
+        // that Distributed seeds (which on a 1000-wide map would sit around x in [480, 544]).
+        var center = size / 2;
+        Assert.True(minX < center - 100, $"minX {minX} should be far left of center {center}");
+        Assert.True(maxX > center + 100, $"maxX {maxX} should be far right of center {center}");
+        Assert.True(minY < center - 100, $"minY {minY} should be far above center {center}");
+        Assert.True(maxY > center + 100, $"maxY {maxY} should be far below center {center}");
+
+        // And they must stay inside the walkable interior (the outer border ring is blocked).
+        Assert.True(minX >= 1 && maxX <= size - 2);
+        Assert.True(minY >= 1 && maxY <= size - 2);
+    }
+
+    [Fact]
+    public void CreateDefaultScatteredSkipsBlockedTiles()
+    {
+        var zone = Zone.CreateDefault(256, 256, SpawnDistribution.Scattered);
+
+        Assert.NotEmpty(zone.BlockedTiles);
+        Assert.All(zone.SpawnTiles, tile => Assert.DoesNotContain(tile, zone.BlockedTiles));
+    }
+
+    [Fact]
     public void ResolvePlayerSpawnTileDistributesLegacyDefaultTile()
     {
         var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Distributed);
