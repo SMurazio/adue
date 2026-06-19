@@ -18,3 +18,11 @@ hand-rolled. Wrong call — bypassed trusted tooling and tripped Defender.
 needs a capability the scripts lack (Release mode, server log teed to a file), extend the reviewed
 script instead of improvising. If the only path looks like the forbidden pattern, stop and raise it.
 Related: [[prefer-scripts-over-mcp]].
+
+**Standing constraint (reaffirmed 2026-06-19):** this is a **company-managed Windows machine** — the
+user set Defender-avoidance as a *strict* rule, not a guideline. It binds the Orchestrator's own
+shell too, and every implementer subagent prompt must carry it verbatim. When the Orchestrator
+delegates work, implementer agents run in the background under accept-edits permission, but this
+safe-execution rule overrides that autonomy: no hidden/bypass/PID-kill commands, ever. For driving or
+debugging the client there is a connected `mmo-client-control` MCP (tools `mcp__mmo-client-control__*`)
+— prefer it over hand-rolled client launchers for test/debug.
