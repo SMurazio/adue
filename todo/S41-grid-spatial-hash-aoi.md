@@ -1,15 +1,20 @@
 # S41 — Grid / spatial-hash AOI (replace the naive O(N) per-client interest scan)
 
-Severity: should-fix (scaling). The measured optimization trigger. **Gate #2 for raising the per-channel
-cap** (after S36a). See `docs/capacity-ladder-study.md` (S40) and `docs/feature-roadmap.md` Phase 7.
+Severity: should-fix (scaling) — **now warranted, not just preventative** (see the S44 data below). The
+measured optimization trigger. See `docs/capacity-ladder-study.md` (S40) and `docs/feature-roadmap.md`
+Phase 7.
 
 ## Why (measured)
 
 S40's capacity ladder showed the **AOI bucket is the only per-tick cost that grows** with population:
-`budgetMs aoi avg` = 0.5 → 1.58 → 2.03 ms across 120 → 300 → 400 connected (Release, scattered). Server
-tick, GC, and per-client bandwidth are all comfortable; the naive **per-client × all-entities distance
-scan** is what will bind first at higher scale. This is exactly the documented Phase 7 trigger ("move to
-a grid or spatial hash after entity counts make naive per-client distance checks measurable") — now met.
+`budgetMs aoi avg` = 0.5 → 1.58 → 2.03 ms across 120 → 300 → 400 connected (Release, scattered). The
+naive **per-client × all-entities distance scan** scales with the **entity count**, not just players.
+
+**Reinforced by S44 (2026-06-19):** world-scattering ~1.3k resource-node entities pushed `aoi avg` from
+**0.14 ms → 1.38 ms at only 120 clients** (Release, 1000²) — AOI became the **dominant tick cost**
+(tickMs 0.29 → 1.59). Adding *content* entities (nodes now, NPCs/objects later) drives this as hard as
+adding players, so the naive scan is no longer a future concern — it's the current bottleneck. gc still
+0 and 1.59 ms is well within the 50 ms budget, but this is the thing to fix next on the scaling track.
 
 ## What
 
