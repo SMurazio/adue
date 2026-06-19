@@ -37,6 +37,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private Node3D? _entityRoot;
     private Camera3D? _camera;
     private Label? _statusLabel;
+    private PanelContainer? _metricsPanel;
     private Label? _metricsLabel;
     private Label? _chatLabel;
     private LineEdit? _chatInput;
@@ -75,7 +76,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private int _lastGc2;
     private bool _zoneBuilt;
     private bool _sentStartupChat;
-    private bool _perfHudVisible;
+    // One state for the whole dev/monitoring HUD (perf panel + server-metrics panel + status-panel
+    // diagnostics). Hidden by default so the launch screen is clean; F3 (and the debug-control
+    // `client_toggle_perf`) flips the entire set together.
+    private bool _debugOverlayVisible;
 
     // Debug control channel (T2). Null unless MMO_DEBUG_CONTROL_PORT is set; absent => zero behavior change.
     private DebugControlChannel? _controlChannel;
@@ -204,7 +208,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
         if (key.Keycode == Key.F3)
         {
-            TogglePerfHud();
+            ToggleDebugOverlay();
             GetViewport().SetInputAsHandled();
             return;
         }
@@ -319,6 +323,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
         var metricsRows = CreatePanelVBox(metricsPanel);
         _metricsLabel = CreateOverlayLabel("Metrics", 13);
         metricsRows.AddChild(_metricsLabel);
+        _metricsPanel = metricsPanel;
 
         var chatPanel = CreateOverlayPanel("ChatPanel", Vector2.Zero, new Vector2(760, 164));
         chatPanel.AnchorTop = 1f;
@@ -391,7 +396,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
         _chatInput.TextSubmitted += OnChatSubmitted;
         inputMargin.AddChild(_chatInput);
 
+        // Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
+        // status panel stays visible but shows only a minimal always-on line until the overlay is on.
         _perfPanel.Visible = false;
+        metricsPanel.Visible = false;
 
         layer.AddChild(statusPanel);
         layer.AddChild(metricsPanel);
@@ -616,18 +624,29 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
         if (_statusLabel is not null)
         {
-            var localTile = _client.LocalTile?.ToString() ?? "(unknown)";
-            var server = _client.Server is null
-                ? "server: pending"
-                : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
-            var movementDebug = _client.DebugMovementEnabled
-                ? "\n" + FormatMovementDebug(_client.MovementDebug)
-                : "";
-            SetTextIfChanged(_statusLabel,
-                $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
-                $"{server}\n" +
-                "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F3 toggles perf." +
-                movementDebug);
+            if (_debugOverlayVisible)
+            {
+                // Full diagnostics — only while the debug/monitoring HUD is on.
+                var localTile = _client.LocalTile?.ToString() ?? "(unknown)";
+                var server = _client.Server is null
+                    ? "server: pending"
+                    : $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
+                var movementDebug = _client.DebugMovementEnabled
+                    ? "\n" + FormatMovementDebug(_client.MovementDebug)
+                    : "";
+                SetTextIfChanged(_statusLabel,
+                    $"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
+                    $"{server}\n" +
+                    "WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F3 toggles the debug HUD." +
+                    movementDebug);
+            }
+            else
+            {
+                // Clean default: one minimal line — who you are, connection state, and the key hints.
+                SetTextIfChanged(_statusLabel,
+                    $"{PlayerName}  {_client.State}\n" +
+                    "WASD to move. Enter/T to chat. E to harvest. F3 for the debug HUD.");
+            }
         }
 
         if (_metricsLabel is not null)
@@ -718,20 +737,30 @@ public partial class MmoClientRoot : Node3D, IControlHost
         };
     }
 
-    private void TogglePerfHud()
+    // F3 / client_toggle_perf: flips the whole dev/monitoring HUD (perf panel + server-metrics panel +
+    // status-panel diagnostics) as one unit. Hidden by default for a clean launch screen.
+    private void ToggleDebugOverlay()
     {
-        _perfHudVisible = !_perfHudVisible;
+        _debugOverlayVisible = !_debugOverlayVisible;
         if (_perfPanel is not null)
         {
-            _perfPanel.Visible = _perfHudVisible;
+            _perfPanel.Visible = _debugOverlayVisible;
         }
 
+        if (_metricsPanel is not null)
+        {
+            _metricsPanel.Visible = _debugOverlayVisible;
+        }
+
+        // Force the next overlay pass to repaint the perf HUD and the status panel immediately so the
+        // toggle feels instant instead of waiting up to ~0.1s for the next throttle window.
         _nextPerfHudAt = 0;
+        _nextOverlayAt = 0;
     }
 
     private void UpdatePerfHud(TimeSpan now)
     {
-        if (!_perfHudVisible || _perfLabel is null)
+        if (!_debugOverlayVisible || _perfLabel is null)
         {
             return;
         }
@@ -913,7 +942,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
     void IControlHost.TogglePerfHud()
     {
-        TogglePerfHud();
+        // The wire-facing name stays TogglePerfHud (debug-control protocol / client_toggle_perf), but it
+        // now flips the whole unified debug overlay, matching F3.
+        ToggleDebugOverlay();
     }
 
     void IControlHost.ToggleFullscreen()
