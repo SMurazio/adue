@@ -43,6 +43,12 @@ public sealed class MmoClient : IDisposable
     private TimeSpan _currentTime;
     private bool _disposed;
 
+    // S53 local-player movement prediction. Created lazily once we know the zone (the blocked map), the
+    // local entity, and its cadence; null until then (and on the web/headless paths that never input).
+    // Local player ONLY — remote entities stay pure interpolation. See LocalPlayerPredictor.
+    private LocalPlayerPredictor? _predictor;
+    private bool _predictionEnabled = true;
+
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
     {
@@ -164,7 +170,24 @@ public sealed class MmoClient : IDisposable
         ThrowIfDisposed();
         _currentTime = now;
         _netManager.PollEvents();
+        // Advance the local-player prediction AFTER draining inbound messages, so a snapshot that arrived
+        // this poll re-bases the prediction before we project it forward to "now".
+        _predictor?.Tick(now);
     }
+
+    // Whether local-player movement prediction is active (S53). Disabling it (e.g. for an A/B feel check)
+    // reverts the local player to the pre-S53 confirmed-tile interpolation path. Default on.
+    public bool PredictionEnabled
+    {
+        get => _predictionEnabled;
+        set => _predictionEnabled = value;
+    }
+
+    // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
+    // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
+    // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
+    // server will reject from its authoritative position.
+    public TileCoord? PredictedLocalTile => _predictor?.PredictedTile;
 
     public void Disconnect()
     {
@@ -193,7 +216,49 @@ public sealed class MmoClient : IDisposable
         var sequence = ++_moveSequence;
         Send(new MoveIntentMessage(sequence, moving, direction), DeliveryMethod.ReliableOrdered);
         _movementTrace.MoveSent(sequence, moving, direction);
+        // S53: the held intent we just sent the server is exactly what the local predictor mirrors. Feed it
+        // so the first step on keydown / the stop on keyup is predicted with no round-trip wait. The
+        // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
+        // step. Created lazily here once the zone + local entity + cadence are all available.
+        EnsurePredictor();
+        _predictor?.SetIntent(moving, direction, _currentTime);
         return sequence;
+    }
+
+    // Creates the local-player predictor once everything it mirrors is known: prediction enabled, a zone
+    // (the blocked map), and the local entity (its start tile + per-entity cadence). Idempotent — no-op once
+    // created or while a prerequisite is missing. Anchored to the local entity's current confirmed tile so
+    // it starts in lockstep with the server.
+    private void EnsurePredictor()
+    {
+        if (_predictor is not null || !_predictionEnabled || Zone is null
+            || !LocalNetworkId.HasValue || !_entities.TryGetValue(LocalNetworkId.Value, out var local))
+        {
+            return;
+        }
+
+        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
+    }
+
+    // Drops the local entity reference and its predictor (local despawn / AOI exit / logout). Nulling the
+    // predictor lets EnsurePredictor re-attach a fresh one (anchored to the new confirmed tile) when the
+    // local entity respawns, so a stale predictor never drives a removed entity's interpolator (S47b guard).
+    private void ClearLocalEntity()
+    {
+        LocalNetworkId = null;
+        _predictor = null;
+    }
+
+    // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
+    // tile is walkable iff it is in bounds and not blocked. Same rule TilePathfinder uses, so prediction and
+    // the server agree on every step except timing.
+    private bool IsWalkableForPrediction(TileCoord tile)
+    {
+        var zone = Zone;
+        return zone is not null
+            && tile.X >= 0 && tile.X < zone.Width
+            && tile.Y >= 0 && tile.Y < zone.Height
+            && !zone.IsBlocked(tile);
     }
 
     public void SendChat(string text)
@@ -272,7 +337,7 @@ public sealed class MmoClient : IDisposable
                 _entities.Remove(despawn.NetworkId);
                 if (LocalNetworkId == despawn.NetworkId)
                 {
-                    LocalNetworkId = null;
+                    ClearLocalEntity();
                 }
 
                 break;
@@ -443,7 +508,7 @@ public sealed class MmoClient : IDisposable
                 _entities.Remove(networkId);
                 if (LocalNetworkId == networkId)
                 {
-                    LocalNetworkId = null;
+                    ClearLocalEntity();
                 }
             }
         }
@@ -489,7 +554,7 @@ public sealed class MmoClient : IDisposable
             _entities.Remove(networkId);
             if (LocalNetworkId == networkId)
             {
-                LocalNetworkId = null;
+                ClearLocalEntity();
             }
         }
     }
@@ -616,6 +681,10 @@ public sealed class MmoClient : IDisposable
     private sealed class ClientEntity
     {
         private readonly TileInterpolator _interpolator;
+        // S53: non-null only for the local player while prediction is active. When present, snapshots
+        // re-base the predictor (which owns the interpolator) instead of confirming the interpolator
+        // directly — the interpolator is then driven by PREDICTED tiles, not confirmed ones.
+        private LocalPlayerPredictor? _predictor;
 
         public ClientEntity(
             uint networkId,
@@ -684,16 +753,41 @@ public sealed class MmoClient : IDisposable
         public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, bool depleted = false)
         {
             var previousTile = Tile;
+            // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
+            // it, and the renderer's AuthoritativeTile uses it. Prediction only affects the interpolated
+            // render position, never this authoritative tile.
             Tile = tile;
-            Facing = facing;
             Depleted = depleted;
             LastSeenSnapshotSequence = snapshotSequence;
-            _interpolator.Confirm(tile, receivedAt);
+            if (_predictor is not null)
+            {
+                // Local predicted entity: re-base the prediction off the confirmed tile (the predictor owns
+                // the interpolator and drives it from predicted tiles). Facing follows the prediction while
+                // moving, else the confirmed facing.
+                _predictor.Reconcile(tile, receivedAt);
+                _predictor.ConfirmFacing(facing);
+                Facing = _predictor.Facing;
+            }
+            else
+            {
+                Facing = facing;
+                _interpolator.Confirm(tile, receivedAt);
+            }
+
             return new EntityConfirmationDebug(
                 tile != previousTile,
                 _interpolator.QueueDepth,
                 _interpolator.StepDurationMs,
                 _interpolator.RenderPosition);
+        }
+
+        // S53: attaches a local-player predictor that takes over driving this entity's interpolator from
+        // predicted tiles. Anchored to the current confirmed tile + facing. Returns the predictor so the
+        // client can feed it held intent and tick it. Idempotent: returns the existing one if already set.
+        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable)
+        {
+            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, _interpolator);
+            return _predictor;
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
@@ -710,6 +804,9 @@ public sealed class MmoClient : IDisposable
             StepCooldownMs = stepCooldownMs;
             var delay = cadenceMs * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
             _interpolator.UpdateCadence(cadenceMs, delay);
+            // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
+            // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
+            _predictor?.SetCadence(cadenceMs);
         }
 
         public ReplicatedEntity ToSnapshot()
