@@ -41,6 +41,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMin = 8f;
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
+	private CheckBox? _uncapFpsCheck;
+	private bool _fpsUncapped;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -184,6 +186,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (!string.IsNullOrWhiteSpace(ReadString("MMO_DEBUG_FRAME_LOG", string.Empty)))
 		{
 			OpenFrameCsv();
+		}
+		// MMO_UNCAP_FPS: set to any value to START with vsync off / fps uncapped (perf testing — shows true
+		// frame-time headroom in the F3 HUD). Off by default; toggle live anytime via the F5 visual panel
+		// checkbox. Runtime-applied so project.godot isn't edited (the editor re-dirties that file).
+		if (!string.IsNullOrWhiteSpace(ReadString("MMO_UNCAP_FPS", string.Empty)))
+		{
+			ApplyFpsUncap(true);
+			_uncapFpsCheck?.SetPressedNoSignal(true);
 		}
 		_client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
 		_client.Connect();
@@ -668,6 +678,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
 		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
 
+		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
+		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
+		uncapFps.AddThemeFontSizeOverride("font_size", 13);
+		uncapFps.Toggled += ApplyFpsUncap;
+		rows.AddChild(uncapFps);
+		_uncapFpsCheck = uncapFps;
+
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
@@ -676,6 +693,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		panel.Visible = false;
 		_visualPanel = panel;
 		layer.AddChild(panel);
+	}
+
+	// Live vsync / fps toggle, shared by the F5 checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
+	// (perf testing — watch the true fps in the F3 HUD); capped = vsync on. Engine.MaxFps stays 0 either way;
+	// vsync does the capping, so re-enabling it re-caps to the monitor refresh.
+	private void ApplyFpsUncap(bool uncapped)
+	{
+		DisplayServer.WindowSetVsyncMode(uncapped
+			? DisplayServer.VSyncMode.Disabled
+			: DisplayServer.VSyncMode.Enabled);
+		Engine.MaxFps = 0;
+		_fpsUncapped = uncapped;
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
