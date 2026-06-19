@@ -19,6 +19,10 @@ read this index at session start, then read any note relevant to the current tas
   GC, S21/S22), what "good" tick timing looks like, and why perf must be measured in Release.
 - [Safe local execution](safe-local-execution.md) - run server/clients only via the skill scripts;
   never hidden-window / exec-bypass / PID-kill commands (triggers Defender). Binds both agents.
+- [Orchestrator runs verification](orchestrator-runs-verification.md) - when Claude drives the loop via
+  subagents: agents edit (accept-edits) but can't run scripts, so the Orchestrator runs all
+  build/test/stress + commits; a targeted allowlist enables unattended runs; single shared tree (SDK is
+  gitignored so worktrees can't build).
 
 Claude Code may still auto-load notes from its user-level memory directory. That directory should
 contain only a pointer note that directs the agent back to this versioned store.
