@@ -19,14 +19,23 @@ Several items below were written before they shipped. Already done — read the 
   write-behind SQLite persistence (S37).
 - **Server-validated interactions** (Phase 4): done — the `Interact`/harvest verb with auth + AOI +
   adjacency validation and owner-only `InventoryUpdate` (S38).
-- **Wire version**: now **v13** (S38), going to **v14** with terrain chunking (S36a) — not the "v9"
-  some older lines still cite (v9 was when tile-stepping landed; the model is unchanged, the wire moved on).
+- **First gameplay loop — gather → inventory — is COMPLETE and player-validated**: server harvest verb +
+  persistence (S37/S38), Godot client UI (S39), resource nodes scattered across the world (S44).
+- **Terrain pivot**: static terrain is *content, not state* — shipped as a procedural **seed** the client
+  regenerates locally (S42), not streamed. The earlier chunked-streaming plan (old S36/S36a) was
+  abandoned. See `terrain-and-map-design.md` and `worldstate-zone-design.md`.
+- **Movement-input pivot**: held-direction **intent**, not a per-tick `MoveStep` stream (S43). See
+  `movement-input-model.md`. (Retired N21, which was tuning the redundant stream.)
+- **Wire version**: now **v15** (held-intent movement, S43; seed terrain took it through v14). The "v9"
+  some older lines cite was only when tile-stepping landed — the model is unchanged, the wire moved on.
 - **Channel cap (the "120–150" target, Phase 2 & 7)**: measured in `capacity-ladder-study.md` (S40) —
-  server CPU is not the bound (≈2 ms of a 50 ms budget at 150 *visible*); per-client bandwidth + the AOI
-  scan at high *visible* density are. 120–150 is a conservative floor; raise it after S36a + grid AOI (S41).
+  server CPU is not the bound; per-client bandwidth + the AOI scan at high *visible* (and *entity*)
+  density are. S44's scattered nodes made the AOI scan the dominant tick cost, so **grid AOI (S41)** is
+  the active gate to raising the cap.
 
-Current active priority is the **optimization/scaling track** (S36a → S41 → S36b) ahead of gameplay UI
-(S39) and feel-polish (N21/S28) — see `todo/`.
+Current active priority is the **optimization/scaling track** — **S41** (grid AOI, in progress) → S36b
+(Godot render-cull); S28 (VSync polish) remains. The gameplay loop and the terrain/movement pivots are
+done. See `todo/`.
 
 ## Near-Term Queue
 

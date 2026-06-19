@@ -23,6 +23,9 @@ read this index at session start, then read any note relevant to the current tas
   subagents: agents edit (accept-edits) but can't run scripts, so the Orchestrator runs all
   build/test/stress + commits; a targeted allowlist enables unattended runs; single shared tree (SDK is
   gitignored so worktrees can't build).
+- [Content-not-state pivots](content-not-state-pivots.md) - static terrain ships as a seed the client
+  regenerates (S42, not streamed — chunked S36/S36a abandoned); movement input is held-direction intent
+  (S43, not a MoveStep stream — retired N21). Don't re-propose streaming them.
 
 Claude Code may still auto-load notes from its user-level memory directory. That directory should
 contain only a pointer note that directs the agent back to this versioned store.

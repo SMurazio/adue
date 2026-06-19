@@ -44,10 +44,12 @@ Run on 2026-06-19, **Release**, single process, 1000² map, 60s/rung, via
   150-visible case runs at ~4% tick budget). It is a floor, not a ceiling.
 - **The server can almost certainly do 2–3× that**, but raise the cap *after* the measured gates clear,
   not on connected-count evidence alone. Gates, in priority order:
-  1. **S36a** — kill the ZoneInfo login bandwidth burst (otherwise login bandwidth, not steady state,
-     bounds big channels).
-  2. **Grid / spatial-hash AOI** — the now-measured trigger; flattens the one growing cost so visible
-     density can rise. (Worth a dedicated todo when prioritized.)
+  1. **Login bandwidth burst — DONE (S42).** Solved better than chunked streaming: static terrain now
+     ships as a procedural **seed** the client regenerates locally, so login terrain cost is ~constant
+     (the 24 Mbps spike is gone). Superseded the abandoned chunked-streaming S36a.
+  2. **Grid / spatial-hash AOI (S41, in progress)** — the now-measured trigger, reinforced by S44:
+     world-scattering ~1.3k node entities pushed `aoi avg` 0.14 → 1.38 ms at 120 clients, making the
+     naive scan the dominant tick cost. Flattens it so visible/entity density can rise.
   3. **A client-render test at high visible density** — confirm the *client* isn't the limiter.
 - **Binding constraint that sets the cap:** per-client bandwidth + AOI-scan cost at high *visible*
   density — **not** connected count and **not** server tick. Re-run this ladder with a dense-visible
