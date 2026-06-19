@@ -65,6 +65,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// to catch slow interpolation, large enough to ignore float jitter at rest.
 	private const double PlayerMovingEpsilonSquared = 0.0000004d; // ~(0.0006 unit/frame)
 
+	// S55 AnimationTree state-machine node names. The Idle state plays the rig's T-pose (placeholder idle,
+	// human-OK'd); the Walk state plays the resolved walk loop. State names are also the Travel() targets.
+	private const string AnimStateIdle = "Idle";
+	private const string AnimStateWalk = "Walk";
+
+	// Cross-fade time (seconds) on the Idle<->Walk transitions so the rig blends instead of snapping between
+	// a standing pose and the stride. ~0.12-0.15s reads as a quick, natural settle. TUNABLE.
+	private const float PlayerAnimCrossFadeSeconds = 0.13f;
+
+	// ---- S55 name labels --------------------------------------------------------------------------
+	// The model renders ~PlayerModelScale * native-height (1.086) ≈ 1.74 tiles tall, so park the name just
+	// above the head. Derived from PlayerModelScale so it tracks scale changes (1.6 -> ~1.96). TUNABLE.
+	private const float PlayerLabelHeight = PlayerModelScale * 1.225f;
+	// Constant on-screen text size (FixedSize) so distant players stay readable; pixel size tuned for crisp
+	// glyphs without the label ballooning. Outline gives contrast on any background.
+	private const float PlayerLabelPixelSize = 0.0018f;
+	private const int PlayerLabelFontSize = 64;
+	private const int PlayerLabelOutlineSize = 14;
+
 	// Loaded lazily on first player spawn so a build with no players never pays the load. Null + a logged
 	// warning if the resource is missing/unloadable; players then fall back to the capsule mesh.
 	private PackedScene? _playerModelScene;
@@ -765,16 +784,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		var animationPlayer = FindAnimationPlayer(model);
 		var walkClip = ResolveWalkClip(animationPlayer);
-		var visual = new PlayerModelVisual(model, animationPlayer, walkClip)
+		var idleClip = ResolveIdleClip(animationPlayer);
+		var stateMachine = BuildAnimationTree(model, animationPlayer, idleClip, walkClip);
+		var visual = new PlayerModelVisual(model, stateMachine)
 		{
-			LastPosition = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y)
+			LastPosition = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y),
+			// The state machine auto-starts in the first-added node (Idle), so seed the latch to match; the
+			// first detected movement then Travels to Walk and a stop Travels back to Idle.
+			CurrentState = stateMachine is null ? null : AnimStateIdle
 		};
 		_playerVisuals[state.NetworkId] = visual;
 		ApplyFacing(visual, state.Facing);
 
-		// Label sits a bit above the rig; the model is ~PlayerModelScale tall so keep it near the capsule
-		// height for visual continuity. The human can nudge if the head clips the label.
-		AttachLabel(wrapper, state, 0.9f);
+		// Name label sits above the head (PlayerLabelHeight, derived from the model scale), outlined and
+		// rendered on top so it never z-fights with or hides behind the rig, and FixedSize so it stays a
+		// constant readable size at distance.
+		AttachPlayerLabel(wrapper, state);
 		return wrapper;
 	}
 
@@ -787,6 +812,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			PixelSize = 0.025f,
 			Position = new Vector3(0, height, 0),
 			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled
+		};
+		parent.AddChild(label);
+		_entityLabels[state.NetworkId] = label;
+	}
+
+	// Player name label (S55): above the head, dark outline for contrast, NoDepthTest so it always renders
+	// on top of the rig, and FixedSize for a constant on-screen size that stays crisp at distance.
+	private void AttachPlayerLabel(Node3D parent, EntityRenderState state)
+	{
+		var label = new Label3D
+		{
+			Name = "Name",
+			Text = state.DisplayName,
+			Position = new Vector3(0, PlayerLabelHeight, 0),
+			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
+			FixedSize = true,
+			PixelSize = PlayerLabelPixelSize,
+			FontSize = PlayerLabelFontSize,
+			OutlineSize = PlayerLabelOutlineSize,
+			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
+			NoDepthTest = true
 		};
 		parent.AddChild(label);
 		_entityLabels[state.NetworkId] = label;
@@ -892,6 +938,88 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
+	// Resolve the idle clip: the placeholder idle is the rig's T-pose (the human OK'd it for now). Prefer a
+	// clip whose name reads as a T-pose, otherwise fall back to the first available clip. Looped so the
+	// state machine holds the pose. Null (no animation player / no clips) leaves the rig un-animated; the
+	// AnimationTree build guards for that.
+	private static string? ResolveIdleClip(AnimationPlayer? player)
+	{
+		if (player is null)
+		{
+			return null;
+		}
+
+		var clips = player.GetAnimationList();
+		string? first = null;
+		foreach (var name in clips)
+		{
+			first ??= name;
+			if (IsTPoseClip(name))
+			{
+				SetClipLooping(player, name);
+				return name;
+			}
+		}
+
+		if (first is not null)
+		{
+			SetClipLooping(player, first);
+		}
+
+		return first;
+	}
+
+	// Build an AnimationTree driving an AnimationNodeStateMachine with two states (Idle, Walk) that
+	// cross-fade between each other, reading from the rig's instanced AnimationPlayer. Returns the live
+	// state-machine playback so the per-frame driver can Travel() between states; returns null (logged
+	// once via the resolvers) if the player/clips are missing, in which case the rig simply stands still.
+	// The AnimationTree is parented to the model so QueueFree on despawn frees it with the rig.
+	private static AnimationNodeStateMachinePlayback? BuildAnimationTree(
+		Node3D model, AnimationPlayer? player, string? idleClip, string? walkClip)
+	{
+		if (player is null || idleClip is null || walkClip is null)
+		{
+			GD.PushWarning("S55: missing AnimationPlayer or idle/walk clip; player rig will not animate.");
+			return null;
+		}
+
+		var idleNode = new AnimationNodeAnimation { Animation = idleClip };
+		var walkNode = new AnimationNodeAnimation { Animation = walkClip };
+
+		var stateMachine = new AnimationNodeStateMachine();
+		stateMachine.AddNode(AnimStateIdle, idleNode);
+		stateMachine.AddNode(AnimStateWalk, walkNode);
+
+		// Cross-fade both directions so neither stop nor start snaps. Immediate switch mode lets Travel()
+		// trigger the transition the moment the moving/idle signal flips, blended over the xfade time.
+		stateMachine.AddTransition(AnimStateIdle, AnimStateWalk, MakeCrossFadeTransition());
+		stateMachine.AddTransition(AnimStateWalk, AnimStateIdle, MakeCrossFadeTransition());
+
+		var tree = new AnimationTree
+		{
+			Name = "AnimTree",
+			TreeRoot = stateMachine
+		};
+		model.AddChild(tree);
+		// AnimPlayer is a NodePath relative to the AnimationTree; resolve it now that the tree is parented
+		// under the model alongside (an ancestor of) the AnimationPlayer.
+		tree.AnimPlayer = tree.GetPathTo(player);
+		tree.Active = true;
+
+		// The state-machine playback object drives Travel() between states; it lives at this parameter path.
+		return tree.Get("parameters/playback").As<AnimationNodeStateMachinePlayback>();
+	}
+
+	private static AnimationNodeStateMachineTransition MakeCrossFadeTransition()
+	{
+		return new AnimationNodeStateMachineTransition
+		{
+			XfadeTime = PlayerAnimCrossFadeSeconds,
+			SwitchMode = AnimationNodeStateMachineTransition.SwitchModeEnum.Immediate,
+			AdvanceMode = AnimationNodeStateMachineTransition.AdvanceModeEnum.Disabled
+		};
+	}
+
 	// Per-frame player rig update: detect movement from the interpolated render position, play/stop the
 	// walk loop accordingly (with a short hold to bridge the idle gap between confirmed tile steps), and
 	// rotate the model to the entity's 8-way facing.
@@ -910,28 +1038,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ApplyFacing(visual, state.Facing);
 	}
 
-	private void DrivePlayerAnimation(PlayerModelVisual visual, bool moving)
+	private static void DrivePlayerAnimation(PlayerModelVisual visual, bool moving)
 	{
-		if (visual.AnimationPlayer is null || visual.WalkClip is null)
+		if (visual.StateMachine is null)
 		{
 			return;
 		}
 
-		if (moving)
+		// Latch to the target state and only Travel() on a change. When the render position stops changing
+		// (no rubber-band now that prediction landed) the moving signal latches false, so the state machine
+		// cross-fades into Idle and holds the standing pose — killing the old mid-stride freeze.
+		var target = moving ? AnimStateWalk : AnimStateIdle;
+		if (visual.CurrentState == target)
 		{
-			if (!visual.IsWalking)
-			{
-				visual.AnimationPlayer.Play(visual.WalkClip);
-				visual.IsWalking = true;
-			}
+			return;
 		}
-		else if (visual.IsWalking)
-		{
-			// Stop (snap to rest) rather than pause so an idle character stands in the rig's rest pose
-			// instead of freezing mid-stride.
-			visual.AnimationPlayer.Stop();
-			visual.IsWalking = false;
-		}
+
+		visual.StateMachine.Travel(target);
+		visual.CurrentState = target;
 	}
 
 	// Rotate the model so its forward axis points along the entity's 8-way Facing. Direction8 maps to a
@@ -1870,17 +1994,17 @@ void fragment() {
 	}
 
 	// Mutable per-player rig state. Reference type so the dict entry is updated in place each frame.
-	// Holds the model child node (rotated for facing), the AnimationPlayer + resolved walk clip (either
-	// may be null when the rig lacks one — guarded everywhere), and the movement tracker driving the
-	// walk/idle switch. The wrapper Node3D (interp-driven) is the dict's _entityNodes value, not stored
-	// here, so freeing the wrapper on despawn frees the model and its AnimationPlayer with it.
-	private sealed class PlayerModelVisual(Node3D model, AnimationPlayer? animationPlayer, string? walkClip)
+	// Holds the model child node (rotated for facing), the AnimationTree state-machine playback that
+	// cross-fades Idle<->Walk (null when the rig lacks an AnimationPlayer/clips — guarded everywhere), the
+	// last-Traveled state so the driver only issues Travel() on a change, and the movement tracker driving
+	// the walk/idle switch. The wrapper Node3D (interp-driven) is the dict's _entityNodes value, not stored
+	// here, so freeing the wrapper on despawn frees the model, its AnimationPlayer and the AnimationTree.
+	private sealed class PlayerModelVisual(Node3D model, AnimationNodeStateMachinePlayback? stateMachine)
 	{
 		public Node3D Model { get; } = model;
-		public AnimationPlayer? AnimationPlayer { get; } = animationPlayer;
-		public string? WalkClip { get; } = walkClip;
+		public AnimationNodeStateMachinePlayback? StateMachine { get; } = stateMachine;
+		public string? CurrentState { get; set; }
 		public Vector3 LastPosition { get; set; }
 		public double MovingUntilSeconds { get; set; }
-		public bool IsWalking { get; set; }
 	}
 }
