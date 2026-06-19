@@ -87,10 +87,28 @@ from a single poll loop** (O(1) threads). With that:
 tick budget, 0 errors**. The only remaining limit is that the load generator and server still **share one
 machine's CPU**; the tail strain at 1000 is that contention, not the server's intrinsic ceiling.
 
-**Updated cap guidance:** the measured headroom supports raising the conservative published target *well*
-beyond the old 120–150 — the server comfortably sustains **1000+ connected**. To publish a precise hard
-ceiling, drive load from a **separate machine** (removes the rig/server CPU contention); the server's true
-limit is above 1000 and unmeasured only because one box can't both generate *and* serve that load cleanly.
+**IMPORTANT — those high-count runs were SCATTERED (the easy case). Dense binds much earlier.** Scattered
+spawn spreads players out so AOI filters and each client sees ~nobody (visible ~12 at 1000). The binding
+case is **central/clustered** — high *visible* density — which is what S40 said sets the cap. Measured
+(Release, default/central spawn, 1000²):
+
+| profile | clients | visible avg/max | tickMs steady avg | AOI ms avg | server out |
+|---|---:|---:|---:|---:|---:|
+| scattered | 1000 | 12 / 23 | 4.6 (9%) | 2.6 | 4.4 Mbps |
+| **central/dense** | **500** | **122 / 150** | **13.8 (28%)** | **8.4** | **24 Mbps** |
+
+Dense 500 is ~3× the tick cost and ~6× the bandwidth of scattered 1000, at half the clients (grid AOI
+helps less when everyone is in the same cells; the per-client snapshot is also large — ~120 visible
+entities). Still 0 errors / drift ~0 / gc minimal at dense 500, but **outbound is already 24 Mbps and
+scales with clients (~48 Mbps at 1000 dense)** — so in the dense case **per-client bandwidth likely binds
+before server CPU**. That's the trigger for *delta snapshots* (roadmap Phase 2).
+
+**Updated cap guidance:** connection count is not the limit — the server sustains **1000+ scattered** at
+~9% tick budget. The real per-channel cap is set by **visible density**: at ~120 visible (the AOI cap)
+the server is at ~28% tick budget and 24 Mbps out by 500 clients. So a dense-scene cap is well under the
+scattered number and is **bandwidth-bound** — pin it with a dense ladder (500 → 800 → 1000 central) and
+expect delta snapshots to be the lever that raises it. Multi-machine load-gen still needed to remove
+rig/server CPU sharing for the precise number.
 
 ## Method notes / reproduce
 
