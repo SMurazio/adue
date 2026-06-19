@@ -77,10 +77,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// ---- S55 name labels --------------------------------------------------------------------------
 	// The model renders ~PlayerModelScale * native-height (1.086) ≈ 1.74 tiles tall, so park the name just
 	// above the head. Derived from PlayerModelScale so it tracks scale changes (1.6 -> ~1.96). TUNABLE.
-	private const float PlayerLabelHeight = PlayerModelScale * 1.225f;
+	private const float PlayerLabelHeight = PlayerModelScale * 1.4f;
 	// Constant on-screen text size (FixedSize) so distant players stay readable; pixel size tuned for crisp
-	// glyphs without the label ballooning. Outline gives contrast on any background.
-	private const float PlayerLabelPixelSize = 0.0018f;
+	// glyphs without the label ballooning. Outline gives contrast on any background. TUNABLE (play-test:
+	// shrunk from 0.0018 — was bigger than the character).
+	private const float PlayerLabelPixelSize = 0.0007f;
 	private const int PlayerLabelFontSize = 64;
 	private const int PlayerLabelOutlineSize = 14;
 
@@ -159,13 +160,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Direction8 _lastSentDirection;
 	private double _nextMoveIntentKeepaliveAt;
 
-	// Click-to-move (S53, UO-style greedy heading): picks the clicked ground tile and steers the SAME
-	// held-direction MoveIntent WASD uses straight toward it, re-aiming every frame off the PREDICTED local
-	// tile. No A* waypoints in v1 (clicking across a wall stalls at the obstacle — acceptable). Any WASD
-	// input or a new right-click cancels/replaces the active drive. The pathfinder is kept only for the
-	// reachability/walkability pre-check on the clicked tile, not to drive movement.
-	private TilePathfinder? _pathfinder;
-	private readonly ClickMoveController _clickMove = new();
+	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
+	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
+	// the PREDICTED local tile toward the cursor tile (CursorHeading) — exactly the keyboard path, re-aimed
+	// live. WASD takes priority while a key is down. The S53 click-a-destination DRIVE PATH is retired: the
+	// ClickMoveController and TilePathfinder CLASSES are kept (a "click once to path there" mode may return
+	// later) but no longer instantiated or driven here.
 
 	// Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
 	private Direction8[]? _autopilotPattern;
@@ -230,7 +230,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_client?.Zone is not null && !_zoneBuilt)
 		{
 			BuildZone(_client.Zone);
-			_pathfinder = TilePathfinder.FromZone(_client.Zone);
 			_zoneBuilt = true;
 		}
 
@@ -269,16 +268,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
-		// Right-click to move: pick the clicked ground tile and path to it. _UnhandledInput only fires
-		// for events no UI Control consumed, so clicks over the (MouseFilter.Stop) overlay panels never
-		// reach here — that is the "ignore clicks over UI" guarantee, for free.
-		if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Right } mouse)
-		{
-			HandleClickToMove(mouse.Position);
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
+		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
+		// SendHeldMovement off Input.IsMouseButtonPressed — NOT an event-driven click-a-destination. So the
+		// right mouse button is intentionally not consumed here; the old HandleClickToMove path is retired.
 		if (@event is not InputEventKey { Pressed: true, Echo: false } key)
 		{
 			return;
@@ -346,37 +338,46 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// Right-click handler: screen -> ground tile -> A* path -> drive. Replaces any active path (a new
-	// click repaths from the current tile) and cancels debug-injected movement. Unreachable / no-tile
-	// gives the existing interact-feedback toast and does not move.
-	private void HandleClickToMove(Vector2 screenPosition)
+	// S56 hold-to-walk-toward-cursor (UO control). Returns the heading to hold while the RIGHT mouse button is
+	// down: ray the cursor onto the ground plane -> cursor tile, then the nearest-of-8 direction from the
+	// PREDICTED local tile (what the player sees) toward it. Returns null when the button is up, when there is
+	// no pickable ground tile, or when the cursor is on the player's own tile (no heading -> the caller sends
+	// moving:false / holds). Called every frame from SendHeldMovement, below WASD in priority. Holding the
+	// button also clears any debug-injected/autopilot motion so the two input sources never fight.
+	private Direction8? CurrentMouseHeading()
 	{
-		if (_client?.IsLoggedIn != true || _pathfinder is null || _client.LocalTile is not TileCoord start)
+		if (!Input.IsMouseButtonPressed(MouseButton.Right))
 		{
-			return;
+			return null;
 		}
 
-		if (!TryPickGroundTile(screenPosition, out var goal))
+		if (_client?.IsLoggedIn != true)
 		{
-			return;
+			return null;
 		}
 
-		if (!_pathfinder.IsWalkable(goal))
+		if ((_client.PredictedLocalTile ?? _client.LocalTile) is not TileCoord from)
 		{
-			ShowInteractFeedback("Can't reach there.");
-			return;
+			return null;
 		}
 
-		// Steer from the PREDICTED tile (what the player sees) when prediction is on, else the confirmed
-		// tile. start == goal is a harmless no-op (already there); the greedy controller stays inactive.
-		var from = _client.PredictedLocalTile ?? start;
+		var screenPosition = GetViewport().GetMousePosition();
+		if (!TryPickGroundTile(screenPosition, out var cursorTile))
+		{
+			return null;
+		}
 
-		// A deliberate move command overrides any debug-injected/autopilot motion so the two input
-		// sources never fight over the held intent.
-		_injectedDirection = null;
-		_injectedSingleStep = false;
-		StopAutopilot();
-		_clickMove.Start(from, goal);
+		// A deliberate mouse move overrides any debug-injected/autopilot motion so they never fight over the
+		// held intent (mirrors how WASD used to pre-empt the old click-move).
+		if (_injectedDirection.HasValue || _autopilotPattern is not null)
+		{
+			_injectedDirection = null;
+			_injectedSingleStep = false;
+			StopAutopilot();
+		}
+
+		// Same tile as the player -> no heading; the caller emits moving:false (stop) for this frame.
+		return CursorHeading.FromTileDelta(from, cursorTile);
 	}
 
 	// Projects the mouse position onto the y=0 ground plane (the tile plane) via the camera ray and
@@ -409,38 +410,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var hit = origin + (direction * distance);
 		tile = new TileCoord(Mathf.RoundToInt(hit.X), Mathf.RoundToInt(hit.Z));
 		return true;
-	}
-
-	// Pumps the active click-to-move drive each frame, returning the direction to hold (or false to stop).
-	// Steers off the PREDICTED local tile (what the player sees) when prediction is on, else the confirmed
-	// tile — so the heading re-aims against the on-screen avatar, not a stale confirmation. Returns false when
-	// nothing is driving, so the caller falls back to keyboard/injected input. Called from SendHeldMovement
-	// BEFORE keyboard so WASD can pre-empt.
-	private bool TryGetPathDirection(out Direction8 direction)
-	{
-		direction = default;
-		if (!_clickMove.IsActive)
-		{
-			return false;
-		}
-
-		if ((_client?.PredictedLocalTile ?? _client?.LocalTile) is not TileCoord from)
-		{
-			return false;
-		}
-
-		var command = _clickMove.Update(from);
-		switch (command.Action)
-		{
-			case PathDriveAction.Move:
-				direction = command.Direction;
-				return true;
-			case PathDriveAction.Stop:
-			default:
-				// Arrived: fall through to "no path direction" so SendHeldMovement emits moving:false. The
-				// controller has already flipped IsActive off.
-				return false;
-		}
 	}
 
 	public override void _ExitTree()
@@ -761,7 +730,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			Visible = !(isResource && state.Depleted)
 		};
 
-		AttachLabel(body, state, isResource ? 0.7f : 0.9f);
+		AttachLabel(body, state, isResource ? 1.0f : 0.9f);
 		return body;
 	}
 
@@ -806,13 +775,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	private void AttachLabel(Node3D parent, EntityRenderState state, float height)
 	{
+		// Same small, outlined, render-on-top, constant-size styling as the player label (S57) so
+		// gatherables/NPCs match — just at the caller-supplied height above the object.
 		var label = new Label3D
 		{
 			Name = "Name",
 			Text = state.DisplayName,
-			PixelSize = 0.025f,
 			Position = new Vector3(0, height, 0),
-			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled
+			Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
+			FixedSize = true,
+			PixelSize = PlayerLabelPixelSize,
+			FontSize = PlayerLabelFontSize,
+			OutlineSize = PlayerLabelOutlineSize,
+			OutlineModulate = new Color(0.02f, 0.02f, 0.02f, 1f),
+			NoDepthTest = true
 		};
 		parent.AddChild(label);
 		_entityLabels[state.NetworkId] = label;
@@ -1326,21 +1302,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// Determine the desired intent. While the chat box has focus we force "stopped" so held keys
-		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > click-to-move heading
-		// > injected (debug-channel) direction. WASD pre-empts an active click-move (cancel below); the
-		// click-move steers off the predicted tile (S53 greedy heading), not the confirmed tile.
+		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > mouse hold-to-move
+		// heading > injected (debug-channel) direction. A held WASD key overrides the mouse heading while it
+		// is down; the mouse heading re-aims live off the PREDICTED tile (what the player sees) each frame.
 		var chatFocused = _chatInput?.HasFocus() == true;
 		var keyboard = chatFocused ? null : CurrentDirection();
 
-		// Any manual WASD input cancels an active click-to-move drive so the player regains direct control.
-		if (keyboard.HasValue && _clickMove.IsActive)
-		{
-			_clickMove.Cancel();
-		}
-
-		Direction8? pathDir = keyboard.HasValue ? null : (TryGetPathDirection(out var pd) ? pd : null);
-		var injected = keyboard.HasValue || pathDir.HasValue || chatFocused ? null : CurrentInjectedDirection();
-		var direction = keyboard ?? pathDir ?? injected;
+		Direction8? mouseDir = keyboard.HasValue || chatFocused ? null : CurrentMouseHeading();
+		var injected = keyboard.HasValue || mouseDir.HasValue || chatFocused ? null : CurrentInjectedDirection();
+		var direction = keyboard ?? mouseDir ?? injected;
 		var moving = direction.HasValue;
 		var resolvedDirection = direction ?? _lastSentDirection;
 

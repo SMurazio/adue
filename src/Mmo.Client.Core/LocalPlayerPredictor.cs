@@ -44,9 +44,14 @@ public sealed class LocalPlayerPredictor
     private bool _moving;
     private Direction8 _direction;
     private double _cadenceMs;
-    // Wall-clock time at which the next step's cooldown elapses. Null = no step pending (idle, or the first
-    // step on a fresh keydown fires immediately). Stepping advances this by exactly one cadence per step.
+    // Wall-clock time at which the next step's cooldown elapses. Null = no step pending (idle). Stepping
+    // advances this by exactly one cadence per step.
     private TimeSpan? _nextStepAt;
+    // Wall-clock time of the last ACCEPTED step (mirrors the server's _lastStepTick). Null until the first
+    // step. SURVIVES a stop so a quick stop->start respects the cadence already consumed and never
+    // double-steps; gates SetIntent's fresh-start scheduling so a fresh press steps only once the cadence
+    // since the last step has elapsed (immediately when idle long enough, matching the server).
+    private TimeSpan? _lastStepAt;
 
     // ---- Present-time render tween (the snappy part; NOT a playout buffer) ------------------------------
     // The local player is rendered by sampling THIS tween at the current wall-clock time — old tile center ->
@@ -94,20 +99,35 @@ public sealed class LocalPlayerPredictor
         _cadenceMs = Math.Max(1, cadenceMs);
     }
 
-    // Records the held movement intent (the same state the client sends as a MoveIntent). On a fresh keydown
-    // (transition to moving, or a direction change) the next step is scheduled to fire IMMEDIATELY so the
-    // first tile is predicted with no round-trip wait. On keyup (moving=false) forward projection stops at
-    // once and the avatar holds at the predicted tile (the in-flight tween finishes) until the server's
-    // confirmed stop lands.
+    // Records the held movement intent (the same state the client sends as a MoveIntent). The step schedule
+    // mirrors the server's cooldown EXACTLY (Mmo.Server.Runtime.WorldEntity.TryStep): a step is due one full
+    // cadence after the last ACCEPTED step, and a direction change updates the held direction but does NOT
+    // bring the next step earlier. So:
+    //   * A fresh start from idle is naturally prompt: no step is scheduled (_nextStepAt is null) and the
+    //     last step was long ago, so we arm the first step at `now` and Tick fires it immediately — matching
+    //     the server, whose cooldown elapsed while the entity stood idle.
+    //   * A quick stop->start does NOT double-step: keyup leaves _lastStepAt intact, so a re-press re-arms the
+    //     next step at `_lastStepAt + cadence`, respecting the cadence already consumed by the last step
+    //     (the server's _lastStepTick survives the stop and gates the next step the same way).
+    //   * Rapid direction flips while moving keep the running schedule untouched, so the prediction produces
+    //     the SAME step count/timing as the server instead of out-stepping it and snapping back.
+    // On keyup (moving=false) forward projection stops at once and the avatar holds at the predicted tile
+    // (the in-flight tween finishes) until the server's confirmed stop lands.
     public void SetIntent(bool moving, Direction8 direction, TimeSpan now)
     {
         if (moving)
         {
-            // Fire the first step of a new press / a redirect immediately; while already moving in the same
-            // direction keep the running cooldown so we don't double-step.
-            if (!_moving || direction != _direction)
+            // Arm the next step only on a true idle->moving transition, and schedule it on the server's rule:
+            // a full cadence after the last accepted step. If the last step is already a cadence (or more) in
+            // the past — the genuine fresh-start case — that clamps to `now` and the first tile fires
+            // immediately; a quick stop->start lands later, exactly when the cadence since the last step
+            // elapses. A direction change while already moving never reschedules (no early step on a flip).
+            if (!_moving)
             {
-                _nextStepAt = now;
+                var dueAt = _lastStepAt is { } last
+                    ? last + TimeSpan.FromMilliseconds(_cadenceMs)
+                    : now;
+                _nextStepAt = dueAt < now ? now : dueAt;
             }
 
             _moving = true;
@@ -152,6 +172,9 @@ public sealed class LocalPlayerPredictor
                 // so back-to-back steps glide continuously) toward the new tile center, over one cadence,
                 // beginning at the step's scheduled time so a late frame doesn't shorten the tween.
                 StartTween(SampleInternal(now), RenderPosition.FromTile(target), _nextStepAt.Value, _cadenceMs);
+                // Record this accepted step's scheduled time (the server stamps _lastStepTick on accept) so a
+                // later stop->start re-arms a full cadence after it, never sooner.
+                _lastStepAt = _nextStepAt.Value;
                 _nextStepAt = _nextStepAt.Value + TimeSpan.FromMilliseconds(_cadenceMs);
                 changed = true;
             }
@@ -195,7 +218,9 @@ public sealed class LocalPlayerPredictor
         var correction = ChebyshevDistance(_predictedTile, confirmedTile);
         _predictedTile = confirmedTile;
         // Re-arm: the very next predicted step happens a full cadence after the correction so we don't
-        // immediately re-diverge from the freshly anchored truth.
+        // immediately re-diverge from the freshly anchored truth. Anchor _lastStepAt at the correction time
+        // too, so a stop->start after a reconcile respects the cadence from here (consistent with Tick).
+        _lastStepAt = now;
         if (_moving)
         {
             _nextStepAt = now + TimeSpan.FromMilliseconds(_cadenceMs);

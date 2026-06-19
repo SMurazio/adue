@@ -215,6 +215,149 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(40d, render.Y, 3);
     }
 
+    // ---- S56: predictor mirrors the server cooldown EXACTLY (no early step on a direction flip) -----
+
+    [Fact]
+    public void DirectionFlipsWithinOneCadence_DoNotAddExtraSteps_MatchServerCount()
+    {
+        // The server steps ONCE per cadence regardless of how the held direction changes (TryStep gates on
+        // _lastStepTick, which only a real step advances). The predictor must do the same: a flurry of
+        // direction changes inside one cadence window produces exactly one step (the one due that window),
+        // not one per flip.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        Assert.True(predictor.Tick(TimeSpan.Zero));                       // first step fires -> (1,0)
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+
+        // Rapidly flip direction several times, all WITHIN the first cadence window. Each SetIntent updates
+        // facing/direction but must NOT bring the next step earlier than _lastStep + cadence.
+        predictor.SetIntent(true, Direction8.N, TimeSpan.FromMilliseconds(20));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(20)));      // no extra step on the flip
+        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(40));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(40)));
+        predictor.SetIntent(true, Direction8.S, TimeSpan.FromMilliseconds(60));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(60)));
+
+        // Still on the tile reached by the single step, now facing the last commanded direction.
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.S, predictor.Facing);
+
+        // The next step is due a full cadence after the first one, in the CURRENT held direction (S), not
+        // sooner — exactly one more step at t=150.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(150)));
+        Assert.Equal(new TileCoord(1, 1), predictor.PredictedTile);       // stepped S from (1,0)
+    }
+
+    [Fact]
+    public void DirectionChangeMidMove_StepsOnServerCadence_NotImmediately()
+    {
+        // A single mid-move redirect (E for a while, then N) must keep the cadence: the post-redirect step
+        // lands at the next cadence boundary, never the instant the direction changed.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) at t=0
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) at t=150
+
+        // Redirect to N at t=160 (mid-cadence). No step should fire until the next boundary (t=300).
+        predictor.SetIntent(true, Direction8.N, TimeSpan.FromMilliseconds(160));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(160)));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(299)));
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));      // cadence elapsed -> step N
+        Assert.Equal(new TileCoord(2, -1), predictor.PredictedTile);
+    }
+
+    [Fact]
+    public void FreshStartFromIdle_StepsPromptly_AfterIdlingPastCadence()
+    {
+        // Idle long past a cadence (the cooldown elapsed while standing still), then start: the first step is
+        // prompt — matching the server, whose cooldown is also long elapsed.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0), last step at t=0
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(10)); // stop
+
+        // Idle well past a cadence, then press again at t=1000.
+        predictor.SetIntent(true, Direction8.E, TimeSpan.FromMilliseconds(1000));
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(1000)));     // prompt: cadence long elapsed
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+    }
+
+    [Fact]
+    public void QuickStopStart_WithinCadence_DoesNotDoubleStep()
+    {
+        // Step, stop, then immediately start again — all inside one cadence window. The re-press must NOT
+        // fire a second step early; it respects the cadence since the last accepted step (mirrors the server
+        // keeping _lastStepTick across the stop).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0), last step at t=0
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(30)); // stop early in the window
+        predictor.SetIntent(true, Direction8.E, TimeSpan.FromMilliseconds(50));  // restart still in the window
+
+        // No step before the cadence since the LAST step (t=0) elapses.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(50)));
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(149)));
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(150)));      // exactly one more step at the boundary
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+    }
+
+    [Fact]
+    public void PredictorMatchesServerStepCount_OverRapidFlips()
+    {
+        // End-to-end parity: drive the predictor and a tiny in-process model of WorldEntity.TryStep with the
+        // SAME held-intent timeline (a press, then rapid direction flips), and assert identical step counts.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+
+        // Server model: steps once per cadence from the last accepted step, ignoring direction churn.
+        TimeSpan? serverLastStep = null;
+        var serverSteps = 0;
+        var predictedSteps = 0;
+        var lastPredicted = predictor.PredictedTile;
+
+        // A timeline of (timeMs, direction) intents: a press at 0, then flips at 25/55/85, holding to 600ms.
+        var intents = new (double ms, Direction8 dir)[]
+        {
+            (0, Direction8.E), (25, Direction8.N), (55, Direction8.W), (85, Direction8.S),
+        };
+        var intentIndex = 0;
+
+        for (var ms = 0; ms <= 600; ms += 5)
+        {
+            var now = TimeSpan.FromMilliseconds(ms);
+            while (intentIndex < intents.Length && intents[intentIndex].ms <= ms)
+            {
+                predictor.SetIntent(true, intents[intentIndex].dir, now);
+                intentIndex++;
+            }
+
+            // Server tick model: a step is due a full cadence after the last accepted step (or immediately
+            // when none yet / idle long enough); count it without caring about the direction.
+            if (serverLastStep is null || now >= serverLastStep.Value + TimeSpan.FromMilliseconds(Cadence))
+            {
+                serverSteps++;
+                serverLastStep = serverLastStep is null
+                    ? now
+                    : serverLastStep.Value + TimeSpan.FromMilliseconds(Cadence);
+            }
+
+            predictor.Tick(now);
+            if (predictor.PredictedTile != lastPredicted)
+            {
+                predictedSteps++;
+                lastPredicted = predictor.PredictedTile;
+            }
+        }
+
+        Assert.Equal(serverSteps, predictedSteps);
+    }
+
     [Fact]
     public void StartStopBoundary_ConvergesToServerStopTile()
     {
