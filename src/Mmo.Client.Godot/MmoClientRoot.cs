@@ -43,14 +43,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private const string PlayerModelPath = "res://content/characters/ProvaPersonaggioWalkLoop.glb";
 
 	// TUNABLE (human eyeballs on relaunch). Character-Creator / Tripo rigs commonly import at real-world
-	// metres (~1.7 units tall); the grid is 1 unit = 1 tile, so the raw model is too big. 0.5 is a first
-	// guess aiming for ~roughly-one-tile-tall. If the model is huge -> shrink; tiny -> grow.
-	private const float PlayerModelScale = 0.5f;
+	// Model native height is 1.086 units; the grid is 1 unit = 1 tile (human ~1.7m on a 1m grid), so scale
+	// ~1.6 renders it ~1.74 tiles tall. If the model is huge -> shrink; tiny -> grow.
+	private const float PlayerModelScale = 1.6f;
 
 	// TUNABLE. glTF/Godot forward is -Z; a Direction8 of N maps to -Z in our world (tile delta (0,-1)).
 	// If the model's mesh faces +Z (away from the look direction) or sideways, correct it here in degrees
 	// (e.g. 180 if it faces backwards, +/-90 if sideways). 0 = trust the model's authored forward.
-	private const float ModelForwardOffsetDegrees = 0f;
+	// 180: play-test showed the rig facing front-to-back relative to movement.
+	private const float ModelForwardOffsetDegrees = 180f;
 
 	// Vertical offset for the model root so the feet sit on the ground plane (y=0). Most rigs are authored
 	// with the origin at the feet; if it floats or sinks, nudge here. TUNABLE.
