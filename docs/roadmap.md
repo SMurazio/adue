@@ -11,8 +11,7 @@ trigger) · **Options** (opportunistic / only if a trigger appears).
 ---
 
 ## Now — in flight
-- **S63 — Free turns (turn-delay, not a full step cooldown).** The movement-feel fix; agent implementing.
-  Verify parity + stress, then commit. → `todo/S63`, `movement-and-architecture-notes.md` §1.1.
+- _(nothing in flight — S63 free-turns shipped; next pickup is below)_
 
 ## Next — clear value, queue when ready
 1. **Walk / Run movement** — two cadences (walk + run) with run-by-cursor-distance; the second movement
@@ -52,6 +51,7 @@ trigger) · **Options** (opportunistic / only if a trigger appears).
 ---
 
 ## Already done (context)
+- **S63 — Free turns** (turn costs a tunable turn-delay, not a full step cooldown; protocol v18). Committed.
 - **S61 — entity-visual hierarchy + `EntityRenderer`** (client refactor Stage 1). Committed.
 - **S62 — UO-inspired study.** Closed → `movement-and-architecture-notes.md`.
 - **S60 tuning panel · S59 turn-then-move · S58 rock models · S56/S57 mouse + labels · S51 per-entity
