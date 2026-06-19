@@ -8,13 +8,22 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
     [switch]$Release,
-    [switch]$KeepServer
+    [switch]$KeepServer,
+    [string]$SpawnDistribution = '',
+    [int]$WorldWidth = 0,
+    [int]$WorldHeight = 0
 )
 
 $ErrorActionPreference = 'Stop'
 if ($Release) {
     $Configuration = 'Release'
 }
+
+# Optional world/spawn overrides, set as env so the server (launched via start-server) inherits them.
+# Lets the reviewer run e.g. a scattered-spawn 1000^2 stress without hand-rolling env-prefixed launchers.
+if (-not [string]::IsNullOrWhiteSpace($SpawnDistribution)) { $env:MMO_SPAWN_DISTRIBUTION = $SpawnDistribution }
+if ($WorldWidth -gt 0) { $env:MMO_WORLD_WIDTH_TILES = "$WorldWidth" }
+if ($WorldHeight -gt 0) { $env:MMO_WORLD_HEIGHT_TILES = "$WorldHeight" }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
 $dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
