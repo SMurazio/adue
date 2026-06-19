@@ -54,6 +54,10 @@ public sealed class WorldEntity
     // that is not a harvestable resource node, so the snapshot path stays uniform.
     public bool IsDepleted => Resource is { IsAvailable: false };
 
+    // The tick this node is scheduled to respawn at. 0 for non-resource entities. Lets the server queue
+    // a depleted node by its respawn time rather than rescanning all nodes each tick.
+    public uint ResourceRespawnAtTick => Resource?.RespawnAtTick ?? 0;
+
     public uint StateRevision { get; private set; } = 1;
 
     // Harvests the node: marks it depleted, schedules respawn, and bumps StateRevision so the change

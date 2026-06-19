@@ -20,7 +20,6 @@ public sealed class GameServer
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
-    private const string PlaceholderEntityName = "Ancient Marker";
     private const float InterestExitHysteresisTiles = 1f;
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
 
@@ -58,7 +57,11 @@ public sealed class GameServer
     private readonly ProtocolEncodeBuffer _messageEncodeBuffer = new();
     private readonly ProtocolEncodeBuffer _snapshotEncodeBuffer = new();
     private readonly Dictionary<Guid, PendingTileSave> _dirtyDurableTiles = [];
-    private readonly List<WorldEntity> _resourceNodeEntities = [];
+    // Depleted-only respawn schedule: per tick only nodes whose respawn time has arrived are processed,
+    // so respawn work is O(depleted) regardless of how many available nodes the scatter placed. The placed
+    // node entities themselves live in the zone's WorldState (replicated by AOI); only depleted ones are
+    // tracked here.
+    private readonly ResourceRespawnSchedule _resourceRespawns = new();
 
     private uint _serverTick;
     private uint _nextPersistenceCheckpointTick;
@@ -81,7 +84,6 @@ public sealed class GameServer
             options.MapSeed,
             TerrainGenerator.CurrentGenVersion,
             options.SpawnDistribution);
-        _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
         ScatterResourceNodes();
         _netManager = new NetManager(_listener)
         {
@@ -795,33 +797,25 @@ public sealed class GameServer
         return _zone.ResolvePlayerSpawnTile(tile);
     }
 
-    private TileCoord ResolvePlaceholderEntityTile()
-    {
-        var preferred = _zone.SpawnTiles[0].Offset(2, 0);
-        return _zone.ResolveSpawnTile(preferred);
-    }
-
-    // Places one harvestable node of each registered type near spawn and tracks them for per-tick
-    // respawn scanning. Server-owned world entities, not session-derived; their transient state is
-    // server-memory only and respawns fresh on restart.
+    // Deterministically scatters harvestable nodes of each registered type across the whole walkable map
+    // (Zone owns the placement algorithm + min spacing; see PlanResourceNodeScatter). Server-owned world
+    // entities, not session-derived; their transient state is server-memory only and respawns fresh on
+    // restart — but the placement is deterministic from the map seed, so the same layout regenerates.
     private void ScatterResourceNodes()
     {
-        foreach (var (definition, tile) in _zone.PlanResourceNodeScatter(_resourceNodes))
+        foreach (var (definition, tile) in
+            _zone.PlanResourceNodeScatter(_resourceNodes, _options.ResourceNodeDensityTilesPerNode))
         {
-            var entity = _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
-            _resourceNodeEntities.Add(entity);
+            _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
         }
     }
 
-    // Per-tick scan of placed nodes: any depleted node whose respawn time has arrived flips back to
-    // Available, bumping its StateRevision so the refreshed availability re-replicates by AOI. Cheap —
-    // the node set is small and fixed, and TryRespawnResource is a no-op for available nodes.
+    // O(depleted) respawn: the schedule pops only nodes whose respawn tick has arrived and flips them back
+    // to Available; StateRevision is already bumped by TryRespawnResource so the refreshed availability
+    // re-replicates by AOI (no extra work needed in the callback). Still-available nodes are never visited.
     private void RespawnResourceNodes()
     {
-        foreach (var entity in _resourceNodeEntities)
-        {
-            entity.TryRespawnResource(_serverTick);
-        }
+        _resourceRespawns.DrainDue(_serverTick, static _ => { });
     }
 
     // Server-authoritative resolution of a generic Interact verb. Harvest is the only dispatch target
@@ -884,6 +878,9 @@ public sealed class GameServer
         }
 
         target.DepleteResource(_serverTick);
+        // Schedule the respawn in the depleted-only schedule so RespawnResourceNodes never rescans
+        // available nodes. Keyed by the node's freshly-computed respawn tick.
+        _resourceRespawns.Schedule(target);
         SendInteractResult(session, true, "");
         SendInventoryUpdate(session, [new ItemStack(definition.YieldItemKey, actor.Inventory.QuantityOf(definition.YieldItemKey))]);
     }

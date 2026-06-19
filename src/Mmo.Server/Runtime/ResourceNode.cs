@@ -18,6 +18,10 @@ public sealed class ResourceNode
     // True when harvestable. A freshly placed node starts Available.
     public bool IsAvailable { get; private set; } = true;
 
+    // The tick at which a depleted node becomes Available again. Only meaningful while !IsAvailable; lets
+    // the server schedule respawns in a depleted-only queue instead of scanning every node each tick.
+    public uint RespawnAtTick => _respawnAtTick;
+
     // Marks the node harvested: it becomes Depleted now and is scheduled to respawn after the
     // definition's RespawnTicks. No-op if already depleted (caller validates availability first).
     public void Deplete(uint serverTick)

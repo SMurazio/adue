@@ -149,48 +149,132 @@ public sealed class Zone
         return World.AddResourceNode(networkId, definition.DisplayName, tile, new ResourceNode(definition));
     }
 
-    // Scatters one node of each registered type onto walkable tiles in a small ring around the first
-    // spawn tile. Deliberately tiny: enough to exercise the gather loop near where players spawn. Full
-    // map population is a later concern (terrain streaming, S36). Returns the placed tiles in order so
-    // callers can rent network ids and wire spawns. Skips any candidate tile that is blocked or already
-    // taken so two nodes never share a tile.
+    // Seed constant XORed into the map seed to derive an independent resource-node placement seed, so the
+    // node layout is deterministic from (and tied to) the map but does not alias the terrain PRNG stream.
+    private const int ResourceNodeSeedSalt = 0x5C4A11ED;
+
+    // Deterministically scatters harvestable resource nodes across the whole walkable map. Determinism is
+    // the contract: identical (seed, size, density, registry) inputs MUST yield a byte-identical layout,
+    // so a restart regenerates exactly the same world even though nodes aren't persisted. Like
+    // TerrainGenerator this uses an explicit seeded SplitMix64 PRNG (no System.Random without a seed, no
+    // clocks, no culture) and a fixed iteration order.
+    //
+    // Algorithm: rejection sampling. Derive a target count from map area and densityTilesPerNode
+    // (~1 node per density² tiles). Repeatedly draw a uniformly-random tile; accept it only if it is
+    // walkable, unused, and at least minSpacing tiles (Chebyshev) from every already-placed node, so
+    // nodes spread across the map instead of clumping. Placed types round-robin the registry definitions
+    // for a roughly even mix. A bounded attempt budget guards against an over-dense target on a small or
+    // wall-heavy map (we place as many as fit rather than looping forever). Returns placements in
+    // placement order so callers can rent network ids and spawn.
     public IReadOnlyList<(ResourceNodeDefinition Definition, TileCoord Tile)> PlanResourceNodeScatter(
-        ResourceNodeRegistry registry)
+        ResourceNodeRegistry registry,
+        int densityTilesPerNode)
     {
         ArgumentNullException.ThrowIfNull(registry);
 
-        var origin = _spawnTiles[0];
-        // A handful of small offsets around spawn; each registered node type takes the next free one.
-        // (2, 0) is deliberately omitted because the legacy placeholder marker sits there.
-        var candidates = new[]
-        {
-            origin.Offset(0, 2),
-            origin.Offset(-2, 0),
-            origin.Offset(0, -2),
-            origin.Offset(2, 2),
-            origin.Offset(-2, -2),
-            origin.Offset(2, -2),
-            origin.Offset(-2, 2),
-            origin.Offset(0, 3),
-        };
-
         var placements = new List<(ResourceNodeDefinition, TileCoord)>();
-        var used = new HashSet<TileCoord>();
-        var candidateIndex = 0;
-        foreach (var definition in registry.Definitions)
+        var definitions = registry.Definitions.ToArray();
+        if (definitions.Length == 0 || densityTilesPerNode <= 0)
         {
-            while (candidateIndex < candidates.Length)
+            return placements;
+        }
+
+        // Inset by 1: the outermost ring is always blocked border, so never sample it.
+        const int margin = 1;
+        var minX = margin;
+        var maxX = Width - 1 - margin;
+        var minY = margin;
+        var maxY = Height - 1 - margin;
+        if (maxX < minX || maxY < minY)
+        {
+            return placements;
+        }
+
+        var spanX = maxX - minX + 1;
+        var spanY = maxY - minY + 1;
+
+        var targetCount = Math.Max(1, (Width * Height) / (densityTilesPerNode * densityTilesPerNode));
+
+        // Min spacing scales with density (~70% of the cell pitch) so denser maps still spread evenly
+        // without the spacing constraint starving the target count. Clamped to >= 1 (never two on a tile).
+        var minSpacing = Math.Max(1, (densityTilesPerNode * 7) / 10);
+
+        var used = new HashSet<TileCoord>();
+        // Attempt budget: generous multiple of the target so a reachable target fills, but bounded so an
+        // impossible target (too dense for the walkable area) terminates with a partial, deterministic set.
+        var maxAttempts = targetCount * 64L + 1024L;
+
+        var state = SeedState(Seed ^ ResourceNodeSeedSalt);
+        var definitionIndex = 0;
+        for (var attempt = 0L; attempt < maxAttempts && placements.Count < targetCount; attempt++)
+        {
+            state = NextState(state);
+            var x = minX + (int)(Mix(state) % (ulong)spanX);
+            state = NextState(state);
+            var y = minY + (int)(Mix(state) % (ulong)spanY);
+            var tile = new TileCoord(x, y);
+
+            if (!IsWalkable(tile) || !used.Add(tile))
             {
-                var tile = candidates[candidateIndex++];
-                if (IsWalkable(tile) && used.Add(tile))
-                {
-                    placements.Add((definition, tile));
-                    break;
-                }
+                continue;
             }
+
+            if (!IsFarEnough(placements, tile, minSpacing))
+            {
+                used.Remove(tile);
+                continue;
+            }
+
+            placements.Add((definitions[definitionIndex], tile));
+            definitionIndex = (definitionIndex + 1) % definitions.Length;
         }
 
         return placements;
+    }
+
+    private static bool IsFarEnough(
+        List<(ResourceNodeDefinition Definition, TileCoord Tile)> placements,
+        TileCoord candidate,
+        int minSpacing)
+    {
+        foreach (var (_, tile) in placements)
+        {
+            var dx = Math.Abs(tile.X - candidate.X);
+            var dy = Math.Abs(tile.Y - candidate.Y);
+            if (Math.Max(dx, dy) < minSpacing)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // SplitMix64, mirroring TerrainGenerator: a tiny, fully-specified integer PRNG whose output is
+    // identical on every platform/runtime (pure 64-bit unsigned arithmetic with defined overflow), so the
+    // node layout cannot drift the way a framework RNG might.
+    private static ulong SeedState(int seed)
+    {
+        return (ulong)(uint)seed * 0x9E3779B97F4A7C15UL;
+    }
+
+    private static ulong NextState(ulong state)
+    {
+        unchecked
+        {
+            return state + 0x9E3779B97F4A7C15UL;
+        }
+    }
+
+    private static ulong Mix(ulong state)
+    {
+        unchecked
+        {
+            var z = state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+            return z ^ (z >> 31);
+        }
     }
 
     public bool Despawn(ulong entityId, out WorldEntity entity)

@@ -17,7 +17,7 @@ namespace Mmo.Server.Tests;
 // (account takeover) keeps the harvested item.
 public sealed class InteractHarvestIntegrationTests
 {
-    // "tree" is the first scattered node type (yields wood) and is placed at spawnTile + (0, 2).
+    // "tree" is the first scattered node type (yields wood).
     private const string TreeNodeName = "Tree";
 
     [Fact]
@@ -26,7 +26,10 @@ public sealed class InteractHarvestIntegrationTests
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
         var options = CreateOptions(port, database.ConnectionString);
-        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "Harvester", placement);
+        var server = new GameServer(options, repository);
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);
 
@@ -37,8 +40,7 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await WaitForNodeAsync(client);
-            await StepAdjacentToAsync(client, node.Tile);
+            var node = await ResolveSpawnedNodeAsync(client, placement);
 
             client.SendInteract(node.NetworkId);
             await WaitUntilAsync(() => client.InteractResults.Any(), client);
@@ -70,7 +72,10 @@ public sealed class InteractHarvestIntegrationTests
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
         var options = CreateOptions(port, database.ConnectionString);
-        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "FarAway", placement);
+        var server = new GameServer(options, repository);
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);
 
@@ -81,9 +86,11 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await WaitForNodeAsync(client);
-            // Move away so we are NOT adjacent (spawn is +2 from the node; step further).
-            await StepUntilAsync(client, Direction8.N, () => Math.Abs(client.OwnTile.Y - node.Tile.Y) > 1);
+            var node = await ResolveSpawnedNodeAsync(client, placement);
+            // We spawn adjacent to the scattered node; step away (in whichever vertical direction has room)
+            // until we are no longer adjacent, so the interact must be rejected too_far.
+            var away = client.OwnTile.Y <= node.Tile.Y ? Direction8.N : Direction8.S;
+            await StepUntilAsync(client, away, () => Math.Abs(client.OwnTile.Y - node.Tile.Y) > 1);
 
             client.SendInteract(node.NetworkId);
             await WaitUntilAsync(() => client.InteractResults.Any(), client);
@@ -146,7 +153,10 @@ public sealed class InteractHarvestIntegrationTests
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
         var options = CreateOptions(port, database.ConnectionString);
-        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "DoubleHarvest", placement);
+        var server = new GameServer(options, repository);
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);
 
@@ -157,21 +167,27 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await WaitForNodeAsync(client);
-            await StepAdjacentToAsync(client, node.Tile);
+            var node = await ResolveSpawnedNodeAsync(client, placement);
 
             client.SendInteract(node.NetworkId);
             await WaitUntilAsync(() => client.InteractResults.Any(r => r.Success), client);
 
-            // Wait out the interact cooldown, then harvest again: the node is depleted.
-            await PollForAsync(TimeSpan.FromMilliseconds(400), client);
-            client.ClearInteractResults();
-            client.SendInteract(node.NetworkId);
-            await WaitUntilAsync(() => client.InteractResults.Any(), client);
+            // Harvest the now-depleted node again and assert it's rejected as "depleted". The server applies
+            // a 4-tick interact rate-limit (ClientSession.TryConsumeInteract): under parallel-suite jitter an
+            // immediate retry can land inside that window and come back "rate_limited" instead (todo/N22). So
+            // retry the second interact, ignoring any "rate_limited" replies, until we observe the
+            // rate-limit-independent verdict — which for a depleted node must be "depleted".
+            var depletedRejection = await PollForInteractAsync(
+                client,
+                r => !r.Success && r.Reason != "rate_limited",
+                () =>
+                {
+                    client.ClearInteractResults();
+                    client.SendInteract(node.NetworkId);
+                });
 
-            var result = client.InteractResults.Last();
-            Assert.False(result.Success);
-            Assert.Equal("depleted", result.Reason);
+            Assert.False(depletedRejection.Success);
+            Assert.Equal("depleted", depletedRejection.Reason);
         }
         finally
         {
@@ -187,7 +203,10 @@ public sealed class InteractHarvestIntegrationTests
         var port = GetFreeUdpPort();
         // Small interest radius so a player who steps away genuinely loses sight of the node.
         var options = CreateOptions(port, database.ConnectionString, interestRadius: 4f);
-        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "Harvester", placement);
+        var server = new GameServer(options, repository);
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);
 
@@ -199,13 +218,19 @@ public sealed class InteractHarvestIntegrationTests
             harvester.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => harvester.IsLoggedIn && harvester.OwnNetworkId != 0, harvester);
 
-            var node = await WaitForNodeAsync(harvester);
-            await StepAdjacentToAsync(harvester, node.Tile);
+            var node = await ResolveSpawnedNodeAsync(harvester, placement);
 
-            // Observer logs in then walks far away so the node is outside its AOI.
+            // Observer logs in then walks far away so the node is outside its small (radius 4) AOI. Walk
+            // toward the horizontal map edge farthest from the node so we reliably clear the AOI window
+            // wherever the scattered node landed.
             observer.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => observer.IsLoggedIn && observer.OwnNetworkId != 0, observer, harvester);
-            await StepUntilAsync(observer, Direction8.E, () => observer.OwnTile.X - node.Tile.X > 8, harvester);
+            var awayFromNode = node.Tile.X < 32 ? Direction8.E : Direction8.W;
+            await StepUntilAsync(
+                observer,
+                awayFromNode,
+                () => Math.Abs(observer.OwnTile.X - node.Tile.X) > 8,
+                harvester);
 
             observer.ClearMessages();
             harvester.SendInteract(node.NetworkId);
@@ -231,7 +256,10 @@ public sealed class InteractHarvestIntegrationTests
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
         var options = CreateOptions(port, database.ConnectionString);
-        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "Relogin", placement);
+        var server = new GameServer(options, repository);
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);
 
@@ -242,8 +270,7 @@ public sealed class InteractHarvestIntegrationTests
             first.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => first.IsLoggedIn && first.OwnNetworkId != 0, first);
 
-            var node = await WaitForNodeAsync(first);
-            await StepAdjacentToAsync(first, node.Tile);
+            var node = await ResolveSpawnedNodeAsync(first, placement);
 
             first.SendInteract(node.NetworkId);
             await WaitUntilAsync(() => first.InventoryUpdates.Any(), first);
@@ -262,8 +289,7 @@ public sealed class InteractHarvestIntegrationTests
             // step adjacent, and harvest it again: the InventoryUpdate now reports a total of 2 wood,
             // proving the first session's not-yet-flushed harvest was handed off, not lost. (If the
             // takeover had reloaded the DB-stale inventory, this would report 1.)
-            var node2 = await WaitForNodeAsync(second);
-            await StepAdjacentToAsync(second, node2.Tile);
+            var node2 = await ResolveSpawnedNodeAsync(second, placement);
             await WaitUntilAsync(() => second.LatestDepletedState(node2.NetworkId) == false, TimeSpan.FromSeconds(12), second);
             second.SendInteract(node2.NetworkId);
             await WaitUntilAsync(() => second.InventoryUpdates.Any(u => u.ChangedStacks.Any(s => s.TemplateKey == "wood")), second);
@@ -298,58 +324,151 @@ public sealed class InteractHarvestIntegrationTests
             interestRadius,
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+        {
+            // Dense scatter on the small 64² test map so a harvestable node is reliably near the clustered
+            // spawn (and quickly reachable under the small-radius test's moving AOI window). ~64 nodes.
+            ResourceNodeDensityTilesPerNode = 8,
+        };
     }
 
-    private static async Task<(uint NetworkId, TileCoord Tile)> WaitForNodeAsync(IntegrationClient client)
+    // Where the deterministically-scattered Tree node sits and the walkable tile the player should spawn
+    // on to be Chebyshev-adjacent to it (no in-sim movement, no wall pathing).
+    private readonly record struct TreePlacement(TileCoord NodeTile, TileCoord SpawnTile);
+
+    // Resource-node placement is deterministic and seeded (S44): identical (seed, size, density, registry)
+    // inputs yield a byte-identical layout. So instead of walking the player across a walled map to find a
+    // node — slow and flaky, because the naive step-toward helper can't path around interior walls — we
+    // reconstruct the exact same Zone the GameServer builds and ask it where the nodes are. We then pick a
+    // Tree whose tile has a walkable Chebyshev-neighbour and pre-seed the player's persisted tile to that
+    // neighbour, so login spawns the player already adjacent to a real, reachable node. This touches no
+    // production placement code; it only reads the public, deterministic PlanResourceNodeScatter.
+    private static TreePlacement DeterministicTreePlacement(ServerOptions options)
     {
-        await WaitUntilAsync(() => client.KnownSpawns.Any(s => s.DisplayName == TreeNodeName), client);
-        var spawn = client.KnownSpawns.First(s => s.DisplayName == TreeNodeName);
+        // Mirror GameServer's world construction exactly (same size, seed, gen version, distribution and
+        // registries) so the computed layout matches the server's spawned nodes tile-for-tile.
+        var zone = Zone.CreateGenerated(
+            options.WorldWidthTiles,
+            options.WorldHeightTiles,
+            options.MapSeed,
+            TerrainGenerator.CurrentGenVersion,
+            options.SpawnDistribution);
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+
+        var placements = zone.PlanResourceNodeScatter(registry, options.ResourceNodeDensityTilesPerNode);
+        var spawnCenter = zone.SpawnTiles[0];
+
+        // Among Tree nodes that have a walkable, non-default neighbour to stand on, prefer the one whose
+        // chosen stand-tile is nearest the clustered spawn centre (keeps observers/walks geometrically close
+        // to the original test, and keeps coordinates well away from the blocked border).
+        TreePlacement? best = null;
+        var bestDistance = int.MaxValue;
+        foreach (var (definition, tile) in placements)
+        {
+            if (definition.DisplayName != TreeNodeName)
+            {
+                continue;
+            }
+
+            if (!TryFindAdjacentStandTile(zone, tile, out var stand))
+            {
+                continue;
+            }
+
+            var distance = Math.Max(Math.Abs(stand.X - spawnCenter.X), Math.Abs(stand.Y - spawnCenter.Y));
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = new TreePlacement(tile, stand);
+            }
+        }
+
+        return best ?? throw new InvalidOperationException(
+            "No Tree node with a walkable adjacent tile was placed for the test map; " +
+            "check the map seed/size/density used by CreateOptions.");
+    }
+
+    // Finds a walkable tile that is Chebyshev-adjacent (<= 1, excluding the node tile itself) to a node and
+    // is not the legacy DefaultSpawnTile — so ResolvePlayerSpawnTile honours it as a persisted spawn tile.
+    private static bool TryFindAdjacentStandTile(Zone zone, TileCoord node, out TileCoord stand)
+    {
+        for (var dy = -1; dy <= 1; dy++)
+        {
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0)
+                {
+                    continue;
+                }
+
+                var candidate = new TileCoord(node.X + dx, node.Y + dy);
+                if (candidate != TileGrid.DefaultSpawnTile && zone.IsWalkable(candidate))
+                {
+                    stand = candidate;
+                    return true;
+                }
+            }
+        }
+
+        stand = default;
+        return false;
+    }
+
+    // Pre-seeds the account's character with a persisted tile adjacent to the chosen node, so that when the
+    // client logs in the server's ResolvePlayerSpawnTile honours it and the player spawns already adjacent —
+    // no in-sim walking across the walled map. Uses only the production persistence path (LoadOrCreate +
+    // SaveTile); no production code is modified.
+    private static async Task SeedSpawnAdjacentToNodeAsync(
+        SqliteCharacterRepository repository,
+        string accountName,
+        TreePlacement placement)
+    {
+        var character = await repository.LoadOrCreateAsync(accountName, accountName, CancellationToken.None);
+        await repository.SaveTileAsync(character.CharacterId, placement.SpawnTile, CancellationToken.None);
+    }
+
+    // After login, resolves the network id of the Tree node at the expected (deterministic) tile from the
+    // spawns the client has received. The player was seeded adjacent to it, so it is inside AOI and arrives
+    // as an EntitySpawn promptly.
+    private static async Task<(uint NetworkId, TileCoord Tile)> ResolveSpawnedNodeAsync(
+        IntegrationClient client,
+        TreePlacement placement)
+    {
+        await WaitUntilAsync(
+            () => client.KnownSpawns.Any(s => s.DisplayName == TreeNodeName && s.Tile == placement.NodeTile),
+            client);
+
+        var spawn = client.KnownSpawns.Last(s => s.DisplayName == TreeNodeName && s.Tile == placement.NodeTile);
         return (spawn.NetworkId, spawn.Tile);
     }
 
-    // Steps the player to a tile that is Chebyshev-adjacent (<= 1) to the target.
-    private static async Task StepAdjacentToAsync(IntegrationClient client, TileCoord target)
+    // Repeatedly triggers an interact attempt and polls until a result satisfying the predicate arrives,
+    // re-issuing on each poll cycle. Used to retry past transient "rate_limited" replies (the 4-tick
+    // interact cooldown) so the test asserts the rate-limit-independent verdict deterministically.
+    private static async Task<InteractResultMessage> PollForInteractAsync(
+        IntegrationClient client,
+        Func<InteractResultMessage, bool> predicate,
+        Action attempt)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(8);
         while (DateTimeOffset.UtcNow < deadline)
         {
-            if (IsAdjacent(client.OwnTile, target))
+            attempt();
+            var pollUntil = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(250);
+            while (DateTimeOffset.UtcNow < pollUntil)
             {
-                client.StopMove();
-                await PollForAsync(TimeSpan.FromMilliseconds(75), client);
-                return;
-            }
+                client.Poll();
+                var match = client.InteractResults.FirstOrDefault(predicate);
+                if (match is not null)
+                {
+                    return match;
+                }
 
-            var direction = DirectionToward(client.OwnTile, target);
-            client.SendMove(direction);
-            await PollForAsync(TimeSpan.FromMilliseconds(75), client);
+                await Task.Delay(10);
+            }
         }
 
-        throw new TimeoutException($"Timed out stepping adjacent to {target} (at {client.OwnTile}).");
-    }
-
-    private static bool IsAdjacent(TileCoord a, TileCoord b)
-    {
-        return Math.Abs(a.X - b.X) <= 1 && Math.Abs(a.Y - b.Y) <= 1;
-    }
-
-    private static Direction8 DirectionToward(TileCoord from, TileCoord to)
-    {
-        var dx = Math.Sign(to.X - from.X);
-        var dy = Math.Sign(to.Y - from.Y);
-        return (dx, dy) switch
-        {
-            (0, -1) => Direction8.N,
-            (1, -1) => Direction8.NE,
-            (1, 0) => Direction8.E,
-            (1, 1) => Direction8.SE,
-            (0, 1) => Direction8.S,
-            (-1, 1) => Direction8.SW,
-            (-1, 0) => Direction8.W,
-            (-1, -1) => Direction8.NW,
-            _ => Direction8.S
-        };
+        throw new TimeoutException("Timed out waiting for a matching interact result.");
     }
 
     private static int GetFreeUdpPort()

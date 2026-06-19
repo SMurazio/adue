@@ -105,6 +105,103 @@ public sealed class ZoneTests
     }
 
     [Fact]
+    public void PlanResourceNodeScatterSpreadsAcrossWholeWalkableMap()
+    {
+        const int size = 1000;
+        var zone = Zone.CreateDefault(size, size, SpawnDistribution.Clustered);
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+
+        var placements = zone.PlanResourceNodeScatter(registry, densityTilesPerNode: 28);
+
+        Assert.NotEmpty(placements);
+        // Every placed tile is walkable and unique.
+        Assert.All(placements, p => Assert.True(zone.IsWalkable(p.Tile)));
+        Assert.Equal(placements.Count, placements.Select(p => p.Tile).Distinct().Count());
+
+        // Count is in the neighbourhood of the density target (1 per 28² tiles ≈ 1276 on a 1000² map).
+        var target = (size * size) / (28 * 28);
+        Assert.InRange(placements.Count, target * 8 / 10, target);
+
+        // Placement reaches well into all four quadrants — not confined near a single cluster.
+        var center = size / 2;
+        Assert.True(placements.Min(p => p.Tile.X) < center - 200);
+        Assert.True(placements.Max(p => p.Tile.X) > center + 200);
+        Assert.True(placements.Min(p => p.Tile.Y) < center - 200);
+        Assert.True(placements.Max(p => p.Tile.Y) > center + 200);
+
+        // A rough even type mix: every registered type appears.
+        var types = placements.Select(p => p.Definition.Key).Distinct().ToHashSet();
+        Assert.Contains("tree", types);
+        Assert.Contains("rock", types);
+        Assert.Contains("plant", types);
+    }
+
+    [Fact]
+    public void PlanResourceNodeScatterIsDeterministicForSameSeed()
+    {
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+        var a = Zone.CreateGenerated(256, 256, seed: 1234, TerrainGenerator.CurrentGenVersion);
+        var b = Zone.CreateGenerated(256, 256, seed: 1234, TerrainGenerator.CurrentGenVersion);
+
+        var first = a.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
+        var second = b.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
+
+        Assert.Equal(first.Count, second.Count);
+        for (var i = 0; i < first.Count; i++)
+        {
+            Assert.Equal(first[i].Tile, second[i].Tile);
+            Assert.Equal(first[i].Definition.Key, second[i].Definition.Key);
+        }
+    }
+
+    [Fact]
+    public void PlanResourceNodeScatterDiffersForDifferentSeed()
+    {
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+        var a = Zone.CreateGenerated(256, 256, seed: 1, TerrainGenerator.CurrentGenVersion);
+        var b = Zone.CreateGenerated(256, 256, seed: 2, TerrainGenerator.CurrentGenVersion);
+
+        var first = a.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
+        var second = b.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
+
+        // Different map seeds should yield a different layout (not byte-identical tile sequences).
+        var firstTiles = first.Select(p => p.Tile).ToList();
+        var secondTiles = second.Select(p => p.Tile).ToList();
+        Assert.NotEqual(firstTiles, secondTiles);
+    }
+
+    [Fact]
+    public void PlanResourceNodeScatterRespectsMinSpacing()
+    {
+        var zone = Zone.CreateGenerated(256, 256, seed: 7, TerrainGenerator.CurrentGenVersion);
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+
+        const int density = 24;
+        var placements = zone.PlanResourceNodeScatter(registry, densityTilesPerNode: density);
+        var minSpacing = Math.Max(1, (density * 7) / 10);
+
+        // No two placed nodes are closer than the min spacing (Chebyshev), so they don't clump.
+        for (var i = 0; i < placements.Count; i++)
+        {
+            for (var j = i + 1; j < placements.Count; j++)
+            {
+                var dx = Math.Abs(placements[i].Tile.X - placements[j].Tile.X);
+                var dy = Math.Abs(placements[i].Tile.Y - placements[j].Tile.Y);
+                Assert.True(Math.Max(dx, dy) >= minSpacing);
+            }
+        }
+    }
+
+    [Fact]
+    public void PlanResourceNodeScatterDisabledByZeroDensity()
+    {
+        var zone = Zone.CreateGenerated(128, 128, seed: 0, TerrainGenerator.CurrentGenVersion);
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+
+        Assert.Empty(zone.PlanResourceNodeScatter(registry, densityTilesPerNode: 0));
+    }
+
+    [Fact]
     public void ResolvePlayerSpawnTileDistributesLegacyDefaultTile()
     {
         var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Distributed);

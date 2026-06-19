@@ -12,8 +12,6 @@ namespace Mmo.Server.Tests;
 
 public sealed class AoiIntegrationTests
 {
-    private const string PlaceholderEntityName = "Ancient Marker";
-
     [Fact]
     public async Task ClientReceivesSpawnAndDespawnWhenEntityEntersAndLeavesAoi()
     {
@@ -122,6 +120,11 @@ public sealed class AoiIntegrationTests
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
+        // Interest radius spans the whole 64² map so at least one of the scattered resource nodes (the
+        // server's static, non-session-owned entities) lands in the observer's AOI regardless of where
+        // the seeded scatter placed them. Verifies such an entity both spawns (with kind + empty
+        // character id) and appears in the periodic world snapshot. (Despawn-on-AOI-exit is covered by
+        // ClientReceivesSpawnAndDespawnWhenEntityEntersAndLeavesAoi.)
         var options = new ServerOptions(
             port,
             20,
@@ -133,7 +136,7 @@ public sealed class AoiIntegrationTests
             64,
             50,
             15,
-            2,
+            64,
             150,
             SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
@@ -147,28 +150,22 @@ public sealed class AoiIntegrationTests
             using var client = new IntegrationClient("Observer");
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
-            var spawnTile = client.OwnTile;
+
             await WaitUntilAsync(
-                () => client.Messages.OfType<EntitySpawnMessage>().Any(message => message.DisplayName == PlaceholderEntityName),
+                () => client.Messages.OfType<EntitySpawnMessage>().Any(message => message.Kind == EntityKind.Resource),
                 client);
 
-            var markerSpawn = client.Messages
+            var nodeSpawn = client.Messages
                 .OfType<EntitySpawnMessage>()
-                .First(message => message.DisplayName == PlaceholderEntityName);
-            Assert.Equal(EntityKind.Resource, markerSpawn.Kind);
-            Assert.Equal(Guid.Empty, markerSpawn.CharacterId);
+                .First(message => message.Kind == EntityKind.Resource);
+            Assert.Equal(EntityKind.Resource, nodeSpawn.Kind);
+            Assert.Equal(Guid.Empty, nodeSpawn.CharacterId);
 
             await WaitUntilAsync(
                 () => client.Messages
                     .OfType<WorldSnapshotMessage>()
                     .SelectMany(message => message.Entities)
-                    .Any(entity => entity.NetworkId == markerSpawn.NetworkId),
-                client);
-
-            client.ClearMessages();
-            await StepUntilAsync(client, Direction8.S, () => client.OwnTile.Y >= spawnTile.Y + 4);
-            await WaitUntilAsync(
-                () => client.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == markerSpawn.NetworkId),
+                    .Any(entity => entity.NetworkId == nodeSpawn.NetworkId),
                 client);
         }
         finally
