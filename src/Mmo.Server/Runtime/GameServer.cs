@@ -47,6 +47,8 @@ public sealed class GameServer
     private readonly Zone _zone;
     private readonly List<ClientSession> _authenticatedScratch = [];
     private readonly List<WorldEntity> _entityScratch = [];
+    private readonly List<WorldEntity> _aoiCandidateScratch = [];
+    private readonly List<WorldEntity> _aoiInteractCandidateScratch = [];
     private readonly List<VisibleEntity> _visibleCandidateScratch = [];
     private readonly List<WorldEntity> _visibleEntityScratch = [];
     private readonly HashSet<uint> _visibleNetworkIdScratch = [];
@@ -63,6 +65,13 @@ public sealed class GameServer
     // tracked here.
     private readonly ResourceRespawnSchedule _resourceRespawns = new();
 
+    // Half-extent (in tiles) of the cell neighborhood an AOI query must examine. The grid returns every
+    // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
+    // the exact set. It MUST cover the interest EXIT radius (interest radius + hysteresis), so a
+    // hysteresis-retained entity sitting between the entry and exit radius is never dropped — dropping
+    // one would be both a visible bug and an anti-cheat hole. Computed once from the configured radius.
+    private readonly int _aoiQueryRadiusTiles;
+
     private uint _serverTick;
     private uint _nextPersistenceCheckpointTick;
     private long _pendingMovementElapsedTicks;
@@ -72,6 +81,7 @@ public sealed class GameServer
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
         _options = options;
+        _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(options.InterestRadius);
         _characters = characters;
         _persistence = new PersistenceWriteBehindWorker(characters);
         _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
@@ -83,7 +93,8 @@ public sealed class GameServer
             options.WorldHeightTiles,
             options.MapSeed,
             TerrainGenerator.CurrentGenVersion,
-            options.SpawnDistribution);
+            options.SpawnDistribution,
+            ResolveEntityGridCellSize(options.InterestRadius));
         ScatterResourceNodes();
         _netManager = new NetManager(_listener)
         {
@@ -565,9 +576,16 @@ public sealed class GameServer
             return;
         }
 
+        // Spatial-index candidate gather (S41): instead of scanning every world entity, query only the
+        // cells overlapping the viewer's interest box. The grid returns a SUPERSET of the in-interest set
+        // (it covers the exit/hysteresis radius), so applying the exact same IsEntityInInterest test to
+        // the candidates below yields a result IDENTICAL to the old full scan. `entities.Count` (the total
+        // world entity count) still drives the cap branch exactly as before.
+        _zone.World.GatherInterestCandidates(recipientEntity.Tile, _aoiQueryRadiusTiles, _aoiCandidateScratch);
+
         if (_options.MaxVisibleEntities >= entities.Count)
         {
-            foreach (var candidate in entities)
+            foreach (var candidate in _aoiCandidateScratch)
             {
                 if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
                 {
@@ -579,7 +597,7 @@ public sealed class GameServer
             return;
         }
 
-        foreach (var candidate in entities)
+        foreach (var candidate in _aoiCandidateScratch)
         {
             var distanceSquared = DistanceSquared(recipientEntity, candidate);
             if (IsEntityInInterest(recipientEntity, candidate, recipient, _options.InterestRadius))
@@ -766,6 +784,24 @@ public sealed class GameServer
         return recipient.WasInLastSnapshot(candidate.NetworkId) && distanceSquared <= exitRadiusSquared;
     }
 
+    // Tile half-extent an AOI grid query must cover: the interest EXIT radius (interest radius + the
+    // hysteresis margin), rounded UP so the integer cell box fully contains the float exit circle. Any
+    // entity that could pass IsEntityInInterest lies within this Chebyshev box of the viewer, so querying
+    // it guarantees the grid returns a superset of the full-scan result.
+    private static int ResolveAoiQueryRadiusTiles(float interestRadius)
+    {
+        return (int)Math.Ceiling(interestRadius + InterestExitHysteresisTiles);
+    }
+
+    // Spatial-index cell size (tiles): one cell ≈ the interest box, so a viewer query touches a small
+    // fixed neighborhood (~3×3 cells) regardless of world size. Derived from the interest radius and
+    // clamped to >= 1. Pure performance knob — correctness is independent of it (the query expands the
+    // cell box to cover the exit radius for whatever cell size is chosen).
+    private static int ResolveEntityGridCellSize(float interestRadius)
+    {
+        return Math.Max(1, (int)Math.Ceiling(interestRadius));
+    }
+
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
         return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted);
@@ -890,7 +926,13 @@ public sealed class GameServer
     // is always visible. Mirrors the AOI test used for snapshots so interaction and replication agree.
     private bool TryFindVisibleEntity(ClientSession session, WorldEntity actor, uint targetNetworkId, out WorldEntity target)
     {
-        foreach (var candidate in _zone.World.Entities)
+        // Route interaction visibility through the SAME spatial index as snapshot AOI so "can replicate"
+        // and "can interact" can never diverge (S38/S41). The grid returns a superset of the actor's
+        // interest set; the exact IsEntityInInterest test below is the security boundary. A target outside
+        // the query neighborhood is necessarily outside the interest radius too, so it would fail the test
+        // anyway — same result as the old full scan, but without scanning every entity.
+        _zone.World.GatherInterestCandidates(actor.Tile, _aoiQueryRadiusTiles, _aoiInteractCandidateScratch);
+        foreach (var candidate in _aoiInteractCandidateScratch)
         {
             if (candidate.NetworkId != targetNetworkId)
             {

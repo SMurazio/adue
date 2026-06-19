@@ -17,7 +17,13 @@ public sealed class Zone
     {
     }
 
-    public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles, int seed, int genVersion)
+    public Zone(
+        string id,
+        TileGrid tileGrid,
+        IEnumerable<TileCoord> spawnTiles,
+        int seed,
+        int genVersion,
+        int entityGridCellSize = WorldState.DefaultGridCellSize)
     {
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -27,6 +33,7 @@ public sealed class Zone
         Id = id;
         Seed = seed;
         GenVersion = genVersion;
+        World = new WorldState(entityGridCellSize);
         _tileGrid = tileGrid ?? throw new ArgumentNullException(nameof(tileGrid));
         _spawnTiles = spawnTiles
             .Where(_tileGrid.IsWalkable)
@@ -46,7 +53,7 @@ public sealed class Zone
     public int GenVersion { get; }
     public IReadOnlySet<TileCoord> BlockedTiles => _tileGrid.BlockedTiles;
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
-    public WorldState World { get; } = new();
+    public WorldState World { get; }
 
     public static Zone CreateDefault(int width, int height, SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
     {
@@ -58,10 +65,17 @@ public sealed class Zone
         int height,
         int seed,
         int genVersion,
-        SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
+        SpawnDistribution spawnDistribution = SpawnDistribution.Distributed,
+        int entityGridCellSize = WorldState.DefaultGridCellSize)
     {
         var tileGrid = TileGrid.CreateGenerated(width, height, seed, genVersion);
-        return new Zone(DefaultId, tileGrid, CreateSpawnTiles(tileGrid, spawnDistribution), seed, genVersion);
+        return new Zone(
+            DefaultId,
+            tileGrid,
+            CreateSpawnTiles(tileGrid, spawnDistribution),
+            seed,
+            genVersion,
+            entityGridCellSize);
     }
 
     public bool IsWalkable(TileCoord tile)
@@ -97,7 +111,7 @@ public sealed class Zone
 
     public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks)
     {
-        return entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid);
+        return TryStep(entity, direction, serverTick, stepCooldownTicks, out _);
     }
 
     public bool TryStep(
@@ -107,7 +121,17 @@ public sealed class Zone
         uint stepCooldownTicks,
         out MovementStepResult result)
     {
-        return entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
+        // Capture the pre-step tile so the spatial index can migrate the entity's bucket if the step is
+        // accepted. WorldEntity.TryStep mutates Tile in place, so the previous tile must be read before
+        // the call. Same-cell steps are a no-op inside the grid.
+        var previousTile = entity.Tile;
+        var stepped = entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
+        if (stepped)
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+
+        return stepped;
     }
 
     public WorldEntity SpawnPlayer(

@@ -4,10 +4,32 @@ namespace Mmo.Server.Runtime;
 
 public sealed class WorldState
 {
+    // Default spatial-index cell size (tiles). A pure performance knob — correctness is independent of it
+    // (see SpatialEntityGrid). Sized so that for the default 40-tile interest radius a viewer query
+    // touches a small fixed neighborhood. GameServer constructs the zone with a cell size derived from
+    // the configured interest radius; this default only applies to the few direct `new WorldState()`
+    // constructions (tests).
+    public const int DefaultGridCellSize = 32;
+
     private readonly Dictionary<ulong, WorldEntity> _entities = [];
+    private readonly SpatialEntityGrid _grid;
     private ulong _nextEntityId = 1;
 
+    public WorldState()
+        : this(DefaultGridCellSize)
+    {
+    }
+
+    public WorldState(int gridCellSize)
+    {
+        _grid = new SpatialEntityGrid(gridCellSize);
+    }
+
     public IReadOnlyCollection<WorldEntity> Entities => _entities.Values;
+
+    public int Count => _entities.Count;
+
+    public int GridCellSize => _grid.CellSize;
 
     public void CopyEntitiesTo(ICollection<WorldEntity> destination)
     {
@@ -15,6 +37,17 @@ public sealed class WorldState
         {
             destination.Add(entity);
         }
+    }
+
+    // Gathers AOI candidates for a viewer centered at `center`: every entity in the spatial cells
+    // overlapping the [center ± radiusTiles] box, appended to `destination` (cleared first). This is a
+    // SUPERSET of the in-interest set — the caller applies the exact interest test to each candidate, so
+    // the final result is identical to a full scan. `radiusTiles` MUST cover the interest exit radius
+    // (interest radius + hysteresis), so a hysteresis-retained entity at the box edge is never dropped.
+    public void GatherInterestCandidates(TileCoord center, int radiusTiles, List<WorldEntity> destination)
+    {
+        destination.Clear();
+        _grid.QueryNeighborhood(center, radiusTiles, destination);
     }
 
     public WorldEntity AddPlayer(
@@ -37,7 +70,7 @@ public sealed class WorldState
             isDurable: true,
             inventory);
 
-        _entities.Add(entity.Id, entity);
+        Insert(entity);
         return entity;
     }
 
@@ -59,7 +92,7 @@ public sealed class WorldState
             ownerSession: null,
             isDurable: false);
 
-        _entities.Add(entity.Id, entity);
+        Insert(entity);
         return entity;
     }
 
@@ -84,7 +117,7 @@ public sealed class WorldState
             inventory: null,
             resource: resource);
 
-        _entities.Add(entity.Id, entity);
+        Insert(entity);
         return entity;
     }
 
@@ -100,6 +133,22 @@ public sealed class WorldState
             return false;
         }
 
+        _grid.Remove(entity);
         return true;
+    }
+
+    // Keeps the spatial index in sync after a movement step changed an entity's tile. Called by the move
+    // path with the tile the entity occupied before the step (its Tile property already holds the new
+    // tile). A same-cell move is a no-op inside the grid, so most single tile steps cost only an equality
+    // check.
+    public void OnEntityMoved(WorldEntity entity, TileCoord previousTile)
+    {
+        _grid.Move(entity, previousTile);
+    }
+
+    private void Insert(WorldEntity entity)
+    {
+        _entities.Add(entity.Id, entity);
+        _grid.Add(entity);
     }
 }
