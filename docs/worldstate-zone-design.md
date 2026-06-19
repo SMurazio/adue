@@ -1,10 +1,20 @@
 # WorldState / Zone Design
 
-Design + decision record for extracting an explicit world model. This is the keystone item
-(roadmap Phase 4, networking-design-plan §S1): today every entity is *derived from a live session*,
-which blocks all non-player content, keeps the hot tick loop allocation-heavy (the source of the
-tick-time spikes), and tangles simulation with serialization. This document is the plan; the
-implementer executes it in the staged order below.
+> **STATUS (updated 2026-06-19): IMPLEMENTED — this is now a historical design record, not a backlog.**
+> `WorldState`, `WorldEntity`, `Zone` (owning the `TileGrid`), the `EntityKind` set (incl. `Resource`),
+> the transient/durable split, the replication step, `ZoneInfo` map distribution, and write-behind
+> periodic checkpoint all exist in `src/Mmo.Server/Runtime/`. Stage 1 (extraction), Stage 3 (non-player
+> entities — placeholder + resource nodes via S38), and Stage 4 (ZoneInfo, now being chunked by S36a)
+> are shipped; Stage 2's goal (no per-tick GC) is met — stress runs show `gc 0/0/0` at 120–400 clients
+> (see `capacity-ladder-study.md`). Keep this doc for the rationale/decisions below; do **not** treat
+> the staged plan as outstanding work. Remaining genuine follow-ups have their own todos (e.g. grid
+> AOI = S41).
+
+Design + decision record for extracting an explicit world model. It was the keystone item
+(roadmap Phase 4, networking-design-plan §S1): every entity was *derived from a live session*,
+which blocked all non-player content, kept the hot tick loop allocation-heavy (the source of the
+tick-time spikes), and tangled simulation with serialization. This document was the plan; it has since
+been executed in the staged order below.
 
 ## Why this is the gate
 

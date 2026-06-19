@@ -6,6 +6,28 @@ The networking rationale is [Networking Design Plan](networking-design-plan.md),
 
 Movement model (implemented in protocol v9): **tile-stepped** on a tile grid - server-timed steps with a per-entity cooldown, 8-way, blocked-tile map (walls block; entities may share a tile), client tweens between tiles, no prediction. This replaced continuous streamed positions. See [Networking Design Plan](networking-design-plan.md) section 5a.
 
+## Status as of 2026-06-19 (what's shipped vs. what the phases below still describe as future)
+
+Several items below were written before they shipped. Already done — read the phases as history for these:
+
+- **`WorldState`/`Zone` extraction** (Near-Term #10, Phase 4 first bullet): done. Entities are no longer
+  derived from sessions; `Zone` owns the tile grid. See `worldstate-zone-design.md` (now a historical
+  record).
+- **Non-player entities + resource nodes** (Phase 4): done — `EntityKind.Resource`, server-owned,
+  transient (S38).
+- **Inventory / items** (Phase 3 caveat, Phase 4): done — item registry + per-character inventory with
+  write-behind SQLite persistence (S37).
+- **Server-validated interactions** (Phase 4): done — the `Interact`/harvest verb with auth + AOI +
+  adjacency validation and owner-only `InventoryUpdate` (S38).
+- **Wire version**: now **v13** (S38), going to **v14** with terrain chunking (S36a) — not the "v9"
+  some older lines still cite (v9 was when tile-stepping landed; the model is unchanged, the wire moved on).
+- **Channel cap (the "120–150" target, Phase 2 & 7)**: measured in `capacity-ladder-study.md` (S40) —
+  server CPU is not the bound (≈2 ms of a 50 ms budget at 150 *visible*); per-client bandwidth + the AOI
+  scan at high *visible* density are. 120–150 is a conservative floor; raise it after S36a + grid AOI (S41).
+
+Current active priority is the **optimization/scaling track** (S36a → S41 → S36b) ahead of gameplay UI
+(S39) and feel-polish (N21/S28) — see `todo/`.
+
 ## Near-Term Queue
 
 These are the next practical tasks before new gameplay:
