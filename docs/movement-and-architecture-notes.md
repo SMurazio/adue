@@ -82,7 +82,25 @@ write-behind ever stalls the tick at scale. Low priority.
 
 ---
 
+## 5. Networking & entity model — mostly aligned; one bandwidth lever
+- **Outgoing compression (the one lever).** Mature servers compress *every* outgoing packet with a cheap
+  stateless codec (a fixed Huffman table). Our snapshots are already compact binary, but **per-client
+  bandwidth is our other named limiter at high visible density** — so compressing the outgoing snapshot
+  stream (a fast codec like LZ4, or a fixed Huffman) is a real lever to squeeze the redundancy in 120–150
+  small position records per tick. Worth a measured experiment when we push visible density. → candidate todo.
+- **Per-tick send coalescing.** Accumulate all of a client's outgoing bytes for a tick and flush once,
+  rather than many small sends. LiteNetLib likely already coalesces for us; verify before bothering. Minor.
+- **Dirty-flag + delta property model.** The proven pattern — mark an entity dirty on change, send only the
+  changed fields to viewers once per tick — is **what we already do** (`StateRevision` + incomplete
+  snapshots that merge deltas). Aligned; no action.
+- **Strongly-typed entity id.** A `readonly struct` wrapper around the id (vs a raw `uint`) is a small
+  type-safety nicety. Trivial; only if we're touching that code anyway.
+
+---
+
 **Overall:** movement #1/#2 are the immediate feel wins; the **AOI spatial-index design is the standout**
 architecture idea because it targets the scaling limiter we already identified; rendering is mostly free for
-us as a 3D engine; persistence is fine as-is. Remaining to mine if we want to go deeper: entity/component
-organization and outgoing-packet batching.
+us as a 3D engine; persistence and the delta/entity model are already fine; and **outgoing-stream
+compression** is the one networking lever worth a measured experiment against the per-client-bandwidth limit.
+The study now spans movement, spatial index/AOI, 2.5D rendering, persistence, networking, and the entity
+model — a comprehensive pass.
