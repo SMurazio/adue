@@ -144,7 +144,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// Mouse-wheel zoom: live orthographic size (smaller = zoomed in), clamped. Seeded from CameraSize.
 	private float _cameraSize = 28f;
 	private const float CameraSizeMin = 8f;
-	private const float CameraSizeMax = 60f;
+	private const float CameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
