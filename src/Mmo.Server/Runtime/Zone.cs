@@ -238,7 +238,7 @@ public sealed class Zone
             var y = minY + (int)(Mix(state) % (ulong)spanY);
             var tile = new TileCoord(x, y);
 
-            if (!IsWalkable(tile) || !used.Add(tile))
+            if (!IsWalkable(tile) || !HasClearApproachRoom(tile) || !used.Add(tile))
             {
                 continue;
             }
@@ -254,6 +254,30 @@ public sealed class Zone
         }
 
         return placements;
+    }
+
+    // S48: a node must sit in open ground — all 8 Chebyshev neighbours walkable — so it never spawns
+    // jammed against a wall/border ring where harvesters had no clear tile to stand on. The current map is
+    // mostly open, so the strict all-8 rule fills the target comfortably (no relaxation to >= K needed).
+    private bool HasClearApproachRoom(TileCoord tile)
+    {
+        for (var dy = -1; dy <= 1; dy++)
+        {
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0)
+                {
+                    continue;
+                }
+
+                if (!IsWalkable(new TileCoord(tile.X + dx, tile.Y + dy)))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static bool IsFarEnough(

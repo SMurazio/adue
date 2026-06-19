@@ -202,6 +202,50 @@ public sealed class ZoneTests
     }
 
     [Fact]
+    public void PlanResourceNodeScatterGivesEveryNodeClearApproachRoom()
+    {
+        // S48: a node must never sit jammed against a wall/border (the play-test bug placed a Tree at
+        // (1,47), 3 of whose 8 neighbours were the X=0 border). Build a map with the perimeter border ring
+        // plus an interior wall segment, then assert every placed node has all 8 Chebyshev neighbours
+        // walkable — so no node is adjacent to a blocked or out-of-bounds tile.
+        const int size = 64;
+        var blocked = new List<TileCoord>();
+        for (var i = 0; i < size; i++)
+        {
+            blocked.Add(new TileCoord(i, 0));
+            blocked.Add(new TileCoord(i, size - 1));
+            blocked.Add(new TileCoord(0, i));
+            blocked.Add(new TileCoord(size - 1, i));
+        }
+
+        // An interior wall segment so neighbour-rejection is exercised away from the border too.
+        for (var y = 20; y <= 40; y++)
+        {
+            blocked.Add(new TileCoord(32, y));
+        }
+
+        var zone = new Zone("test", new TileGrid(size, size, blocked), [new TileCoord(10, 10)]);
+        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
+
+        var placements = zone.PlanResourceNodeScatter(registry, densityTilesPerNode: 6);
+
+        Assert.NotEmpty(placements);
+        Assert.All(placements, p =>
+        {
+            for (var dy = -1; dy <= 1; dy++)
+            {
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    var neighbour = new TileCoord(p.Tile.X + dx, p.Tile.Y + dy);
+                    Assert.True(
+                        zone.IsWalkable(neighbour),
+                        $"Node at {p.Tile} has non-walkable neighbour {neighbour}");
+                }
+            }
+        });
+    }
+
+    [Fact]
     public void ResolvePlayerSpawnTileDistributesLegacyDefaultTile()
     {
         var zone = Zone.CreateDefault(128, 128, SpawnDistribution.Distributed);
