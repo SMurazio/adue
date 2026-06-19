@@ -24,6 +24,12 @@ public sealed class GameServer
     private const float InterestExitHysteresisTiles = 1f;
     private const float SnapshotRetentionBonusDistanceSquared = 144f;
 
+    // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
+    // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
+    // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
+    // the entity, so this only guards the wedged-client edge case. See docs/movement-input-model.md.
+    private static readonly TimeSpan MoveIntentKeepaliveTimeout = TimeSpan.FromSeconds(1);
+
     private readonly ServerOptions _options;
     private readonly ICharacterRepository _characters;
     private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
@@ -277,26 +283,13 @@ public sealed class GameServer
             case LoginRequestMessage login:
                 BeginLogin(peer, session, login);
                 break;
-            case MoveStepMessage move:
+            case MoveIntentMessage intent:
                 if (session.IsAuthenticated)
                 {
-                    var startedAt = Stopwatch.GetTimestamp();
-                    try
-                    {
-                        if (TryGetSessionEntity(session, out var entity))
-                        {
-                            if (_zone.TryStep(entity, move.Direction, _serverTick, _options.StepCooldownTicks, out var result))
-                            {
-                                MarkDirtyDurableTile(entity);
-                            }
-
-                            _movementTrace.MoveStep(session, move.Sequence, result, _serverTick);
-                        }
-                    }
-                    finally
-                    {
-                        _pendingMovementElapsedTicks += Stopwatch.GetTimestamp() - startedAt;
-                    }
+                    // Input is state, not events: record the held intent (rejecting stale sequences) and
+                    // let TickCore step the entity at the server's own cooldown cadence. No stepping
+                    // happens on the receive path anymore. See docs/movement-input-model.md.
+                    session.TryUpdateMoveIntent(intent.Sequence, intent.Moving, intent.Direction, _serverTick);
                 }
                 break;
             case ChatSendMessage chat:
@@ -449,7 +442,15 @@ public sealed class GameServer
     private void TickCore(TickBudgetRecorder tickBudget)
     {
         _serverTick++;
+
+        // Held-direction movement (protocol v15): step each session's entity at the server's own cooldown
+        // cadence from its held intent, instead of acting on per-step client messages. DrainPending... is
+        // kept for any movement work still timed off the tick thread (currently none → 0).
         tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
+        using (tickBudget.Measure(TickBudgetCategory.Movement))
+        {
+            StepHeldMovementIntents();
+        }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
         {
@@ -1220,6 +1221,49 @@ public sealed class GameServer
         var elapsedTicks = _pendingMovementElapsedTicks;
         _pendingMovementElapsedTicks = 0;
         return elapsedTicks;
+    }
+
+    // Per-tick held-movement stepping. For every authenticated session whose intent is "moving", attempt
+    // exactly one tile step in the held direction. WorldEntity.TryStep enforces the per-entity cooldown,
+    // bounds, and walkability (the same validation as before) — a session that is still inside its
+    // cooldown simply doesn't move this tick, and a blocked target keeps the intent so the entity steps
+    // as soon as it is unblocked or redirected. A "moving" session that has not sent any intent (not even
+    // a keepalive) within MoveIntentKeepaliveTimeout is force-stopped. See docs/movement-input-model.md.
+    private void StepHeldMovementIntents()
+    {
+        var keepaliveTimeoutTicks = (uint)Math.Max(1, (int)Math.Ceiling(MoveIntentKeepaliveTimeout.TotalMilliseconds / (1000d / _options.TickRate)));
+
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated || !session.MoveIntentMoving)
+            {
+                continue;
+            }
+
+            if (_serverTick - session.LastMoveIntentTick >= keepaliveTimeoutTicks)
+            {
+                session.ClearMoveIntent();
+                continue;
+            }
+
+            if (!TryGetSessionEntity(session, out var entity))
+            {
+                continue;
+            }
+
+            var direction = session.MoveIntentDirection;
+            if (_zone.TryStep(entity, direction, _serverTick, _options.StepCooldownTicks, out var result))
+            {
+                MarkDirtyDurableTile(entity);
+            }
+
+            // Trace every cooldown-elapsed step attempt (accepted, blocked, or out-of-bounds); cooldown
+            // no-ops are skipped to keep the trace readable, matching the old per-MoveStep granularity.
+            if (result.CooldownElapsed)
+            {
+                _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
+            }
+        }
     }
 
     private void MarkDirtyDurableTile(WorldEntity entity)

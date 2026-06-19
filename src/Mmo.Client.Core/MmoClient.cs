@@ -169,11 +169,15 @@ public sealed class MmoClient : IDisposable
         _serverPeer = null;
     }
 
-    public uint SendMoveStep(Direction8 direction)
+    // Sends a held-direction movement intent (protocol v15). The server steps the entity at its own
+    // cooldown cadence from this intent, so the client sends it on change (keydown / keyup / direction
+    // change) plus a low-rate keepalive — NOT once per step. Reliable-ordered: a dropped "stop" must not
+    // be lost. Direction is ignored by the server when moving is false. See docs/movement-input-model.md.
+    public uint SendMoveIntent(bool moving, Direction8 direction)
     {
         var sequence = ++_moveSequence;
-        Send(new MoveStepMessage(sequence, direction), DeliveryMethod.Sequenced);
-        _movementTrace.MoveSent(sequence, direction);
+        Send(new MoveIntentMessage(sequence, moving, direction), DeliveryMethod.ReliableOrdered);
+        _movementTrace.MoveSent(sequence, moving, direction);
         return sequence;
     }
 

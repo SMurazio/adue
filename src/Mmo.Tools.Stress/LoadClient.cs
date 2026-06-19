@@ -27,14 +27,21 @@ public sealed class LoadClient : IDisposable
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _client;
 
+    // Held-direction movement intent keepalive (protocol v15): mirror the real clients, which resend the
+    // current intent ~every 500 ms so a dropped intent can't wedge the avatar. This (plus on-change
+    // sends), not a per-step stream, is what the server now sees — inbound move/s drops accordingly.
+    private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(500);
+
     private NetPeer? _serverPeer;
     private uint _inputSequence;
     private bool _authenticated;
     private bool _disposed;
-    private TimeSpan _nextMoveAt;
+    private TimeSpan _nextKeepaliveAt;
     private TimeSpan _nextDirectionAt;
     private TimeSpan _nextChatAt;
     private Direction8? _direction;
+    private bool _intentMoving;
+    private Direction8 _intentDirection;
 
     public LoadClient(int id, StressOptions options, RunStats stats, Random random)
     {
@@ -68,8 +75,8 @@ public sealed class LoadClient : IDisposable
         _client.Start();
         _client.Connect(_options.Host, _options.Port, _options.ConnectionKey);
 
-        var initialOffsetMs = _random.Next(0, Math.Max(1, (int)_options.MoveInterval.TotalMilliseconds));
-        _nextMoveAt = TimeSpan.FromMilliseconds(initialOffsetMs);
+        var initialOffsetMs = _random.Next(0, Math.Max(1, (int)MoveIntentKeepalive.TotalMilliseconds));
+        _nextKeepaliveAt = TimeSpan.FromMilliseconds(initialOffsetMs);
         _nextDirectionAt = TimeSpan.Zero;
         _nextChatAt = _options.ChatInterval > TimeSpan.Zero
             ? TimeSpan.FromMilliseconds(_random.Next(0, Math.Max(1, (int)_options.ChatInterval.TotalMilliseconds)))
@@ -90,20 +97,24 @@ public sealed class LoadClient : IDisposable
             return;
         }
 
+        // Periodically pick a new desired direction (null => stop). Sending happens below, only when the
+        // intent actually changes (on-change), plus a low-rate keepalive — the v15 input model.
         if (elapsed >= _nextDirectionAt)
         {
             _direction = Directions[_random.Next(Directions.Length)];
             _nextDirectionAt = elapsed + _options.DirectionInterval;
         }
 
-        if (elapsed >= _nextMoveAt && _direction.HasValue)
+        var desiredMoving = _direction.HasValue;
+        var desiredDirection = _direction ?? _intentDirection;
+        var changed = desiredMoving != _intentMoving || (desiredMoving && desiredDirection != _intentDirection);
+        var keepaliveDue = _intentMoving && elapsed >= _nextKeepaliveAt;
+        if (changed || keepaliveDue)
         {
-            Send(_serverPeer, new MoveStepMessage(++_inputSequence, _direction.Value), DeliveryMethod.Sequenced);
-            _nextMoveAt = elapsed + _options.MoveInterval;
-        }
-        else if (elapsed >= _nextMoveAt)
-        {
-            _nextMoveAt = elapsed + _options.MoveInterval;
+            _intentMoving = desiredMoving;
+            _intentDirection = desiredDirection;
+            Send(_serverPeer, new MoveIntentMessage(++_inputSequence, _intentMoving, _intentDirection), DeliveryMethod.ReliableOrdered);
+            _nextKeepaliveAt = elapsed + MoveIntentKeepalive;
         }
 
         if (elapsed >= _nextChatAt)

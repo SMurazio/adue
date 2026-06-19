@@ -94,7 +94,7 @@ try
 
     for (var i = 0; i < 4; i++)
     {
-        mover.SendMoveStep(Direction8.E);
+        mover.SendMoveIntent(true, Direction8.E);
         await WaitUntilWithTimeoutAsync(
             () => mover.MovementDebug.LastConfirmedSnapshotSequence > (uint)i,
             TimeSpan.FromSeconds(2),

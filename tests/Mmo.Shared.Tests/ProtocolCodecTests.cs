@@ -103,14 +103,27 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void MoveStepRoundTrips()
+    public void MoveIntentRoundTrips()
     {
-        var original = new MoveStepMessage(123, Direction8.SW);
+        var original = new MoveIntentMessage(123, true, Direction8.SW);
 
-        var decoded = Assert.IsType<MoveStepMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+        var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(123u, decoded.Sequence);
+        Assert.True(decoded.Moving);
         Assert.Equal(Direction8.SW, decoded.Direction);
+    }
+
+    [Fact]
+    public void MoveIntentStoppedRoundTrips()
+    {
+        var original = new MoveIntentMessage(7, false, Direction8.N);
+
+        var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(7u, decoded.Sequence);
+        Assert.False(decoded.Moving);
+        Assert.Equal(Direction8.N, decoded.Direction);
     }
 
     [Fact]
@@ -283,12 +296,13 @@ public sealed class ProtocolCodecTests
 
         stream.Position = 0;
         stream.SetLength(0);
-        ProtocolCodec.Encode(new MoveStepMessage(42, Direction8.NW), writer);
+        ProtocolCodec.Encode(new MoveIntentMessage(42, true, Direction8.NW), writer);
         writer.Flush();
 
         var packet = stream.ToArray();
-        var decoded = Assert.IsType<MoveStepMessage>(ProtocolCodec.Decode(packet));
+        var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(packet));
         Assert.Equal(42u, decoded.Sequence);
+        Assert.True(decoded.Moving);
         Assert.Equal(Direction8.NW, decoded.Direction);
     }
 }

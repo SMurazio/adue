@@ -316,6 +316,8 @@ public sealed class InteractHarvestIntegrationTests
         {
             if (IsAdjacent(client.OwnTile, target))
             {
+                client.StopMove();
+                await PollForAsync(TimeSpan.FromMilliseconds(75), client);
                 return;
             }
 
@@ -406,6 +408,8 @@ public sealed class InteractHarvestIntegrationTests
             await PollForAsync(TimeSpan.FromMilliseconds(75), clients);
             if (condition())
             {
+                mover.StopMove();
+                await PollForAsync(TimeSpan.FromMilliseconds(75), clients);
                 return;
             }
         }
@@ -465,9 +469,16 @@ public sealed class InteractHarvestIntegrationTests
             }
         }
 
+        // Held-direction intent (protocol v15): starts/redirects continuous movement. The server steps at
+        // its own cooldown while the intent stands; call StopMove to halt at the current tile.
         public void SendMove(Direction8 direction)
         {
-            Send(new MoveStepMessage(++_moveSequence, direction), DeliveryMethod.Sequenced);
+            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+        }
+
+        public void StopMove()
+        {
+            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
         }
 
         public void SendInteract(uint targetNetworkId)

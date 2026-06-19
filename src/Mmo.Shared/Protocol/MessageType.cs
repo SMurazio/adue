@@ -4,7 +4,7 @@ public enum MessageType : ushort
 {
     ClientHello = 1,
     LoginRequest = 2,
-    MoveStep = 3,
+    MoveIntent = 3,
     ChatSend = 4,
     SnapshotAck = 5,
     InteractRequest = 6,

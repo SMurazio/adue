@@ -17,9 +17,14 @@ public sealed record LoginRequestMessage(string AccountName, string DisplayName)
     public MessageType Type => MessageType.LoginRequest;
 }
 
-public sealed record MoveStepMessage(uint Sequence, Direction8 Direction) : IProtocolMessage
+// Held-direction movement intent (protocol v15, replaces the per-step MoveStep stream). Input as
+// state, not events: the client declares what it intends (Moving + Direction) and the server steps
+// the entity at its own cooldown cadence from that intent. Moving=false means stopped (Direction is
+// then ignored). Sent reliable-ordered (a dropped "stop" must not be lost). Sequence rejects stale
+// intents (seq <= lastSeq) belt-and-suspenders + anti-cheat. See docs/movement-input-model.md.
+public sealed record MoveIntentMessage(uint Sequence, bool Moving, Direction8 Direction) : IProtocolMessage
 {
-    public MessageType Type => MessageType.MoveStep;
+    public MessageType Type => MessageType.MoveIntent;
 }
 
 public sealed record ChatSendMessage(string Text) : IProtocolMessage

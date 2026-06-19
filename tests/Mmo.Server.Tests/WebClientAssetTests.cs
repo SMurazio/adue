@@ -26,8 +26,8 @@ public sealed class WebClientAssetTests
         Assert.Contains("setInterestRadiusTiles(message.interestRadiusTiles);", app);
         Assert.Contains("debugVisibilityRadius = Number.isFinite(parsed) && parsed > 0", app);
         Assert.Contains("const selfMovementInterpolationDelayMs = 0;", app);
-        Assert.Contains("const stepRetryMs = 50;", app);
         Assert.Contains("const movementChordDelayMs = 70;", app);
+        Assert.Contains("const moveIntentKeepaliveMs = 500;", app);
         Assert.Contains("const entityRegistryMaxEntries = 2048;", app);
         Assert.Contains("const screenInputStepDirections = new Map([", app);
         Assert.Contains("[\"0,1\", \"NW\"]", app);
@@ -45,6 +45,10 @@ public sealed class WebClientAssetTests
         Assert.Contains("keysDown.delete(\"w\");", app);
         Assert.Contains("keysDown.delete(\"a\");", app);
         Assert.Contains("now - heldMoveChangedAt < movementChordDelayMs", app);
+        Assert.Contains("function setMoveIntent", app);
+        Assert.Contains("function stopMoveIntent", app);
+        Assert.Contains("function pumpMoveIntentKeepalive", app);
+        Assert.Contains("function sendHeldMoveIntent", app);
         Assert.Contains("function rememberEntityMetadata", app);
         Assert.Contains("function pruneEntityRegistry", app);
         Assert.Contains("const snapshotEntities = message.entities ?? [];", app);
@@ -55,8 +59,7 @@ public sealed class WebClientAssetTests
         Assert.Contains("function handleZoneInfo", app);
         Assert.Contains("blockedTiles = new Set((message.blockedTiles ?? []).map(tile => `${tile.x},${tile.y}`));", app);
         Assert.Contains("function rebuildWorldMap", app);
-        Assert.Contains("function sendMoveStep", app);
-        Assert.Contains("type: \"moveStep\"", app);
+        Assert.Contains("type: \"moveIntent\", moving: intentMoving", app);
         Assert.Contains("confirmedStepQueue", app);
         Assert.Contains("function startNextConfirmedStep", app);
         Assert.Contains("function movementInterpolationDelayForEntry", app);

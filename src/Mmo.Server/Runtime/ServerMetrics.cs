@@ -284,7 +284,7 @@ public sealed class ServerMetrics
         var receivedMessages = includeMessageCounts ? new long[MessageTypeCount] : Array.Empty<long>();
         var sentMessages = includeMessageCounts ? new long[MessageTypeCount] : Array.Empty<long>();
         long tickCount = 0;
-        long moveStepReceived = 0;
+        long moveIntentReceived = 0;
         long chatSendReceived = 0;
         long gcGen0Collections = 0;
         long gcGen1Collections = 0;
@@ -350,7 +350,7 @@ public sealed class ServerMetrics
             loginRejected += bucket.LoginRejected;
             loginTotalMs += bucket.LoginTotalMs;
             loginMaxMs = Math.Max(loginMaxMs, bucket.LoginMaxMs);
-            moveStepReceived += bucket.ReceivedMessages[(int)MessageType.MoveStep];
+            moveIntentReceived += bucket.ReceivedMessages[(int)MessageType.MoveIntent];
             chatSendReceived += bucket.ReceivedMessages[(int)MessageType.ChatSend];
 
             if (includeMessageCounts)
@@ -367,7 +367,7 @@ public sealed class ServerMetrics
             window,
             effectiveSeconds,
             tickCount,
-            moveStepReceived,
+            moveIntentReceived,
             chatSendReceived,
             gcGen0Collections,
             gcGen1Collections,
@@ -422,7 +422,7 @@ public sealed class ServerMetrics
             $"culled/s={Rate(snapshot.SnapshotCulled, seconds):0.0}, " +
             $"out={ToKbps(snapshot.SentBytes, seconds):0.0}kbps, in={ToKbps(snapshot.ReceivedBytes, seconds):0.0}kbps, " +
             $"recv/s={Rate(snapshot.ReceivedMessageCount, seconds):0.0}, sent/s={Rate(snapshot.SentMessageCount, seconds):0.0}, " +
-            $"move/s={Rate(snapshot.MoveStepReceived, seconds):0.0}, " +
+            $"move/s={Rate(snapshot.MoveIntentReceived, seconds):0.0}, " +
             $"chat/s={Rate(snapshot.ChatSendReceived, seconds):0.0}, " +
             $"sendFail/s={Rate(snapshot.SendFailures, seconds):0.0}, bad/s={Rate(snapshot.BadPackets, seconds):0.0}, netErr/s={Rate(snapshot.NetworkErrors, seconds):0.0}, runtimeFault/s={Rate(snapshot.RuntimeFaults, seconds):0.0}, " +
             $"login/s={Rate(snapshot.LoginAccepted + snapshot.LoginRejected, seconds):0.0}, loginMs avg/max={snapshot.LoginAverageMs:0.0}/{snapshot.LoginMaxMs:0.0}ms";
@@ -686,7 +686,7 @@ public sealed record MetricsWindowSnapshot(
     TimeSpan Window,
     double Seconds,
     long TickCount,
-    long MoveStepReceived,
+    long MoveIntentReceived,
     long ChatSendReceived,
     long GcGen0Collections,
     long GcGen1Collections,

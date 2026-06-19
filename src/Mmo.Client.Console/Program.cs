@@ -86,7 +86,7 @@ try
 
         while (serverPeer is not null && outgoing.TryDequeue(out var message))
         {
-            var deliveryMethod = message is MoveStepMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            var deliveryMethod = message is SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(serverPeer, message, deliveryMethod);
         }
 
@@ -150,10 +150,14 @@ static void ReadInputLoop(
 
         if (direction.HasValue)
         {
-            outgoing.Enqueue(new MoveStepMessage(nextSequence(), direction.Value));
+            // Held-direction intent (protocol v15): the server steps the avatar at its own cooldown while
+            // this intent stands. Type "stop" to halt; the server's keepalive timeout also stops a
+            // forgotten intent after ~1 s of silence (this REPL sends no keepalive).
+            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), true, direction.Value));
         }
         else if (command == "stop")
         {
+            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), false, Direction8.S));
         }
         else
         {

@@ -12,6 +12,13 @@ public sealed class ClientSession
     private uint _lastFullSnapshotSentTick;
     private uint? _lastInteractTick;
 
+    // Held-direction movement intent (protocol v15). The client declares Moving + Direction; the tick
+    // loop steps the entity at its own cooldown cadence while MoveIntentMoving is true. LastMoveSeq
+    // rejects stale intents; LastMoveIntentTick drives the keepalive safety timeout. See
+    // docs/movement-input-model.md.
+    private uint _lastMoveSeq;
+    private uint _lastMoveIntentTick;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -34,6 +41,14 @@ public sealed class ClientSession
     public int LastLatencyMs { get; set; }
     public int BadPacketCount { get; private set; }
     public uint LastAcknowledgedSnapshotSequence { get; private set; }
+
+    // Current held movement intent. When MoveIntentMoving is true the tick loop attempts one cooldown-
+    // gated tile step in MoveIntentDirection per tick. The last seq we accepted and the tick at which we
+    // last heard a (fresh) intent are exposed for the keepalive timeout.
+    public bool MoveIntentMoving { get; private set; }
+    public Direction8 MoveIntentDirection { get; private set; }
+    public uint LastMoveIntentTick => _lastMoveIntentTick;
+    public uint LastMoveSeq => _lastMoveSeq;
 
     public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId)
     {
@@ -69,6 +84,31 @@ public sealed class ClientSession
 
         _lastInteractTick = serverTick;
         return true;
+    }
+
+    // Applies an inbound MoveIntent. Rejects stale sequences (seq <= lastSeq) and returns false without
+    // mutating state; otherwise records the new intent + the tick it arrived (for the keepalive timeout)
+    // and returns true. A fresh keepalive carrying the same Moving/Direction still refreshes the timeout.
+    public bool TryUpdateMoveIntent(uint sequence, bool moving, Direction8 direction, uint serverTick)
+    {
+        if (sequence <= _lastMoveSeq)
+        {
+            return false;
+        }
+
+        _lastMoveSeq = sequence;
+        _lastMoveIntentTick = serverTick;
+        MoveIntentMoving = moving;
+        MoveIntentDirection = direction;
+        return true;
+    }
+
+    // Clears the held intent to stopped (keepalive safety timeout, or any server-side halt). Does not
+    // touch the sequence cursor, so a later genuine intent still has to advance past the last accepted
+    // seq.
+    public void ClearMoveIntent()
+    {
+        MoveIntentMoving = false;
     }
 
     public bool KnowsEntity(uint networkId)

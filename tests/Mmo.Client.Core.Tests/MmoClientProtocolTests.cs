@@ -171,10 +171,10 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S));
 
-        var sequence = client.SendMoveStep(Direction8.E);
+        var sequence = client.SendMoveIntent(true, Direction8.E);
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
 
-        Assert.Contains(outbound.OfType<MoveStepMessage>(), move => move.Sequence == sequence && move.Direction == Direction8.E);
+        Assert.Contains(outbound.OfType<MoveIntentMessage>(), move => move.Sequence == sequence && move.Moving && move.Direction == Direction8.E);
         Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
         Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
         Assert.Equal(9u, client.MovementDebug.LastConfirmedNetworkId);
@@ -182,7 +182,7 @@ public sealed class MmoClientProtocolTests
         Assert.Equal(3u, client.MovementDebug.LastConfirmedSnapshotSequence);
         Assert.True(client.MovementDebug.QueueDepth > 0);
         Assert.Equal(150d, client.MovementDebug.EffectiveCadenceMs);
-        Assert.Contains(lines, line => line.Contains("event=move_sent", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("event=move_intent", StringComparison.Ordinal));
         Assert.Contains(lines, line => line.Contains("event=tile_confirmed", StringComparison.Ordinal));
     }
 
@@ -192,7 +192,7 @@ public sealed class MmoClientProtocolTests
         var lines = new List<string>();
         using var client = CreateClient(out _, debugMovement: false, lines.Add);
 
-        var sequence = client.SendMoveStep(Direction8.E);
+        var sequence = client.SendMoveIntent(true, Direction8.E);
         client.RecordFrameHitch(40, 1, 0, 0);
 
         Assert.False(client.DebugMovementEnabled);

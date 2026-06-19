@@ -144,12 +144,17 @@ public sealed class SyntheticClientLoad : IDisposable
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
 
+        // Keepalive cadence for held-direction movement intent (protocol v15), mirroring the real clients.
+        private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(500);
+
         private NetPeer? _serverPeer;
         private bool _disposed;
         private uint _inputSequence;
-        private TimeSpan _nextMoveAt;
+        private TimeSpan _nextKeepaliveAt;
         private TimeSpan _nextDirectionAt;
         private Direction8? _direction;
+        private bool _intentMoving;
+        private Direction8 _intentDirection;
 
         public SyntheticClient(int id, string name, int serverPort, string connectionKey, SyntheticClientLoad owner)
         {
@@ -180,7 +185,7 @@ public sealed class SyntheticClientLoad : IDisposable
         {
             _client.Start();
             _client.Connect("127.0.0.1", _serverPort, _connectionKey);
-            _nextMoveAt = TimeSpan.FromMilliseconds(_random.Next(0, 250));
+            _nextKeepaliveAt = TimeSpan.FromMilliseconds(_random.Next(0, 500));
             _nextDirectionAt = TimeSpan.Zero;
         }
 
@@ -203,14 +208,18 @@ public sealed class SyntheticClientLoad : IDisposable
                 _nextDirectionAt = elapsed + TimeSpan.FromSeconds(1);
             }
 
-            if (elapsed >= _nextMoveAt && _direction.HasValue)
+            // Held-direction movement intent (v15): send only on change plus a 500 ms keepalive, not a
+            // step every 250 ms. The server steps the avatar from the held intent on its own cooldown.
+            var desiredMoving = _direction.HasValue;
+            var desiredDirection = _direction ?? _intentDirection;
+            var changed = desiredMoving != _intentMoving || (desiredMoving && desiredDirection != _intentDirection);
+            var keepaliveDue = _intentMoving && elapsed >= _nextKeepaliveAt;
+            if (changed || keepaliveDue)
             {
-                Send(_serverPeer, new MoveStepMessage(++_inputSequence, _direction.Value), DeliveryMethod.Sequenced);
-                _nextMoveAt = elapsed + TimeSpan.FromMilliseconds(250);
-            }
-            else if (elapsed >= _nextMoveAt)
-            {
-                _nextMoveAt = elapsed + TimeSpan.FromMilliseconds(250);
+                _intentMoving = desiredMoving;
+                _intentDirection = desiredDirection;
+                Send(_serverPeer, new MoveIntentMessage(++_inputSequence, _intentMoving, _intentDirection), DeliveryMethod.ReliableOrdered);
+                _nextKeepaliveAt = elapsed + MoveIntentKeepalive;
             }
         }
 

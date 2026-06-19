@@ -342,6 +342,8 @@ public sealed class AoiIntegrationTests
             await PollForAsync(TimeSpan.FromMilliseconds(75), clients);
             if (condition())
             {
+                mover.StopMove();
+                await PollForAsync(TimeSpan.FromMilliseconds(75), clients);
                 return;
             }
         }
@@ -424,9 +426,16 @@ public sealed class AoiIntegrationTests
             _client.PollEvents();
         }
 
+        // Held-direction intent (protocol v15): starts/redirects continuous movement; the server steps at
+        // its own cooldown while the intent stands. StopMove halts at the current tile.
         public void SendMove(Direction8 direction)
         {
-            Send(new MoveStepMessage(++_moveSequence, direction), DeliveryMethod.Sequenced);
+            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+        }
+
+        public void StopMove()
+        {
+            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
         }
 
         public void ClearMessages()

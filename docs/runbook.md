@@ -34,7 +34,7 @@ Start the server first, then run a conservative synthetic-client load:
 .\.shared\skills\mmo-dev\scripts\stress-test.cmd
 ```
 
-The stress client opens many LiteNetLib connections, logs in unique local characters, sends `MoveStep` inputs, receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
+The stress client opens many LiteNetLib connections, logs in unique local characters, drives movement via `MoveIntent` (held-direction intent: change direction periodically plus a low-rate keepalive — protocol v15), receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
 
 Useful examples:
 

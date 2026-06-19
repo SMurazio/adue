@@ -139,13 +139,14 @@ public sealed class WebBridgeSession
 
         switch (type)
         {
-            case "move":
-            case "moveStep":
-                if (TryReadDirection(root, out var direction))
-                {
-                    _toServer.Enqueue(new MoveStepMessage(++_inputSequence, direction));
-                }
-
+            case "moveIntent":
+                // Held-direction movement intent (protocol v15). The browser sends this on change +
+                // keepalive; the server steps the avatar from the held intent at its own cooldown. When
+                // moving is false the direction is ignored (we still parse it, defaulting safely).
+                var moving = root.TryGetProperty("moving", out var movingProperty)
+                    && movingProperty.ValueKind == JsonValueKind.True;
+                TryReadDirection(root, out var direction);
+                _toServer.Enqueue(new MoveIntentMessage(++_inputSequence, moving, direction));
                 break;
             case "chat":
                 var text = root.GetProperty("text").GetString() ?? "";
@@ -161,7 +162,9 @@ public sealed class WebBridgeSession
     {
         while (_serverPeer is not null && _toServer.TryDequeue(out var message))
         {
-            var delivery = message is MoveStepMessage or SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
+            // MoveIntent is reliable-ordered (a dropped "stop" must not be lost); SnapshotAck stays
+            // sequenced (last-write-wins, drops are harmless).
+            var delivery = message is SnapshotAckMessage ? DeliveryMethod.Sequenced : DeliveryMethod.ReliableOrdered;
             Send(_serverPeer, message, delivery);
         }
     }

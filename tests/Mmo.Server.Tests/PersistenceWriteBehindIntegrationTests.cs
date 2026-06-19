@@ -137,6 +137,8 @@ public sealed class PersistenceWriteBehindIntegrationTests
             await WaitForPollAsync(TimeSpan.FromMilliseconds(75), mover);
             if (condition())
             {
+                mover.StopMove();
+                await WaitForPollAsync(TimeSpan.FromMilliseconds(75), mover);
                 return;
             }
         }
@@ -205,9 +207,16 @@ public sealed class PersistenceWriteBehindIntegrationTests
             }
         }
 
+        // Held-direction intent (protocol v15): starts/redirects continuous movement; the server steps at
+        // its own cooldown while the intent stands. StopMove halts at the current tile.
         public void SendMove(Direction8 direction)
         {
-            Send(new MoveStepMessage(++_moveSequence, direction), DeliveryMethod.Sequenced);
+            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+        }
+
+        public void StopMove()
+        {
+            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
         }
 
         public async Task DisconnectAsync()

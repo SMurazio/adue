@@ -12,7 +12,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private readonly Dictionary<uint, MeshInstance3D> _entityNodes = [];
     private readonly Dictionary<uint, Label3D> _entityLabels = [];
     private readonly HashSet<TileCoord> _renderedBlockedTiles = [];
-    private readonly Dictionary<Direction8, double> _nextStepAt = [];
     private readonly List<EntityRenderState> _renderStates = [];
     private readonly HashSet<uint> _seenEntityIds = [];
     private readonly List<uint> _staleEntityIds = [];
@@ -72,6 +71,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private Direction8? _injectedDirection;
     private double _injectedUntilSeconds;
     private bool _injectedSingleStep;
+
+    // Held-direction movement intent (protocol v15). We send a MoveIntent only when the intent changes
+    // (keydown / keyup / direction change) plus a low-rate keepalive resend, instead of streaming a step
+    // every tick. The server steps the entity from the held intent at its own cooldown cadence.
+    // _lastSentMoving/_lastSentDirection track what the server currently believes; the server's keepalive
+    // timeout (~1 s) is the safety net if the keepalive itself is dropped.
+    private const double MoveIntentKeepaliveSeconds = 0.5;
+    private bool _lastSentMoving;
+    private Direction8 _lastSentDirection;
+    private double _nextMoveIntentKeepaliveAt;
 
     // Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
     private Direction8[]? _autopilotPattern;
@@ -619,38 +628,37 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
     private void SendHeldMovement(TimeSpan now)
     {
-        if (_client is null || !_client.IsLoggedIn || _chatInput?.HasFocus() == true)
+        if (_client is null || !_client.IsLoggedIn)
         {
             return;
         }
 
-        // Real keyboard input takes priority; an injected (debug-channel) direction fills in otherwise.
-        // Either way movement goes out through the same SendMoveStep path and per-direction cadence gate.
-        var keyboard = CurrentDirection();
-        var injected = keyboard.HasValue ? null : CurrentInjectedDirection();
+        // Determine the desired intent. While the chat box has focus we force "stopped" so held keys
+        // don't drive the avatar while typing. Real keyboard input takes priority; an injected
+        // (debug-channel) direction fills in otherwise.
+        var chatFocused = _chatInput?.HasFocus() == true;
+        var keyboard = chatFocused ? null : CurrentDirection();
+        var injected = keyboard.HasValue || chatFocused ? null : CurrentInjectedDirection();
         var direction = keyboard ?? injected;
-        if (!direction.HasValue)
+        var moving = direction.HasValue;
+        var resolvedDirection = direction ?? _lastSentDirection;
+
+        // Input is state, not events: send a MoveIntent only when the intent changes, plus a keepalive
+        // resend while moving (the server's ~1 s timeout stops a stuck avatar if a keepalive is dropped).
+        // The server paces tile steps on its own cooldown from this held intent — no per-step send.
+        var changed = moving != _lastSentMoving || (moving && resolvedDirection != _lastSentDirection);
+        var keepaliveDue = moving && now.TotalSeconds >= _nextMoveIntentKeepaliveAt;
+        if (changed || keepaliveDue)
         {
-            return;
+            _client.SendMoveIntent(moving, resolvedDirection);
+            _lastSentMoving = moving;
+            _lastSentDirection = resolvedDirection;
+            _nextMoveIntentKeepaliveAt = now.TotalSeconds + MoveIntentKeepaliveSeconds;
         }
 
-        // Send at the server tick rate, NOT the step cadence: throttling sends to the 150ms step
-        // cadence beat against the server's own ~150ms step cooldown (two unsynchronized clocks),
-        // producing uneven step intervals so the fixed-cadence tween froze between steps. Feeding a
-        // move every tick lets the server pace steps evenly on its cooldown (extra moves are dropped
-        // server-side by the cooldown), matching the tween.
-        var tickMs = _client.Server is { TickRate: > 0 } server ? 1000d / server.TickRate : 50d;
-        var cadence = TimeSpan.FromMilliseconds(tickMs);
-        if (_nextStepAt.TryGetValue(direction.Value, out var nextAt) && now.TotalSeconds < nextAt)
-        {
-            return;
-        }
-
-        _client.SendMoveStep(direction.Value);
-        _nextStepAt[direction.Value] = (now + cadence).TotalSeconds;
-
-        // A one-shot injected step is consumed the moment it actually fires.
-        if (injected.HasValue && _injectedSingleStep)
+        // A one-shot injected step: with held intent the "single step" is a brief moving intent that we
+        // clear right after it goes out, so the server takes exactly one cooldown step before stopping.
+        if (moving && injected.HasValue && _injectedSingleStep)
         {
             _injectedDirection = null;
             _injectedSingleStep = false;
@@ -714,7 +722,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
     void IControlHost.BeginManualMove(Direction8 direction, double durationMs)
     {
-        // durationMs <= 0 => a single step (one cadence-gated SendMoveStep); otherwise hold for the window.
+        // durationMs <= 0 => a single step (a brief moving intent cleared after it fires); otherwise hold
+        // the intent for the window.
         StopAutopilot();
         _injectedDirection = direction;
         _injectedSingleStep = durationMs <= 0;

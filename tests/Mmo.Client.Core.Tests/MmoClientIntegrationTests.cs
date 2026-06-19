@@ -88,20 +88,22 @@ public sealed class MmoClientIntegrationTests
                 bob);
 
             var bobStart = bob.LocalTile!.Value;
-            bob.SendMoveStep(Direction8.E);
+            bob.SendMoveIntent(true, Direction8.E);
             await WaitUntilAsync(
                 () => bob.LocalTile!.Value.X > bobStart.X
                     && alice.TryGetEntity(bob.LocalNetworkId!.Value, out var seenBob)
                     && seenBob.Tile == bob.LocalTile,
                 alice,
                 bob);
+            bob.SendMoveIntent(false, Direction8.E);
 
             var aliceStart = alice.LocalTile!.Value;
-            alice.SendMoveStep(Direction8.S);
+            alice.SendMoveIntent(true, Direction8.S);
             await WaitUntilAsync(
                 () => alice.LocalTile!.Value.Y > aliceStart.Y,
                 alice,
                 bob);
+            alice.SendMoveIntent(false, Direction8.S);
 
             alice.SendChat("hello from core");
             await WaitUntilAsync(

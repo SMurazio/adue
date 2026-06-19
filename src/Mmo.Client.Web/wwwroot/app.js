@@ -42,11 +42,15 @@ const playerNameKey = "mmo.playerName";
 let rightMouseActive = false;
 let rightMouseTarget = null;
 let rightMousePointer = null;
-let lastRightMoveSentAt = 0;
 let heldMoveDirection = null;
-let lastHeldMoveSentAt = 0;
 let heldMoveChangedAt = 0;
-let lastMoveDirection = "";
+// Held-direction movement intent (protocol v15): input is state, not events. We send a moveIntent to
+// the bridge only when the intent changes (moving/direction) plus a low-rate keepalive, instead of
+// streaming a step per frame. The server steps the avatar from the held intent at its own cooldown.
+let intentMoving = false;
+let intentDirection = "";
+let lastIntentSentAt = 0;
+const moveIntentKeepaliveMs = 500;
 const cameraFollowAlpha = 0.14;
 const minCameraZoom = 0.55;
 const maxCameraZoom = 3.25;
@@ -57,7 +61,6 @@ let tileStepTweenMs = defaultTileStepTweenMs;
 const remoteInterpolationCadenceMultiplier = 1.3;
 let movementInterpolationDelayMs = tileStepTweenMs * remoteInterpolationCadenceMultiplier;
 const selfMovementInterpolationDelayMs = 0;
-const stepRetryMs = 50;
 const movementChordDelayMs = 70;
 const defaultDebugVisibilityRadius = 40;
 let debugVisibilityRadius = defaultDebugVisibilityRadius;
@@ -1075,24 +1078,59 @@ function sendMoveDirection(direction) {
     return;
   }
 
+  // D-pad button: set a held intent in that direction (the Stop button halts). The server steps the
+  // avatar from the intent at its own cooldown until a new direction or Stop arrives.
   const moveDirection = screenDirectionToStep(direction);
   if (moveDirection) {
-    sendMoveStep(moveDirection, true);
+    heldMoveDirection = moveDirection;
+    heldMoveChangedAt = performance.now();
+    setMoveIntent(moveDirection);
   }
 }
 
-function sendMoveStep(direction, force = false) {
+// Sets the held movement intent to "moving in `direction`" and pushes it to the bridge if it changed.
+// (Replaces the old per-step sendMoveStep; the server now steps from the held intent.)
+function setMoveIntent(direction) {
   if (!direction) {
+    stopMoveIntent();
     return;
   }
 
-  const now = performance.now();
-  if (!force && direction === lastMoveDirection && now - lastHeldMoveSentAt < stepRetryMs) {
+  if (intentMoving && direction === intentDirection) {
     return;
   }
 
-  lastMoveDirection = direction;
-  send({ type: "moveStep", direction });
+  intentMoving = true;
+  intentDirection = direction;
+  sendMoveIntent();
+}
+
+// Clears the held intent to stopped and tells the bridge once (reliable-ordered on the wire).
+function stopMoveIntent() {
+  if (!intentMoving) {
+    return;
+  }
+
+  intentMoving = false;
+  sendMoveIntent();
+}
+
+// Emits the current intent and arms the keepalive timer.
+function sendMoveIntent() {
+  lastIntentSentAt = performance.now();
+  send({ type: "moveIntent", moving: intentMoving, direction: intentDirection || "N" });
+}
+
+// Resends the current intent at a low rate while moving so a dropped intent (or the server's safety
+// timeout) cannot wedge or freeze the avatar. Called from the render loop.
+function pumpMoveIntentKeepalive() {
+  if (!intentMoving) {
+    return;
+  }
+
+  if (performance.now() - lastIntentSentAt >= moveIntentKeepaliveMs) {
+    sendMoveIntent();
+  }
 }
 
 function screenDirectionToStep(direction) {
@@ -1156,12 +1194,14 @@ function syncKeyboardMovement() {
   const direction = screenInputToStepDirection(screenX, screenY);
   if (direction !== heldMoveDirection) {
     heldMoveDirection = direction;
-    lastHeldMoveSentAt = 0;
     heldMoveChangedAt = performance.now();
   }
 
   if (heldMoveDirection) {
-    sendHeldMoveStep();
+    sendHeldMoveIntent();
+  } else {
+    // All movement keys released: stop (an explicit reliable-ordered halt, not a lost keepalive).
+    stopMoveIntent();
   }
 }
 
@@ -1353,11 +1393,6 @@ function syncRightMouseMovement(force = false) {
     return;
   }
 
-  const now = performance.now();
-  if (!force && now - lastRightMoveSentAt < stepRetryMs) {
-    return;
-  }
-
   const self = [...meshes.values()].find(entry => entry.isSelf);
   if (!self) {
     return;
@@ -1367,6 +1402,8 @@ function syncRightMouseMovement(force = false) {
   const dy = rightMouseTarget.z - self.renderPosition.z;
   const distance = Math.hypot(dx, dy);
   if (distance < 0.35) {
+    // Close enough to the target: stop holding the intent so the avatar doesn't overshoot.
+    stopMoveIntent();
     return;
   }
 
@@ -1375,8 +1412,8 @@ function syncRightMouseMovement(force = false) {
     return;
   }
 
-  lastRightMoveSentAt = now;
-  sendMoveStep(direction, true);
+  // Hold an intent toward the cursor; the direction updates as the cursor (or avatar) moves.
+  setMoveIntent(direction);
 }
 
 function sampleEntityPosition(entry, nowMs) {
@@ -1432,26 +1469,22 @@ function movementInterpolationDelayForEntry(entry) {
 function clearHeldMovement() {
   heldMoveDirection = null;
   heldMoveChangedAt = 0;
-  lastHeldMoveSentAt = 0;
-  lastMoveDirection = "";
+  stopMoveIntent();
 }
 
-function sendHeldMoveStep() {
+function sendHeldMoveIntent() {
   if (!heldMoveDirection) {
     return;
   }
 
+  // Let a diagonal chord settle before committing the direction (avoids a stray cardinal intent in the
+  // few ms between the two keydowns), then set the held intent. setMoveIntent dedupes unchanged intents.
   const now = performance.now();
   if (now - heldMoveChangedAt < movementChordDelayMs) {
     return;
   }
 
-  if (now - lastHeldMoveSentAt < stepRetryMs) {
-    return;
-  }
-
-  lastHeldMoveSentAt = now;
-  sendMoveStep(heldMoveDirection, true);
+  setMoveIntent(heldMoveDirection);
 }
 
 function updateDebugVisibilityRing() {
@@ -1537,7 +1570,8 @@ function animate() {
   updateDebugVisibilityRing();
   updateRightMouseTargetFromPointer();
   syncRightMouseMovement();
-  sendHeldMoveStep();
+  sendHeldMoveIntent();
+  pumpMoveIntentKeepalive();
 
   for (const [id, entry] of [...meshes]) {
     if (!updateEntityFreshness(id, entry, nowMs)) {

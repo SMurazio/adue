@@ -30,7 +30,7 @@ internal sealed class ClientMovementTrace
         Snapshot = Snapshot with { LastLatencyMs = latency };
     }
 
-    public void MoveSent(uint sequence, Direction8 direction)
+    public void MoveSent(uint sequence, bool moving, Direction8 direction)
     {
         var sentAt = DateTimeOffset.UtcNow;
         Snapshot = Snapshot with
@@ -46,8 +46,8 @@ internal sealed class ClientMovementTrace
         }
 
         _write(
-            "mmo_trace side=client event=move_sent" +
-            $" ts={Timestamp(sentAt)} seq={sequence.ToString(CultureInfo.InvariantCulture)} dir={direction}");
+            "mmo_trace side=client event=move_intent" +
+            $" ts={Timestamp(sentAt)} seq={sequence.ToString(CultureInfo.InvariantCulture)} moving={(moving ? "true" : "false")} dir={direction}");
     }
 
     public void TileConfirmed(
