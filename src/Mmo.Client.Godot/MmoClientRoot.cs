@@ -849,7 +849,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// bit can hide/show it. Returns null if the chosen scene is unavailable so the caller falls back to the box.
 	private Node3D? TryCreateRockNode(EntityRenderState state)
 	{
-		var variant = (int)(state.NetworkId % 3);
+		// NetworkId % 3 doesn't vary: the server assigns resource ids so every Rock shares the same residue
+		// (always the same model). Mix the id so the variant AND the yaw are well-distributed yet
+		// deterministic (identical across clients).
+		var hash = MixId(state.NetworkId);
+		var variant = (int)(hash % 3u);
 		var scene = LoadRockModelScene(variant);
 		if (scene is null || scene.Instantiate() is not Node3D model)
 		{
@@ -867,6 +871,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		model.Name = "Model";
 		model.Scale = new Vector3(scale, scale, scale);
 		model.Position = new Vector3(0f, yOffset, 0f);
+		// Deterministic per-node spin around up so rocks don't all face the same way (decorrelated from the
+		// variant by dividing out the % 3).
+		model.RotationDegrees = new Vector3(0f, (hash / 3u) % 360u, 0f);
 		// Start hidden if the node spawns already depleted; UpdateEntities keeps it in sync thereafter.
 		model.Visible = !state.Depleted;
 		wrapper.AddChild(model);
@@ -875,6 +882,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Keep the S57 name label above the node (above the tallest variant so it clears every rock).
 		AttachLabel(wrapper, state, RockLabelHeight);
 		return wrapper;
+	}
+
+	// Avalanche bit-mix (Murmur-style) so a sequential / type-clustered NetworkId yields well-distributed
+	// derived values (rock variant + yaw). Deterministic — same id gives the same result on every client.
+	private static uint MixId(uint id)
+	{
+		id ^= id >> 16;
+		id *= 0x7feb352du;
+		id ^= id >> 15;
+		id *= 0x846ca68bu;
+		id ^= id >> 16;
+		return id;
 	}
 
 	// Loads (once) and caches the rock PackedScene for the given variant (0=moss, 1=floating, 2=engraved).
