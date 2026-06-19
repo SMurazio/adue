@@ -38,7 +38,7 @@ public sealed class ClientSessionTests
 
         var seq = session.NextSnapshotSequence();
         var pending = session.BeginPendingSnapshot(seq, serverTick: 100);
-        pending.Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        pending.Add(entity.NetworkId, entity.StateRevision);
 
         // Sent but not yet acked: still unacked.
         Assert.False(session.HasAckedCurrentRevision(entity));
@@ -58,11 +58,11 @@ public sealed class ClientSessionTests
 
         // Seq 1 carries the entity but is "dropped" (never acked).
         var seq1 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq1, serverTick: 10).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq1, serverTick: 10).Add(entity.NetworkId, entity.StateRevision);
 
         // Seq 2 re-carries it (self-heal) and IS acked. Acking seq2 also drains seq1 (<= acked).
         var seq2 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision);
 
         Assert.False(session.HasAckedCurrentRevision(entity));
 
@@ -79,7 +79,7 @@ public sealed class ClientSessionTests
         var entity = CreateEntity(networkId: 7, revision: 4);
 
         var seq = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq, serverTick: 10).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq, serverTick: 10).Add(entity.NetworkId, entity.StateRevision);
         session.AcknowledgeSnapshot(seq, serverTick: 11);
         Assert.True(session.HasAckedCurrentRevision(entity));
 
@@ -90,7 +90,7 @@ public sealed class ClientSessionTests
         // A stale pending carry that acks AFTER the forget must not re-establish the baseline (re-entry
         // at the same revision would otherwise be wrongly suppressed → silent desync).
         var seq2 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision);
         session.ForgetEntityBaseline(entity.NetworkId);
         session.AcknowledgeSnapshot(seq2, serverTick: 12);
 
@@ -104,13 +104,13 @@ public sealed class ClientSessionTests
         var entity = CreateEntity(networkId: 7, revision: 2);
 
         var seq = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq, serverTick: 10).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq, serverTick: 10).Add(entity.NetworkId, entity.StateRevision);
         session.AcknowledgeSnapshot(seq, serverTick: 11);
         Assert.True(session.HasAckedCurrentRevision(entity));
 
         // Outstanding (unacked) snapshot plus an acked baseline.
         var seq2 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq2, serverTick: 11).Add(entity.NetworkId, entity.StateRevision);
         Assert.Equal(1, session.PendingSnapshotCount);
 
         session.ForceFullRebaseline();
@@ -129,9 +129,9 @@ public sealed class ClientSessionTests
         Assert.Equal(0u, session.UnackedAgeTicks(serverTick: 100));
 
         var seq1 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq1, serverTick: 100).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq1, serverTick: 100).Add(entity.NetworkId, entity.StateRevision);
         var seq2 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq2, serverTick: 105).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq2, serverTick: 105).Add(entity.NetworkId, entity.StateRevision);
 
         // Age is measured from the OLDEST outstanding snapshot (seq1 @ tick 100).
         Assert.Equal(50u, session.UnackedAgeTicks(serverTick: 150));
@@ -152,7 +152,7 @@ public sealed class ClientSessionTests
 
         // First snapshot starts the silence clock at tick 100.
         var seq1 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq1, serverTick: 100).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq1, serverTick: 100).Add(entity.NetworkId, entity.StateRevision);
         Assert.Equal(20u, session.SilenceTicks(serverTick: 120));
 
         // A forced re-baseline (cheap bound) does NOT reset the disconnect clock: still measured from 100.
@@ -162,7 +162,7 @@ public sealed class ClientSessionTests
 
         // A later snapshot + ack resets the silence clock (client proved alive).
         var seq2 = session.NextSnapshotSequence();
-        session.BeginPendingSnapshot(seq2, serverTick: 141).Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+        session.BeginPendingSnapshot(seq2, serverTick: 141).Add(entity.NetworkId, entity.StateRevision);
         session.AcknowledgeSnapshot(seq2, serverTick: 145);
         Assert.Equal(0u, session.SilenceTicks(serverTick: 145));
     }

@@ -17,12 +17,6 @@ public sealed class WebBridgeSession
     private readonly ConcurrentQueue<IProtocolMessage> _toServer = new();
     private readonly ConcurrentQueue<string> _toBrowser = new();
 
-    // Per-entity absolute state reconstructed from delta-coded snapshot rows (S47b, protocol v16). A row
-    // only carries the CHANGED fields (position as absolute/step/omitted; facing/depleted only when changed),
-    // so the bridge resolves each row against this running state before forwarding ABSOLUTE x/y/facing to the
-    // browser, which has no delta logic of its own. Seeded by EntitySpawn, cleared by EntityDespawn.
-    private readonly Dictionary<uint, ResolvedEntity> _entityState = new();
-
     private NetPeer? _serverPeer;
     private uint _inputSequence;
     private volatile bool _closing;
@@ -214,11 +208,16 @@ public sealed class WebBridgeSession
                     isComplete = snapshot.IsComplete,
                     chunkIndex = snapshot.ChunkIndex,
                     chunkCount = snapshot.ChunkCount,
-                    entities = ResolveSnapshotEntities(snapshot)
+                    entities = snapshot.Entities.Select(entity => new
+                    {
+                        id = entity.NetworkId,
+                        x = entity.Tile.X,
+                        y = entity.Tile.Y,
+                        facing = entity.Facing.ToString()
+                    })
                 });
                 break;
             case EntitySpawnMessage spawn:
-                _entityState[spawn.NetworkId] = new ResolvedEntity(spawn.Tile, spawn.Facing, false);
                 EnqueueBrowser(new
                 {
                     type = "entitySpawn",
@@ -232,7 +231,6 @@ public sealed class WebBridgeSession
                 });
                 break;
             case EntityDespawnMessage despawn:
-                _entityState.Remove(despawn.NetworkId);
                 EnqueueBrowser(new
                 {
                     type = "entityDespawn",
@@ -290,48 +288,6 @@ public sealed class WebBridgeSession
                 break;
         }
     }
-
-    // Resolves the snapshot's delta-coded rows to absolute positions/facing for the browser. Each row is
-    // applied against the running per-entity state (absolute replaces, step adds the direction delta to the
-    // current tile, omitted fields keep their current value), exactly like the real client decode. A complete
-    // snapshot's rows are all absolute, so this also re-establishes the baseline. Returns a list so the
-    // running state is fully updated before the (deferred) JSON serialization reads it.
-    private List<object> ResolveSnapshotEntities(WorldSnapshotMessage snapshot)
-    {
-        var resolved = new List<object>(snapshot.Entities.Count);
-        foreach (var entity in snapshot.Entities)
-        {
-            _entityState.TryGetValue(entity.NetworkId, out var current);
-
-            var tile = current.Tile;
-            if (entity.HasAbsolutePosition)
-            {
-                tile = entity.Tile;
-            }
-            else if (entity.HasStepPosition)
-            {
-                var delta = entity.Step.Delta();
-                tile = current.Tile.Offset(delta.X, delta.Y);
-            }
-
-            var facing = entity.HasFacing ? entity.Facing : current.Facing;
-            var depleted = entity.HasDepleted ? entity.Depleted : current.Depleted;
-
-            _entityState[entity.NetworkId] = new ResolvedEntity(tile, facing, depleted);
-            resolved.Add(new
-            {
-                id = entity.NetworkId,
-                x = tile.X,
-                y = tile.Y,
-                facing = facing.ToString(),
-                depleted
-            });
-        }
-
-        return resolved;
-    }
-
-    private readonly record struct ResolvedEntity(TileCoord Tile, Direction8 Facing, bool Depleted);
 
     private void EnqueueBrowser(object value)
     {

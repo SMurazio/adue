@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 16;
+    public const byte Version = 15;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -234,12 +234,6 @@ public static class ProtocolCodec
         writer.Write((ushort)value);
     }
 
-    // Delta-coded per-entity encoding (S47b, protocol v16). Each row is networkId + a changed-field bitmask
-    // (EntityStateChange) followed only by the fields the bitmask marks present. Position is either absolute
-    // (int16 x,y, used on baseline/AOI-entry/non-unit moves) or a single Direction8 step byte (the common
-    // single-tile move), distinguished by the bitmask so the decoder knows whether `Tile` is absolute or a
-    // step against the entity's current tile. Facing/depleted ride their own bits. An entity with no changed
-    // fields is never in the payload (server selection omits it), so every row carries at least one field.
     private static void WriteEntityStates(BinaryWriter writer, IReadOnlyList<EntityStateSnapshot> entities)
     {
         if (entities.Count > MaxSnapshotEntities)
@@ -250,34 +244,11 @@ public static class ProtocolCodec
         writer.Write((ushort)entities.Count);
         foreach (var entity in entities)
         {
-            var changes = entity.Changes;
-            if ((changes & EntityStateChange.PositionAbsolute) != 0 && (changes & EntityStateChange.PositionStep) != 0)
-            {
-                throw new ProtocolException("Entity state row cannot be both absolute and step position.");
-            }
-
             writer.Write(ToSnapshotNetworkId(entity.NetworkId));
-            writer.Write((byte)changes);
-
-            if ((changes & EntityStateChange.PositionAbsolute) != 0)
-            {
-                WriteSnapshotTileCoordinate(writer, entity.Tile.X);
-                WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
-            }
-            else if ((changes & EntityStateChange.PositionStep) != 0)
-            {
-                writer.Write((byte)entity.Step);
-            }
-
-            if ((changes & EntityStateChange.Facing) != 0)
-            {
-                writer.Write((byte)entity.Facing);
-            }
-
-            if ((changes & EntityStateChange.Depleted) != 0)
-            {
-                writer.Write(entity.Depleted);
-            }
+            WriteSnapshotTileCoordinate(writer, entity.Tile.X);
+            WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
+            writer.Write((byte)entity.Facing);
+            writer.Write(entity.Depleted);
         }
     }
 
@@ -373,38 +344,11 @@ public static class ProtocolCodec
         for (var i = 0; i < count; i++)
         {
             var networkId = reader.ReadUInt16();
-            var changes = (EntityStateChange)reader.ReadByte();
-            if ((changes & EntityStateChange.PositionAbsolute) != 0 && (changes & EntityStateChange.PositionStep) != 0)
-            {
-                throw new ProtocolException("Entity state row cannot be both absolute and step position.");
-            }
-
-            var tile = TileCoord.Zero;
-            var step = Direction8.N;
-            if ((changes & EntityStateChange.PositionAbsolute) != 0)
-            {
-                var x = reader.ReadInt16();
-                var y = reader.ReadInt16();
-                tile = new TileCoord(x, y);
-            }
-            else if ((changes & EntityStateChange.PositionStep) != 0)
-            {
-                step = ReadDirection(reader);
-            }
-
-            var facing = Direction8.N;
-            if ((changes & EntityStateChange.Facing) != 0)
-            {
-                facing = ReadDirection(reader);
-            }
-
-            var depleted = false;
-            if ((changes & EntityStateChange.Depleted) != 0)
-            {
-                depleted = reader.ReadBoolean();
-            }
-
-            entities.Add(new EntityStateSnapshot(networkId, tile, facing, depleted, changes, step));
+            var x = reader.ReadInt16();
+            var y = reader.ReadInt16();
+            var facing = ReadDirection(reader);
+            var depleted = reader.ReadBoolean();
+            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing, depleted));
         }
 
         return entities;

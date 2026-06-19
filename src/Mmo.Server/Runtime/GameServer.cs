@@ -16,11 +16,7 @@ public sealed class GameServer
     private const int MaxSequencedSnapshotBytes = 1000;
     private const int ProtocolHeaderBytes = 7;
     private const int SnapshotHeaderBytes = 17;
-
-    // Worst-case bytes for one delta-coded entity row (S47b, protocol v16): networkId(2) + bitmask(1) +
-    // absolute x,y(4) + facing(1) + depleted(1). Drives the conservative chunk-entity cap so a chunk can
-    // never exceed the packet budget; the common single-step row is ~4 bytes, so this only over-estimates.
-    private const int EntityStateMaxBytes = 9;
+    private const int EntityStateFixedBytes = 8;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -689,7 +685,7 @@ public sealed class GameServer
         var pending = recipient.BeginPendingSnapshot(snapshotSequence, _serverTick);
         foreach (var entity in _payloadEntityScratch)
         {
-            pending.Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
+            pending.Add(entity.NetworkId, entity.StateRevision);
         }
 
         for (var chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
@@ -700,7 +696,7 @@ public sealed class GameServer
             for (var i = start; i < end; i++)
             {
                 var entity = _payloadEntityScratch[i];
-                _snapshotChunkScratch.Add(BuildEntityStateRow(recipient, entity, isComplete));
+                _snapshotChunkScratch.Add(ToEntityStateSnapshot(entity));
                 if (_movementTrace.Enabled)
                 {
                     _movementTrace.SnapshotCarried(recipient, entity, snapshotSequence, _serverTick, chunkIndex, chunkCount);
@@ -878,39 +874,14 @@ public sealed class GameServer
         return Math.Max(1, (int)Math.Ceiling(interestRadius));
     }
 
-    // Builds the delta-coded snapshot row for one entity against the recipient's ACKED baseline (S47b).
-    //  - A complete snapshot (re-baseline / AOI-entry / first send) is the baseline itself: every row is
-    //    ABSOLUTE with all fields, so the client reconstructs full state from scratch.
-    //  - On an incremental delta, if the client has no acked baseline for the entity (AOI entry not yet
-    //    acked) the row is ABSOLUTE (establishes the baseline). Otherwise position is a single-tile STEP
-    //    when the move is exactly one of the 8 unit directions (the common tile-step case), ABSOLUTE on a
-    //    non-unit move (teleport/spawn-relocate), or OMITTED when the tile is unchanged. Facing and depleted
-    //    are sent only when they differ from the baseline. Step deltas are relative to the tile the client
-    //    provably holds (its acked baseline), which S47a's contiguous ack guarantees is consistent.
-    private static EntityStateSnapshot BuildEntityStateRow(ClientSession recipient, WorldEntity entity, bool isComplete)
+    private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
-        if (isComplete || !recipient.TryGetAckedBaseline(entity.NetworkId, out var baseline))
-        {
-            return EntityStateDelta.EncodeAbsolute(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted);
-        }
-
-        return EntityStateDelta.EncodeDelta(
-            entity.NetworkId,
-            entity.Tile,
-            entity.Facing,
-            entity.IsDepleted,
-            baseline.Tile,
-            baseline.Facing,
-            baseline.Depleted);
+        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted);
     }
 
-    // Worst-case wire size of one delta-coded entity row (S47b): networkId(2) + changed-field bitmask(1) +
-    // absolute position(4) + facing(1) + depleted(1). The common single-step row is far smaller
-    // (2 + 1 + 1 step = 4 bytes, +1 if facing also changed). Using the worst case keeps chunk sizing safe
-    // (it can only over-estimate, never overflow a packet).
     private static int EstimateEntityStateBytes()
     {
-        return EntityStateMaxBytes;
+        return EntityStateFixedBytes;
     }
 
     // Safety bound for the acked baseline (S46). A healthy client acks every snapshot within ~1 RTT, so the

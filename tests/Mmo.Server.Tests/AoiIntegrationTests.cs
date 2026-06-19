@@ -396,9 +396,6 @@ public sealed class AoiIntegrationTests
         // not in the snapshot). The convergence test asserts this converges to the server's truth.
         private readonly Dictionary<uint, TileCoord> _reconstructed = [];
 
-        // Resolves delta-coded snapshot rows (S47b) back to absolute per-entity state, mirroring the client.
-        private readonly SnapshotRowResolver _resolver = new();
-
         public List<IProtocolMessage> Messages { get; } = [];
         public bool IsLoggedIn { get; private set; }
         public string OwnDisplayName => _name;
@@ -459,7 +456,6 @@ public sealed class AoiIntegrationTests
                         IsLoggedIn = login.Accepted;
                         break;
                     case EntitySpawnMessage spawn:
-                        _resolver.Seed(spawn.NetworkId, spawn.Tile, spawn.Facing);
                         _reconstructed[spawn.NetworkId] = spawn.Tile;
                         if (spawn.DisplayName == _name)
                         {
@@ -469,7 +465,6 @@ public sealed class AoiIntegrationTests
 
                         break;
                     case EntityDespawnMessage despawn:
-                        _resolver.Remove(despawn.NetworkId);
                         _reconstructed.Remove(despawn.NetworkId);
                         break;
                     case WorldSnapshotMessage snapshot:
@@ -494,13 +489,10 @@ public sealed class AoiIntegrationTests
 
             foreach (var entity in snapshot.Entities)
             {
-                // Resolve the delta-coded row (absolute / step / changed-only fields, S47b) against the
-                // running per-entity state, exactly like the real client.
-                var resolved = _resolver.Apply(entity);
-                _reconstructed[entity.NetworkId] = resolved.Tile;
+                _reconstructed[entity.NetworkId] = entity.Tile;
                 if (entity.NetworkId == OwnNetworkId)
                 {
-                    OwnTile = resolved.Tile;
+                    OwnTile = entity.Tile;
                 }
             }
 
@@ -508,7 +500,6 @@ public sealed class AoiIntegrationTests
             // reconstructed entity it did not include — mirrors the real client's reconciliation.
             if (snapshot.IsComplete && snapshot.ChunkCount <= 1)
             {
-                _resolver.PruneTo(snapshot.Entities);
                 var present = snapshot.Entities.Select(static e => e.NetworkId).ToHashSet();
                 foreach (var networkId in _reconstructed.Keys.Where(id => !present.Contains(id)).ToArray())
                 {

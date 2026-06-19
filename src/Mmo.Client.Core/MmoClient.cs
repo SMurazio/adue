@@ -401,42 +401,21 @@ public sealed class MmoClient : IDisposable
             _snapshotVisibleScratch.Add(state.NetworkId);
             if (!_entities.TryGetValue(state.NetworkId, out var entity))
             {
-                // First sight of this entity from a snapshot. The server only step-codes entities the client
-                // has acked (so it already exists locally); an absolute row establishes a brand-new one. A
-                // step row for an unknown entity is a protocol anomaly — create it at Zero so the step below
-                // resolves defensively (never crashes), but the legit path always carries absolute on entry.
                 entity = UpsertEntity(
                     state.NetworkId,
                     Guid.Empty,
                     EntityKind.Player,
                     $"#{state.NetworkId}",
-                    state.HasAbsolutePosition ? state.Tile : TileCoord.Zero,
-                    state.HasFacing ? state.Facing : Direction8.S);
+                    state.Tile,
+                    state.Facing);
             }
 
-            // Resolve the delta-coded row against the entity's CURRENT state (which equals the acked baseline
-            // the server encoded against — S47a's contiguous ack guarantees that). Absolute replaces the tile;
-            // a step applies the direction to the current tile; an unchanged field keeps the current value.
-            var resolvedTile = entity.Tile;
-            if (state.HasAbsolutePosition)
-            {
-                resolvedTile = state.Tile;
-            }
-            else if (state.HasStepPosition)
-            {
-                var delta = state.Step.Delta();
-                resolvedTile = entity.Tile.Offset(delta.X, delta.Y);
-            }
-
-            var resolvedFacing = state.HasFacing ? state.Facing : entity.Facing;
-            var resolvedDepleted = state.HasDepleted ? state.Depleted : entity.Depleted;
-
-            var confirmation = entity.ApplySnapshot(resolvedTile, resolvedFacing, _currentTime, sequence, resolvedDepleted);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, state.Depleted);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
                     state.NetworkId,
-                    resolvedTile,
+                    state.Tile,
                     sequence,
                     DateTimeOffset.UtcNow,
                     confirmation.QueueDepth,

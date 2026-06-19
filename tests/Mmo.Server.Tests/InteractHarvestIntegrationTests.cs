@@ -542,9 +542,6 @@ public sealed class InteractHarvestIntegrationTests
         private readonly NetManager _client;
         private readonly string _name;
         private readonly Dictionary<uint, bool> _depletedByNetworkId = new();
-
-        // Resolves delta-coded snapshot rows (S47b) to absolute per-entity state, mirroring the real client.
-        private readonly SnapshotRowResolver _resolver = new();
         private NetPeer? _serverPeer;
         private uint _moveSequence;
         private bool _disposed;
@@ -651,7 +648,6 @@ public sealed class InteractHarvestIntegrationTests
                         break;
                     case EntitySpawnMessage spawn:
                         KnownSpawns.Add(spawn);
-                        _resolver.Seed(spawn.NetworkId, spawn.Tile, spawn.Facing);
                         if (spawn.DisplayName == _name)
                         {
                             OwnNetworkId = spawn.NetworkId;
@@ -669,13 +665,10 @@ public sealed class InteractHarvestIntegrationTests
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         foreach (var entity in snapshot.Entities)
                         {
-                            // Resolve the delta-coded row (S47b): depleted/tile are only on the wire when they
-                            // changed, so apply against the running state to observe the absolute values.
-                            var resolved = _resolver.Apply(entity);
-                            _depletedByNetworkId[entity.NetworkId] = resolved.Depleted;
+                            _depletedByNetworkId[entity.NetworkId] = entity.Depleted;
                             if (entity.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = resolved.Tile;
+                                OwnTile = entity.Tile;
                             }
                         }
 

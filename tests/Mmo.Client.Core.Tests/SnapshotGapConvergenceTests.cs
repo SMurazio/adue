@@ -37,14 +37,14 @@ public sealed class SnapshotGapConvergenceTests
         // Entity steps → R2. Seq 2 carries R2 but is DROPPED (never observed by the client → never acked).
         Step(entity);
         var r2 = entity.StateRevision;
-        Carry(session.BeginPendingSnapshot(2, serverTick: 12), entity);
+        session.BeginPendingSnapshot(2, serverTick: 12).Add(EntityNetworkId, r2);
         // (client drops seq 2: no tracker.Observe, no ack)
 
         // Entity steps again → R3. Seq 3 carries R3, is delivered and the client acks — but the contiguous
         // cursor is still 1 (gap at 2), so the client acks 1, NOT 3.
         Step(entity);
         var r3 = entity.StateRevision;
-        Carry(session.BeginPendingSnapshot(3, serverTick: 13), entity);
+        session.BeginPendingSnapshot(3, serverTick: 13).Add(EntityNetworkId, r3);
         var ack = tracker.Observe(3); // delivered, but stalls at the gap
         Assert.Equal(1u, ack);
         session.AcknowledgeSnapshot(ack, serverTick: 14);
@@ -70,11 +70,11 @@ public sealed class SnapshotGapConvergenceTests
 
         Step(entity);
         var r2 = entity.StateRevision;
-        Carry(session.BeginPendingSnapshot(2, serverTick: 12), entity);
+        session.BeginPendingSnapshot(2, serverTick: 12).Add(EntityNetworkId, r2);
 
         Step(entity);
         var r3 = entity.StateRevision;
-        Carry(session.BeginPendingSnapshot(3, serverTick: 13), entity);
+        session.BeginPendingSnapshot(3, serverTick: 13).Add(EntityNetworkId, r3);
 
         // Seq 3 arrives first (reorder): ack stalls at 1.
         Assert.Equal(1u, tracker.Observe(3));
@@ -103,10 +103,10 @@ public sealed class SnapshotGapConvergenceTests
 
         // Seq 2 dropped forever; seq 3 delivered but stalled behind the gap.
         Step(entity);
-        Carry(session.BeginPendingSnapshot(2, serverTick: 12), entity);
+        session.BeginPendingSnapshot(2, serverTick: 12).Add(EntityNetworkId, entity.StateRevision);
         Step(entity);
         var r3 = entity.StateRevision;
-        Carry(session.BeginPendingSnapshot(3, serverTick: 13), entity);
+        session.BeginPendingSnapshot(3, serverTick: 13).Add(EntityNetworkId, r3);
         session.AcknowledgeSnapshot(tracker.Observe(3), serverTick: 14); // acks 1, stalled
 
         Assert.False(session.HasAckedCurrentRevision(entity));
@@ -117,7 +117,7 @@ public sealed class SnapshotGapConvergenceTests
         session.ForceFullRebaseline();
         var rebaselineSeq = 4u;
         var rRebaseline = entity.StateRevision; // current revision re-sent in the complete snapshot
-        Carry(session.BeginPendingSnapshot(rebaselineSeq, serverTick: 1000), entity);
+        session.BeginPendingSnapshot(rebaselineSeq, serverTick: 1000).Add(EntityNetworkId, rRebaseline);
 
         var ack = tracker.Observe(rebaselineSeq, isComplete: true);
         Assert.Equal(rebaselineSeq, ack);
@@ -145,7 +145,7 @@ public sealed class SnapshotGapConvergenceTests
             }
 
             var sentTick = 10 + seq;
-            Carry(session.BeginPendingSnapshot(seq, sentTick), entity);
+            session.BeginPendingSnapshot(seq, sentTick).Add(EntityNetworkId, entity.StateRevision);
             var ack = tracker.Observe(seq, isComplete: seq == 1);
             Assert.Equal(seq, ack); // contiguous == latest, no loss
             session.AcknowledgeSnapshot(ack, sentTick + 1);
@@ -167,18 +167,11 @@ public sealed class SnapshotGapConvergenceTests
         var pending = session.BeginPendingSnapshot(seq, sentTick);
         foreach (var (networkId, revision) in carried)
         {
-            pending.Add(networkId, revision, TileGrid.DefaultSpawnTile, Direction8.S, false);
+            pending.Add(networkId, revision);
         }
 
         var ack = tracker.Observe(seq, isComplete);
         session.AcknowledgeSnapshot(ack, ackTick);
-    }
-
-    // Records the entity's CURRENT state (revision + tile/facing/depleted) into a pending-snapshot record,
-    // mirroring what the server carries for the S47b step-delta baseline.
-    private static void Carry(ClientSession.PendingSnapshotRecord record, WorldEntity entity)
-    {
-        record.Add(entity.NetworkId, entity.StateRevision, entity.Tile, entity.Facing, entity.IsDepleted);
     }
 
     private static void Step(WorldEntity entity)

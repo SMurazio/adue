@@ -8,14 +8,12 @@ public sealed class ClientSession
     private readonly HashSet<uint> _lastSnapshotEntityIds = [];
     private readonly HashSet<uint> _knownEntityIds = [];
 
-    // Acked baseline (S46 + S47b): the full entity STATE the CLIENT has acknowledged receiving, per visible
-    // entity — revision (selection), plus tile/facing/depleted (the values the client currently holds).
-    // Snapshot selection sends an entity iff its current revision differs from this acked revision — so a
-    // dropped (never-acked) snapshot's changes stay "unacked" and are re-sent next tick (self-healing under
-    // loss). S47b additionally encodes the position as a single-tile STEP against the acked baseline tile
-    // (the value the client provably holds, via S47a's contiguous ack); facing/depleted are sent only when
-    // they differ from this baseline. This replaces the old revision-only map.
-    private readonly Dictionary<uint, AckedEntityBaseline> _ackedEntityBaselines = [];
+    // Acked baseline (S46): the entity revision the CLIENT has acknowledged receiving, per visible
+    // entity. Snapshot selection sends an entity iff its current revision differs from this acked
+    // revision — so a dropped (never-acked) snapshot's changes stay "unacked" and are re-sent next tick
+    // (self-healing under loss). This replaces the old "last sent" baseline, which desynced on any drop
+    // and needed the periodic full heartbeat to recover.
+    private readonly Dictionary<uint, uint> _ackedEntityRevisions = [];
 
     // Per-snapshot-sequence record of what each outgoing snapshot CARRIED (entity -> revision), so an ack
     // of sequence S can advance the acked baseline for every entity that S delivered. Kept as a small ring
@@ -208,22 +206,13 @@ public sealed class ClientSession
     }
 
     // True when the entity's current revision already matches the revision the CLIENT acknowledged: it is
-    // in sync, so this tick's snapshot can omit it. A never-seen entity (no acked baseline) returns false
+    // in sync, so this tick's snapshot can omit it. A never-seen entity (no acked revision) returns false
     // → it is sent (this is what re-baselines an AOI-entry entity). After a forced re-baseline
     // (ForceFullRebaseline clears the acked map) every visible entity returns false and is re-sent.
     public bool HasAckedCurrentRevision(WorldEntity entity)
     {
-        return _ackedEntityBaselines.TryGetValue(entity.NetworkId, out var baseline)
-            && baseline.Revision == entity.StateRevision;
-    }
-
-    // The acked baseline STATE for an entity (the tile/facing/depleted the client currently holds), or false
-    // if the client has no acked baseline for it (AOI entry / post-rebaseline) — in which case the server
-    // must send ABSOLUTE coordinates to establish the baseline. Used by the delta encoder (S47b) to compute
-    // a single-tile step delta and to send only the fields that differ from what the client already has.
-    public bool TryGetAckedBaseline(uint networkId, out AckedEntityBaseline baseline)
-    {
-        return _ackedEntityBaselines.TryGetValue(networkId, out baseline);
+        return _ackedEntityRevisions.TryGetValue(entity.NetworkId, out var revision)
+            && revision == entity.StateRevision;
     }
 
     // AOI exit / despawn: forget all baseline + pending state for the entity so a later re-entry
@@ -235,7 +224,7 @@ public sealed class ClientSession
     // flight), so this scan is cheap and bounded.
     public void ForgetEntityBaseline(uint networkId)
     {
-        _ackedEntityBaselines.Remove(networkId);
+        _ackedEntityRevisions.Remove(networkId);
         foreach (var record in _pendingSnapshots)
         {
             record.Remove(networkId);
@@ -312,8 +301,7 @@ public sealed class ClientSession
         // those records. Because a client acks the highest sequence it has fully received, acking S implies
         // every sequence <= S that the client got; any earlier sequence it never received simply leaves its
         // entities unacked here, so they re-send next tick (self-healing). We use the max revision so an
-        // out-of-order ack can't lower a baseline, and store the FULL carried state (tile/facing/depleted)
-        // because S47b's step-delta encoding is relative to the tile the client now holds.
+        // out-of-order ack can't lower a baseline.
         var writeIndex = 0;
         for (var readIndex = 0; readIndex < _pendingSnapshots.Count; readIndex++)
         {
@@ -322,14 +310,10 @@ public sealed class ClientSession
             {
                 foreach (var carried in record.Carried)
                 {
-                    if (!_ackedEntityBaselines.TryGetValue(carried.NetworkId, out var existing)
-                        || carried.Revision > existing.Revision)
+                    if (!_ackedEntityRevisions.TryGetValue(carried.NetworkId, out var existing)
+                        || carried.Revision > existing)
                     {
-                        _ackedEntityBaselines[carried.NetworkId] = new AckedEntityBaseline(
-                            carried.Revision,
-                            carried.Tile,
-                            carried.Facing,
-                            carried.Depleted);
+                        _ackedEntityRevisions[carried.NetworkId] = carried.Revision;
                     }
                 }
 
@@ -370,7 +354,7 @@ public sealed class ClientSession
     // Used by the safety bound when a client has gone silent past the re-baseline threshold.
     public void ForceFullRebaseline()
     {
-        _ackedEntityBaselines.Clear();
+        _ackedEntityRevisions.Clear();
         foreach (var record in _pendingSnapshots)
         {
             _pendingSnapshotPool.Push(record);
@@ -395,9 +379,9 @@ public sealed class ClientSession
             Carried.Clear();
         }
 
-        public void Add(uint networkId, uint revision, TileCoord tile, Direction8 facing, bool depleted)
+        public void Add(uint networkId, uint revision)
         {
-            Carried.Add(new CarriedEntity(networkId, revision, tile, facing, depleted));
+            Carried.Add(new CarriedEntity(networkId, revision));
         }
 
         // Drops an entity from this record's carried set (AOI exit), so a later ack of this snapshot will
@@ -415,12 +399,6 @@ public sealed class ClientSession
         }
     }
 
-    // What an outgoing snapshot delivered for one entity: its revision (selection baseline) plus the full
-    // state the client will hold once it acks (the step-delta baseline for S47b).
-    public readonly record struct CarriedEntity(uint NetworkId, uint Revision, TileCoord Tile, Direction8 Facing, bool Depleted);
+    public readonly record struct CarriedEntity(uint NetworkId, uint Revision);
 
-    // The acked baseline STATE for one entity: the revision the client acknowledged plus the absolute
-    // tile/facing/depleted it now holds. The delta encoder computes a single-tile step against Tile and
-    // sends facing/depleted only when they differ from these values.
-    public readonly record struct AckedEntityBaseline(uint Revision, TileCoord Tile, Direction8 Facing, bool Depleted);
 }
