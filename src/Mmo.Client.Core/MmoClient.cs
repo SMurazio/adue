@@ -46,8 +46,12 @@ public sealed class MmoClient : IDisposable
     // S53 local-player movement prediction. Created lazily once we know the zone (the blocked map), the
     // local entity, and its cadence; null until then (and on the web/headless paths that never input).
     // Local player ONLY — remote entities stay pure interpolation. See LocalPlayerPredictor.
+    // DISABLED by default (S53 redo): the predictor as integrated fights the playout-buffered interpolator
+    // (keyboard rubber-band) and click-to-move advances on the confirmed tile so prediction overshoots
+    // turns (mouse far worse). Re-enable only once prediction renders at present-time with a clean reconcile
+    // AND the path-driver follows the predicted tile. Code kept; flag off restores stable confirmed-state.
     private LocalPlayerPredictor? _predictor;
-    private bool _predictionEnabled = true;
+    private bool _predictionEnabled = false;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
