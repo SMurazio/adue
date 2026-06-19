@@ -153,6 +153,28 @@ public sealed class WorldEntity
             return false;
         }
 
+        // Turn-then-move (UO, S59): a step in a direction we don't already face just TURNS to face it —
+        // consumes the cooldown and re-replicates Facing (StateRevision bump), but does NOT move the tile.
+        // Only a step in the current facing direction actually moves (below). Turning is always allowed
+        // (you may face a wall). This makes rapid direction changes a clean pivot instead of a zigzag.
+        if (direction != Facing)
+        {
+            Facing = direction;
+            _lastStepTick = serverTick;
+            StateRevision++;
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                Tile,
+                CooldownElapsed: true,
+                TargetWalkable: false,
+                Accepted: false,
+                "turn",
+                Tile,
+                Turned: true);
+            return false;
+        }
+
         var delta = direction.Delta();
         var target = Tile.Offset(delta.X, delta.Y);
         // TODO: reject diagonal corner-cutting once tiles can carry richer collision flags.

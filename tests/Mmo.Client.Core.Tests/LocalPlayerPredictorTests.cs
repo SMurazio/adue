@@ -25,7 +25,9 @@ public sealed class LocalPlayerPredictorTests
     [Fact]
     public void FirstStepFiresImmediatelyOnKeydown_NoRoundTrip()
     {
-        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.S);
+        // Already facing E, so the first step is a MOVE with no round-trip wait. (Starting in a direction you
+        // don't face turns in place first — covered by the turn-then-move tests below.)
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
 
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         var stepped = predictor.Tick(TimeSpan.Zero);
@@ -239,13 +241,19 @@ public sealed class LocalPlayerPredictorTests
         predictor.SetIntent(true, Direction8.S, TimeSpan.FromMilliseconds(60));
         Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(60)));
 
-        // Still on the tile reached by the single step, now facing the last commanded direction.
+        // Facing only changes on a STEP (turn-then-move), and no step has been due since the first, so facing
+        // is still E even though the held direction is now S.
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.E, predictor.Facing);
+
+        // The next step is due a full cadence after the first (t=150). Because the held direction (S) differs
+        // from facing (E), that single step is a TURN in place — not a move.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(150)));
         Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
         Assert.Equal(Direction8.S, predictor.Facing);
 
-        // The next step is due a full cadence after the first one, in the CURRENT held direction (S), not
-        // sooner — exactly one more step at t=150.
-        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(150)));
+        // Now facing S, the following step (t=300) moves.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));
         Assert.Equal(new TileCoord(1, 1), predictor.PredictedTile);       // stepped S from (1,0)
     }
 
@@ -265,7 +273,13 @@ public sealed class LocalPlayerPredictorTests
         Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(299)));
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
 
-        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));      // cadence elapsed -> step N
+        // At the next boundary (t=300) the redirect first TURNS to N (no move); the move N follows a cadence
+        // later (t=450).
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(300)));     // turn to N
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.N, predictor.Facing);
+
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(450)));      // now facing N -> moves
         Assert.Equal(new TileCoord(2, -1), predictor.PredictedTile);
     }
 
@@ -315,10 +329,15 @@ public sealed class LocalPlayerPredictorTests
         // SAME held-intent timeline (a press, then rapid direction flips), and assert identical step counts.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
 
-        // Server model: steps once per cadence from the last accepted step, ignoring direction churn.
+        // Server model with turn-then-move: a step is due one cadence after the last; a step in a new
+        // direction TURNS (no tile move), only a step in the faced direction MOVES.
         TimeSpan? serverLastStep = null;
-        var serverSteps = 0;
-        var predictedSteps = 0;
+        var serverFacing = Direction8.E;
+        var serverTile = new TileCoord(0, 0);
+        var serverMoves = 0;
+        var currentDir = Direction8.E;
+
+        var predictedMoves = 0;
         var lastPredicted = predictor.PredictedTile;
 
         // A timeline of (timeMs, direction) intents: a press at 0, then flips at 25/55/85, holding to 600ms.
@@ -334,14 +353,25 @@ public sealed class LocalPlayerPredictorTests
             while (intentIndex < intents.Length && intents[intentIndex].ms <= ms)
             {
                 predictor.SetIntent(true, intents[intentIndex].dir, now);
+                currentDir = intents[intentIndex].dir;
                 intentIndex++;
             }
 
-            // Server tick model: a step is due a full cadence after the last accepted step (or immediately
-            // when none yet / idle long enough); count it without caring about the direction.
+            // Server tick model (turn-then-move): a step is due a full cadence after the last; it turns when
+            // the held direction differs from facing, otherwise moves one tile.
             if (serverLastStep is null || now >= serverLastStep.Value + TimeSpan.FromMilliseconds(Cadence))
             {
-                serverSteps++;
+                if (currentDir != serverFacing)
+                {
+                    serverFacing = currentDir; // turn in place
+                }
+                else
+                {
+                    var d = currentDir.Delta();
+                    serverTile = serverTile.Offset(d.X, d.Y);
+                    serverMoves++;
+                }
+
                 serverLastStep = serverLastStep is null
                     ? now
                     : serverLastStep.Value + TimeSpan.FromMilliseconds(Cadence);
@@ -350,12 +380,15 @@ public sealed class LocalPlayerPredictorTests
             predictor.Tick(now);
             if (predictor.PredictedTile != lastPredicted)
             {
-                predictedSteps++;
+                predictedMoves++;
                 lastPredicted = predictor.PredictedTile;
             }
         }
 
-        Assert.Equal(serverSteps, predictedSteps);
+        // Tile-for-tile, move-for-move, and facing parity between the predictor and the server rule.
+        Assert.Equal(serverTile, predictor.PredictedTile);
+        Assert.Equal(serverMoves, predictedMoves);
+        Assert.Equal(serverFacing, predictor.Facing);
     }
 
     [Fact]

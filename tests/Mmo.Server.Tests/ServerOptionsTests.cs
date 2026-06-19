@@ -57,7 +57,7 @@ public sealed class ServerOptionsTests
 
         var options = ServerOptions.FromEnvironment();
 
-        Assert.Equal(40f, options.InterestRadius);
+        Assert.Equal(35f, options.InterestRadius);
         Assert.Equal(140, options.StepCooldownMs);
         Assert.Equal(15, options.PersistenceCheckpointSeconds);
         Assert.Equal(128, options.WorldWidthTiles);

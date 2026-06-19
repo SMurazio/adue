@@ -828,7 +828,10 @@ public sealed class MmoClient : IDisposable
             // S53: the local predicted player renders from the predictor's OWN present-time tween (snappy, no
             // playout delay). Everything else (remote players, resources) keeps the buffered interpolator.
             var position = _predictor is not null ? _predictor.Sample(now) : _interpolator.Sample(now);
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted);
+            // S59: render the predictor's LIVE facing for the local entity, so a predicted turn (no tile move)
+            // rotates the avatar immediately instead of waiting for the next snapshot to sync Facing.
+            var facing = _predictor is not null ? _predictor.Facing : Facing;
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted);
         }
     }
 

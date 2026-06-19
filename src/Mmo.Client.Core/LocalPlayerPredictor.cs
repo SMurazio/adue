@@ -132,7 +132,9 @@ public sealed class LocalPlayerPredictor
 
             _moving = true;
             _direction = direction;
-            _facing = direction;
+            // S59 turn-then-move: do NOT set _facing here. The server changes Facing only inside TryStep at a
+            // step boundary (a turn), never at intent-receive; Tick mirrors that. Setting facing here would
+            // make Tick see _direction == _facing and skip the turn, desyncing from the server.
         }
         else
         {
@@ -156,6 +158,17 @@ public sealed class LocalPlayerPredictor
             // loop; the next snapshot re-bases anyway. 8 mirrors the interpolator's per-sample step cap.
             for (var i = 0; i < 8 && now >= _nextStepAt.Value; i++)
             {
+                // Turn-then-move (S59): a step in a direction we don't already face just TURNS (consumes the
+                // cooldown, no tile move) — mirrors WorldEntity.TryStep. Only a step in the facing direction
+                // moves, so rapid direction flips become clean turns, not zigzag moves.
+                if (_direction != _facing)
+                {
+                    _facing = _direction;
+                    _lastStepAt = _nextStepAt.Value;
+                    _nextStepAt = _nextStepAt.Value + TimeSpan.FromMilliseconds(_cadenceMs);
+                    continue;
+                }
+
                 var delta = _direction.Delta();
                 var target = _predictedTile.Offset(delta.X, delta.Y);
                 if (!_isWalkable(target))

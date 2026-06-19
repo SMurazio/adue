@@ -99,7 +99,7 @@ public sealed class WorldEntitySpeedTests
     private static int CountSteps(double multiplier, int ticks)
     {
         var grid = new TileGrid(256, 256, []);
-        var entity = CreateEntity(tile: new TileCoord(128, 128));
+        var entity = CreateEntity(tile: new TileCoord(128, 128), facing: Direction8.E);
         // Note: setting 1.0 on an already-default entity is a no-op that returns false, so don't assert the
         // return here — we only need the entity to END at `multiplier` (it does, including the 1.0 case).
         entity.TrySetSpeedMultiplier(multiplier);
@@ -109,9 +109,9 @@ public sealed class WorldEntitySpeedTests
         var steps = 0;
         for (uint tick = 1; tick <= ticks; tick++)
         {
-            // March east then reset facing-only walls aren't an issue on the open grid; keep within bounds.
-            var dir = (tick / cooldown) % 2 == 0 ? Direction8.E : Direction8.W;
-            if (entity.TryStep(dir, tick, cooldown, grid))
+            // March a CONSTANT direction so every accepted step moves (turn-then-move: a direction change just
+            // turns). The entity faces E from the start, and 40 ticks of E stays within the 256-wide grid.
+            if (entity.TryStep(Direction8.E, tick, cooldown, grid))
             {
                 steps++;
             }
@@ -120,14 +120,14 @@ public sealed class WorldEntitySpeedTests
         return steps;
     }
 
-    private static WorldEntity CreateEntity(TileCoord? tile = null)
+    private static WorldEntity CreateEntity(TileCoord? tile = null, Direction8 facing = Direction8.S)
     {
         return new WorldEntity(
             id: 1,
             networkId: 1,
             EntityKind.Player,
             tile ?? TileGrid.DefaultSpawnTile,
-            Direction8.S,
+            facing,
             "Player1",
             Guid.NewGuid(),
             ownerSession: null,

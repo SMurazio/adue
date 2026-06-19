@@ -105,7 +105,8 @@ public sealed class SpatialAoiParityTests
         var state = new WorldState(gridCellSize: 8);
         var session = new ClientSession(null!);
 
-        var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(120, 100), Direction8.S);
+        // Spawn facing W so each westward step is a move (turn-then-move: a step in a new direction turns).
+        var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(120, 100), Direction8.W);
         var grid = new TileGrid(256, 256, blockedTiles: []);
 
         var viewer = MakeViewer(new TileCoord(98, 100));
@@ -136,7 +137,8 @@ public sealed class SpatialAoiParityTests
         var session = new ClientSession(null!);
         var grid = new TileGrid(256, 256, blockedTiles: []);
 
-        var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(100, 100), Direction8.S);
+        // Spawn facing E so the eastward step is a move (turn-then-move: a new direction turns first).
+        var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(100, 100), Direction8.E);
         var viewer = MakeViewer(new TileCoord(105, 100));
 
         var previous = mover.Tile;
