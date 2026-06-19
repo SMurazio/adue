@@ -50,5 +50,18 @@ integration tests without the Godot client.
 - Out-of-range / depleted / non-resource / unauthenticated interactions are rejected with a reason and
   cause no state change.
 - Protocol version bumped; AOI invariant covered by a test.
-- `run-checks.cmd` green + a 120-client/60s stress (watch interaction handling doesn't blow the tick
+- `run-checks.cmd` green + a 120-client/30s stress (watch interaction handling doesn't blow the tick
   budget). Do NOT commit — Orchestrator reviews.
+
+## Review finding carried from S37 (must handle here — harvest makes inventory mutable)
+
+S37 attaches the inventory to the durable `WorldEntity` and loads it from the DB on login. The
+account-**takeover** path (`GameServer` `KickExistingSessionForCharacter`) hands off the kicked
+session's **tile** (`takeoverTile`) but the new session's inventory is **re-read from the DB**, which is
+stale vs the kicked session's not-yet-flushed in-memory inventory. This was harmless in S37 (inventory
+was never dirty — no mutation path). **Once harvest makes inventory mutable, this is a data-loss race**
+(a fresh login by the same account mid-session reloads pre-harvest inventory and can later overwrite the
+flushed gains). Fix it as part of this task: on takeover, **hand off the kicked entity's in-memory
+`Inventory`** to the new entity (mirroring `takeoverTile`) rather than using the DB-loaded stacks — or
+flush-then-reload synchronously. Add a regression test for harvest → same-account relogin (takeover) →
+inventory intact.
