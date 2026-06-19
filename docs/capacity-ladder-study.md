@@ -55,6 +55,28 @@ Run on 2026-06-19, **Release**, single process, 1000² map, 60s/rung, via
   density — **not** connected count and **not** server tick. Re-run this ladder with a dense-visible
   profile (e.g. 300–500 connected clustered) after grid AOI lands to set the next number.
 
+## Re-measurement after the gates cleared (2026-06-19, post S41/S42/S44)
+
+Both gates are now in (S42 seed terrain, S41 grid AOI), with S44's ~1.3k scattered node entities also
+live. Re-ran the ladder (Release, scattered, 1000², grid AOI + nodes):
+
+| Clients | tickMs avg | AOI ms avg | gc | errors | note |
+|---:|---:|---:|:--:|:--:|---|
+| 120 | 0.45 | **0.23** | 0 | 0 | vs pre-grid the AOI scan was the dominant cost; now negligible |
+| 300 | 1.03 | **0.57** | ~0 | 0 | **AOI 1.58 → 0.57 ms (~3×)** vs the original 300 rung; tick ~2% of budget |
+
+**Grid AOI worked:** the scan that was the binding/dominant tick cost is now ~3× cheaper and no longer
+the bottleneck. At 300 connected the server is at ~2% tick budget, gc ~0, 0 errors — comfortable headroom.
+
+**Single-machine measurement ceiling (~400):** pushing to **500 clients crashed the local load harness**
+— the synthetic clients + server + metrics client all share one box, so the *load generator* saturates
+the CPU before the server does. We therefore **cannot measure the true server ceiling (>400) on one
+machine**; that needs a **separate load-generator host** (or a leaner headless synthetic client).
+
+**Updated cap guidance:** the measured headroom comfortably supports **raising the conservative published
+target from 120–150 to ~300** (healthy at ~2% tick budget, AOI now cheap). The *true* ceiling is higher
+but unmeasured — pin it with multi-machine load testing before publishing a number above ~300.
+
 ## Method notes / reproduce
 
 ```
