@@ -224,8 +224,16 @@ public sealed class AoiIntegrationTests
         }
     }
 
+    // S46 convergence-under-loss MUST-HAVE: with the acked baseline and NO periodic full heartbeat, an
+    // observer that DROPS every snapshot (ignores it: neither applies nor acks) while a mover keeps
+    // stepping must NOT desync permanently. Because the dropped snapshots are never acked, the server's
+    // acked baseline for the mover never advances, so the mover stays in the snapshot payload every tick;
+    // when the observer resumes, the next snapshot it accepts carries the mover's CURRENT absolute tile
+    // and its reconstruction converges EXACTLY to the server's. A baseline bug that marked the mover
+    // "sent" after the first (dropped) snapshot would drop it from the payload and the observer would stay
+    // permanently stale — this test would then fail. Heartbeats are gone, so only the acked baseline heals.
     [Fact]
-    public async Task FullSnapshotHeartbeatIsNotStarvedByPartialSnapshots()
+    public async Task ObserverConvergesAfterDroppingSnapshotsWhileMoverSteps()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
@@ -251,35 +259,44 @@ public sealed class AoiIntegrationTests
         try
         {
             await Task.Delay(100);
-            using var moverA = new IntegrationClient("MoverA");
-            using var moverB = new IntegrationClient("MoverB");
+            using var mover = new IntegrationClient("Mover");
             using var observer = new IntegrationClient("Observer");
-            moverA.Connect(port, options.ConnectionKey);
-            moverB.Connect(port, options.ConnectionKey);
+            mover.Connect(port, options.ConnectionKey);
             observer.Connect(port, options.ConnectionKey);
 
             await WaitUntilAsync(
-                () => moverA.IsLoggedIn && moverA.OwnNetworkId != 0
-                    && moverB.IsLoggedIn && moverB.OwnNetworkId != 0
+                () => mover.IsLoggedIn && mover.OwnNetworkId != 0
                     && observer.IsLoggedIn && observer.OwnNetworkId != 0,
-                moverA,
-                moverB,
+                mover,
                 observer);
+
+            // Both spawn at the clustered spawn tile, so the mover is already inside the observer's AOI.
             await WaitUntilAsync(
-                () => observer.Messages.OfType<WorldSnapshotMessage>().Any(message => message.IsComplete),
-                moverA,
-                moverB,
+                () => observer.ReconstructedTileOf(mover.OwnNetworkId) is not null,
+                mover,
                 observer);
 
-            observer.ClearMessages();
+            var staleTile = observer.ReconstructedTileOf(mover.OwnNetworkId);
 
-            var sawFullHeartbeat = await PumpMovementUntilFullSnapshotAsync(
-                TimeSpan.FromMilliseconds(1600),
-                moverA,
-                moverB,
+            // Drop ALL snapshots on the observer (no apply, no ack), then move the mover several tiles. The
+            // server never gets an ack, so its acked baseline for the mover cannot advance.
+            observer.DropSnapshots = true;
+            var startX = mover.OwnTile.X;
+            await StepUntilAsync(mover, Direction8.E, () => mover.OwnTile.X >= startX + 5, observer);
+
+            // The observer's view is now stale (it ignored every snapshot during the move).
+            Assert.Equal(staleTile, observer.ReconstructedTileOf(mover.OwnNetworkId));
+            Assert.NotEqual(mover.OwnTile, observer.ReconstructedTileOf(mover.OwnNetworkId));
+
+            // Resume processing. The next accepted snapshot must carry the mover (still unacked on the
+            // server) at its current absolute tile, so the reconstruction converges exactly.
+            observer.DropSnapshots = false;
+            await WaitUntilAsync(
+                () => observer.ReconstructedTileOf(mover.OwnNetworkId) == mover.OwnTile,
+                mover,
                 observer);
 
-            Assert.True(sawFullHeartbeat);
+            Assert.Equal(mover.OwnTile, observer.ReconstructedTileOf(mover.OwnNetworkId));
         }
         finally
         {
@@ -348,39 +365,6 @@ public sealed class AoiIntegrationTests
         throw new TimeoutException("Timed out waiting for step movement condition.");
     }
 
-    private static async Task<bool> PumpMovementUntilFullSnapshotAsync(TimeSpan timeout, IntegrationClient firstMover, IntegrationClient secondMover, IntegrationClient observer)
-    {
-        var clients = new[] { firstMover, secondMover, observer };
-        var deadline = DateTimeOffset.UtcNow + timeout;
-        var nextMoveAt = DateTimeOffset.UtcNow;
-        var direction = Direction8.E;
-
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            if (DateTimeOffset.UtcNow >= nextMoveAt)
-            {
-                firstMover.SendMove(direction);
-                secondMover.SendMove(direction);
-                direction = direction == Direction8.E ? Direction8.W : Direction8.E;
-                nextMoveAt += TimeSpan.FromMilliseconds(60);
-            }
-
-            foreach (var client in clients)
-            {
-                client.Poll();
-            }
-
-            if (observer.Messages.OfType<WorldSnapshotMessage>().Any(message => message.IsComplete))
-            {
-                return true;
-            }
-
-            await Task.Delay(5);
-        }
-
-        return false;
-    }
-
     private sealed class IntegrationClient : IDisposable
     {
         private readonly EventBasedNetListener _listener = new();
@@ -406,11 +390,26 @@ public sealed class AoiIntegrationTests
             _listener.NetworkReceiveEvent += OnNetworkReceive;
         }
 
+        // Client-side reconstructed view of every entity it currently believes is in its AOI, by network
+        // id → last-known tile. Built exactly like the real client: EntitySpawn inserts, EntityDespawn
+        // removes, snapshots apply absolute tiles, and an isComplete snapshot reconciles (prunes anything
+        // not in the snapshot). The convergence test asserts this converges to the server's truth.
+        private readonly Dictionary<uint, TileCoord> _reconstructed = [];
+
         public List<IProtocolMessage> Messages { get; } = [];
         public bool IsLoggedIn { get; private set; }
         public string OwnDisplayName => _name;
         public uint OwnNetworkId { get; private set; }
         public TileCoord OwnTile { get; private set; } = TileGrid.DefaultSpawnTile;
+
+        // When true, the client ignores every snapshot entirely (no apply, no ack) — simulating snapshot
+        // loss so the server's acked baseline cannot advance (the self-heal path under test).
+        public bool DropSnapshots { get; set; }
+
+        public TileCoord? ReconstructedTileOf(uint networkId)
+        {
+            return _reconstructed.TryGetValue(networkId, out var tile) ? tile : null;
+        }
 
         public void Connect(int port, string key)
         {
@@ -456,27 +455,56 @@ public sealed class AoiIntegrationTests
                     case LoginResultMessage login:
                         IsLoggedIn = login.Accepted;
                         break;
-                    case EntitySpawnMessage spawn when spawn.DisplayName == _name:
-                        OwnNetworkId = spawn.NetworkId;
-                        OwnTile = spawn.Tile;
-                        break;
-                    case WorldSnapshotMessage snapshot:
-                        Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
-                        foreach (var entity in snapshot.Entities)
+                    case EntitySpawnMessage spawn:
+                        _reconstructed[spawn.NetworkId] = spawn.Tile;
+                        if (spawn.DisplayName == _name)
                         {
-                            if (entity.NetworkId == OwnNetworkId)
-                            {
-                                OwnTile = entity.Tile;
-                                break;
-                            }
+                            OwnNetworkId = spawn.NetworkId;
+                            OwnTile = spawn.Tile;
                         }
 
+                        break;
+                    case EntityDespawnMessage despawn:
+                        _reconstructed.Remove(despawn.NetworkId);
+                        break;
+                    case WorldSnapshotMessage snapshot:
+                        ApplySnapshot(snapshot);
                         break;
                 }
             }
             finally
             {
                 reader.Recycle();
+            }
+        }
+
+        private void ApplySnapshot(WorldSnapshotMessage snapshot)
+        {
+            if (DropSnapshots)
+            {
+                return;
+            }
+
+            Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
+
+            foreach (var entity in snapshot.Entities)
+            {
+                _reconstructed[entity.NetworkId] = entity.Tile;
+                if (entity.NetworkId == OwnNetworkId)
+                {
+                    OwnTile = entity.Tile;
+                }
+            }
+
+            // A complete snapshot (single-chunk in this test) carries the full visible set, so prune any
+            // reconstructed entity it did not include — mirrors the real client's reconciliation.
+            if (snapshot.IsComplete && snapshot.ChunkCount <= 1)
+            {
+                var present = snapshot.Entities.Select(static e => e.NetworkId).ToHashSet();
+                foreach (var networkId in _reconstructed.Keys.Where(id => !present.Contains(id)).ToArray())
+                {
+                    _reconstructed.Remove(networkId);
+                }
             }
         }
 

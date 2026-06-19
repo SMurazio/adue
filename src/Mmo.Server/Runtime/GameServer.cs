@@ -314,7 +314,7 @@ public sealed class GameServer
             case SnapshotAckMessage ack:
                 if (session.IsAuthenticated)
                 {
-                    session.AcknowledgeSnapshot(ack.LastSnapshotSequence);
+                    session.AcknowledgeSnapshot(ack.LastSnapshotSequence, _serverTick);
                 }
                 break;
             case InteractRequestMessage interact:
@@ -556,7 +556,7 @@ public sealed class GameServer
         {
             var packet = _messageEncodeBuffer.EncodeEntityDespawn(_serverTick, networkId);
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntityDespawn);
-            recipient.ForgetSentRevision(networkId);
+            recipient.ForgetEntityBaseline(networkId);
             recipient.ForgetKnownEntity(networkId);
         }
     }
@@ -634,11 +634,17 @@ public sealed class GameServer
             return;
         }
 
-        var isComplete = recipient.ShouldSendFullSnapshot(_serverTick, SnapshotHeartbeatTicks());
+        // Acked-baseline selection (S46): send an entity iff its current revision differs from the revision
+        // the CLIENT has acknowledged. A dropped snapshot is never acked, so its entities stay unacked and
+        // are re-included next tick → self-healing under loss, no periodic full heartbeat needed. A viewer
+        // gone silent past the safety threshold is force-rebaselined first (acked map cleared) so per-viewer
+        // pending state cannot grow without bound; a longer threshold disconnects a wedged client.
+        ApplyUnackedSafetyBound(recipient);
+
         _payloadEntityScratch.Clear();
         foreach (var entity in visible)
         {
-            if (isComplete || !recipient.HasSentRevision(entity))
+            if (!recipient.HasAckedCurrentRevision(entity))
             {
                 _payloadEntityScratch.Add(entity);
             }
@@ -648,13 +654,39 @@ public sealed class GameServer
 
         if (_payloadEntityScratch.Count == 0)
         {
+            // Per-recipient delta is empty (static AOI: nothing changed, entered, or left). With the periodic
+            // full heartbeat gone (S46), sending nothing here would leave an idle-but-healthy viewer with no
+            // snapshot to ack, so its ack-silence clock would grow until the disconnect bound wrongly dropped
+            // it (~8 s on a perfect connection). Emit a low-rate EMPTY keep-alive instead: a tiny snapshot
+            // carrying no entity states (isComplete=false so it does NOT reconcile/prune the client's visible
+            // set) just so the client acks the sequence and stays alive. Tiny + low-rate → the dense-bandwidth
+            // win (no full resend) is preserved.
+            if (recipient.ShouldSendKeepAlive(_serverTick, SnapshotKeepAliveTicks))
+            {
+                SendKeepAliveSnapshot(recipient, visible.Count, tickBudget, ref sentBytes, ref sentPackets);
+            }
+
             visibleCount = visible.Count;
             return;
         }
 
+        // A snapshot is "complete" (the client may reconcile/prune to it) iff its payload carries every
+        // currently-visible entity — i.e. nothing was omitted as already-acked. Re-baselines and the very
+        // first snapshot are complete; an incremental delta is not (the client relies on reliable
+        // EntityDespawn for AOI-exit removals, exactly as before).
+        var isComplete = _payloadEntityScratch.Count == visible.Count;
+
         var maxEntitiesPerPacket = Math.Max(1, (MaxSequencedSnapshotBytes - ProtocolHeaderBytes - SnapshotHeaderBytes) / EstimateEntityStateBytes());
         chunkCount = Math.Max(1, (int)Math.Ceiling(_payloadEntityScratch.Count / (double)maxEntitiesPerPacket));
         var snapshotSequence = recipient.NextSnapshotSequence();
+
+        // One per-seq carried record for the whole sequence (all chunks): the client acks the sequence only
+        // once every chunk of it is received, so the baseline advances for the full payload atomically.
+        var pending = recipient.BeginPendingSnapshot(snapshotSequence, _serverTick);
+        foreach (var entity in _payloadEntityScratch)
+        {
+            pending.Add(entity.NetworkId, entity.StateRevision);
+        }
 
         for (var chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
         {
@@ -699,13 +731,53 @@ public sealed class GameServer
             }
         }
 
-        foreach (var entity in _payloadEntityScratch)
+        // No "remember sent" baseline step: the acked baseline advances only on ACK (AcknowledgeSnapshot),
+        // which is what makes a dropped snapshot self-heal — its carried entities stay unacked and re-send
+        // next tick. We DO reset the keep-alive cadence clock, so a real delta defers the next empty
+        // keep-alive: the keep-alive only fires after SnapshotKeepAliveTicks of NO snapshot at all.
+        recipient.RememberSnapshotSentTick(_serverTick);
+        visibleCount = visible.Count;
+    }
+
+    // Sends a single empty keep-alive WorldSnapshot to a viewer whose per-recipient delta is empty, so it
+    // keeps acking and never trips the disconnect bound. The payload is empty and isComplete is FALSE — an
+    // empty complete snapshot would tell the client to prune its entire visible set, so the keep-alive must
+    // be non-complete to leave the client's known entities untouched. It opens NO pending record (carries no
+    // entities, so there is nothing to baseline) but advances the cadence + disconnect clocks via
+    // RememberSnapshotSentTick. The client acks it like any snapshot, refreshing its silence clock on ack.
+    private void SendKeepAliveSnapshot(
+        ClientSession recipient,
+        int totalVisible,
+        TickBudgetRecorder tickBudget,
+        ref int sentBytes,
+        ref int sentPackets)
+    {
+        var snapshotSequence = recipient.NextSnapshotSequence();
+        _snapshotChunkScratch.Clear();
+
+        EncodedPacket packet;
+        using (tickBudget.Measure(TickBudgetCategory.Serialize))
         {
-            recipient.RememberSentRevision(entity);
+            packet = _snapshotEncodeBuffer.EncodeWorldSnapshot(
+                _serverTick,
+                snapshotSequence,
+                totalVisible,
+                isComplete: false,
+                chunkIndex: 0,
+                chunkCount: 1,
+                _snapshotChunkScratch);
         }
 
-        recipient.RememberSnapshotSent(_serverTick, isComplete);
-        visibleCount = visible.Count;
+        using (tickBudget.Measure(TickBudgetCategory.Network))
+        {
+            if (TrySend(recipient.Peer, packet.Buffer, packet.Length, DeliveryMethod.Unreliable))
+            {
+                sentBytes += packet.Length;
+                sentPackets++;
+            }
+        }
+
+        recipient.RememberSnapshotSentTick(_serverTick);
     }
 
     private void EnsureEntitySpawns(ClientSession recipient, IReadOnlyCollection<WorldEntity> authenticated)
@@ -812,9 +884,41 @@ public sealed class GameServer
         return EntityStateFixedBytes;
     }
 
-    private uint SnapshotHeartbeatTicks()
+    // Safety bound for the acked baseline (S46). A healthy client acks every snapshot within ~1 RTT, so the
+    // oldest-unacked age stays tiny. A wedged/silent-but-connected client never acks; without a bound its
+    // per-viewer pending-snapshot ring would grow each tick. Two thresholds, both in ticks:
+    //  - RebaselineTicks (~2 s): clear the acked baseline and re-send a complete snapshot. Cheap recovery
+    //    if the client is merely lagging its acks; also bounds the pending ring (it is cleared here).
+    //  - DisconnectTicks (~8 s): the client is genuinely wedged; drop it. (LiteNetLib's own 15 s
+    //    DisconnectTimeout still covers a fully dead peer; this is the faster app-level bound.)
+    private uint RebaselineUnackedThresholdTicks => (uint)Math.Max(1, _options.TickRate * 2);
+    private uint DisconnectUnackedThresholdTicks => (uint)Math.Max(1, _options.TickRate * 8);
+
+    // Low-rate EMPTY keep-alive cadence (~1 s): the longest a viewer with an empty per-recipient delta goes
+    // without being sent SOME snapshot to ack. Well under the 2 s re-baseline / 8 s disconnect bounds, so an
+    // idle-but-healthy viewer keeps acking and never trips them. One tiny empty packet/sec/idle-viewer is
+    // negligible next to the dense-scene resend the acked baseline removed.
+    private uint SnapshotKeepAliveTicks => (uint)Math.Max(1, _options.TickRate);
+
+    private void ApplyUnackedSafetyBound(ClientSession recipient)
     {
-        return (uint)Math.Max(1, _options.TickRate);
+        // Disconnect bound first: measured from the last ack (non-resetting), so a client that keeps being
+        // re-baselined but never acks is still dropped once total silence passes the larger threshold.
+        var silence = recipient.SilenceTicks(_serverTick);
+        if (silence >= DisconnectUnackedThresholdTicks)
+        {
+            Log.Warn($"Disconnecting {recipient.DisplayName} #{recipient.NetworkId}: no snapshot ack for {silence} ticks.");
+            _netManager.DisconnectPeer(recipient.Peer);
+            recipient.ForceFullRebaseline();
+            return;
+        }
+
+        // Cheap re-baseline bound: if the pending ring has been growing for the smaller threshold, clear the
+        // acked baseline and re-send a complete snapshot. Bounds the per-viewer pending state.
+        if (recipient.UnackedAgeTicks(_serverTick) >= RebaselineUnackedThresholdTicks)
+        {
+            recipient.ForceFullRebaseline();
+        }
     }
 
     private bool TryGetSessionEntity(ClientSession session, out WorldEntity entity)
