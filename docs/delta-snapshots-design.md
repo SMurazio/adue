@@ -45,9 +45,16 @@ Phase 2): the gate was "full snapshots well-measured + ack baseline exists" — 
 - Protocol: keep `WorldSnapshot`/ack shape; the change is server-side selection + dropping the
   heartbeat. Bump version only if the wire actually changes.
 
-**Stage 2 — delta-coded entity encoding (S47, depends on S46).**
+**Stage 2 — delta-coded entity encoding (S47, depends on S46). ⚠️ ATTEMPTED (S47b) AND REVERTED.**
 - Per-entity: changed-field bitmask + step-delta position (direction byte) for moves; absolute only on
   baseline/AOI-entry. Protocol version bump. The big dense-bandwidth win.
+- **Shipped as S47b (v16), then reverted (commit `c5bac3c`, 2026-06-19):** caused a real local-player
+  position desync (~4-tile drift) in live play. Step-deltas are cumulative and the client drops
+  out-of-order/duplicate snapshots, so any dropped/reordered packet drifts the position until an absolute
+  re-baseline — and drops happen even on loopback. The suite + dense stress were green; the convergence
+  test didn't reproduce continuous movement under intermittent loss. Back on **v15 absolute coords**. See
+  `todo/S47-…` for the hard redo requirement (a continuous-movement-under-drop/reorder drift test) and the
+  design rethink (gap-triggered resync, or abandon step-deltas — the packed-crowd cost is O(N²) anyway).
 
 ## Correctness requirements (the bar — desync is silent and severe)
 
