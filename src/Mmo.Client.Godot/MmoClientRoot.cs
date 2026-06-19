@@ -81,7 +81,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// Constant on-screen text size (FixedSize) so distant players stay readable; pixel size tuned for crisp
 	// glyphs without the label ballooning. Outline gives contrast on any background. TUNABLE (play-test:
 	// shrunk from 0.0018 — was bigger than the character).
-	private const float PlayerLabelPixelSize = 0.0007f;
+	private const float PlayerLabelPixelSize = 0.0005f;
 	private const int PlayerLabelFontSize = 64;
 	private const int PlayerLabelOutlineSize = 14;
 
@@ -90,6 +90,52 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PackedScene? _playerModelScene;
 	private bool _playerModelLoadAttempted;
 	private bool _playerModelLoadFailed;
+
+	// ---- S58 rock resource models -----------------------------------------------------------------
+	// Rock gatherables (server DisplayName "Rock") render as one of three static GLBs instead of the box.
+	// Tree/Plant keep the box (no models yet). The variant is chosen by NetworkId % 3 so it is deterministic
+	// and identical across clients. Models are origin-centered, so each needs a +Y offset (≈ -Ymin × scale)
+	// to drop the base onto the ground plane (y=0). All three PackedScenes are loaded once and cached.
+	//
+	// FRAGILITY (called out for review): there is no resource-subtype field in the protocol — "is this a
+	// Rock?" is inferred purely from the replicated DisplayName string. If the server ever renames "Rock"
+	// or localizes display names, this detection silently falls back to the box. The clean fix would be a
+	// kind/subtype field, but that is a server/protocol change and out of scope for this Godot-only task.
+	private const string RockDisplayName = "Rock";
+
+	// One entry per model (path, scale, Y-offset). Scale/Y-offset are TUNABLE — human eyeballs on relaunch.
+	// Native bounds (grid = 1 unit/tile), and the first-guess sizing rationale:
+	//   moss      H 0.64, Ymin −0.32 → scale 1.25 ≈ 0.80 tile tall; Yoff = 0.32 × 1.25 = 0.40
+	//   floating  H 0.98, Ymin −0.49 → scale 0.85 ≈ 0.83 tile tall; Yoff = 0.49 × 0.85 ≈ 0.42 (a "floating"
+	//             monolith; trimmed to 0.38 so it hovers slightly off the ground on purpose)
+	//   engraved  H 1.91, Ymin −0.96 → scale 0.70 ≈ 1.34 tile tall (the "L"/large one, intentionally biggest);
+	//             Yoff = 0.96 × 0.70 ≈ 0.67
+	private const string RockMossPath = "res://content/resources/M_Rock_Moss_Overgrowth.glb";
+	private const float RockMossScale = 1.25f;
+	private const float RockMossYOffset = 0.40f;
+
+	private const string RockFloatingPath = "res://content/resources/M_Rock_Floating_Monolith.glb";
+	private const float RockFloatingScale = 0.85f;
+	private const float RockFloatingYOffset = 0.38f;
+
+	private const string RockEngravedPath = "res://content/resources/M_Rock_Engraved_Monolith_L.glb";
+	private const float RockEngravedScale = 0.70f;
+	private const float RockEngravedYOffset = 0.67f;
+
+	// Name label height above a rock wrapper. The tallest variant (engraved) reaches ~1.34 tiles, so park the
+	// label a touch above that so it clears every variant. TUNABLE.
+	private const float RockLabelHeight = 1.5f;
+
+	// The three rock scenes, loaded once on first rock spawn and cached. A failed load is logged once and the
+	// rock then falls back to the box (same posture as the player model fallback).
+	private readonly PackedScene?[] _rockModelScenes = new PackedScene?[3];
+	private bool _rockModelsLoadAttempted;
+	private bool _rockModelsLoadFailed;
+
+	// The instanced GLB child of each rock wrapper, keyed by NetworkId, so UpdateEntities can hide/show it on
+	// the Depleted bit (the box path keys off `node is MeshInstance3D`, which a wrapper is not). Entries are
+	// removed alongside _entityNodes on despawn.
+	private readonly Dictionary<uint, Node3D> _rockVisuals = [];
 
 	private MmoClient? _client;
 	private Node3D? _worldRoot;
@@ -665,10 +711,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			}
 
 			node.Position = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
-			if (state.Kind == EntityKind.Resource && node is MeshInstance3D resourceNode)
+			// Name label tracks availability: hide it when the node is harvested (the model/box already hides)
+			// and show it again on respawn, so a mined node leaves no floating "Rock" label.
+			if (state.Kind == EntityKind.Resource && _entityLabels.TryGetValue(state.NetworkId, out var resourceLabel))
 			{
-				// Drive node availability purely off the replicated Depleted bit: hide a harvested node
-				// and grey it; restore (show + green) when the server respawns it. No prediction.
+				resourceLabel.Visible = !state.Depleted;
+			}
+			if (state.Kind == EntityKind.Resource && _rockVisuals.TryGetValue(state.NetworkId, out var rockModel))
+			{
+				// Rock rendered as a GLB wrapper (no box mesh to recolour): drive availability off the same
+				// replicated Depleted bit — hide the model when harvested, show it again on respawn. No
+				// prediction. We hide rather than grey because a static GLB has no shared override material.
+				rockModel.Visible = !state.Depleted;
+			}
+			else if (state.Kind == EntityKind.Resource && node is MeshInstance3D resourceNode)
+			{
+				// Box-rendered resources (Tree/Plant, or a Rock that fell back to the box): drive node
+				// availability purely off the replicated Depleted bit — hide a harvested node and grey it;
+				// restore (show + green) when the server respawns it. No prediction.
 				resourceNode.Visible = !state.Depleted;
 				resourceNode.MaterialOverride = state.Depleted ? _resourceDepletedMaterial : _resourceAvailableMaterial;
 			}
@@ -703,6 +763,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_entityNodes.Remove(stale);
 			_entityLabels.Remove(stale);
 			_playerVisuals.Remove(stale);
+			// QueueFree on the wrapper frees the instanced rock GLB child with it; drop our reference too.
+			_rockVisuals.Remove(stale);
 		}
 	}
 
@@ -718,6 +780,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				return playerNode;
 			}
 		}
+		else if (state.Kind == EntityKind.Resource && state.DisplayName == RockDisplayName)
+		{
+			var rockNode = TryCreateRockNode(state);
+			if (rockNode is not null)
+			{
+				return rockNode;
+			}
+		}
 
 		var isResource = state.Kind == EntityKind.Resource;
 		var body = new MeshInstance3D
@@ -730,7 +800,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			Visible = !(isResource && state.Depleted)
 		};
 
-		AttachLabel(body, state, isResource ? 1.0f : 0.9f);
+		AttachLabel(body, state, isResource ? 1.3f : 0.9f);
 		return body;
 	}
 
@@ -771,6 +841,67 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// constant readable size at distance.
 		AttachPlayerLabel(wrapper, state);
 		return wrapper;
+	}
+
+	// Builds a Rock wrapper (S58): a Node3D positioned by the interpolator, holding one of three static rock
+	// GLBs as a scaled + Y-offset child so the base sits on the ground. The variant is NetworkId % 3 so it is
+	// deterministic and identical across clients. Registers the model child in _rockVisuals so the Depleted
+	// bit can hide/show it. Returns null if the chosen scene is unavailable so the caller falls back to the box.
+	private Node3D? TryCreateRockNode(EntityRenderState state)
+	{
+		var variant = (int)(state.NetworkId % 3);
+		var scene = LoadRockModelScene(variant);
+		if (scene is null || scene.Instantiate() is not Node3D model)
+		{
+			return null;
+		}
+
+		var (scale, yOffset) = variant switch
+		{
+			0 => (RockMossScale, RockMossYOffset),
+			1 => (RockFloatingScale, RockFloatingYOffset),
+			_ => (RockEngravedScale, RockEngravedYOffset)
+		};
+
+		var wrapper = new Node3D { Name = $"Entity_{state.NetworkId}" };
+		model.Name = "Model";
+		model.Scale = new Vector3(scale, scale, scale);
+		model.Position = new Vector3(0f, yOffset, 0f);
+		// Start hidden if the node spawns already depleted; UpdateEntities keeps it in sync thereafter.
+		model.Visible = !state.Depleted;
+		wrapper.AddChild(model);
+		_rockVisuals[state.NetworkId] = model;
+
+		// Keep the S57 name label above the node (above the tallest variant so it clears every rock).
+		AttachLabel(wrapper, state, RockLabelHeight);
+		return wrapper;
+	}
+
+	// Loads (once) and caches the rock PackedScene for the given variant (0=moss, 1=floating, 2=engraved).
+	// A failed load is logged a single time and disables all rock models for the session, so rocks then fall
+	// back to the box rather than re-attempting/spamming the log (same posture as the player model fallback).
+	private PackedScene? LoadRockModelScene(int variant)
+	{
+		if (_rockModelsLoadFailed)
+		{
+			return null;
+		}
+
+		if (!_rockModelsLoadAttempted)
+		{
+			_rockModelsLoadAttempted = true;
+			_rockModelScenes[0] = GD.Load<PackedScene>(RockMossPath);
+			_rockModelScenes[1] = GD.Load<PackedScene>(RockFloatingPath);
+			_rockModelScenes[2] = GD.Load<PackedScene>(RockEngravedPath);
+			if (_rockModelScenes[0] is null || _rockModelScenes[1] is null || _rockModelScenes[2] is null)
+			{
+				_rockModelsLoadFailed = true;
+				GD.PushWarning("S58: could not load one or more rock models; rocks fall back to the box.");
+				return null;
+			}
+		}
+
+		return _rockModelScenes[variant];
 	}
 
 	private void AttachLabel(Node3D parent, EntityRenderState state, float height)
