@@ -76,9 +76,12 @@ the box thrashed and PowerShell fell over. S45 converted the load-gen to **Manua
 from a single poll loop** (O(1) threads). With that:
 - **500 clients** (which previously crashed) now run **0-error / 100%-auth**.
 - **800:** server tick 2.09 ms avg (~4% budget), 0 errors.
-- **1000:** server tick **2.99 ms avg (~6% budget)**, 0 errors — first strain is in the *tail* (tick max
-  66 ms, drift max 41 ms). The signature (low avg tick + high drift) is **CPU contention between the
-  co-located rig and the server**, not the server doing 66 ms of work.
+- **1000:** server tick **2.99 ms avg (~6% budget)**, 0 errors. The tick *tail* (max 66 ms over the run;
+  135 ms / drift 90 ms in the windows that include connect) is **entirely the login ramp** — a 90 s run
+  isolated it: the **steady-state last-5s window (all 1000 connected) is tick avg 4.58 / max 7.44 ms,
+  drift max 0.16 ms, gc 0**. So once connected the server has *no* tail strain at 1000; the spikes are the
+  mass-connect burst (loginMs max ~920 ms), which **staggering logins** would smooth — a thundering-herd
+  *login* cost, not a steady-state ceiling.
 
 **So the server is not the cap at any single-box-achievable load** — it sustains **1000 connected at ~6%
 tick budget, 0 errors**. The only remaining limit is that the load generator and server still **share one
