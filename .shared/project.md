@@ -43,7 +43,9 @@ At the start of every session:
 3. **Report** - Implementer writes a self-contained review-request briefing as
    `review/review-request-<slug>.md`. It must include intent, branch and base commit, how to diff,
    change manifest, decisions and deviations, self-verification evidence including a fresh
-   120-client/60s stress run, known gaps, highest-risk areas, and what the reviewer should check.
+   standard-gate stress run (**120 clients / 30s** — fixed and comparable across tasks; longer 60s+
+   runs are reserved for milestone/capacity studies, not per-task gating), known gaps, highest-risk
+   areas, and what the reviewer should check.
 4. **Review** - Orchestrator treats each file in `review/` as an inbound review task, independently
    re-runs build/tests/stress, re-reads the diff, produces a severity-ranked verdict, updates
    `todo/` with any new findings, and deletes the request file once reviewed.
