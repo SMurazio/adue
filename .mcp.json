@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mmo-client-control": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["D:\\MMO\\tools\\mcp\\client-control\\server.js"],
+      "env": { "MMO_DEBUG_CONTROL_PORT": "7780" }
+    }
+  }
+}

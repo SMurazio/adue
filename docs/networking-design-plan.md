@@ -23,6 +23,15 @@ No client prediction now. Probably not ever. Use confirmed-state smoothing inste
 
 If tile tweening is measured as laggy, revisit local-player-only prediction as a measured exception, not a default.
 
+**Decision (movement feel):** the human reported the web client feels sluggish even after the self
+interpolation buffer was removed (S4). Resolution, in order: (1) **first response is a faster step
+cadence** — lower `MMO_STEP_COOLDOWN_MS`, server-advertised so the client glide stays in sync (todo
+S10); this keeps the server-authoritative-only model. (2) If responsiveness is still unsatisfactory,
+**local-player-only client prediction is the next escalation — and it will be built in the Godot
+client only**, not the throwaway web debug client (which also carries avoidable bridge latency the
+native client won't). Prediction stays deferred until S10 is evaluated; this records the trigger and
+the where, not a commitment to build it now.
+
 ## 3. What To Adopt
 
 Verdicts are tied to this project profile. NOW applies to the current single-zone prototype. SOON is the next natural step. LATER is correct technique gated on a measured trigger. NEVER is deliberately rejected for this genre/topology.
