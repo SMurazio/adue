@@ -229,18 +229,18 @@ public sealed class ProtocolCodecTests
             "sandbox",
             16,
             12,
-            [
-                new TileCoord(0, 0),
-                new TileCoord(4, 7),
-                new TileCoord(15, 11)
-            ]);
+            Seed: 1234,
+            GenVersion: 1,
+            ContentHash: 0xDEADBEEFCAFEF00DUL);
 
         var decoded = Assert.IsType<ZoneInfoMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal("sandbox", decoded.ZoneId);
         Assert.Equal(16, decoded.Width);
         Assert.Equal(12, decoded.Height);
-        Assert.Equal(original.BlockedTiles, decoded.BlockedTiles);
+        Assert.Equal(1234, decoded.Seed);
+        Assert.Equal(1, decoded.GenVersion);
+        Assert.Equal(0xDEADBEEFCAFEF00DUL, decoded.ContentHash);
     }
 
     [Fact]

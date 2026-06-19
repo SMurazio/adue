@@ -126,11 +126,18 @@ public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IPr
     public MessageType Type => MessageType.EntityDespawn;
 }
 
+// Terrain is procedural content, not state: instead of shipping the blocked-tile list, ZoneInfo carries
+// a tiny descriptor — dimensions plus the generator (Seed, GenVersion) — and a ContentHash of the
+// generated blocked set. The client regenerates the identical map locally via the shared
+// TerrainGenerator and compares hashes as a drift/tamper check. Login terrain cost is now ~constant
+// regardless of map size. The server remains authoritative for movement validation.
 public sealed record ZoneInfoMessage(
     string ZoneId,
     int Width,
     int Height,
-    IReadOnlyList<TileCoord> BlockedTiles) : IProtocolMessage
+    int Seed,
+    int GenVersion,
+    ulong ContentHash) : IProtocolMessage
 {
     public MessageType Type => MessageType.ZoneInfo;
 }

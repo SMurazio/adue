@@ -236,13 +236,45 @@ public sealed class WebBridgeSession
                 });
                 break;
             case ZoneInfoMessage zone:
+                // Terrain is procedural content: regenerate the blocked set locally from the seed
+                // descriptor via the same shared deterministic generator the server uses, instead of
+                // receiving a tile payload. Verify the local hash matches the server's (drift/tamper
+                // check); the server stays authoritative regardless. The browser keeps consuming a flat
+                // blockedTiles list, so the bridge does the regeneration on its behalf.
+                IReadOnlyList<TileCoord> regenerated;
+                try
+                {
+                    regenerated = TerrainGenerator.Generate(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+                }
+                catch (Exception exception)
+                {
+                    EnqueueBrowser(new
+                    {
+                        type = "error",
+                        code = "zone_gen_failed",
+                        message = $"Could not regenerate zone '{zone.ZoneId}' (seed={zone.Seed}, genVersion={zone.GenVersion}): {exception.Message}"
+                    });
+                    break;
+                }
+
+                var localHash = TerrainGenerator.ContentHash(regenerated);
+                if (localHash != zone.ContentHash)
+                {
+                    EnqueueBrowser(new
+                    {
+                        type = "error",
+                        code = "zone_hash_mismatch",
+                        message = $"Zone '{zone.ZoneId}' content hash mismatch: local {localHash:X16} != server {zone.ContentHash:X16}. Generator drift or tampering."
+                    });
+                }
+
                 EnqueueBrowser(new
                 {
                     type = "zoneInfo",
                     zone.ZoneId,
                     zone.Width,
                     zone.Height,
-                    blockedTiles = zone.BlockedTiles.Select(tile => new { tile.X, tile.Y })
+                    blockedTiles = regenerated.Select(tile => new { tile.X, tile.Y })
                 });
                 break;
             case ChatBroadcastMessage chat:

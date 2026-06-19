@@ -31,29 +31,22 @@ public sealed class TileGrid
     public int Height { get; }
     public IReadOnlySet<TileCoord> BlockedTiles => _blockedTiles;
 
+    // The map is content, not state: the server builds its authoritative TileGrid from the same shared
+    // deterministic generator the clients use, so it never has to ship the blocked-tile list. The
+    // historical "default" map is genVersion 1 with a fixed default seed (overload below).
     public static TileGrid CreateDefault(int width, int height)
     {
-        var blocked = new HashSet<TileCoord>();
+        return CreateGenerated(width, height, DefaultSeed, TerrainGenerator.CurrentGenVersion);
+    }
 
-        for (var x = 0; x < width; x++)
-        {
-            blocked.Add(new TileCoord(x, 0));
-            blocked.Add(new TileCoord(x, height - 1));
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            blocked.Add(new TileCoord(0, y));
-            blocked.Add(new TileCoord(width - 1, y));
-        }
-
-        AddVerticalSegment(blocked, width, height, 16, 8, 20);
-        AddHorizontalSegment(blocked, width, height, 24, 20, 36);
-        AddVerticalSegment(blocked, width, height, 40, 12, 18);
-        blocked.Remove(DefaultSpawnTile);
-
+    public static TileGrid CreateGenerated(int width, int height, int seed, int genVersion)
+    {
+        var blocked = TerrainGenerator.Generate(width, height, seed, genVersion);
         return new TileGrid(width, height, blocked);
     }
+
+    /// <summary>Stable default seed so the generated map (and persisted tile positions) survive restarts.</summary>
+    public const int DefaultSeed = 0;
 
     public bool IsInBounds(TileCoord tile)
     {
@@ -63,29 +56,5 @@ public sealed class TileGrid
     public bool IsWalkable(TileCoord tile)
     {
         return IsInBounds(tile) && !_blockedTiles.Contains(tile);
-    }
-
-    private static void AddVerticalSegment(HashSet<TileCoord> blocked, int width, int height, int x, int yStart, int yEnd)
-    {
-        for (var y = yStart; y <= yEnd; y++)
-        {
-            AddIfInBounds(blocked, width, height, new TileCoord(x, y));
-        }
-    }
-
-    private static void AddHorizontalSegment(HashSet<TileCoord> blocked, int width, int height, int y, int xStart, int xEnd)
-    {
-        for (var x = xStart; x <= xEnd; x++)
-        {
-            AddIfInBounds(blocked, width, height, new TileCoord(x, y));
-        }
-    }
-
-    private static void AddIfInBounds(HashSet<TileCoord> blocked, int width, int height, TileCoord tile)
-    {
-        if (tile.X >= 0 && tile.X < width && tile.Y >= 0 && tile.Y < height)
-        {
-            blocked.Add(tile);
-        }
     }
 }

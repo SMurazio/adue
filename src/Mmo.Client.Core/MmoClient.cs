@@ -233,7 +233,7 @@ public sealed class MmoClient : IDisposable
                 HandleLogin(login);
                 break;
             case ZoneInfoMessage zone:
-                Zone = new ZoneModel(zone.ZoneId, zone.Width, zone.Height, zone.BlockedTiles);
+                HandleZoneInfo(zone);
                 break;
             case EntitySpawnMessage spawn:
                 UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, spawn.Tile, spawn.Facing);
@@ -256,6 +256,38 @@ public sealed class MmoClient : IDisposable
                 _errors.Add(new ClientError(error.Code, error.Message));
                 break;
         }
+    }
+
+    private void HandleZoneInfo(ZoneInfoMessage zone)
+    {
+        // Regenerate the map locally from the seed descriptor instead of consuming a tile payload.
+        // If the server advertises a generator version this build can't produce, the terrain would be
+        // wrong — fail loudly rather than render a mismatched map. The server stays authoritative for
+        // movement regardless, so this is a diagnostic gate, not a security boundary.
+        ZoneModel model;
+        try
+        {
+            model = new ZoneModel(zone.ZoneId, zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+        }
+        catch (Exception exception)
+        {
+            _errors.Add(new ClientError(
+                "zone-gen-failed",
+                $"Could not regenerate zone '{zone.ZoneId}' (seed={zone.Seed}, genVersion={zone.GenVersion}): {exception.Message}"));
+            return;
+        }
+
+        if (model.ContentHash != zone.ContentHash)
+        {
+            // Loud diagnostic: client/server generator drift or tampering. We still apply the locally
+            // generated map (the server validates movement against its own copy).
+            _errors.Add(new ClientError(
+                "zone-hash-mismatch",
+                $"Zone '{zone.ZoneId}' content hash mismatch: local {model.ContentHash:X16} != server {zone.ContentHash:X16} "
+                    + $"(seed={zone.Seed}, genVersion={zone.GenVersion}, {zone.Width}x{zone.Height}). Generator drift or tampering."));
+        }
+
+        Zone = model;
     }
 
     private void HandleLogin(LoginResultMessage login)

@@ -16,6 +16,11 @@ public sealed record ServerOptions(
     SpawnDistribution SpawnDistribution,
     IReadOnlySet<string> AdminNames)
 {
+    // Procedural map seed. Default 0 (TileGrid.DefaultSeed) keeps the generated map — and therefore
+    // persisted tile positions — stable across restarts. Init-only (not a positional ctor arg) so the
+    // many test constructions of ServerOptions don't all have to thread it.
+    public int MapSeed { get; init; }
+
     public bool DebugMovement { get; init; }
 
     public IReadOnlySet<string> DebugMovementWatchNames { get; init; } =
@@ -51,6 +56,7 @@ public sealed record ServerOptions(
             ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
             ReadSet("MMO_ADMIN_NAMES", "Admin"))
         {
+            MapSeed = ReadInt("MMO_MAP_SEED", 0),
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
             DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
             DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d),

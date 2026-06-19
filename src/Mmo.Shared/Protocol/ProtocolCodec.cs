@@ -6,11 +6,10 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 13;
+    public const byte Version = 14;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
-    private const int MaxZoneTiles = 1_048_576;
     private const int MaxInventoryUpdateStacks = 1024;
 
     public static byte[] Encode(IProtocolMessage message)
@@ -200,27 +199,17 @@ public static class ProtocolCodec
         };
     }
 
+    // Terrain ships as a seed descriptor, not a tile payload: dims + (Seed, GenVersion) + ContentHash.
+    // Fixed-size and tiny — login terrain cost is constant regardless of map size. The client
+    // regenerates the map locally via the shared TerrainGenerator and validates ContentHash.
     private static void WriteZoneInfo(BinaryWriter writer, ZoneInfoMessage zone)
     {
         WriteString(writer, zone.ZoneId);
         WriteZoneDimension(writer, zone.Width, nameof(zone.Width));
         WriteZoneDimension(writer, zone.Height, nameof(zone.Height));
-        var tileCount = CheckedZoneTileCount(zone.Width, zone.Height);
-        var bitset = new byte[(tileCount + 7) / 8];
-
-        foreach (var tile in zone.BlockedTiles)
-        {
-            if (tile.X < 0 || tile.X >= zone.Width || tile.Y < 0 || tile.Y >= zone.Height)
-            {
-                throw new ProtocolException($"Blocked tile is out of zone bounds: {tile}.");
-            }
-
-            var index = (tile.Y * zone.Width) + tile.X;
-            bitset[index / 8] |= (byte)(1 << (index % 8));
-        }
-
-        writer.Write(bitset.Length);
-        writer.Write(bitset);
+        writer.Write(zone.Seed);
+        writer.Write(zone.GenVersion);
+        writer.Write(zone.ContentHash);
     }
 
     private static ZoneInfoMessage ReadZoneInfo(BinaryReader reader)
@@ -228,32 +217,10 @@ public static class ProtocolCodec
         var zoneId = ReadString(reader);
         var width = reader.ReadUInt16();
         var height = reader.ReadUInt16();
-        var tileCount = CheckedZoneTileCount(width, height);
-        var expectedBytes = (tileCount + 7) / 8;
-        var byteCount = reader.ReadInt32();
-        if (byteCount != expectedBytes)
-        {
-            throw new ProtocolException($"Invalid zone bitset size: {byteCount}, expected {expectedBytes}.");
-        }
-
-        var bitset = reader.ReadBytes(byteCount);
-        if (bitset.Length != byteCount)
-        {
-            throw new ProtocolException("Zone bitset payload ended early.");
-        }
-
-        var blocked = new List<TileCoord>();
-        for (var index = 0; index < tileCount; index++)
-        {
-            if ((bitset[index / 8] & (1 << (index % 8))) == 0)
-            {
-                continue;
-            }
-
-            blocked.Add(new TileCoord(index % width, index / width));
-        }
-
-        return new ZoneInfoMessage(zoneId, width, height, blocked);
+        var seed = reader.ReadInt32();
+        var genVersion = reader.ReadInt32();
+        var contentHash = reader.ReadUInt64();
+        return new ZoneInfoMessage(zoneId, width, height, seed, genVersion, contentHash);
     }
 
     private static void WriteZoneDimension(BinaryWriter writer, int value, string name)
@@ -264,17 +231,6 @@ public static class ProtocolCodec
         }
 
         writer.Write((ushort)value);
-    }
-
-    private static int CheckedZoneTileCount(int width, int height)
-    {
-        var tileCount = (long)width * height;
-        if (tileCount < 1 || tileCount > MaxZoneTiles)
-        {
-            throw new ProtocolException($"Zone is too large to encode: {width}x{height}.");
-        }
-
-        return (int)tileCount;
     }
 
     private static void WriteEntityStates(BinaryWriter writer, IReadOnlyList<EntityStateSnapshot> entities)

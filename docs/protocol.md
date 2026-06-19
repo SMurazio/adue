@@ -4,7 +4,7 @@ The protocol is binary and versioned. It is intentionally small so packet behavi
 
 ## Movement Model
 
-Movement is tile-stepped (the model landed at v9; the wire has since advanced — current shipped is **v13**, and **v14** lands with terrain chunking, S36a). The client sends `MoveStep` with an input sequence and one 8-way `Direction` (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`). The server validates cooldown, world bounds, and blocked tiles, then moves the entity exactly one tile if the step is legal.
+Movement is tile-stepped (the model landed at v9; the wire has since advanced — current shipped is **v14**, which switched `ZoneInfo` from a blocked-tile payload to a procedural-seed descriptor, S42). The client sends `MoveStep` with an input sequence and one 8-way `Direction` (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`). The server validates cooldown, world bounds, and blocked tiles, then moves the entity exactly one tile if the step is legal.
 
 Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile coordinates. Entity snapshots also carry facing. Clients tween between confirmed tile centers; there is no client-side prediction. Rationale: [networking-design-plan.md](networking-design-plan.md) section 5a.
 
@@ -13,7 +13,7 @@ Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile 
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `13` (current shipped — keep in sync with `ProtocolCodec.Version`; v14 lands with terrain chunking, S36a)
+- `byte` version: `14` (current shipped — keep in sync with `ProtocolCodec.Version`; v14 made `ZoneInfo` carry a procedural-terrain seed descriptor instead of a tile payload, S42)
 - `uint16` message type
 - message-specific payload
 
@@ -42,7 +42,7 @@ Between full heartbeat snapshots, `WorldSnapshot` may be incomplete (`isComplete
 
 - `ServerHello`: server name, protocol version, tick rate, authoritative step cooldown in milliseconds, and server interest radius in tiles.
 - `LoginResult`: accepted/rejected, character id, display name, assigned role, spawn tile, reason.
-- `ZoneInfo`: zone id, width, height, and blocked-tile map. The codec carries blocked tiles as a compact bitset ordered row-major by tile coordinate; clients render the server-provided map instead of duplicating wall seeds. **(Changing in v14/S36a: `ZoneInfo` keeps dims + chunk size but drops the tile list; terrain streams per-AOI-chunk via `TerrainChunk`.)**
+- `ZoneInfo`: zone id, width, height, and a **procedural-terrain descriptor** — `int32 seed`, `int32 genVersion`, and `uint64 contentHash`. Static terrain is content, not state: rather than shipping the blocked-tile list, the server ships the seed and the client regenerates the identical map locally via the shared deterministic `TerrainGenerator` (`(width, height, seed, genVersion) -> blocked tiles`). The client compares its locally-computed hash to `contentHash` as a drift/tamper check and logs loudly on mismatch; the server remains authoritative for movement. Login terrain cost is constant regardless of map size. `genVersion` lets the generator algorithm change later without a silent mismatch.
 - `EntitySpawn`: durable visible-entity metadata: network id, character id, kind, display name, initial tile, and facing.
 - `EntityDespawn`: server tick plus network id for an entity that left the client's current area of interest.
 - `WorldSnapshot`: server tick, per-client snapshot sequence, and compact visible entity state. Each entity state is `ushort networkId`, `int16 tileX`, `int16 tileY`, `byte facing`, `byte depleted` (the resource-node availability flag — false for players and all non-resource entities).

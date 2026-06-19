@@ -69,7 +69,12 @@ public sealed class GameServer
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _movementTrace = new ServerMovementTrace(options);
         _resourceNodes = ResourceNodeRegistry.CreateDefault(_itemRegistry);
-        _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles, options.SpawnDistribution);
+        _zone = Zone.CreateGenerated(
+            options.WorldWidthTiles,
+            options.WorldHeightTiles,
+            options.MapSeed,
+            TerrainGenerator.CurrentGenVersion,
+            options.SpawnDistribution);
         _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
         ScatterResourceNodes();
         _netManager = new NetManager(_listener)
@@ -926,11 +931,11 @@ public sealed class GameServer
 
     private ZoneInfoMessage CreateZoneInfoMessage()
     {
-        var blockedTiles = _zone.BlockedTiles
-            .OrderBy(tile => tile.Y)
-            .ThenBy(tile => tile.X)
-            .ToArray();
-        return new ZoneInfoMessage(_zone.Id, _zone.Width, _zone.Height, blockedTiles);
+        // Ship the seed, not the tiles: the client regenerates the identical map locally via the shared
+        // deterministic generator. ContentHash is computed over the same canonically-ordered set the
+        // generator emits, so the client can compare against its own regeneration (drift/tamper check).
+        var contentHash = TerrainGenerator.ContentHash(_zone.Width, _zone.Height, _zone.Seed, _zone.GenVersion);
+        return new ZoneInfoMessage(_zone.Id, _zone.Width, _zone.Height, _zone.Seed, _zone.GenVersion, contentHash);
     }
 
     private void HandleChat(ClientSession sender, string text)

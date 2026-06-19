@@ -13,6 +13,11 @@ public sealed class Zone
     private int _nextSpawnTileIndex;
 
     public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles)
+        : this(id, tileGrid, spawnTiles, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion)
+    {
+    }
+
+    public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles, int seed, int genVersion)
     {
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -20,6 +25,8 @@ public sealed class Zone
         }
 
         Id = id;
+        Seed = seed;
+        GenVersion = genVersion;
         _tileGrid = tileGrid ?? throw new ArgumentNullException(nameof(tileGrid));
         _spawnTiles = spawnTiles
             .Where(_tileGrid.IsWalkable)
@@ -35,14 +42,26 @@ public sealed class Zone
     public string Id { get; }
     public int Width => _tileGrid.Width;
     public int Height => _tileGrid.Height;
+    public int Seed { get; }
+    public int GenVersion { get; }
     public IReadOnlySet<TileCoord> BlockedTiles => _tileGrid.BlockedTiles;
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
     public WorldState World { get; } = new();
 
     public static Zone CreateDefault(int width, int height, SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
     {
-        var tileGrid = TileGrid.CreateDefault(width, height);
-        return new Zone(DefaultId, tileGrid, CreateSpawnTiles(tileGrid, spawnDistribution));
+        return CreateGenerated(width, height, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion, spawnDistribution);
+    }
+
+    public static Zone CreateGenerated(
+        int width,
+        int height,
+        int seed,
+        int genVersion,
+        SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
+    {
+        var tileGrid = TileGrid.CreateGenerated(width, height, seed, genVersion);
+        return new Zone(DefaultId, tileGrid, CreateSpawnTiles(tileGrid, spawnDistribution), seed, genVersion);
     }
 
     public bool IsWalkable(TileCoord tile)

@@ -213,8 +213,12 @@ public sealed class AoiIntegrationTests
             Assert.Equal(Zone.DefaultId, zone.ZoneId);
             Assert.Equal(64, zone.Width);
             Assert.Equal(64, zone.Height);
-            Assert.Contains(new TileCoord(16, 8), zone.BlockedTiles);
-            Assert.DoesNotContain(TileGrid.DefaultSpawnTile, zone.BlockedTiles);
+            // ZoneInfo no longer ships the tile payload — it ships the seed descriptor. Regenerate the
+            // map locally via the shared generator and confirm both the content and the server's hash.
+            var blocked = TerrainGenerator.Generate(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+            Assert.Contains(new TileCoord(16, 8), blocked);
+            Assert.DoesNotContain(TileGrid.DefaultSpawnTile, blocked);
+            Assert.Equal(TerrainGenerator.ContentHash(blocked), zone.ContentHash);
         }
         finally
         {
