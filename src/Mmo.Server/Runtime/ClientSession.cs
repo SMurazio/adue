@@ -62,6 +62,11 @@ public sealed class ClientSession
         _knownEntityIds.Add(networkId);
     }
 
+    public void ForgetKnownEntity(uint networkId)
+    {
+        _knownEntityIds.Remove(networkId);
+    }
+
     public bool WasInLastSnapshot(uint networkId)
     {
         return _lastSnapshotEntityIds.Contains(networkId);

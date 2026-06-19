@@ -509,6 +509,7 @@ public sealed class GameServer
             var packet = _messageEncodeBuffer.EncodeEntityDespawn(_serverTick, networkId);
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntityDespawn);
             recipient.ForgetSentRevision(networkId);
+            recipient.ForgetKnownEntity(networkId);
         }
     }
 

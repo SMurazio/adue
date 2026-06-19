@@ -69,6 +69,7 @@ public sealed class AoiIntegrationTests
                 observer.Messages.OfType<WorldSnapshotMessage>().SelectMany(message => message.Entities),
                 entity => entity.NetworkId == outsideNetworkId);
 
+            // First entry into the observer's AOI: spawn must carry the real display name.
             observer.ClearMessages();
             await StepUntilAsync(outsideClient, Direction8.W, () => outsideClient.OwnTile.X <= observer.OwnTile.X + 4, observer);
             await WaitUntilAsync(
@@ -83,12 +84,31 @@ public sealed class AoiIntegrationTests
                 observer,
                 outsideClient);
 
+            var firstSpawn = observer.Messages
+                .OfType<EntitySpawnMessage>()
+                .First(message => message.NetworkId == outsideNetworkId);
+            Assert.Equal(outsideClient.OwnDisplayName, firstSpawn.DisplayName);
+
+            // Exit the observer's AOI: despawn must be sent.
             observer.ClearMessages();
             await StepUntilAsync(outsideClient, Direction8.E, () => outsideClient.OwnTile.X >= outsideX, observer);
             await WaitUntilAsync(
                 () => observer.Messages.OfType<EntityDespawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
                 observer,
                 outsideClient);
+
+            // Re-entry: a fresh named EntitySpawn must arrive again (regression for S34).
+            observer.ClearMessages();
+            await StepUntilAsync(outsideClient, Direction8.W, () => outsideClient.OwnTile.X <= observer.OwnTile.X + 4, observer);
+            await WaitUntilAsync(
+                () => observer.Messages.OfType<EntitySpawnMessage>().Any(message => message.NetworkId == outsideNetworkId),
+                observer,
+                outsideClient);
+
+            var reentrySpawn = observer.Messages
+                .OfType<EntitySpawnMessage>()
+                .First(message => message.NetworkId == outsideNetworkId);
+            Assert.Equal(outsideClient.OwnDisplayName, reentrySpawn.DisplayName);
         }
         finally
         {
@@ -385,6 +405,7 @@ public sealed class AoiIntegrationTests
 
         public List<IProtocolMessage> Messages { get; } = [];
         public bool IsLoggedIn { get; private set; }
+        public string OwnDisplayName => _name;
         public uint OwnNetworkId { get; private set; }
         public TileCoord OwnTile { get; private set; } = TileGrid.DefaultSpawnTile;
 
