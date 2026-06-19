@@ -6,11 +6,12 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 12;
+    public const byte Version = 13;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
     private const int MaxZoneTiles = 1_048_576;
+    private const int MaxInventoryUpdateStacks = 1024;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -44,6 +45,16 @@ public static class ProtocolCodec
                 break;
             case SnapshotAckMessage value:
                 writer.Write(value.LastSnapshotSequence);
+                break;
+            case InteractRequestMessage value:
+                writer.Write(value.TargetNetworkId);
+                break;
+            case InteractResultMessage value:
+                writer.Write(value.Success);
+                WriteString(writer, value.Reason);
+                break;
+            case InventoryUpdateMessage value:
+                WriteInventoryUpdate(writer, value.ChangedStacks);
                 break;
             case ServerHelloMessage value:
                 WriteString(writer, value.ServerName);
@@ -162,6 +173,9 @@ public static class ProtocolCodec
             MessageType.MoveStep => new MoveStepMessage(reader.ReadUInt32(), ReadDirection(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
+            MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
+            MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
+            MessageType.InventoryUpdate => ReadInventoryUpdate(reader),
             MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle()),
             MessageType.LoginResult => new LoginResultMessage(
                 reader.ReadBoolean(),
@@ -277,6 +291,7 @@ public static class ProtocolCodec
             WriteSnapshotTileCoordinate(writer, entity.Tile.X);
             WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
             writer.Write((byte)entity.Facing);
+            writer.Write(entity.Depleted);
         }
     }
 
@@ -375,7 +390,8 @@ public static class ProtocolCodec
             var x = reader.ReadInt16();
             var y = reader.ReadInt16();
             var facing = ReadDirection(reader);
-            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing));
+            var depleted = reader.ReadBoolean();
+            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing, depleted));
         }
 
         return entities;
@@ -437,6 +453,50 @@ public static class ProtocolCodec
         }
 
         return new Guid(bytes);
+    }
+
+    private static void WriteInventoryUpdate(BinaryWriter writer, IReadOnlyList<ItemStack> stacks)
+    {
+        if (stacks.Count > MaxInventoryUpdateStacks)
+        {
+            throw new ProtocolException($"Inventory update has too many stacks: {stacks.Count}.");
+        }
+
+        writer.Write((ushort)stacks.Count);
+        foreach (var stack in stacks)
+        {
+            WriteString(writer, stack.TemplateKey);
+            if (stack.Quantity < 0)
+            {
+                throw new ProtocolException($"Inventory stack quantity is negative: {stack.Quantity}.");
+            }
+
+            writer.Write(stack.Quantity);
+        }
+    }
+
+    private static InventoryUpdateMessage ReadInventoryUpdate(BinaryReader reader)
+    {
+        var count = reader.ReadUInt16();
+        if (count > MaxInventoryUpdateStacks)
+        {
+            throw new ProtocolException($"Inventory update has too many stacks: {count}.");
+        }
+
+        var stacks = new List<ItemStack>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadString(reader);
+            var quantity = reader.ReadInt32();
+            if (quantity < 0)
+            {
+                throw new ProtocolException($"Inventory stack quantity is negative: {quantity}.");
+            }
+
+            stacks.Add(new ItemStack(key, quantity));
+        }
+
+        return new InventoryUpdateMessage(stacks);
     }
 
     private static void WriteString(BinaryWriter writer, string value)

@@ -47,6 +47,62 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void InteractRequestRoundTrips()
+    {
+        var original = new InteractRequestMessage(4242);
+
+        var decoded = Assert.IsType<InteractRequestMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4242u, decoded.TargetNetworkId);
+    }
+
+    [Fact]
+    public void InteractResultRoundTripsSuccessAndFailure()
+    {
+        var success = Assert.IsType<InteractResultMessage>(
+            ProtocolCodec.Decode(ProtocolCodec.Encode(new InteractResultMessage(true, ""))));
+        Assert.True(success.Success);
+        Assert.Equal("", success.Reason);
+
+        var failure = Assert.IsType<InteractResultMessage>(
+            ProtocolCodec.Decode(ProtocolCodec.Encode(new InteractResultMessage(false, "too_far"))));
+        Assert.False(failure.Success);
+        Assert.Equal("too_far", failure.Reason);
+    }
+
+    [Fact]
+    public void InventoryUpdateRoundTrips()
+    {
+        var original = new InventoryUpdateMessage(
+        [
+            new ItemStack("wood", 5),
+            new ItemStack("stone", 0),
+        ]);
+
+        var decoded = Assert.IsType<InventoryUpdateMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(2, decoded.ChangedStacks.Count);
+        Assert.Equal(new ItemStack("wood", 5), decoded.ChangedStacks[0]);
+        Assert.Equal(new ItemStack("stone", 0), decoded.ChangedStacks[1]);
+    }
+
+    [Fact]
+    public void WorldSnapshotRoundTripsDepletedFlag()
+    {
+        var original = new WorldSnapshotMessage(
+            7,
+            [
+                new EntityStateSnapshot(11, new TileCoord(3, 4), Direction8.S, Depleted: true),
+                new EntityStateSnapshot(12, new TileCoord(5, 6), Direction8.N, Depleted: false),
+            ]);
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.True(decoded.Entities[0].Depleted);
+        Assert.False(decoded.Entities[1].Depleted);
+    }
+
+    [Fact]
     public void MoveStepRoundTrips()
     {
         var original = new MoveStepMessage(123, Direction8.SW);

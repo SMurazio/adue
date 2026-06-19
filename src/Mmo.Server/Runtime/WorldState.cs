@@ -63,6 +63,31 @@ public sealed class WorldState
         return entity;
     }
 
+    // Server-owned harvestable resource node. Transient (not durable, no owner session) but carries a
+    // ResourceNode for its available/depleted state. Spawned at world setup, not derived from sessions.
+    public WorldEntity AddResourceNode(
+        uint networkId,
+        string displayName,
+        TileCoord tile,
+        ResourceNode resource)
+    {
+        var entity = new WorldEntity(
+            _nextEntityId++,
+            networkId,
+            EntityKind.Resource,
+            tile,
+            Direction8.S,
+            displayName,
+            characterId: null,
+            ownerSession: null,
+            isDurable: false,
+            inventory: null,
+            resource: resource);
+
+        _entities.Add(entity.Id, entity);
+        return entity;
+    }
+
     public bool TryGet(ulong entityId, out WorldEntity entity)
     {
         return _entities.TryGetValue(entityId, out entity!);

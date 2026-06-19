@@ -32,6 +32,27 @@ public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMe
     public MessageType Type => MessageType.SnapshotAck;
 }
 
+// Generic client->server "use the entity I'm pointing at" verb. Carries only the target's network id;
+// the server resolves what interacting means (harvest for now) and validates authority/adjacency.
+public sealed record InteractRequestMessage(uint TargetNetworkId) : IProtocolMessage
+{
+    public MessageType Type => MessageType.InteractRequest;
+}
+
+// Server->owner acknowledgement of an InteractRequest. Reason is a short machine-readable code on
+// failure (e.g. "too_far", "depleted", "not_resource", "no_target") and empty on success.
+public sealed record InteractResultMessage(bool Success, string Reason) : IProtocolMessage
+{
+    public MessageType Type => MessageType.InteractResult;
+}
+
+// Server->owner private inventory delta: the changed stacks (Quantity is the new authoritative total
+// for each template; 0 means the stack is now empty). Owner-only — inventory never AOI-replicates.
+public sealed record InventoryUpdateMessage(IReadOnlyList<ItemStack> ChangedStacks) : IProtocolMessage
+{
+    public MessageType Type => MessageType.InventoryUpdate;
+}
+
 public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, float InterestRadiusTiles) : IProtocolMessage
 {
     public MessageType Type => MessageType.ServerHello;

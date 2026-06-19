@@ -117,6 +117,63 @@ public sealed class Zone
         return World.AddTransient(networkId, kind, displayName, tile, facing);
     }
 
+    public WorldEntity SpawnResourceNode(
+        uint networkId,
+        ResourceNodeDefinition definition,
+        TileCoord tile)
+    {
+        if (!IsWalkable(tile))
+        {
+            throw new ArgumentException($"Resource node tile {tile} is not walkable.", nameof(tile));
+        }
+
+        return World.AddResourceNode(networkId, definition.DisplayName, tile, new ResourceNode(definition));
+    }
+
+    // Scatters one node of each registered type onto walkable tiles in a small ring around the first
+    // spawn tile. Deliberately tiny: enough to exercise the gather loop near where players spawn. Full
+    // map population is a later concern (terrain streaming, S36). Returns the placed tiles in order so
+    // callers can rent network ids and wire spawns. Skips any candidate tile that is blocked or already
+    // taken so two nodes never share a tile.
+    public IReadOnlyList<(ResourceNodeDefinition Definition, TileCoord Tile)> PlanResourceNodeScatter(
+        ResourceNodeRegistry registry)
+    {
+        ArgumentNullException.ThrowIfNull(registry);
+
+        var origin = _spawnTiles[0];
+        // A handful of small offsets around spawn; each registered node type takes the next free one.
+        // (2, 0) is deliberately omitted because the legacy placeholder marker sits there.
+        var candidates = new[]
+        {
+            origin.Offset(0, 2),
+            origin.Offset(-2, 0),
+            origin.Offset(0, -2),
+            origin.Offset(2, 2),
+            origin.Offset(-2, -2),
+            origin.Offset(2, -2),
+            origin.Offset(-2, 2),
+            origin.Offset(0, 3),
+        };
+
+        var placements = new List<(ResourceNodeDefinition, TileCoord)>();
+        var used = new HashSet<TileCoord>();
+        var candidateIndex = 0;
+        foreach (var definition in registry.Definitions)
+        {
+            while (candidateIndex < candidates.Length)
+            {
+                var tile = candidates[candidateIndex++];
+                if (IsWalkable(tile) && used.Add(tile))
+                {
+                    placements.Add((definition, tile));
+                    break;
+                }
+            }
+        }
+
+        return placements;
+    }
+
     public bool Despawn(ulong entityId, out WorldEntity entity)
     {
         return World.Remove(entityId, out entity);

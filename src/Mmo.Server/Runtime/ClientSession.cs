@@ -10,6 +10,12 @@ public sealed class ClientSession
     private readonly Dictionary<uint, uint> _sentEntityRevisions = [];
     private uint _nextSnapshotSequence = 1;
     private uint _lastFullSnapshotSentTick;
+    private uint? _lastInteractTick;
+
+    // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
+    // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
+    // depleting a node already gates legitimate re-harvest for far longer.
+    private const uint InteractCooldownTicks = 4;
 
     public ClientSession(NetPeer peer)
     {
@@ -50,6 +56,19 @@ public sealed class ClientSession
     {
         BadPacketCount++;
         return BadPacketCount;
+    }
+
+    // Returns true and arms the cooldown if an Interact request is allowed at this tick; false if the
+    // client is still inside its interaction cooldown window.
+    public bool TryConsumeInteract(uint serverTick)
+    {
+        if (_lastInteractTick.HasValue && serverTick - _lastInteractTick.Value < InteractCooldownTicks)
+        {
+            return false;
+        }
+
+        _lastInteractTick = serverTick;
+        return true;
     }
 
     public bool KnowsEntity(uint networkId)

@@ -7,6 +7,7 @@ public enum MessageType : ushort
     MoveStep = 3,
     ChatSend = 4,
     SnapshotAck = 5,
+    InteractRequest = 6,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -15,5 +16,7 @@ public enum MessageType : ushort
     ServerError = 104,
     EntitySpawn = 105,
     EntityDespawn = 106,
-    ZoneInfo = 107
+    ZoneInfo = 107,
+    InteractResult = 108,
+    InventoryUpdate = 109
 }

@@ -16,7 +16,7 @@ public sealed class GameServer
     private const int MaxSequencedSnapshotBytes = 1000;
     private const int ProtocolHeaderBytes = 7;
     private const int SnapshotHeaderBytes = 17;
-    private const int EntityStateFixedBytes = 7;
+    private const int EntityStateFixedBytes = 8;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -27,6 +27,7 @@ public sealed class GameServer
     private readonly ServerOptions _options;
     private readonly ICharacterRepository _characters;
     private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
+    private readonly ResourceNodeRegistry _resourceNodes;
     private readonly PersistenceWriteBehindWorker _persistence;
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _netManager;
@@ -51,6 +52,7 @@ public sealed class GameServer
     private readonly ProtocolEncodeBuffer _messageEncodeBuffer = new();
     private readonly ProtocolEncodeBuffer _snapshotEncodeBuffer = new();
     private readonly Dictionary<Guid, PendingTileSave> _dirtyDurableTiles = [];
+    private readonly List<WorldEntity> _resourceNodeEntities = [];
 
     private uint _serverTick;
     private uint _nextPersistenceCheckpointTick;
@@ -66,8 +68,10 @@ public sealed class GameServer
         _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _movementTrace = new ServerMovementTrace(options);
+        _resourceNodes = ResourceNodeRegistry.CreateDefault(_itemRegistry);
         _zone = Zone.CreateDefault(options.WorldWidthTiles, options.WorldHeightTiles, options.SpawnDistribution);
         _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, PlaceholderEntityName, ResolvePlaceholderEntityTile(), Direction8.S);
+        ScatterResourceNodes();
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -302,6 +306,12 @@ public sealed class GameServer
                     session.AcknowledgeSnapshot(ack.LastSnapshotSequence);
                 }
                 break;
+            case InteractRequestMessage interact:
+                if (session.IsAuthenticated)
+                {
+                    HandleInteract(session, interact.TargetNetworkId);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -334,10 +344,14 @@ public sealed class GameServer
                     try
                     {
                         var role = ResolveRole(login.AccountName, character.DisplayName);
-                        var takeoverTile = KickExistingSessionForCharacter(current, character.CharacterId);
-                        var loginTile = ResolveLoginTile(takeoverTile ?? character.Tile);
+                        var takeover = KickExistingSessionForCharacter(current, character.CharacterId);
+                        var loginTile = ResolveLoginTile(takeover.Tile ?? character.Tile);
                         networkId = _networkIds.Rent();
-                        var inventory = new Inventory(_itemRegistry, items);
+                        // On account takeover, hand off the kicked session's in-memory Inventory (which may
+                        // hold harvested items not yet flushed to the DB) instead of the DB-loaded stacks
+                        // read at the start of this login. Without this, a mid-session relogin reloads the
+                        // pre-harvest inventory and can later overwrite the kicked session's flushed gains.
+                        var inventory = takeover.Inventory ?? new Inventory(_itemRegistry, items);
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current, inventory);
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
@@ -373,7 +387,7 @@ public sealed class GameServer
         });
     }
 
-    private TileCoord? KickExistingSessionForCharacter(ClientSession current, Guid characterId)
+    private TakeoverState KickExistingSessionForCharacter(ClientSession current, Guid characterId)
     {
         ClientSession? existing = null;
         foreach (var session in _sessions.Values)
@@ -388,20 +402,25 @@ public sealed class GameServer
         }
 
         return existing is null
-            ? null
+            ? default
             : KickAuthenticatedSession(existing, "logged_in_elsewhere", "Logged in elsewhere.");
     }
 
-    private TileCoord? KickAuthenticatedSession(ClientSession session, string code, string message)
+    private TakeoverState KickAuthenticatedSession(ClientSession session, string code, string message)
     {
         TrySend(session.Peer, new ServerErrorMessage(code, message), DeliveryMethod.ReliableOrdered);
         _sessions.Remove(session.Peer);
         _metrics.RecordPeerDisconnected();
 
         TileCoord? tile = null;
+        Inventory? inventory = null;
         if (session.EntityId.HasValue && _zone.Despawn(session.EntityId.Value, out var entity))
         {
             tile = entity.Tile;
+            // Hand the live in-memory inventory to the taking-over login so any not-yet-flushed harvest
+            // gains survive the relogin. FlushInventory still enqueues its dirty changes for persistence;
+            // the quantities live on this same object, so nothing is lost either way.
+            inventory = entity.Inventory;
             _networkIds.Return(entity.NetworkId);
             QueueTileSave(session, entity.Tile);
             FlushInventory(entity);
@@ -414,7 +433,7 @@ public sealed class GameServer
 
         _netManager.DisconnectPeer(session.Peer);
         Log.Info($"Kicked {session.DisplayName}: {message}");
-        return tile;
+        return new TakeoverState(tile, inventory);
     }
 
     private void Tick(TickBudgetRecorder tickBudget)
@@ -426,6 +445,11 @@ public sealed class GameServer
     {
         _serverTick++;
         tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
+
+        using (tickBudget.Measure(TickBudgetCategory.Other))
+        {
+            RespawnResourceNodes();
+        }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
         {
@@ -736,7 +760,7 @@ public sealed class GameServer
 
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
-        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing);
+        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted);
     }
 
     private static int EstimateEntityStateBytes()
@@ -769,6 +793,135 @@ public sealed class GameServer
     {
         var preferred = _zone.SpawnTiles[0].Offset(2, 0);
         return _zone.ResolveSpawnTile(preferred);
+    }
+
+    // Places one harvestable node of each registered type near spawn and tracks them for per-tick
+    // respawn scanning. Server-owned world entities, not session-derived; their transient state is
+    // server-memory only and respawns fresh on restart.
+    private void ScatterResourceNodes()
+    {
+        foreach (var (definition, tile) in _zone.PlanResourceNodeScatter(_resourceNodes))
+        {
+            var entity = _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
+            _resourceNodeEntities.Add(entity);
+        }
+    }
+
+    // Per-tick scan of placed nodes: any depleted node whose respawn time has arrived flips back to
+    // Available, bumping its StateRevision so the refreshed availability re-replicates by AOI. Cheap —
+    // the node set is small and fixed, and TryRespawnResource is a no-op for available nodes.
+    private void RespawnResourceNodes()
+    {
+        foreach (var entity in _resourceNodeEntities)
+        {
+            entity.TryRespawnResource(_serverTick);
+        }
+    }
+
+    // Server-authoritative resolution of a generic Interact verb. Harvest is the only dispatch target
+    // for now: validate authentication, that the target is a visible-and-adjacent harvestable resource
+    // node, and that the node is Available; on success grant the yield through the inventory service,
+    // deplete the node, and reply to the owner. Every failure path replies with a reason and changes no
+    // state. Rate-limited like other client input (a node is depleted for its respawn window, so spam
+    // is naturally bounded, but we also guard against per-tick floods).
+    private void HandleInteract(ClientSession session, uint targetNetworkId)
+    {
+        if (!session.TryConsumeInteract(_serverTick))
+        {
+            SendInteractResult(session, false, "rate_limited");
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var actor))
+        {
+            SendInteractResult(session, false, "no_actor");
+            return;
+        }
+
+        if (!TryFindVisibleEntity(session, actor, targetNetworkId, out var target))
+        {
+            SendInteractResult(session, false, "no_target");
+            return;
+        }
+
+        if (target.Resource is null)
+        {
+            SendInteractResult(session, false, "not_resource");
+            return;
+        }
+
+        if (!IsAdjacent(actor.Tile, target.Tile))
+        {
+            SendInteractResult(session, false, "too_far");
+            return;
+        }
+
+        if (!target.Resource.IsAvailable)
+        {
+            SendInteractResult(session, false, "depleted");
+            return;
+        }
+
+        if (actor.Inventory is null)
+        {
+            SendInteractResult(session, false, "no_inventory");
+            return;
+        }
+
+        var definition = target.Resource.Definition;
+        var added = actor.Inventory.TryAdd(definition.YieldItemKey, definition.YieldQuantity);
+        if (added <= 0)
+        {
+            // Inventory full for this item (or unknown yield): do not deplete a node for nothing.
+            SendInteractResult(session, false, "inventory_full");
+            return;
+        }
+
+        target.DepleteResource(_serverTick);
+        SendInteractResult(session, true, "");
+        SendInventoryUpdate(session, [new ItemStack(definition.YieldItemKey, actor.Inventory.QuantityOf(definition.YieldItemKey))]);
+    }
+
+    // Resolves a target network id to a world entity the requester can actually see (AOI is the security
+    // boundary: a client may never interact with something outside its interest set). The actor itself
+    // is always visible. Mirrors the AOI test used for snapshots so interaction and replication agree.
+    private bool TryFindVisibleEntity(ClientSession session, WorldEntity actor, uint targetNetworkId, out WorldEntity target)
+    {
+        foreach (var candidate in _zone.World.Entities)
+        {
+            if (candidate.NetworkId != targetNetworkId)
+            {
+                continue;
+            }
+
+            if (IsEntityInInterest(actor, candidate, session, _options.InterestRadius))
+            {
+                target = candidate;
+                return true;
+            }
+
+            break;
+        }
+
+        target = null!;
+        return false;
+    }
+
+    private void SendInteractResult(ClientSession session, bool success, string reason)
+    {
+        TrySend(session.Peer, new InteractResultMessage(success, reason), DeliveryMethod.ReliableOrdered);
+    }
+
+    private void SendInventoryUpdate(ClientSession session, IReadOnlyList<ItemStack> changedStacks)
+    {
+        TrySend(session.Peer, new InventoryUpdateMessage(changedStacks), DeliveryMethod.ReliableOrdered);
+    }
+
+    // Adjacency = Chebyshev distance <= 1 tile, so a player standing on or in any of the 8 tiles around
+    // a node (matching 8-directional movement) may harvest it.
+    private static bool IsAdjacent(TileCoord a, TileCoord b)
+    {
+        return Math.Abs(a.X - b.X) <= 1 && Math.Abs(a.Y - b.Y) <= 1;
     }
 
     private ZoneInfoMessage CreateZoneInfoMessage()
@@ -1158,6 +1311,10 @@ public sealed class GameServer
     }
 
     private readonly record struct PendingTileSave(Guid CharacterId, string DisplayName, TileCoord Tile);
+
+    // What a kicked session hands off to the login that took it over: its last tile and its live
+    // in-memory inventory (both null when there was no existing session to kick).
+    private readonly record struct TakeoverState(TileCoord? Tile, Inventory? Inventory);
 }
 
 internal readonly record struct EncodedPacket(byte[] Buffer, int Length);
