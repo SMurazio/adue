@@ -110,6 +110,17 @@ scattered number and is **bandwidth-bound** — pin it with a dense ladder (500 
 expect delta snapshots to be the lever that raises it. Multi-machine load-gen still needed to remove
 rig/server CPU sharing for the precise number.
 
+**Decision (2026-06-19): netcode density work STOPS at lossless delta encoding (S47/S47b).** A uniformly
+*packed* crowd (e.g. 150+ all in one spot, all in each other's AOI) is inherently O(N²) — every client
+needs every other's update, and in a packed scene everything changes every tick — so there is no netcode
+structure that makes it cheap. Delta encoding (~8→3 bytes/entity) is the one **lossless** lever and we
+take it; beyond that the only levers are a quality cut (lower rate / priority-accumulator — useless when
+all are equally close) or capping the crowd. **Mega-density is therefore a gameplay/ops concern, not a
+netcode one:** the design already targets "120–150 visible **per channel**", so **channels / instances /
+layering** (the standard MMO answer) is the seam — left open, built only when a real scene demands it.
+This is a deliberate non-goal, not an oversight; the priority-accumulator (plan D2) stays parked as the
+*cap-graceful-degradation* tool for crowds that exceed the cap, not a fix for packed-crowd bandwidth.
+
 ## Method notes / reproduce
 
 ```
