@@ -10,6 +10,7 @@ public sealed class SyntheticClientLoad : IDisposable
 
     private DateTimeOffset _startedAt;
     private DateTimeOffset _endsAt;
+    private TimeSpan _lastPollElapsed;
     private string _lastSummary = "stress idle.";
 
     public int Spawned => _clients.Count;
@@ -26,6 +27,7 @@ public sealed class SyntheticClientLoad : IDisposable
 
         _startedAt = DateTimeOffset.UtcNow;
         _endsAt = _startedAt + duration;
+        _lastPollElapsed = TimeSpan.Zero;
         SnapshotsReceived = 0;
         ServerErrors = 0;
         NetworkErrors = 0;
@@ -48,9 +50,14 @@ public sealed class SyntheticClientLoad : IDisposable
 
         var now = DateTimeOffset.UtcNow;
         var elapsed = now - _startedAt;
+        // Manual-mode clients are pumped from this (server-loop) thread; pass the elapsed ms since the
+        // previous poll so each NetManager.ManualUpdate advances its timers correctly. This poll runs
+        // every server-loop iteration (far faster than the tick rate), so deltas stay small.
+        var deltaTimeMs = (int)Math.Clamp((elapsed - _lastPollElapsed).TotalMilliseconds, 0, int.MaxValue);
+        _lastPollElapsed = elapsed;
         foreach (var client in _clients)
         {
-            client.Poll(elapsed);
+            client.Poll(elapsed, deltaTimeMs);
         }
 
         if (now >= _endsAt)
@@ -183,19 +190,26 @@ public sealed class SyntheticClientLoad : IDisposable
 
         public void Start()
         {
-            _client.Start();
+            // Manual mode: no per-client background thread. The owner pumps ManualUpdate + PollEvents
+            // from the server loop (see SyntheticClientLoad.Poll), so client count no longer scales
+            // OS-thread count (S45).
+            _client.Start(System.Net.IPAddress.Any, System.Net.IPAddress.IPv6Any, 0, manualMode: true);
             _client.Connect("127.0.0.1", _serverPort, _connectionKey);
             _nextKeepaliveAt = TimeSpan.FromMilliseconds(_random.Next(0, 500));
             _nextDirectionAt = TimeSpan.Zero;
         }
 
-        public void Poll(TimeSpan elapsed)
+        public void Poll(TimeSpan elapsed, int deltaTimeMs)
         {
             if (_disposed)
             {
                 return;
             }
 
+            // Manual mode: drive the library's timers (handshake, reliable resends, ping, timeout) and
+            // then dispatch queued events. Both are required every poll in the absence of a background
+            // thread.
+            _client.ManualUpdate(deltaTimeMs);
             _client.PollEvents();
             if (!IsAuthenticated || _serverPeer is null)
             {
@@ -233,6 +247,8 @@ public sealed class SyntheticClientLoad : IDisposable
             if (_serverPeer is not null)
             {
                 _client.DisconnectPeer(_serverPeer);
+                // Manual mode: flush the disconnect packet with an explicit ManualUpdate before Stop.
+                _client.ManualUpdate(0);
                 _client.PollEvents();
             }
 

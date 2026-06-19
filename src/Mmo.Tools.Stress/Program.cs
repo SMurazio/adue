@@ -46,11 +46,19 @@ Console.WriteLine($"Movement every {FormatDuration(options.MoveInterval)}, direc
 Console.WriteLine($"Pass criteria: authRate>={options.MinAuthRate:P0}, errors<={options.MaxErrors}");
 Console.WriteLine();
 
+// Single-threaded driver: every client's NetManager runs in LiteNetLib manual mode (no per-client
+// background thread), so the entire fleet is pumped from this one loop. Thread count is O(1) in the
+// client count — the fix that lets one box drive thousands of synthetic clients (S45). Each iteration
+// we measure the real elapsed milliseconds since the previous pump and hand it to every client's
+// ManualUpdate so the library's timers (handshake, reliable resends, ping, timeout) advance correctly.
+var lastPumpAt = startedAt.Elapsed;
 try
 {
     while (!linked.IsCancellationRequested)
     {
         var elapsed = startedAt.Elapsed;
+        var deltaTimeMs = (int)Math.Clamp((elapsed - lastPumpAt).TotalMilliseconds, 0, int.MaxValue);
+        lastPumpAt = elapsed;
 
         while (spawned < options.Clients && elapsed >= nextSpawnAt)
         {
@@ -63,7 +71,7 @@ try
 
         foreach (var client in clients)
         {
-            client.Poll(elapsed);
+            client.Poll(elapsed, deltaTimeMs);
         }
 
         if (elapsed >= nextReportAt)

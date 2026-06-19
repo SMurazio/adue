@@ -72,7 +72,12 @@ public sealed class LoadClient : IDisposable
 
     public void Start()
     {
-        _client.Start();
+        // Manual mode: NetManager.Start(manualMode: true) does NOT spawn a background logic/receive
+        // thread. Instead the driver pumps the socket explicitly via ManualUpdate + PollEvents on the
+        // single run-loop thread (see Poll). This is what decouples client count from OS-thread count:
+        // N clients => N sockets but ~1 driver thread, instead of the old N background threads that
+        // crashed the rig around ~500 clients (S45).
+        _client.Start(System.Net.IPAddress.Any, System.Net.IPAddress.IPv6Any, 0, manualMode: true);
         _client.Connect(_options.Host, _options.Port, _options.ConnectionKey);
 
         var initialOffsetMs = _random.Next(0, Math.Max(1, (int)MoveIntentKeepalive.TotalMilliseconds));
@@ -83,13 +88,19 @@ public sealed class LoadClient : IDisposable
             : TimeSpan.MaxValue;
     }
 
-    public void Poll(TimeSpan elapsed)
+    public void Poll(TimeSpan elapsed, int deltaTimeMs)
     {
         if (_disposed)
         {
             return;
         }
 
+        // Manual mode requires the host to drive the NetManager every iteration: ManualUpdate advances
+        // the library's internal timers (connection requests/handshake, reliable resends, ping/pong,
+        // disconnect timeout) using the elapsed milliseconds since the last call, and PollEvents then
+        // dispatches the queued events (connect, receive, error, latency) to the listener. Without the
+        // background thread these two calls are the only thing keeping the connection alive.
+        _client.ManualUpdate(deltaTimeMs);
         _client.PollEvents();
 
         if (!_authenticated || _serverPeer is null)
@@ -134,6 +145,11 @@ public sealed class LoadClient : IDisposable
         if (_serverPeer is not null)
         {
             _client.DisconnectPeer(_serverPeer);
+            // In manual mode the disconnect packet is only flushed by an explicit ManualUpdate; pump
+            // one tick (plus PollEvents) so the server is told to drop the peer instead of waiting out
+            // the DisconnectTimeout. _client.Stop() below also sends disconnects, but this is cheap and
+            // makes the intent explicit.
+            _client.ManualUpdate(0);
             _client.PollEvents();
         }
 
