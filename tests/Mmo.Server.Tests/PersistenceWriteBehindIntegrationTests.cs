@@ -335,6 +335,18 @@ public sealed class PersistenceWriteBehindIntegrationTests
             return Task.CompletedTask;
         }
 
+        public Task<IReadOnlyList<ItemStack>> LoadItemsAsync(Guid characterId, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<ItemStack>>([]);
+        }
+
+        public Task SaveItemsAsync(Guid characterId, IReadOnlyList<ItemStack> changes, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
         public async Task<SaveRecord> WaitForSaveAsync(Predicate<SaveRecord> predicate, TimeSpan timeout)
         {
             var deadline = DateTimeOffset.UtcNow + timeout;

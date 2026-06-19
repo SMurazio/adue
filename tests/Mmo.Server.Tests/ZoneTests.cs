@@ -23,7 +23,7 @@ public sealed class ZoneTests
         var characterId = Guid.NewGuid();
         session.Authenticate(1, characterId, "Player", ClientRole.Player, Zone.DefaultId);
         var zone = new Zone("test", new TileGrid(8, 8, [new TileCoord(3, 2)]), [new TileCoord(2, 2)]);
-        var entity = zone.SpawnPlayer(1, characterId, "Player", new TileCoord(2, 2), session);
+        var entity = zone.SpawnPlayer(1, characterId, "Player", new TileCoord(2, 2), session, new Inventory(ItemRegistry.Default));
         session.AttachEntity(entity);
 
         Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
@@ -40,7 +40,7 @@ public sealed class ZoneTests
         var characterId = Guid.NewGuid();
         var zone = new Zone("test", new TileGrid(8, 8, []), [new TileCoord(2, 2)]);
 
-        var entity = zone.SpawnPlayer(4, characterId, "Player", new TileCoord(3, 3), session);
+        var entity = zone.SpawnPlayer(4, characterId, "Player", new TileCoord(3, 3), session, new Inventory(ItemRegistry.Default));
 
         Assert.True(zone.World.TryGet(entity.Id, out var found));
         Assert.Same(entity, found);

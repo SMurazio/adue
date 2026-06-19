@@ -22,7 +22,8 @@ public sealed class WorldState
         Guid characterId,
         string displayName,
         TileCoord tile,
-        ClientSession ownerSession)
+        ClientSession ownerSession,
+        Inventory inventory)
     {
         var entity = new WorldEntity(
             _nextEntityId++,
@@ -33,7 +34,8 @@ public sealed class WorldState
             displayName,
             characterId,
             ownerSession,
-            isDurable: true);
+            isDurable: true,
+            inventory);
 
         _entities.Add(entity.Id, entity);
         return entity;

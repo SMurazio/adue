@@ -13,13 +13,15 @@ public sealed class WorldStateTests
         var state = new WorldState();
         var characterId = Guid.NewGuid();
 
-        var entity = state.AddPlayer(12, characterId, "Player", new TileCoord(4, 5), session);
+        var inventory = new Inventory(ItemRegistry.Default);
+        var entity = state.AddPlayer(12, characterId, "Player", new TileCoord(4, 5), session, inventory);
 
         Assert.Equal(12u, entity.NetworkId);
         Assert.Equal(EntityKind.Player, entity.Kind);
         Assert.True(entity.IsDurable);
         Assert.Equal(characterId, entity.CharacterId);
         Assert.Same(session, entity.OwnerSession);
+        Assert.Same(inventory, entity.Inventory);
         Assert.True(state.TryGet(entity.Id, out var found));
         Assert.Same(entity, found);
     }
@@ -28,7 +30,7 @@ public sealed class WorldStateTests
     public void RemoveDeletesEntityFromTable()
     {
         var state = new WorldState();
-        var entity = state.AddPlayer(12, Guid.NewGuid(), "Player", new TileCoord(4, 5), new ClientSession(null!));
+        var entity = state.AddPlayer(12, Guid.NewGuid(), "Player", new TileCoord(4, 5), new ClientSession(null!), new Inventory(ItemRegistry.Default));
 
         Assert.True(state.Remove(entity.Id, out var removed));
         Assert.Same(entity, removed);
@@ -39,8 +41,8 @@ public sealed class WorldStateTests
     public void CopyEntitiesToReusesCallerOwnedBuffer()
     {
         var state = new WorldState();
-        var first = state.AddPlayer(12, Guid.NewGuid(), "First", new TileCoord(4, 5), new ClientSession(null!));
-        var second = state.AddPlayer(13, Guid.NewGuid(), "Second", new TileCoord(5, 5), new ClientSession(null!));
+        var first = state.AddPlayer(12, Guid.NewGuid(), "First", new TileCoord(4, 5), new ClientSession(null!), new Inventory(ItemRegistry.Default));
+        var second = state.AddPlayer(13, Guid.NewGuid(), "Second", new TileCoord(5, 5), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         var buffer = new List<WorldEntity> { first };
 
         buffer.Clear();

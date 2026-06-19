@@ -15,7 +15,8 @@ public sealed class WorldEntity
         string displayName,
         Guid? characterId,
         ClientSession? ownerSession,
-        bool isDurable)
+        bool isDurable,
+        Inventory? inventory = null)
     {
         Id = id;
         NetworkId = networkId;
@@ -26,6 +27,7 @@ public sealed class WorldEntity
         CharacterId = characterId;
         OwnerSession = ownerSession;
         IsDurable = isDurable;
+        Inventory = inventory;
     }
 
     public ulong Id { get; }
@@ -37,6 +39,11 @@ public sealed class WorldEntity
     public Guid? CharacterId { get; }
     public ClientSession? OwnerSession { get; }
     public bool IsDurable { get; }
+
+    // Durable per-character inventory (server-memory truth, write-behind persisted). Present only on
+    // durable player entities; null for transient/world entities.
+    public Inventory? Inventory { get; }
+
     public uint StateRevision { get; private set; } = 1;
 
     public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)

@@ -96,9 +96,10 @@ public sealed class Zone
         Guid characterId,
         string displayName,
         TileCoord tile,
-        ClientSession ownerSession)
+        ClientSession ownerSession,
+        Inventory inventory)
     {
-        return World.AddPlayer(networkId, characterId, displayName, ResolveSpawnTile(tile), ownerSession);
+        return World.AddPlayer(networkId, characterId, displayName, ResolveSpawnTile(tile), ownerSession, inventory);
     }
 
     public WorldEntity SpawnTransient(

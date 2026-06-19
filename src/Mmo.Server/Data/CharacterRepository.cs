@@ -50,6 +50,83 @@ public sealed class PostgresCharacterRepository : ICharacterRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<ItemStack>> LoadItemsAsync(Guid characterId, CancellationToken cancellationToken)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            select template_key, quantity
+            from character_items
+            where character_id = @character_id
+            order by template_key;
+            """;
+        command.Parameters.AddWithValue("character_id", characterId);
+
+        var stacks = new List<ItemStack>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            stacks.Add(new ItemStack(reader.GetString(0), reader.GetInt32(1)));
+        }
+
+        return stacks;
+    }
+
+    public async Task SaveItemsAsync(Guid characterId, IReadOnlyList<ItemStack> changes, CancellationToken cancellationToken)
+    {
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using var upsert = connection.CreateCommand();
+        upsert.Transaction = transaction;
+        upsert.CommandText = """
+            insert into character_items (character_id, template_key, quantity)
+            values (@character_id, @template_key, @quantity)
+            on conflict (character_id, template_key)
+            do update set quantity = excluded.quantity;
+            """;
+        var upsertCharacterId = upsert.Parameters.Add("character_id", NpgsqlTypes.NpgsqlDbType.Uuid);
+        var upsertTemplateKey = upsert.Parameters.Add("template_key", NpgsqlTypes.NpgsqlDbType.Text);
+        var upsertQuantity = upsert.Parameters.Add("quantity", NpgsqlTypes.NpgsqlDbType.Integer);
+
+        await using var delete = connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = """
+            delete from character_items
+            where character_id = @character_id and template_key = @template_key;
+            """;
+        var deleteCharacterId = delete.Parameters.Add("character_id", NpgsqlTypes.NpgsqlDbType.Uuid);
+        var deleteTemplateKey = delete.Parameters.Add("template_key", NpgsqlTypes.NpgsqlDbType.Text);
+
+        foreach (var change in changes)
+        {
+            if (change.Quantity > 0)
+            {
+                upsertCharacterId.Value = characterId;
+                upsertTemplateKey.Value = change.TemplateKey;
+                upsertQuantity.Value = change.Quantity;
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+            else
+            {
+                deleteCharacterId.Value = characterId;
+                deleteTemplateKey.Value = change.TemplateKey;
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     private static async Task<Guid> UpsertAccountAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,

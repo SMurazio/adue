@@ -26,6 +26,7 @@ public sealed class GameServer
 
     private readonly ServerOptions _options;
     private readonly ICharacterRepository _characters;
+    private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
     private readonly PersistenceWriteBehindWorker _persistence;
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _netManager;
@@ -198,6 +199,7 @@ public sealed class GameServer
             {
                 _networkIds.Return(entity.NetworkId);
                 QueueTileSave(session, entity.Tile);
+                FlushInventory(entity);
             }
             else
             {
@@ -320,6 +322,7 @@ public sealed class GameServer
             try
             {
                 var character = await _characters.LoadOrCreateAsync(login.AccountName, login.DisplayName, CancellationToken.None);
+                var items = await _characters.LoadItemsAsync(character.CharacterId, CancellationToken.None);
                 _mainThreadActions.Enqueue(() =>
                 {
                     if (!_sessions.TryGetValue(peer, out var current))
@@ -334,7 +337,8 @@ public sealed class GameServer
                         var takeoverTile = KickExistingSessionForCharacter(current, character.CharacterId);
                         var loginTile = ResolveLoginTile(takeoverTile ?? character.Tile);
                         networkId = _networkIds.Rent();
-                        var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current);
+                        var inventory = new Inventory(_itemRegistry, items);
+                        var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current, inventory);
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
@@ -400,6 +404,7 @@ public sealed class GameServer
             tile = entity.Tile;
             _networkIds.Return(entity.NetworkId);
             QueueTileSave(session, entity.Tile);
+            FlushInventory(entity);
         }
         else
         {
@@ -424,7 +429,7 @@ public sealed class GameServer
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
         {
-            CheckpointDirtyDurableTiles();
+            CheckpointDirtyDurableState();
         }
 
         BroadcastSnapshot(tickBudget);
@@ -1072,7 +1077,10 @@ public sealed class GameServer
             entity.Tile);
     }
 
-    private void CheckpointDirtyDurableTiles()
+    // Single write-behind checkpoint for all durable per-character state. Gated to the configured
+    // checkpoint cadence so no DB writes happen in the tick hot path; flushes dirty tiles and dirty
+    // inventories together on the same boundary.
+    private void CheckpointDirtyDurableState()
     {
         if (_serverTick < _nextPersistenceCheckpointTick)
         {
@@ -1080,6 +1088,13 @@ public sealed class GameServer
         }
 
         _nextPersistenceCheckpointTick = _serverTick + _options.PersistenceCheckpointTicks;
+
+        FlushDirtyDurableTiles();
+        FlushDirtyInventories();
+    }
+
+    private void FlushDirtyDurableTiles()
+    {
         if (_dirtyDurableTiles.Count == 0)
         {
             return;
@@ -1091,6 +1106,32 @@ public sealed class GameServer
         }
 
         _dirtyDurableTiles.Clear();
+    }
+
+    // Scans authenticated players' inventories and enqueues only those with pending changes (the
+    // inventory itself tracks dirty template keys, so this is cheap when nothing changed). Draining
+    // clears the inventory's dirty set, so each change is persisted at most once.
+    private void FlushDirtyInventories()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated || !TryGetSessionEntity(session, out var entity))
+            {
+                continue;
+            }
+
+            FlushInventory(entity);
+        }
+    }
+
+    private void FlushInventory(WorldEntity entity)
+    {
+        if (entity.Inventory is not { HasPendingChanges: true } inventory || !entity.CharacterId.HasValue)
+        {
+            return;
+        }
+
+        _persistence.EnqueueItems(entity.CharacterId.Value, entity.DisplayName, inventory.DrainDirtyKeys());
     }
 
     private void QueueConnectedPlayersForPersistence()
@@ -1106,6 +1147,7 @@ public sealed class GameServer
         if (TryGetSessionEntity(session, out var entity))
         {
             QueueTileSave(session, entity.Tile);
+            FlushInventory(entity);
         }
     }
 

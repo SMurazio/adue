@@ -9,7 +9,7 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
     private static readonly TimeSpan DefaultFlushTimeout = TimeSpan.FromSeconds(5);
 
     private readonly ICharacterRepository _characters;
-    private readonly ConcurrentQueue<PersistenceSaveRequest> _queue = new();
+    private readonly ConcurrentQueue<IPersistenceSaveRequest> _queue = new();
     private readonly SemaphoreSlim _signal = new(0);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _workerTask;
@@ -31,6 +31,21 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
             return;
         }
 
+        Enqueue(new TileSaveRequest(characterId, displayName, tile));
+    }
+
+    public void EnqueueItems(Guid characterId, string displayName, IReadOnlyList<ItemStack> changes)
+    {
+        if (characterId == Guid.Empty || changes.Count == 0)
+        {
+            return;
+        }
+
+        Enqueue(new ItemsSaveRequest(characterId, displayName, changes));
+    }
+
+    private void Enqueue(IPersistenceSaveRequest request)
+    {
         lock (_idleLock)
         {
             if (_pendingWrites == 0)
@@ -41,7 +56,7 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
             _pendingWrites++;
         }
 
-        _queue.Enqueue(new PersistenceSaveRequest(characterId, displayName, tile));
+        _queue.Enqueue(request);
         _signal.Release();
     }
 
@@ -114,11 +129,11 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
         }
     }
 
-    private async Task SaveAsync(PersistenceSaveRequest request)
+    private async Task SaveAsync(IPersistenceSaveRequest request)
     {
         try
         {
-            await _characters.SaveTileAsync(request.CharacterId, request.Tile, _shutdown.Token);
+            await request.PersistAsync(_characters, _shutdown.Token);
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
         {
@@ -148,5 +163,26 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
         idleWaiter?.TrySetResult();
     }
 
-    private readonly record struct PersistenceSaveRequest(Guid CharacterId, string DisplayName, TileCoord Tile);
+    private interface IPersistenceSaveRequest
+    {
+        string DisplayName { get; }
+
+        Task PersistAsync(ICharacterRepository characters, CancellationToken cancellationToken);
+    }
+
+    private sealed record TileSaveRequest(Guid CharacterId, string DisplayName, TileCoord Tile) : IPersistenceSaveRequest
+    {
+        public Task PersistAsync(ICharacterRepository characters, CancellationToken cancellationToken)
+        {
+            return characters.SaveTileAsync(CharacterId, Tile, cancellationToken);
+        }
+    }
+
+    private sealed record ItemsSaveRequest(Guid CharacterId, string DisplayName, IReadOnlyList<ItemStack> Changes) : IPersistenceSaveRequest
+    {
+        public Task PersistAsync(ICharacterRepository characters, CancellationToken cancellationToken)
+        {
+            return characters.SaveItemsAsync(CharacterId, Changes, cancellationToken);
+        }
+    }
 }

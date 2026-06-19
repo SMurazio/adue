@@ -51,7 +51,7 @@ public sealed class SqliteCharacterRepositoryTests
         await using var command = connection.CreateCommand();
         command.CommandText = "select count(*) from schema_migrations;";
         var count = Convert.ToInt32(await command.ExecuteScalarAsync());
-        Assert.Equal(3, count);
+        Assert.Equal(4, count);
 
         command.CommandText = "select count(*) from accounts;";
         Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
