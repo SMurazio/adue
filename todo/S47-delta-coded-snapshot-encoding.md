@@ -1,23 +1,10 @@
 # S47 — Delta-coded snapshot encoding (Stage 2 of delta snapshots)
 
 Severity: should-fix (scaling). Stage 2 — the **big dense-bandwidth cut** that S46 made safe. Design:
-`docs/delta-snapshots-design.md`. **Depends on S46.** Hot path + correctness-critical: a wrong delta
-**permanently corrupts** client positions (deltas are cumulative), so the two prerequisites below are
-mandatory, and the convergence-under-loss test is the bar.
-
-## Prerequisite (MUST do first — S46 flagged it): highest-contiguous ack
-
-S46's baseline can be silently skipped by **cumulative ack + UDP reorder**: a dropped snapshot carrying
-entity X (revision R) followed by a *later* acked snapshot (not carrying X) advances X's acked revision
-to R even though the client never received it. With **absolute** coords (S46) this self-corrects on X's
-next change; with **step-deltas** it permanently desyncs X's position. Fix before encoding:
-- Client acks the **highest contiguously-received** snapshot sequence (track received seqs; ack the top
-  of the gap-free prefix), not the latest-received. Then the server never advances the baseline past a
-  gap. (Reuses the existing `SnapshotAck` field — likely **no wire change** for the ack itself.)
-- The S46 2-s force-re-baseline already bounds a stuck prefix (a permanently-lost seq stalls the
-  contiguous ack → re-baseline resyncs). Confirm that interaction.
-- Test: drop a MIDDLE snapshot (not all), keep a later one, and assert the entity is NOT marked acked /
-  converges — i.e. the gap case S46 couldn't cover.
+`docs/delta-snapshots-design.md`. **Depends on S46 AND S47a** (highest-contiguous ack — extracted into its
+own task). Do NOT start until S47a lands: step-deltas are cumulative, so a baseline that can silently skip
+(the S46 reorder gap) would **permanently corrupt** positions. Hot path + correctness-critical; the
+convergence-under-loss gap test is the bar.
 
 ## What (the encoding)
 
