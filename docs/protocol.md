@@ -13,7 +13,7 @@ Positions in `LoginResult`, `EntitySpawn`, and `WorldSnapshot` are integer tile 
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `16` (current shipped — keep in sync with `ProtocolCodec.Version`; v16 delta-codes the per-entity snapshot row — step-delta positions + a changed-field bitmask, S47b. v15 was held-direction `MoveIntent`, S43.)
+- `byte` version: `15` (current shipped — keep in sync with `ProtocolCodec.Version`; v15 replaced the per-step `MoveStep` stream with a held-direction `MoveIntent`, S43)
 - `uint16` message type
 - message-specific payload
 
@@ -45,7 +45,7 @@ Between full heartbeat snapshots, `WorldSnapshot` may be incomplete (`isComplete
 - `ZoneInfo`: zone id, width, height, and a **procedural-terrain descriptor** — `int32 seed`, `int32 genVersion`, and `uint64 contentHash`. Static terrain is content, not state: rather than shipping the blocked-tile list, the server ships the seed and the client regenerates the identical map locally via the shared deterministic `TerrainGenerator` (`(width, height, seed, genVersion) -> blocked tiles`). The client compares its locally-computed hash to `contentHash` as a drift/tamper check and logs loudly on mismatch; the server remains authoritative for movement. Login terrain cost is constant regardless of map size. `genVersion` lets the generator algorithm change later without a silent mismatch.
 - `EntitySpawn`: durable visible-entity metadata: network id, character id, kind, display name, initial tile, and facing.
 - `EntityDespawn`: server tick plus network id for an entity that left the client's current area of interest.
-- `WorldSnapshot`: server tick, per-client snapshot sequence, and compact visible entity state, **delta-coded against the baseline the client has acked** (v16, S47b). Each entity row is `ushort networkId` + a **changed-field bitmask** (`PositionStep` | `PositionAbsolute` | `Facing` | `Depleted`) followed by only the changed fields: position is a 1-byte `Direction8` **step** for a one-tile move, absolute `int16 x,y` on a baseline/AOI-entry/non-unit move, omitted when unchanged; `facing`/`depleted` ride the bitmask. A **complete** snapshot (AOI entry / force-re-baseline) sends every field absolute to (re)establish the baseline. Step deltas are emitted only when the move is exactly one unit from the **acked** baseline (which the highest-contiguous ack, S47a, guarantees the client holds), so a lost snapshot freezes the baseline → the next move is non-unit → absolute → self-corrects (no cumulative-delta corruption). The client sends `SnapshotAck` with the **highest contiguously-received** sequence; the server advances each viewer's baseline to what acked snapshots carried.
+- `WorldSnapshot`: server tick, per-client snapshot sequence, and compact visible entity state. Each entity state is `ushort networkId`, `int16 tileX`, `int16 tileY`, `byte facing`, `byte depleted` (the resource-node availability flag — false for players and all non-resource entities).
 - `InteractResult`: success flag plus a short reason code (`too_far`, `depleted`, `not_resource`, `no_target`, `inventory_full`, `rate_limited`, …; empty on success). Sent to the requesting owner only.
 - `InventoryUpdate`: owner-only private inventory delta — the changed stacks, each carrying the new authoritative total quantity (0 = emptied). Never AOI-replicated.
 - `ChatBroadcast`: sender plus text.
