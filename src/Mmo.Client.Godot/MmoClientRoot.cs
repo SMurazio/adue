@@ -159,11 +159,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Direction8 _lastSentDirection;
 	private double _nextMoveIntentKeepaliveAt;
 
-	// Click-to-move (S52): A* over the locally-regenerated blocked map (built once the zone is known)
-	// feeds the SAME held-direction MoveIntent WASD uses. The driver advances on server-confirmed tiles
-	// (no prediction); any WASD input or a new right-click cancels/replaces the active path.
+	// Click-to-move (S53, UO-style greedy heading): picks the clicked ground tile and steers the SAME
+	// held-direction MoveIntent WASD uses straight toward it, re-aiming every frame off the PREDICTED local
+	// tile. No A* waypoints in v1 (clicking across a wall stalls at the obstacle — acceptable). Any WASD
+	// input or a new right-click cancels/replaces the active drive. The pathfinder is kept only for the
+	// reachability/walkability pre-check on the clicked tile, not to drive movement.
 	private TilePathfinder? _pathfinder;
-	private readonly PathDriver _pathDriver = new();
+	private readonly ClickMoveController _clickMove = new();
 
 	// Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
 	private Direction8[]? _autopilotPattern;
@@ -365,24 +367,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		var path = _pathfinder.FindPath(start, goal);
-		if (path.Count == 0)
-		{
-			// start == goal is a harmless no-op (already there); a genuinely unreachable goal gets feedback.
-			if (goal != start)
-			{
-				ShowInteractFeedback("Can't reach there.");
-			}
-
-			return;
-		}
+		// Steer from the PREDICTED tile (what the player sees) when prediction is on, else the confirmed
+		// tile. start == goal is a harmless no-op (already there); the greedy controller stays inactive.
+		var from = _client.PredictedLocalTile ?? start;
 
 		// A deliberate move command overrides any debug-injected/autopilot motion so the two input
 		// sources never fight over the held intent.
 		_injectedDirection = null;
 		_injectedSingleStep = false;
 		StopAutopilot();
-		_pathDriver.Start(path);
+		_clickMove.Start(from, goal);
 	}
 
 	// Projects the mouse position onto the y=0 ground plane (the tile plane) via the camera ray and
@@ -417,18 +411,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		return true;
 	}
 
-	// Pumps the active click-to-move path each frame from the server-confirmed local tile, returning the
-	// direction to hold (or null to stop). Returns false when no path is driving, so the caller falls back
-	// to keyboard/injected input. Called from SendHeldMovement BEFORE keyboard so WASD can pre-empt.
+	// Pumps the active click-to-move drive each frame, returning the direction to hold (or false to stop).
+	// Steers off the PREDICTED local tile (what the player sees) when prediction is on, else the confirmed
+	// tile — so the heading re-aims against the on-screen avatar, not a stale confirmation. Returns false when
+	// nothing is driving, so the caller falls back to keyboard/injected input. Called from SendHeldMovement
+	// BEFORE keyboard so WASD can pre-empt.
 	private bool TryGetPathDirection(out Direction8 direction)
 	{
 		direction = default;
-		if (!_pathDriver.IsActive || _client?.LocalTile is not TileCoord confirmed)
+		if (!_clickMove.IsActive)
 		{
 			return false;
 		}
 
-		var command = _pathDriver.Update(confirmed);
+		if ((_client?.PredictedLocalTile ?? _client?.LocalTile) is not TileCoord from)
+		{
+			return false;
+		}
+
+		var command = _clickMove.Update(from);
 		switch (command.Action)
 		{
 			case PathDriveAction.Move:
@@ -436,8 +437,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				return true;
 			case PathDriveAction.Stop:
 			default:
-				// Arrived (or desynced): fall through to "no path direction" so SendHeldMovement emits
-				// moving:false. The driver has already flipped IsActive off.
+				// Arrived: fall through to "no path direction" so SendHeldMovement emits moving:false. The
+				// controller has already flipped IsActive off.
 				return false;
 		}
 	}
@@ -1325,16 +1326,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// Determine the desired intent. While the chat box has focus we force "stopped" so held keys
-		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > click-to-move path
-		// > injected (debug-channel) direction. WASD pre-empts an active path (cancel below); the path
-		// driver advances on server-confirmed tiles, not prediction.
+		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > click-to-move heading
+		// > injected (debug-channel) direction. WASD pre-empts an active click-move (cancel below); the
+		// click-move steers off the predicted tile (S53 greedy heading), not the confirmed tile.
 		var chatFocused = _chatInput?.HasFocus() == true;
 		var keyboard = chatFocused ? null : CurrentDirection();
 
-		// Any manual WASD input cancels an active click-to-move path so the player regains direct control.
-		if (keyboard.HasValue && _pathDriver.IsActive)
+		// Any manual WASD input cancels an active click-to-move drive so the player regains direct control.
+		if (keyboard.HasValue && _clickMove.IsActive)
 		{
-			_pathDriver.Cancel();
+			_clickMove.Cancel();
 		}
 
 		Direction8? pathDir = keyboard.HasValue ? null : (TryGetPathDirection(out var pd) ? pd : null);

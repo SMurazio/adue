@@ -46,12 +46,13 @@ public sealed class MmoClient : IDisposable
     // S53 local-player movement prediction. Created lazily once we know the zone (the blocked map), the
     // local entity, and its cadence; null until then (and on the web/headless paths that never input).
     // Local player ONLY — remote entities stay pure interpolation. See LocalPlayerPredictor.
-    // DISABLED by default (S53 redo): the predictor as integrated fights the playout-buffered interpolator
-    // (keyboard rubber-band) and click-to-move advances on the confirmed tile so prediction overshoots
-    // turns (mouse far worse). Re-enable only once prediction renders at present-time with a clean reconcile
-    // AND the path-driver follows the predicted tile. Code kept; flag off restores stable confirmed-state.
+    // ENABLED (S53 redo): the predictor now renders the local player at the predicted tile with its OWN
+    // present-time step-tween (NOT the buffered interpolator that smoothed remote jitter by rendering the
+    // past — that was the attempt-1 rubber-band), and reconciles UO-style by snapping/blending to the
+    // server's truth on divergence. Click-to-move re-aims off the predicted tile. Revert criterion: a visible
+    // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
-    private bool _predictionEnabled = false;
+    private bool _predictionEnabled = true;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -685,9 +686,10 @@ public sealed class MmoClient : IDisposable
     private sealed class ClientEntity
     {
         private readonly TileInterpolator _interpolator;
-        // S53: non-null only for the local player while prediction is active. When present, snapshots
-        // re-base the predictor (which owns the interpolator) instead of confirming the interpolator
-        // directly — the interpolator is then driven by PREDICTED tiles, not confirmed ones.
+        // S53: non-null only for the local player while prediction is active. When present, the predictor
+        // OWNS the render position via its own present-time step-tween (the buffered _interpolator — which
+        // renders confirmed state in the past for jitter smoothing — is bypassed for the local player, the
+        // attempt-1 rubber-band fix). Snapshots re-base the predictor instead of confirming the interpolator.
         private LocalPlayerPredictor? _predictor;
 
         public ClientEntity(
@@ -766,18 +768,20 @@ public sealed class MmoClient : IDisposable
             if (_predictor is not null)
             {
                 // Local predicted entity: re-base the prediction off the confirmed tile (the predictor owns
-                // the interpolator and drives it from predicted tiles). Facing follows the prediction while
-                // moving, else the confirmed facing.
+                // its own present-time render tween — the buffered interpolator is bypassed here). Facing
+                // follows the prediction while moving, else the confirmed facing.
                 _predictor.Reconcile(tile, receivedAt);
                 _predictor.ConfirmFacing(facing);
                 Facing = _predictor.Facing;
-            }
-            else
-            {
-                Facing = facing;
-                _interpolator.Confirm(tile, receivedAt);
+                return new EntityConfirmationDebug(
+                    tile != previousTile,
+                    0,
+                    _predictor.CadenceMs,
+                    _predictor.RenderPosition);
             }
 
+            Facing = facing;
+            _interpolator.Confirm(tile, receivedAt);
             return new EntityConfirmationDebug(
                 tile != previousTile,
                 _interpolator.QueueDepth,
@@ -785,12 +789,13 @@ public sealed class MmoClient : IDisposable
                 _interpolator.RenderPosition);
         }
 
-        // S53: attaches a local-player predictor that takes over driving this entity's interpolator from
-        // predicted tiles. Anchored to the current confirmed tile + facing. Returns the predictor so the
-        // client can feed it held intent and tick it. Idempotent: returns the existing one if already set.
+        // S53: attaches a local-player predictor that takes over the render position with its own present-time
+        // step-tween (the buffered interpolator is bypassed for the local player). Anchored to the current
+        // confirmed tile + facing. Returns the predictor so the client can feed it held intent and tick it.
+        // Idempotent: returns the existing one if already set.
         public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable)
         {
-            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, _interpolator);
+            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable);
             return _predictor;
         }
 
@@ -820,7 +825,10 @@ public sealed class MmoClient : IDisposable
 
         public EntityRenderState ToRenderState(TimeSpan now)
         {
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, _interpolator.Sample(now), Tile, Facing, IsLocal, Depleted);
+            // S53: the local predicted player renders from the predictor's OWN present-time tween (snappy, no
+            // playout delay). Everything else (remote players, resources) keeps the buffered interpolator.
+            var position = _predictor is not null ? _predictor.Sample(now) : _interpolator.Sample(now);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted);
         }
     }
 

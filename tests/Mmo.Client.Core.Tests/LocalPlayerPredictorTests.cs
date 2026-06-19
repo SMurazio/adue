@@ -1,15 +1,15 @@
-using System.Collections.Generic;
 using Mmo.Client.Core;
 using Mmo.Shared.Domain;
 using Xunit;
 
 namespace Mmo.Client.Core.Tests;
 
-// S53 movement-prediction bar: the predictor mirrors the server's held-intent step loop for the local
-// player, re-bases on each authoritative self-snapshot, and reconciles EXACTLY to the server on a
-// disagreement while NOT rubber-banding on the steady path. These tests drive the predictor against a
-// tiny in-process model of the server's step rule (one tile per cadence in the held direction, validating
-// IsWalkable) and assert tile-for-tile agreement plus the correction outcomes.
+// S53 (redo) movement-prediction bar: the predictor mirrors the server's held-intent step loop for the local
+// player, renders it at the predicted tile with its OWN present-time tween (no playout-buffer delay), and on
+// an authoritative self-snapshot snaps/blends to the server's truth on divergence while NOT rubber-banding on
+// the steady path. These tests drive the predictor against a tiny in-process model of the server's step rule
+// (one tile per cadence in the held direction, validating IsWalkable) and assert tile-for-tile agreement, the
+// present-time render position, and the reconcile outcomes.
 public sealed class LocalPlayerPredictorTests
 {
     private const double Cadence = 150d;
@@ -17,14 +17,15 @@ public sealed class LocalPlayerPredictorTests
     // Open field: every tile walkable.
     private static bool OpenField(TileCoord _) => true;
 
-    private static TileInterpolator NewInterpolator(TileCoord start) => new(start, Cadence, 0);
+    private static LocalPlayerPredictor NewPredictor(TileCoord start, Direction8 facing, Func<TileCoord, bool>? walkable = null)
+        => new(start, facing, Cadence, walkable ?? OpenField);
 
     // ---- Predict: snappy first step + faithful stepping -------------------------------------------
 
     [Fact]
     public void FirstStepFiresImmediatelyOnKeydown_NoRoundTrip()
     {
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.S, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.S);
 
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         var stepped = predictor.Tick(TimeSpan.Zero);
@@ -37,7 +38,7 @@ public sealed class LocalPlayerPredictorTests
     [Fact]
     public void StepsOneTilePerCadence_NotPerFrame()
     {
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
         predictor.Tick(TimeSpan.Zero);                              // step -> (1,0)
@@ -53,12 +54,28 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
     }
 
+    // ---- Present-time render tween (the snappy part; no playout delay) ----------------------------
+
+    [Fact]
+    public void RenderTweens_PresentTime_BetweenTileCenters_NoDelay()
+    {
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        predictor.Tick(TimeSpan.Zero);                                // step -> (1,0), tween 0..150ms
+        // The very instant the step is accepted the render still sits at the old center (no past-rendering
+        // playout buffer would START the move yet); it then glides to the new center over the cadence.
+        Assert.Equal(0d, predictor.Sample(TimeSpan.Zero).X, 3);
+        Assert.Equal(0.5d, predictor.Sample(TimeSpan.FromMilliseconds(75)).X, 3);   // halfway across the tile
+        Assert.Equal(1d, predictor.Sample(TimeSpan.FromMilliseconds(150)).X, 3);    // arrived at present time
+    }
+
     [Fact]
     public void BlockedTarget_HoldsAtWall_DoesNotConsumeCooldown()
     {
         // Wall at x>=2: the avatar can reach (1,0) but not step onto (2,0).
         bool walkable(TileCoord t) => t.X < 2;
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, walkable, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E, walkable);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
         predictor.Tick(TimeSpan.Zero);                  // (0,0)->(1,0)
@@ -73,7 +90,7 @@ public sealed class LocalPlayerPredictorTests
     [Fact]
     public void Keyup_StopsProjectingForward()
     {
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         predictor.Tick(TimeSpan.Zero);                  // (1,0)
         predictor.Tick(TimeSpan.FromMilliseconds(150));  // (2,0)
@@ -94,7 +111,7 @@ public sealed class LocalPlayerPredictorTests
         // Mirror the server: it steps the same held intent at the same cadence, so its confirmations climb
         // the same tiles the client predicts. The confirmed tile trails the prediction by the in-flight
         // steps; every Reconcile must return Matched (no rubber-band on normal play).
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
         var serverTile = new TileCoord(0, 0);
@@ -120,7 +137,7 @@ public sealed class LocalPlayerPredictorTests
     public void SteadyState_ConfirmExactlyEqualsPrediction_NoCorrection()
     {
         // Zero-latency limit (LAN): the confirmed tile equals the predicted tile each snapshot.
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
         for (var step = 0; step < 10; step++)
@@ -140,7 +157,7 @@ public sealed class LocalPlayerPredictorTests
         // The client thinks (2,0) is walkable and predicts onto it, but the server rejects that step (its
         // authoritative map blocks it / a race). The server stops at (1,0). The prediction must reconcile
         // EXACTLY to (1,0) and continue correctly from there.
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
         predictor.Tick(TimeSpan.Zero);                   // predict (1,0)
@@ -161,7 +178,7 @@ public sealed class LocalPlayerPredictorTests
     [Fact]
     public void MidMoveSpeedChange_AdoptedImmediately_ContinuesCorrectly()
     {
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         predictor.Tick(TimeSpan.Zero);                   // (1,0) at cadence 150
 
@@ -180,10 +197,9 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void LargeDisagreement_SnapsTheInterpolator()
+    public void LargeDisagreement_SnapsTheRenderInstantly()
     {
-        var interpolator = NewInterpolator(new TileCoord(0, 0));
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, interpolator);
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         predictor.Tick(TimeSpan.Zero);                   // (1,0)
         predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(10));
@@ -193,9 +209,10 @@ public sealed class LocalPlayerPredictorTests
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Snapped, outcome);
         Assert.Equal(new TileCoord(40, 40), predictor.PredictedTile);
-        // The interpolator was reset to the truth (render position jumps, no multi-tile smear).
-        Assert.Equal(40d, interpolator.RenderPosition.X);
-        Assert.Equal(40d, interpolator.RenderPosition.Y);
+        // The render jumps to the truth at present time — no multi-tile smear.
+        var render = predictor.Sample(TimeSpan.FromMilliseconds(20));
+        Assert.Equal(40d, render.X, 3);
+        Assert.Equal(40d, render.Y, 3);
     }
 
     [Fact]
@@ -204,7 +221,7 @@ public sealed class LocalPlayerPredictorTests
         // Predict three steps, stop, then the server's final confirmation lands one tile short of the
         // prediction (the last in-flight step had not been processed when the player released). Reconcile
         // must converge exactly to the server's stop tile with a small (non-snapping) correction.
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, Cadence, OpenField, NewInterpolator(new TileCoord(0, 0)));
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         predictor.Tick(TimeSpan.Zero);                   // (1,0)
         predictor.Tick(TimeSpan.FromMilliseconds(150));   // (2,0)
