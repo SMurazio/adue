@@ -13,4 +13,5 @@ public readonly record struct EntityRenderState(
     RenderPosition Position,
     TileCoord AuthoritativeTile,
     Direction8 Facing,
-    bool IsLocal);
+    bool IsLocal,
+    bool Depleted = false);

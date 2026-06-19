@@ -347,6 +347,8 @@ internal sealed class DebugControlChannel : IDisposable
                 writer.WriteNumber("networkId", state.NetworkId);
                 writer.WriteBoolean("isLocal", state.IsLocal);
                 writer.WriteString("name", state.DisplayName);
+                writer.WriteString("kind", state.Kind.ToString());
+                writer.WriteBoolean("depleted", state.Depleted);
                 writer.WriteString("tile", state.AuthoritativeTile.ToString());
                 writer.WriteStartObject("render");
                 writer.WriteNumber("x", state.Position.X);

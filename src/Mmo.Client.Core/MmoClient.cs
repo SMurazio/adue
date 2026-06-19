@@ -27,6 +27,7 @@ public sealed class MmoClient : IDisposable
     private readonly List<uint> _staleEntityScratch = [];
     private readonly long _startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
     private readonly ClientMovementTrace _movementTrace;
+    private readonly ClientInventory _inventory = new();
 
     private NetPeer? _serverPeer;
     private PendingSnapshot? _pendingSnapshot;
@@ -92,6 +93,15 @@ public sealed class MmoClient : IDisposable
     public bool DebugMovementEnabled => _movementTrace.Enabled;
 
     public MovementDebugSnapshot MovementDebug => _movementTrace.Snapshot;
+
+    // Client-side mirror of the owner's private inventory, updated by InventoryUpdate deltas. Read-only
+    // view for the renderer; the server stays authoritative (each delta sets the new total).
+    public ClientInventory Inventory => _inventory;
+
+    // The most recent InteractResult the server sent, with a monotonic counter so a HUD can detect a new
+    // result (success or a failure reason like "too_far"/"depleted") without an event subscription. Null
+    // until the first interaction completes.
+    public InteractResultInfo? LastInteractResult { get; private set; }
 
     public IReadOnlyList<ReplicatedEntity> Entities => _entities.Values.Select(static entity => entity.ToSnapshot()).ToArray();
 
@@ -186,6 +196,14 @@ public sealed class MmoClient : IDisposable
         Send(new ChatSendMessage(text), DeliveryMethod.ReliableOrdered);
     }
 
+    // Sends a generic Interact (harvest) request for the entity the player is pointing at. Reliable-ordered
+    // so a request is never silently dropped. No client-side prediction: the result lands later via the
+    // owner-only InteractResult (and InventoryUpdate on success). The server re-validates authority/adjacency.
+    public void SendInteractRequest(uint targetNetworkId)
+    {
+        Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
+    }
+
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
     {
         _movementTrace.FrameHitch(durationMs, gc0, gc1, gc2, EntityCount, State);
@@ -259,7 +277,19 @@ public sealed class MmoClient : IDisposable
             case ServerErrorMessage error:
                 _errors.Add(new ClientError(error.Code, error.Message));
                 break;
+            case InteractResultMessage interact:
+                HandleInteractResult(interact);
+                break;
+            case InventoryUpdateMessage inventory:
+                _inventory.Apply(inventory.ChangedStacks);
+                break;
         }
+    }
+
+    private void HandleInteractResult(InteractResultMessage interact)
+    {
+        var sequence = (LastInteractResult?.Sequence ?? 0) + 1;
+        LastInteractResult = new InteractResultInfo(interact.Success, interact.Reason, sequence);
     }
 
     private void HandleZoneInfo(ZoneInfoMessage zone)
@@ -375,7 +405,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, state.Depleted);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -457,7 +487,9 @@ public sealed class MmoClient : IDisposable
         if (_entities.TryGetValue(networkId, out var existing))
         {
             existing.UpdateMetadata(characterId, kind, displayName, isLocal);
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0);
+            // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
+            // last snapshot set rather than resetting a known-depleted node to available.
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, existing.Depleted);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -560,6 +592,11 @@ public sealed class MmoClient : IDisposable
 
         public bool IsLocal { get; private set; }
 
+        // Resource-node availability replicated via the AOI snapshot Depleted bit. Always false for
+        // players/NPCs (the server never sets it for them). Carried separately from the interpolated
+        // position so the renderer can grey/hide a node without affecting movement.
+        public bool Depleted { get; private set; }
+
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
             && DisplayName.StartsWith("#", StringComparison.Ordinal);
@@ -578,11 +615,12 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, bool depleted = false)
         {
             var previousTile = Tile;
             Tile = tile;
             Facing = facing;
+            Depleted = depleted;
             LastSeenSnapshotSequence = snapshotSequence;
             _interpolator.Confirm(tile, receivedAt);
             return new EntityConfirmationDebug(
@@ -599,12 +637,12 @@ public sealed class MmoClient : IDisposable
 
         public ReplicatedEntity ToSnapshot()
         {
-            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal);
+            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted);
         }
 
         public EntityRenderState ToRenderState(TimeSpan now)
         {
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, _interpolator.Sample(now), Tile, Facing, IsLocal);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, _interpolator.Sample(now), Tile, Facing, IsLocal, Depleted);
         }
     }
 

@@ -19,10 +19,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private readonly StringBuilder _perfText = new(768);
     private readonly BoxMesh _wallMesh = new() { Size = new Vector3(0.92f, 0.85f, 0.92f) };
     private readonly CapsuleMesh _entityMesh = new() { Radius = 0.28f, Height = 0.9f };
+    // Resource nodes use a chunky box so they read as scenery, not avatars (capsules). Distinct mesh +
+    // colour so a node is unmistakable from a player at a glance.
+    private readonly BoxMesh _resourceMesh = new() { Size = new Vector3(0.7f, 0.7f, 0.7f) };
     private readonly StandardMaterial3D _groundMaterial = Material(new Color(0.08f, 0.12f, 0.13f));
     private readonly StandardMaterial3D _wallMaterial = Material(new Color(0.45f, 0.50f, 0.53f));
     private readonly StandardMaterial3D _localEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
     private readonly StandardMaterial3D _remoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
+    // Available = lush green; depleted = dim grey (and the node is also hidden when depleted, but the
+    // material keeps it readable if a future build chooses to show stumps instead of hiding them).
+    private readonly StandardMaterial3D _resourceAvailableMaterial = Material(new Color(0.32f, 0.78f, 0.30f));
+    private readonly StandardMaterial3D _resourceDepletedMaterial = Material(new Color(0.28f, 0.30f, 0.28f));
 
     private MmoClient? _client;
     private Node3D? _worldRoot;
@@ -36,6 +43,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private PanelContainer? _perfPanel;
     private Label? _perfLabel;
     private FrameTimeGraph? _perfGraph;
+    private Label? _inventoryLabel;
+    private PanelContainer? _toastPanel;
+    private Label? _toastLabel;
+    private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
+    private long _renderedInventoryVersion = -1;
+    private long _lastInteractResultSequence;
+    private double _toastExpiresAt;
     private double _elapsedSeconds;
     private double _nextMetricsAt;
     private double _nextOverlayAt;
@@ -212,11 +226,41 @@ public partial class MmoClientRoot : Node3D, IControlHost
             return;
         }
 
+        // E = harvest. Only when not typing in chat (otherwise 'e' would both type and harvest). Targets
+        // the nearest adjacent available resource node; the server re-validates adjacency authoritatively.
+        if (key.Keycode == Key.E && _chatInput?.HasFocus() != true)
+        {
+            TryHarvest();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
         if ((key.Keycode == Key.Enter || key.Keycode == Key.KpEnter || key.Keycode == Key.T)
             && _chatInput?.HasFocus() != true)
         {
             FocusChatInput();
             GetViewport().SetInputAsHandled();
+        }
+    }
+
+    private void TryHarvest()
+    {
+        if (_client?.IsLoggedIn != true || _client.LocalTile is not TileCoord actorTile)
+        {
+            return;
+        }
+
+        // _renderStates is refreshed every frame in SampleRenderStates; it is the same data the renderer
+        // sees, so nearest-node selection matches what the player is looking at.
+        if (HarvestTargeting.TryFindNearestHarvestable(_renderStates, actorTile, out var targetNetworkId))
+        {
+            _client.SendInteractRequest(targetNetworkId);
+        }
+        else
+        {
+            // No adjacent node: give immediate local feedback rather than a silent no-op. This is the one
+            // place the client "knows" without the server, and it never mutates state — purely a hint.
+            ShowInteractFeedback("No resource node in reach.");
         }
     }
 
@@ -298,6 +342,35 @@ public partial class MmoClientRoot : Node3D, IControlHost
         perfRows.AddChild(_perfLabel);
         perfRows.AddChild(_perfGraph);
 
+        // Inventory HUD: top-right, below the metrics panel. Driven by the owner-only InventoryUpdate.
+        var inventoryPanel = CreateOverlayPanel("InventoryPanel", Vector2.Zero, new Vector2(260, 150));
+        inventoryPanel.AnchorLeft = 1f;
+        inventoryPanel.AnchorRight = 1f;
+        inventoryPanel.OffsetLeft = -272f;
+        inventoryPanel.OffsetRight = -12f;
+        inventoryPanel.OffsetTop = 350f;
+        inventoryPanel.OffsetBottom = 500f;
+        var inventoryRows = CreatePanelVBox(inventoryPanel);
+        _inventoryLabel = CreateOverlayLabel("Inventory", 14);
+        inventoryRows.AddChild(_inventoryLabel);
+
+        // Interact feedback toast: bottom-center, above the chat panel. Brief, auto-hiding.
+        var toastPanel = CreateOverlayPanel("ToastPanel", Vector2.Zero, new Vector2(420, 36));
+        toastPanel.AnchorLeft = 0.5f;
+        toastPanel.AnchorRight = 0.5f;
+        toastPanel.AnchorTop = 1f;
+        toastPanel.AnchorBottom = 1f;
+        toastPanel.OffsetLeft = -210f;
+        toastPanel.OffsetRight = 210f;
+        toastPanel.OffsetTop = -270f;
+        toastPanel.OffsetBottom = -234f;
+        var toastRows = CreatePanelVBox(toastPanel);
+        _toastLabel = CreateOverlayLabel("Toast", 16);
+        _toastLabel.HorizontalAlignment = HorizontalAlignment.Center;
+        toastRows.AddChild(_toastLabel);
+        toastPanel.Visible = false;
+        _toastPanel = toastPanel;
+
         var inputPanel = CreateOverlayPanel("ChatInputPanel", Vector2.Zero, new Vector2(760, 40));
         inputPanel.AnchorTop = 1f;
         inputPanel.AnchorBottom = 1f;
@@ -324,6 +397,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
         layer.AddChild(metricsPanel);
         layer.AddChild(chatPanel);
         layer.AddChild(_perfPanel);
+        layer.AddChild(inventoryPanel);
+        layer.AddChild(toastPanel);
         layer.AddChild(inputPanel);
     }
 
@@ -438,6 +513,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
             }
 
             node.Position = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
+            if (state.Kind == EntityKind.Resource)
+            {
+                // Drive node availability purely off the replicated Depleted bit: hide a harvested node
+                // and grey it; restore (show + green) when the server respawns it. No prediction.
+                node.Visible = !state.Depleted;
+                node.MaterialOverride = state.Depleted ? _resourceDepletedMaterial : _resourceAvailableMaterial;
+            }
+
             if (_entityLabels.TryGetValue(state.NetworkId, out var label))
             {
                 SetTextIfChanged(label, state.DisplayName);
@@ -463,11 +546,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
     private MeshInstance3D CreateEntityNode(EntityRenderState state)
     {
+        var isResource = state.Kind == EntityKind.Resource;
         var body = new MeshInstance3D
         {
             Name = $"Entity_{state.NetworkId}",
-            Mesh = _entityMesh,
-            MaterialOverride = state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial
+            Mesh = isResource ? _resourceMesh : _entityMesh,
+            MaterialOverride = isResource
+                ? (state.Depleted ? _resourceDepletedMaterial : _resourceAvailableMaterial)
+                : (state.IsLocal ? _localEntityMaterial : _remoteEntityMaterial),
+            Visible = !(isResource && state.Depleted)
         };
 
         var label = new Label3D
@@ -475,7 +562,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
             Name = "Name",
             Text = state.DisplayName,
             PixelSize = 0.025f,
-            Position = new Vector3(0, 0.9f, 0),
+            Position = new Vector3(0, isResource ? 0.7f : 0.9f, 0),
             Billboard = BaseMaterial3D.BillboardModeEnum.Enabled
         };
         body.AddChild(label);
@@ -552,6 +639,83 @@ public partial class MmoClientRoot : Node3D, IControlHost
         {
             SetTextIfChanged(_chatLabel, FormatChat(_client));
         }
+
+        UpdateInventory();
+        UpdateInteractFeedback(now);
+    }
+
+    private void UpdateInventory()
+    {
+        if (_inventoryLabel is null || _client is null)
+        {
+            return;
+        }
+
+        var inventory = _client.Inventory;
+        if (inventory.Version == _renderedInventoryVersion)
+        {
+            return;
+        }
+
+        _renderedInventoryVersion = inventory.Version;
+        var rows = inventory.ToOrderedRows(_itemRegistry);
+        if (rows.Count == 0)
+        {
+            SetTextIfChanged(_inventoryLabel, "INVENTORY\n(empty)");
+            return;
+        }
+
+        var builder = new StringBuilder("INVENTORY");
+        foreach (var row in rows)
+        {
+            builder.Append('\n').Append(row.DisplayName).Append(" x").Append(row.Quantity.ToString(CultureInfo.InvariantCulture));
+        }
+
+        SetTextIfChanged(_inventoryLabel, builder.ToString());
+    }
+
+    private void UpdateInteractFeedback(TimeSpan now)
+    {
+        if (_client?.LastInteractResult is InteractResultInfo result && result.Sequence != _lastInteractResultSequence)
+        {
+            _lastInteractResultSequence = result.Sequence;
+            ShowInteractFeedback(result.Success ? "Harvested!" : DescribeInteractFailure(result.Reason));
+        }
+
+        // Auto-hide the toast once its window elapses.
+        if (_toastPanel is { Visible: true } && now.TotalSeconds >= _toastExpiresAt)
+        {
+            _toastPanel.Visible = false;
+        }
+    }
+
+    private void ShowInteractFeedback(string text)
+    {
+        if (_toastLabel is null || _toastPanel is null)
+        {
+            return;
+        }
+
+        SetTextIfChanged(_toastLabel, text);
+        _toastPanel.Visible = true;
+        _toastExpiresAt = _elapsedSeconds + 2.0d;
+    }
+
+    // Maps the server's machine-readable Interact reason codes to a short human-readable line.
+    private static string DescribeInteractFailure(string reason)
+    {
+        return reason switch
+        {
+            "too_far" => "Too far from the node.",
+            "depleted" => "Node is depleted.",
+            "inventory_full" => "Inventory is full.",
+            "rate_limited" => "Harvesting too fast.",
+            "not_resource" => "That can't be harvested.",
+            "no_target" => "No target.",
+            "no_actor" => "No character.",
+            "no_inventory" => "No inventory.",
+            _ => string.IsNullOrEmpty(reason) ? "Harvest failed." : $"Harvest failed: {reason}"
+        };
     }
 
     private void TogglePerfHud()

@@ -9,4 +9,5 @@ public sealed record ReplicatedEntity(
     string DisplayName,
     TileCoord Tile,
     Direction8 Facing,
-    bool IsLocal);
+    bool IsLocal,
+    bool Depleted = false);
