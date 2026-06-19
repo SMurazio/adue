@@ -3,7 +3,9 @@
 Severity: research. Mine two mature, battle-tested UO codebases for the best solutions to adopt **while
 keeping our Godot 3D client + our C# server** — NOT a 1:1 port. Priority: **movement** (ours is close but
 not there yet). Output: `docs/uo-reference-takeaways.md` — findings mapped to concrete, prioritized
-recommendations for OUR stack. Each code change that comes OUT of it gets its own todo + commit.
+recommendations for OUR stack. Each code change that comes OUT of it gets its own todo + commit. **Frame
+all output as inspiration for our own design — no references to the reference codebases (clean docs/code).**
+Deliverable: `docs/movement-and-architecture-notes.md`.
 
 ## Sources
 - **ClassicUO** (client, C#/MonoGame): GitHub `ClassicUO/ClassicUO`, source under
