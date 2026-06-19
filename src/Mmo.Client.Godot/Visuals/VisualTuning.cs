@@ -20,8 +20,17 @@ public sealed class VisualTuning
     public float PlayerLabelHeight { get; set; } = PlayerVisual.ModelScale * 1.4f;
 
     // One scale applied to ALL rock GLB variants. Each variant's ground offset is multiplied by this so the
-    // base stays on the floor at any scale. The S60 panel clamps to [0.1, 50].
+    // base stays on the floor at any scale. The S65 F5 panel clamps to [0.1, 50].
     public float RockModelScale { get; set; } = 4f;
+
+    // S65: per-archetype model scales, live-tunable from the F5 visual panel alongside the rock scale.
+    //   * TreeModelScale  — the alberello Tree GLB. Default 1.2 matches ModelVisual's prior fixed tree scale so
+    //     the look is unchanged until tuned; ModelVisual multiplies its tree ground offset by this too.
+    //   * PlantModelScale — the BoxVisual "Plant" resource box (the current placeholder). Default 1.0 leaves the
+    //     box at its native 0.7³ so nothing changes until tuned; BoxVisual applies it as a uniform body scale.
+    // Both clamp to [0.1, 50] in the panel.
+    public float TreeModelScale { get; set; } = 1.2f;
+    public float PlantModelScale { get; set; } = 1.0f;
 
     // Shared label font/outline styling (constant; not panel-tunable). Kept here so every visual builds an
     // identical Label3D without duplicating the magic numbers.

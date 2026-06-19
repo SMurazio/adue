@@ -21,9 +21,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private readonly StandardMaterial3D _groundMaterial = Material(new Color(0.08f, 0.12f, 0.13f));
 	private readonly StandardMaterial3D _wallMaterial = Material(new Color(0.45f, 0.50f, 0.53f));
 
-	// Live-tunable presentation params shared with the visuals (label pixel size/height, rock scale). The S60
-	// admin panel mutates these; the renderer pushes label changes onto live visuals. The rock model scale
-	// stays an [Export] for inspector tweaking, mirrored into _tuning at _Ready and on each panel apply.
+	// Live-tunable presentation params shared with the visuals (label pixel size/height, rock/tree/plant model
+	// scale). The S65 F5 visual panel mutates these; the renderer pushes label + model-scale changes onto live
+	// visuals. The rock model scale stays an [Export] for inspector tweaking, mirrored into _tuning at _Ready
+	// and on each F5 apply.
 	[Export] public float RockModelScale { get; set; } = 4f;
 	private readonly VisualTuning _tuning = new();
 	private EntityRenderer? _renderer;
@@ -52,20 +53,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
-	// ---- S60 admin live-tuning panel --------------------------------------------------------------
-	// F4 toggles this admin-only panel of labeled fields + Apply. Client-local fields (camera zoom range,
-	// rock scale, label pixel-size/height) apply instantly to local state/nodes; server fields
-	// (move.stepCooldownMs, aoi.interestRadius) ride AdminSetTuning to the server, which admin-gates +
-	// clamps. Dev tool, not shipped UI — built once, shown only for an Admin session.
+	// ---- S60 / S65 admin live-tuning panels --------------------------------------------------------
+	// F4 toggles the SERVER tuning panel (move.stepCooldownMs, move.turnDelayMs, aoi.interestRadius — ride
+	// AdminSetTuning to the server, which admin-gates + clamps). F5 (S65) toggles the CLIENT-LOCAL VISUAL panel
+	// (camera zoom range, rock/tree/plant model scale, label pixel-size/height — applied instantly to local
+	// state/nodes, no server round-trip). Both are admin-only dev tools, not shipped UI — built once, shown only
+	// for an Admin session. Splitting them keeps the server knobs unmistakable from the render knobs.
 	private PanelContainer? _tuningPanel;
 	private bool _tuningPanelVisible;
 	private bool _tuningFieldsSeeded;
 	private LineEdit? _tuneStepCooldownMs;
 	private LineEdit? _tuneTurnDelayMs;
 	private LineEdit? _tuneInterestRadius;
+
+	// F5 visual panel (S65).
+	private PanelContainer? _visualPanel;
+	private bool _visualPanelVisible;
+	private bool _visualFieldsSeeded;
 	private LineEdit? _tuneCameraZoomMin;
 	private LineEdit? _tuneCameraZoomMax;
 	private LineEdit? _tuneRockScale;
+	private LineEdit? _tuneTreeScale;
+	private LineEdit? _tunePlantScale;
 	private LineEdit? _tuneLabelPixelSize;
 	private LineEdit? _tuneLabelHeight;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
@@ -267,11 +276,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// F4: admin-only live tuning panel (S60). Ignored for non-admins (panel never shows). Not consumed
+		// F4: admin-only SERVER tuning panel (S60). Ignored for non-admins (panel never shows). Not consumed
 		// while typing in chat so 'F4' can't be swallowed mid-message — but F4 isn't a text key anyway.
 		if (key.Keycode == Key.F4)
 		{
 			ToggleTuningPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// F5: admin-only CLIENT-LOCAL VISUAL tuning panel (S65 — camera zoom + model scales + label sizes).
+		if (key.Keycode == Key.F5)
+		{
+			ToggleVisualPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -579,6 +596,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		inputMargin.AddChild(_chatInput);
 
 		BuildTuningPanel(layer);
+		BuildVisualPanel(layer);
 
 		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
 		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
@@ -594,35 +612,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(inputPanel);
 	}
 
-	// S60: the admin tuning panel (F4). Centered-left, hidden until F4 is pressed by an Admin session. Each
-	// row is a label + a LineEdit; one Apply button at the bottom applies every field at once (client-local
-	// fields instantly, server fields via AdminSetTuning). Fields are seeded on first open with the current
-	// known values (camera/rock/label from local state; server params from ServerHello / last-applied).
+	// S60/S65: the admin SERVER tuning panel (F4). Centered-left, hidden until F4 is pressed by an Admin session.
+	// Each row is a label + a LineEdit; one Apply button at the bottom sends every server field at once via
+	// AdminSetTuning (the server admin-gates + clamps authoritatively). Client-local VISUAL knobs moved to the
+	// F5 panel (S65). Fields are seeded on first open from ServerHello / last-applied.
 	private void BuildTuningPanel(CanvasLayer layer)
 	{
 		// Center-left, below the status panel and to the right of the perf HUD so F3 + F4 panels don't overlap.
-		var panel = CreateOverlayPanel("TuningPanel", new Vector2(490, 154), new Vector2(360, 380));
+		var panel = CreateOverlayPanel("TuningPanel", new Vector2(490, 154), new Vector2(360, 250));
 		var rows = CreatePanelVBox(panel);
 
 		var title = CreateOverlayLabel("TuningTitle", 15);
-		title.Text = "ADMIN TUNING (F4)";
+		title.Text = "ADMIN SERVER TUNING (F4)";
 		rows.AddChild(title);
 
 		var serverHeader = CreateOverlayLabel("TuningServerHeader", 12);
 		serverHeader.Text = "— server (sent on Apply) —";
 		rows.AddChild(serverHeader);
-		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs");
-		_tuneTurnDelayMs = AddTuningField(rows, "move.turnDelayMs");
-		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius");
-
-		var localHeader = CreateOverlayLabel("TuningLocalHeader", 12);
-		localHeader.Text = "— client-local (instant) —";
-		rows.AddChild(localHeader);
-		_tuneCameraZoomMin = AddTuningField(rows, "camera.zoomMin");
-		_tuneCameraZoomMax = AddTuningField(rows, "camera.zoomMax");
-		_tuneRockScale = AddTuningField(rows, "rock.modelScale");
-		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize");
-		_tuneLabelHeight = AddTuningField(rows, "label.height");
+		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs", OnTuningApplyPressed);
+		_tuneTurnDelayMs = AddTuningField(rows, "move.turnDelayMs", OnTuningApplyPressed);
+		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius", OnTuningApplyPressed);
 
 		var apply = new Button { Name = "TuningApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -634,9 +643,44 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(panel);
 	}
 
-	// One labeled input row (label : LineEdit) inside the tuning panel. Returns the LineEdit so the caller
-	// can seed/read it. Enter in any field also applies all (same as the Apply button) for quick iteration.
-	private LineEdit AddTuningField(VBoxContainer parent, string label)
+	// S65: the admin CLIENT-LOCAL VISUAL tuning panel (F5). Same row/Apply pattern as F4, but every field is
+	// applied INSTANTLY client-side (no server round-trip): camera zoom range, rock/tree/plant model scale, and
+	// the name-label pixel-size/height. Hidden until F5 is pressed by an Admin session; seeded on first open
+	// from live local state (the consts/_tuning values currently in effect).
+	private void BuildVisualPanel(CanvasLayer layer)
+	{
+		// To the right of the F4 panel so the two admin panels can be open side-by-side without overlapping.
+		var panel = CreateOverlayPanel("VisualPanel", new Vector2(860, 154), new Vector2(360, 330));
+		var rows = CreatePanelVBox(panel);
+
+		var title = CreateOverlayLabel("VisualTitle", 15);
+		title.Text = "ADMIN VISUAL TUNING (F5)";
+		rows.AddChild(title);
+
+		var localHeader = CreateOverlayLabel("VisualLocalHeader", 12);
+		localHeader.Text = "— client-local (instant) —";
+		rows.AddChild(localHeader);
+		_tuneCameraZoomMin = AddTuningField(rows, "camera.zoomMin", OnVisualApplyPressed);
+		_tuneCameraZoomMax = AddTuningField(rows, "camera.zoomMax", OnVisualApplyPressed);
+		_tuneRockScale = AddTuningField(rows, "rock.modelScale", OnVisualApplyPressed);
+		_tuneTreeScale = AddTuningField(rows, "tree.modelScale", OnVisualApplyPressed);
+		_tunePlantScale = AddTuningField(rows, "plant.modelScale", OnVisualApplyPressed);
+		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
+		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
+
+		var apply = new Button { Name = "VisualApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnVisualApplyPressed;
+		rows.AddChild(apply);
+
+		panel.Visible = false;
+		_visualPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
+	// seed/read it. Enter in any field runs `onSubmit` (the owning panel's apply-all) for quick iteration.
+	private LineEdit AddTuningField(VBoxContainer parent, string label, Action onSubmit)
 	{
 		var row = new HBoxContainer { Name = $"Row_{label}" };
 		row.AddThemeConstantOverride("separation", 8);
@@ -652,7 +696,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
 		};
 		edit.AddThemeFontSizeOverride("font_size", 13);
-		edit.TextSubmitted += _ => OnTuningApplyPressed();
+		edit.TextSubmitted += _ => onSubmit();
 		row.AddChild(edit);
 
 		parent.AddChild(row);
@@ -940,9 +984,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_nextOverlayAt = 0;
 	}
 
-	// F4: toggle the admin live-tuning panel (S60). Admin-only — for a non-admin (or pre-login) session the
+	// F4: toggle the admin SERVER tuning panel (S60). Admin-only — for a non-admin (or pre-login) session the
 	// panel never shows. Fields are seeded with current known values on first open of an authenticated admin
-	// session so the human sees real starting points (and so server params reflect ServerHello).
+	// session so the human sees real starting points (server params reflect ServerHello).
 	private void ToggleTuningPanel()
 	{
 		if (_tuningPanel is null)
@@ -967,9 +1011,33 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_tuningPanel.Visible = _tuningPanelVisible;
 	}
 
-	// Seed each field with the current value: server params from ServerHello (the server's startup truth),
-	// client-local params from the live local state/consts. Only called once on first open (re-seeding would
-	// stomp values the human has typed but not yet applied).
+	// F5: toggle the admin CLIENT-LOCAL VISUAL tuning panel (S65). Same admin gating as F4 for now — these are
+	// dev knobs; the human can decide later whether a visual-only panel should be ungated.
+	private void ToggleVisualPanel()
+	{
+		if (_visualPanel is null)
+		{
+			return;
+		}
+
+		if (_client?.Role != ClientRole.Admin)
+		{
+			ShowInteractFeedback("Visual panel requires Admin role.");
+			return;
+		}
+
+		_visualPanelVisible = !_visualPanelVisible;
+		if (_visualPanelVisible && !_visualFieldsSeeded)
+		{
+			SeedVisualFields();
+			_visualFieldsSeeded = true;
+		}
+
+		_visualPanel.Visible = _visualPanelVisible;
+	}
+
+	// Seed the F4 server fields from ServerHello (the server's startup truth). Only called once on first open
+	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
 	{
 		var serverStep = _client?.Server?.StepCooldownMs ?? 140;
@@ -978,9 +1046,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneStepCooldownMs, serverStep);
 		SetField(_tuneTurnDelayMs, serverTurnDelay);
 		SetField(_tuneInterestRadius, serverRadius);
+	}
+
+	// Seed the F5 client-local visual fields from the live local state/_tuning. Only called once on first open.
+	private void SeedVisualFields()
+	{
 		SetField(_tuneCameraZoomMin, _cameraSizeMin);
 		SetField(_tuneCameraZoomMax, _cameraSizeMax);
 		SetField(_tuneRockScale, _tuning.RockModelScale);
+		SetField(_tuneTreeScale, _tuning.TreeModelScale);
+		SetField(_tunePlantScale, _tuning.PlantModelScale);
 		SetField(_tuneLabelPixelSize, _tuning.LabelPixelSize);
 		SetField(_tuneLabelHeight, _tuning.PlayerLabelHeight);
 	}
@@ -993,9 +1068,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// Apply-all: parse every field; client-local fields take effect instantly (clamped/updated in place),
-	// server fields are sent via AdminSetTuning (the server admin-gates + clamps authoritatively). Invalid
-	// (unparseable) fields are skipped with a toast so a typo in one field never blocks the others.
+	// F4 apply-all: parse every SERVER field and send it via AdminSetTuning (the server admin-gates + clamps
+	// authoritatively). Invalid (unparseable) fields are skipped so a typo in one never blocks the others.
 	private void OnTuningApplyPressed()
 	{
 		if (_client?.Role != ClientRole.Admin)
@@ -1023,8 +1097,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_client.SendAdminSetTuning("aoi.interestRadius", radius);
 		}
 
-		// Client-local group — apply instantly. Camera zoom range is clamped sane; the live _cameraSize is
-		// re-clamped into the new range so a tighter range snaps the current zoom in immediately.
+		ShowInteractFeedback("Server tuning applied.");
+	}
+
+	// F5 apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server
+	// round-trip). Camera zoom range is clamped sane and the live _cameraSize re-clamped into it; model scales
+	// and label sizes are mirrored into _tuning and pushed onto existing visuals so the change is visible
+	// without a respawn. Invalid fields are skipped so a typo in one never blocks the others.
+	private void OnVisualApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
 		if (TryReadField(_tuneCameraZoomMin, out var zoomMin))
 		{
 			_cameraSizeMin = Mathf.Clamp((float)zoomMin, 1f, 200f);
@@ -1044,6 +1130,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			RockModelScale = _tuning.RockModelScale;
 		}
 
+		if (TryReadField(_tuneTreeScale, out var treeScale))
+		{
+			_tuning.TreeModelScale = Mathf.Clamp((float)treeScale, 0.1f, 50f);
+		}
+
+		if (TryReadField(_tunePlantScale, out var plantScale))
+		{
+			_tuning.PlantModelScale = Mathf.Clamp((float)plantScale, 0.1f, 50f);
+		}
+
 		if (TryReadField(_tuneLabelPixelSize, out var pixelSize))
 		{
 			_tuning.LabelPixelSize = Mathf.Clamp((float)pixelSize, 0.0001f, 0.02f);
@@ -1054,12 +1150,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_tuning.PlayerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
 		}
 
-		// Push the new label pixel-size/height onto every existing label so the change is visible without
-		// requiring a respawn (the renderer walks its live visuals). Rock scale takes effect on the next rock
-		// spawn / pool-acquire (ModelVisual re-reads the live scale on acquire).
+		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly
+		// without a respawn (the renderer walks its live visuals; pooled ones re-read on next acquire).
 		_renderer?.ApplyLabelTuningToExisting();
+		_renderer?.ApplyModelScaleToExisting();
 
-		ShowInteractFeedback("Tuning applied.");
+		ShowInteractFeedback("Visual tuning applied.");
 	}
 
 	private static bool TryReadField(LineEdit? field, out double value)

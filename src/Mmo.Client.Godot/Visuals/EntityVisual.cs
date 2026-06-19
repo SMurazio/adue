@@ -123,6 +123,11 @@ public abstract partial class EntityVisual : Node3D
     // height at spawn, so they ignore the height push.
     protected virtual bool TracksLabelHeight => false;
 
+    // S65: push the live per-archetype model scale (Tuning.RockModelScale / TreeModelScale / PlantModelScale)
+    // onto this already-spawned visual so an F5-panel apply is visible WITHOUT a respawn. Default no-op (a
+    // player capsule / sprite has no tunable scale); ModelVisual + BoxVisual override it.
+    public virtual void ApplyModelScale() { }
+
     // ---- subclass extension points -----------------------------------------------------------------
     protected virtual void OnAcquire(EntityRenderState state) { }
     protected virtual void OnReset() { }

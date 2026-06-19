@@ -29,10 +29,10 @@ public sealed partial class ModelVisual : EntityVisual
     private const float RockLabelHeight = 1.5f;
 
     // ---- Tree config (alberello, NEW) --------------------------------------------------------------
-    // Native H~1.43, Ymin -0.61 (grid = 1 unit/tile). Scale 1.2 ≈ 1.72 tiles tall; ground offset 0.61 × scale
-    // drops the trunk base onto y=0. First-guess sizing — human eyeballs on relaunch. TUNABLE.
+    // Native H~1.43, Ymin -0.61 (grid = 1 unit/tile). Scale ~1.2 ≈ 1.72 tiles tall; ground offset 0.61 × scale
+    // drops the trunk base onto y=0. S65: the tree scale is now live-tunable (VisualTuning.TreeModelScale,
+    // default 1.2 — unchanged look); the ground offset below still re-scales with it. TUNABLE.
     private const string TreePath = "res://content/resources/alberello.glb";
-    private const float TreeScale = 1.2f;
     private const float TreeGroundOffset = 0.61f;
     private const float TreeLabelHeight = 1.9f;
 
@@ -109,10 +109,11 @@ public sealed partial class ModelVisual : EntityVisual
         }
 
         model.Name = "Model";
+        // Rock + Tree scales are live-tunable (S65 F5 panel reads/writes Tuning); Portal keeps its const.
         var (scale, groundOffset) = _kind switch
         {
             ModelKind.Rock => (Tuning.RockModelScale, RockGroundOffset(_variant)),
-            ModelKind.Tree => (TreeScale, TreeGroundOffset),
+            ModelKind.Tree => (Tuning.TreeModelScale, TreeGroundOffset),
             _ => (PortalScale, PortalGroundOffset)
         };
         model.Scale = new Vector3(scale, scale, scale);
@@ -131,12 +132,9 @@ public sealed partial class ModelVisual : EntityVisual
 
     protected override void OnAcquire(EntityRenderState state)
     {
-        // Rock scale is live-tunable; re-apply on (re)acquire so a pooled rock reflects the current scale.
-        if (_kind == ModelKind.Rock && _model is not null)
-        {
-            _model.Scale = new Vector3(Tuning.RockModelScale, Tuning.RockModelScale, Tuning.RockModelScale);
-            _model.Position = new Vector3(0f, RockGroundOffset(_variant) * Tuning.RockModelScale, 0f);
-        }
+        // Rock + Tree scales are live-tunable (S65); re-apply on (re)acquire so a pooled model reflects the
+        // current panel scale.
+        ApplyLiveScale();
 
         // Harvestable models (Rock/Tree) start hidden if spawned already depleted; the decorative Portal
         // ignores the bit and is always visible.
@@ -144,6 +142,28 @@ public sealed partial class ModelVisual : EntityVisual
         {
             _model.Visible = _kind == ModelKind.Portal || !state.Depleted;
         }
+    }
+
+    // S65: re-apply the live per-archetype scale to an ALREADY-spawned model so an F5 apply lands instantly
+    // without a respawn. Portal keeps its const scale (not panel-tunable).
+    public override void ApplyModelScale()
+    {
+        ApplyLiveScale();
+    }
+
+    private void ApplyLiveScale()
+    {
+        if (_model is null || _kind == ModelKind.Portal)
+        {
+            return;
+        }
+
+        // The ground offset re-scales with the model so the base stays on the floor at any scale.
+        var (scale, groundOffset) = _kind == ModelKind.Rock
+            ? (Tuning.RockModelScale, RockGroundOffset(_variant))
+            : (Tuning.TreeModelScale, TreeGroundOffset);
+        _model.Scale = new Vector3(scale, scale, scale);
+        _model.Position = new Vector3(0f, groundOffset * scale, 0f);
     }
 
     protected override void OnUpdate(EntityRenderState state, double now)

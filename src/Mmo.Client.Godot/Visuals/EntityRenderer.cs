@@ -72,6 +72,17 @@ public sealed class EntityRenderer
         }
     }
 
+    // S65: push the live per-archetype model scale (rock / tree / plant) onto every active visual so an F5-panel
+    // apply is visible instantly without a respawn. Pooled (parked) visuals re-read the scale on their next
+    // acquire, so this only needs to walk the active set.
+    public void ApplyModelScaleToExisting()
+    {
+        foreach (var visual in _active.Values)
+        {
+            visual.ApplyModelScale();
+        }
+    }
+
     // Release-all seam for a future zone change: park every active visual back in its pool, leaving the
     // renderer clean for a rebuild. Wired now even though no zone change drives it yet.
     public void Reset()

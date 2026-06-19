@@ -38,6 +38,10 @@ public sealed partial class BoxVisual : EntityVisual
     {
         _isResource = state.Kind == EntityKind.Resource;
         _body.Mesh = _isResource ? ResourceMesh : EntityMesh;
+        // S65: the "Plant" resource box is live-tunable via VisualTuning.PlantModelScale (default 1.0 = native
+        // 0.7³). Re-applied on every (re)acquire so a pooled box reflects the current F5 panel scale. Players /
+        // NPCs (capsule) keep unit scale — the knob is plant-only.
+        _body.Scale = _isResource ? new Vector3(Tuning.PlantModelScale, Tuning.PlantModelScale, Tuning.PlantModelScale) : Vector3.One;
         ApplyMaterial(state);
         _body.Visible = !(_isResource && state.Depleted);
     }
@@ -54,6 +58,15 @@ public sealed partial class BoxVisual : EntityVisual
         // server respawns it. No prediction.
         _body.Visible = !state.Depleted;
         _body.MaterialOverride = state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial;
+    }
+
+    // S65: re-apply the live "Plant" box scale to an already-spawned resource box so an F5 apply lands instantly
+    // without a respawn. Players / NPCs (capsule) keep unit scale.
+    public override void ApplyModelScale()
+    {
+        _body.Scale = _isResource
+            ? new Vector3(Tuning.PlantModelScale, Tuning.PlantModelScale, Tuning.PlantModelScale)
+            : Vector3.One;
     }
 
     private void ApplyMaterial(EntityRenderState state)
