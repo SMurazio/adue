@@ -111,16 +111,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	//   engraved  H 1.91, Ymin −0.96 → scale 0.70 ≈ 1.34 tile tall (the "L"/large one, intentionally biggest);
 	//             Yoff = 0.96 × 0.70 ≈ 0.67
 	private const string RockMossPath = "res://content/resources/M_Rock_Moss_Overgrowth.glb";
-	private const float RockMossScale = 1.25f;
-	private const float RockMossYOffset = 0.40f;
+	private const float RockMossScale = 1.0f;
+	private const float RockMossYOffset = 0.32f;
 
 	private const string RockFloatingPath = "res://content/resources/M_Rock_Floating_Monolith.glb";
-	private const float RockFloatingScale = 0.85f;
-	private const float RockFloatingYOffset = 0.38f;
+	private const float RockFloatingScale = 1.0f;
+	private const float RockFloatingYOffset = 0.49f;
 
 	private const string RockEngravedPath = "res://content/resources/M_Rock_Engraved_Monolith_L.glb";
-	private const float RockEngravedScale = 0.70f;
-	private const float RockEngravedYOffset = 0.67f;
+	private const float RockEngravedScale = 1.0f;
+	private const float RockEngravedYOffset = 0.96f;
 
 	// Name label height above a rock wrapper. The tallest variant (engraved) reaches ~1.34 tiles, so park the
 	// label a touch above that so it clears every variant. TUNABLE.
@@ -142,6 +142,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Node3D? _wallRoot;
 	private Node3D? _entityRoot;
 	private Camera3D? _camera;
+	// Mouse-wheel zoom: live orthographic size (smaller = zoomed in), clamped. Seeded from CameraSize.
+	private float _cameraSize = 28f;
+	private const float CameraSizeMin = 8f;
+	private const float CameraSizeMax = 60f;
+	private const float CameraZoomStep = 2.5f;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -317,6 +322,23 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
 		// SendHeldMovement off Input.IsMouseButtonPressed — NOT an event-driven click-a-destination. So the
 		// right mouse button is intentionally not consumed here; the old HandleClickToMove path is retired.
+		// Mouse-wheel zoom: shrink/grow the orthographic camera around the character.
+		if (@event is InputEventMouseButton { Pressed: true } wheel)
+		{
+			if (wheel.ButtonIndex == MouseButton.WheelUp)
+			{
+				_cameraSize = Mathf.Clamp(_cameraSize - CameraZoomStep, CameraSizeMin, CameraSizeMax);
+				GetViewport().SetInputAsHandled();
+				return;
+			}
+			if (wheel.ButtonIndex == MouseButton.WheelDown)
+			{
+				_cameraSize = Mathf.Clamp(_cameraSize + CameraZoomStep, CameraSizeMin, CameraSizeMax);
+				GetViewport().SetInputAsHandled();
+				return;
+			}
+		}
+
 		if (@event is not InputEventKey { Pressed: true, Echo: false } key)
 		{
 			return;
@@ -491,6 +513,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 		AddChild(_camera);
 		_camera.LookAt(Vector3.Zero, Vector3.Up);
+		_cameraSize = CameraSize;
 	}
 
 	private void BuildOverlay()
@@ -1229,6 +1252,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var focus = new Vector3((float)localState.Position.X, 0, (float)localState.Position.Y);
 		_camera.Position = focus + new Vector3(24, 28, 24);
 		_camera.LookAt(focus, Vector3.Up);
+		_camera.Size = _cameraSize;
 	}
 
 	private void UpdateOverlay(TimeSpan now)
