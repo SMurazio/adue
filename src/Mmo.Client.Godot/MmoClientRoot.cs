@@ -100,6 +100,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
     private Direction8 _lastSentDirection;
     private double _nextMoveIntentKeepaliveAt;
 
+    // Click-to-move (S52): A* over the locally-regenerated blocked map (built once the zone is known)
+    // feeds the SAME held-direction MoveIntent WASD uses. The driver advances on server-confirmed tiles
+    // (no prediction); any WASD input or a new right-click cancels/replaces the active path.
+    private TilePathfinder? _pathfinder;
+    private readonly PathDriver _pathDriver = new();
+
     // Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
     private Direction8[]? _autopilotPattern;
     private double _autopilotEndsAtSeconds;
@@ -163,6 +169,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
         if (_client?.Zone is not null && !_zoneBuilt)
         {
             BuildZone(_client.Zone);
+            _pathfinder = TilePathfinder.FromZone(_client.Zone);
             _zoneBuilt = true;
         }
 
@@ -201,6 +208,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        // Right-click to move: pick the clicked ground tile and path to it. _UnhandledInput only fires
+        // for events no UI Control consumed, so clicks over the (MouseFilter.Stop) overlay panels never
+        // reach here — that is the "ignore clicks over UI" guarantee, for free.
+        if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Right } mouse)
+        {
+            HandleClickToMove(mouse.Position);
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
         if (@event is not InputEventKey { Pressed: true, Echo: false } key)
         {
             return;
@@ -265,6 +282,104 @@ public partial class MmoClientRoot : Node3D, IControlHost
             // No adjacent node: give immediate local feedback rather than a silent no-op. This is the one
             // place the client "knows" without the server, and it never mutates state — purely a hint.
             ShowInteractFeedback("No resource node in reach.");
+        }
+    }
+
+    // Right-click handler: screen -> ground tile -> A* path -> drive. Replaces any active path (a new
+    // click repaths from the current tile) and cancels debug-injected movement. Unreachable / no-tile
+    // gives the existing interact-feedback toast and does not move.
+    private void HandleClickToMove(Vector2 screenPosition)
+    {
+        if (_client?.IsLoggedIn != true || _pathfinder is null || _client.LocalTile is not TileCoord start)
+        {
+            return;
+        }
+
+        if (!TryPickGroundTile(screenPosition, out var goal))
+        {
+            return;
+        }
+
+        if (!_pathfinder.IsWalkable(goal))
+        {
+            ShowInteractFeedback("Can't reach there.");
+            return;
+        }
+
+        var path = _pathfinder.FindPath(start, goal);
+        if (path.Count == 0)
+        {
+            // start == goal is a harmless no-op (already there); a genuinely unreachable goal gets feedback.
+            if (goal != start)
+            {
+                ShowInteractFeedback("Can't reach there.");
+            }
+
+            return;
+        }
+
+        // A deliberate move command overrides any debug-injected/autopilot motion so the two input
+        // sources never fight over the held intent.
+        _injectedDirection = null;
+        _injectedSingleStep = false;
+        StopAutopilot();
+        _pathDriver.Start(path);
+    }
+
+    // Projects the mouse position onto the y=0 ground plane (the tile plane) via the camera ray and
+    // rounds to the nearest tile. The orthographic camera looks down at the world from a fixed offset, so
+    // a ray/plane intersection is exact. Returns false only if the ray is parallel to / pointing away
+    // from the ground; bounds/walkability of the resulting tile are checked by the caller via the
+    // pathfinder. NOTE FOR VISUAL CHECK: pick accuracy depends on this projection — verify the
+    // tile the avatar walks to matches the tile under the cursor across the screen.
+    private bool TryPickGroundTile(Vector2 screenPosition, out TileCoord tile)
+    {
+        tile = default;
+        if (_camera is null)
+        {
+            return false;
+        }
+
+        var origin = _camera.ProjectRayOrigin(screenPosition);
+        var direction = _camera.ProjectRayNormal(screenPosition);
+        if (Mathf.IsZeroApprox(direction.Y))
+        {
+            return false;
+        }
+
+        var distance = -origin.Y / direction.Y;
+        if (distance < 0f)
+        {
+            return false;
+        }
+
+        var hit = origin + (direction * distance);
+        tile = new TileCoord(Mathf.RoundToInt(hit.X), Mathf.RoundToInt(hit.Z));
+        return true;
+    }
+
+    // Pumps the active click-to-move path each frame from the server-confirmed local tile, returning the
+    // direction to hold (or null to stop). Returns false when no path is driving, so the caller falls back
+    // to keyboard/injected input. Called from SendHeldMovement BEFORE keyboard so WASD can pre-empt.
+    private bool TryGetPathDirection(out Direction8 direction)
+    {
+        direction = default;
+        if (!_pathDriver.IsActive || _client?.LocalTile is not TileCoord confirmed)
+        {
+            return false;
+        }
+
+        var command = _pathDriver.Update(confirmed);
+        switch (command.Action)
+        {
+            case PathDriveAction.Move:
+                direction = command.Direction;
+                return true;
+            case PathDriveAction.Stop:
+            default:
+                // Arrived (or desynced): fall through to "no path direction" so SendHeldMovement emits
+                // moving:false. The driver has already flipped IsActive off.
+                return false;
         }
     }
 
@@ -827,12 +942,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
         }
 
         // Determine the desired intent. While the chat box has focus we force "stopped" so held keys
-        // don't drive the avatar while typing. Real keyboard input takes priority; an injected
-        // (debug-channel) direction fills in otherwise.
+        // don't drive the avatar while typing. Priority: real keyboard input (WASD) > click-to-move path
+        // > injected (debug-channel) direction. WASD pre-empts an active path (cancel below); the path
+        // driver advances on server-confirmed tiles, not prediction.
         var chatFocused = _chatInput?.HasFocus() == true;
         var keyboard = chatFocused ? null : CurrentDirection();
-        var injected = keyboard.HasValue || chatFocused ? null : CurrentInjectedDirection();
-        var direction = keyboard ?? injected;
+
+        // Any manual WASD input cancels an active click-to-move path so the player regains direct control.
+        if (keyboard.HasValue && _pathDriver.IsActive)
+        {
+            _pathDriver.Cancel();
+        }
+
+        Direction8? pathDir = keyboard.HasValue ? null : (TryGetPathDirection(out var pd) ? pd : null);
+        var injected = keyboard.HasValue || pathDir.HasValue || chatFocused ? null : CurrentInjectedDirection();
+        var direction = keyboard ?? pathDir ?? injected;
         var moving = direction.HasValue;
         var resolvedDirection = direction ?? _lastSentDirection;
 
