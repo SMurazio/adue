@@ -5,6 +5,7 @@ param(
     [int]$Port = 7777,
     [string]$ConnectionKey = 'local-dev',
     [string]$AdminNames = '',
+    [int]$ControlPort = 7780,
     [switch]$LogToFile,
     [string]$LogPath = '',
     [string]$ErrorLogPath = '',
@@ -76,6 +77,13 @@ function Start-GodotClient {
     $psi.EnvironmentVariables['MMO_PLAYER_NAME'] = $Name
     $psi.EnvironmentVariables['MMO_GODOT_STARTUP_CHAT'] = "visual check client $Index online"
 
+    # Open the debug control channel on the FIRST client only so the mmo-client-control MCP can drive it
+    # (move/autopilot) and read interp/frame telemetry. Single port -> one controllable client; the second
+    # client stays a plain remote-movement reference. ControlPort=0 disables it.
+    if ($Index -eq 1 -and $ControlPort -gt 0) {
+        $psi.EnvironmentVariables['MMO_DEBUG_CONTROL_PORT'] = [string]$ControlPort
+    }
+
     $process = [System.Diagnostics.Process]::Start($psi)
     $process.Id | Set-Content -LiteralPath $pidFile
     "Godot client '$Name' started as PID $($process.Id)."
@@ -123,5 +131,8 @@ Start-Sleep -Milliseconds 500
 Start-GodotClient -Name $SecondName -Godot $godot -Index 2
 
 "Visual check launched."
+if ($ControlPort -gt 0) {
+    "'$FirstName' has the debug control channel on port $ControlPort -> the mmo-client-control MCP can drive it."
+}
 "Verify: map renders, '$FirstName' and '$SecondName' are both visible, WASD/diagonals glide, remote movement updates."
 "Stop everything with: .\.shared\skills\mmo-dev\scripts\stop-mmo.cmd"
