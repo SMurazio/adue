@@ -24,12 +24,17 @@ public sealed class EntityVisualFactory
     // Stage-1 dispatch. Resource subtype is still inferred from the replicated DisplayName string (the S58
     // fragility — no kind/subtype field in the protocol yet; that is the Stage 2 VisualArchetype on the wire).
     // S73: when the F5 "Debug facing box" toggle is on, a Player resolves to the debug box+arrow archetype
-    // instead of the model rig — diagnostic-only, default off.
-    public static VisualArchetype ChooseArchetype(EntityRenderState state, bool debugFacingBox = false)
+    // instead of the model rig — diagnostic-only, default off. S96: when the F5 "Cato sprite (player)" toggle is
+    // on (and the debug box is off), a Player resolves to the Cato AnimatedSprite3D billboard instead. Precedence
+    // for a Player: DebugFacingBox > CatoSprite > Player.
+    public static VisualArchetype ChooseArchetype(
+        EntityRenderState state, bool debugFacingBox = false, bool useCatoSprite = false)
     {
         if (state.Kind == EntityKind.Player)
         {
-            return debugFacingBox ? VisualArchetype.DebugFacingBox : VisualArchetype.Player;
+            return debugFacingBox
+                ? VisualArchetype.DebugFacingBox
+                : useCatoSprite ? VisualArchetype.CatoSprite : VisualArchetype.Player;
         }
 
         if (state.Kind == EntityKind.Resource)
@@ -71,6 +76,7 @@ public sealed class EntityVisualFactory
         {
             VisualArchetype.Player => PlayerVisual.LoadModelScene() is null ? null : new PlayerVisual(),
             VisualArchetype.DebugFacingBox => new DebugFacingBoxVisual(),
+            VisualArchetype.CatoSprite => CatoSpriteVisual.LoadFrames() is null ? null : new CatoSpriteVisual(),
             VisualArchetype.Rock => ModelVisual.CreateRock(state),
             VisualArchetype.Tree => ModelVisual.CreateTree(),
             VisualArchetype.Portal => ModelVisual.CreatePortal(),

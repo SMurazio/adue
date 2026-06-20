@@ -54,6 +54,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _fpsUncapped;
 	private CheckBox? _frameCsvCheck;
 	private CheckBox? _debugFacingBoxCheck;
+	private CheckBox? _catoSpriteCheck;
 	private CheckBox? _predictionTilesCheck;
 	// S89: F5 "Cosmetic lead (model B)" toggle. Flips the LOCAL player's MmoClient.RenderMode between model A
 	// (prediction, default) and model B (cosmetic lead) LIVE — no restart. Admin-gated like the rest of F5.
@@ -787,6 +788,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(debugFacingBox);
 		_debugFacingBoxCheck = debugFacingBox;
 
+		// S96 live toggle — flips on click, no Apply needed: render every Player (local + remote) as the "Cato"
+		// AnimatedSprite3D billboard (idle/walk PNG frames, side-view directional flip) instead of the character
+		// model. Toggling rebuilds already-spawned players so the swap is immediate. Falls back to the box if the
+		// Cato art isn't imported yet.
+		var catoSprite = new CheckBox { Name = "CatoSprite", Text = "Cato sprite (player)", ButtonPressed = _tuning.DebugCatoSprite };
+		catoSprite.AddThemeFontSizeOverride("font_size", 13);
+		catoSprite.Toggled += ApplyCatoSprite;
+		rows.AddChild(catoSprite);
+		_catoSpriteCheck = catoSprite;
+
 		// S79 live debug toggle — flips on click, no Apply needed: paint the local player's PREDICTED tile (green)
 		// and CONFIRMED/server tile (magenta) as flat ground markers, refreshed each frame. They overlap when in
 		// sync and separate under lag, so the human can SEE the residual movement divergence while walking. Off
@@ -855,6 +866,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplyDebugFacingBox(bool enabled)
 	{
 		_tuning.DebugFacingBox = enabled;
+		_renderer?.RebuildPlayerVisuals();
+	}
+
+	// S96 live toggle (F5 "Cato sprite (player)"). Flip the shared VisualTuning flag and rebuild the
+	// already-spawned player visuals so the swap (model rig <-> Cato AnimatedSprite3D billboard) lands instantly —
+	// the renderer releases each active player back to its pool and the next Sync re-acquires it under the new
+	// flag (the factory picks CatoSprite for a player, falling back to the box if the Cato art isn't imported).
+	// Off restores the normal PlayerVisual model. DebugFacingBox takes precedence when both are on.
+	private void ApplyCatoSprite(bool enabled)
+	{
+		_tuning.DebugCatoSprite = enabled;
 		_renderer?.RebuildPlayerVisuals();
 	}
 

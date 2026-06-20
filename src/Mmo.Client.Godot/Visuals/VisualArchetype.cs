@@ -13,6 +13,10 @@ public enum VisualArchetype
     // "Debug facing box" toggle is on. Pooled separately from Player so a parked debug box never reuses (or is
     // reused as) a real PlayerVisual.
     DebugFacingBox,
+    // S96: a Player rendered as the "Cato" AnimatedSprite3D billboard (idle/walk PNG frames) instead of the
+    // model rig, chosen when the F5 "Cato sprite (player)" toggle is on. Pooled separately from Player so a
+    // parked Cato is only reused for another Cato, never mixed with a real PlayerVisual.
+    CatoSprite,
     Rock,
     Tree,
     Portal,

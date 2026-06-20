@@ -39,6 +39,13 @@ public sealed class VisualTuning
     // player visuals on toggle so the swap is immediate.
     public bool DebugFacingBox { get; set; }
 
+    // S96: when true, every Player-kind entity (local + remote) renders as the "Cato" AnimatedSprite3D billboard
+    // (idle/walk PNG frames, side-view directional flip) instead of the character model. Flipped live by the F5
+    // "Cato sprite (player)" checkbox; default off = zero render change. The factory reads this when choosing a
+    // player's archetype (precedence: DebugFacingBox > CatoSprite > Player); the EntityRenderer rebuilds existing
+    // player visuals on toggle so the swap is immediate.
+    public bool DebugCatoSprite { get; set; }
+
     // S79 diagnostic: when true, the local player's PREDICTED tile and CONFIRMED/server tile are each painted
     // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
     // frame. They overlap when prediction and server agree and separate visibly under lag, so the human can
