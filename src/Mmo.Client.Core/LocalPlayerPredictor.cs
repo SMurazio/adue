@@ -78,6 +78,23 @@ public sealed class LocalPlayerPredictor
     // tick boundaries processed per Tick call.
     private const int MaxTicksPerCall = 8;
 
+    // S82 — the maximum number of accepted steps the prediction may run AHEAD of the latest server-confirmed
+    // step-seq before it must HOLD and wait for the next confirm. The disease this caps: Tick runs every frame
+    // (~16 ms) but Reconcile only lands per snapshot (~50 ms), so during rapid turn-spam the predictor can
+    // accept several un-reconciled steps between reconciles and a per-turn misprediction COMPOUNDS — the lead
+    // grew to ~6 in the deterministic repro and, because every while-moving confirm benignly MATCHES the step it
+    // confirms, the idle/stop clause never fires while the key stays held, so the lead never recovered (the
+    // stuck-state latch). Capping the lead at a small N (the in-flight amount at ~0 latency is ~1-2 steps) means
+    // a confirm can ALWAYS pull the prediction back: the predictor never advances more than N past the truth, so
+    // a single reconcile re-anchors it. At the bound Tick stops accepting steps for that frame WITHOUT consuming
+    // the cooldown (it leaves _nextEligibleTick on the un-fired boundary), so the very next confirm that raises
+    // the bound lets the held step fire — no double-step, no per-frame rewind. ONLY engaged once the predictor
+    // has been reconciled at least once (_hasReconciled): the pure-stepping parity tests never reconcile and must
+    // stay unbounded so they remain faithful tick-grid parity proofs; the real client reconciles on the first
+    // snapshot, so the bound arms immediately. 2 covers the steady-state in-flight lead with a tile of slack so a
+    // normal LAN round-trip never clips, while still capping a spam runaway tightly enough that one confirm heals.
+    private const uint MaxPredictedLeadSteps = 2;
+
     private readonly Func<TileCoord, bool> _isWalkable;
 
     // Ring of the last HistoryCapacity accepted steps. _history[seq % HistoryCapacity] holds the entry whose
@@ -341,6 +358,22 @@ public sealed class LocalPlayerPredictor
                     _facing = _direction;
                     _nextEligibleTick = actionTick + _turnDelayTicks;
                     continue;
+                }
+
+                // S82 LEAD BOUND: once reconciled at least once, never accept a step that would push the
+                // prediction more than MaxPredictedLeadSteps past the latest confirmed server step-seq. At the
+                // bound HOLD: break out WITHOUT advancing _nextEligibleTick (the cooldown is NOT consumed), so the
+                // next confirm that raises _highestReconciledStepSeq lets this same boundary fire — capping the
+                // runaway lead so a single reconcile always re-anchors the prediction (the stuck-state latch fix).
+                // The check sits BEFORE the turn/walkable branches because a turn does not advance the step-seq
+                // (so it can never breach the lead) and we must still process turns even while holding at the
+                // bound; only an accepted MOVE is gated.
+                if (_hasReconciled
+                    && _direction == _facing
+                    && _predictedStepSeq >= _highestReconciledStepSeq
+                    && _predictedStepSeq - _highestReconciledStepSeq >= MaxPredictedLeadSteps)
+                {
+                    break;
                 }
 
                 var delta = _direction.Delta();

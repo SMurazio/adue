@@ -693,6 +693,151 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
+    public void SpamThenRest_AgainstRealWorldEntity_LeadStaysBounded_AndReconvergesAtRest()
+    {
+        // S82 — THE STUCK-STATE LATCH. The full real-client loop, not the pure-stepping parity sweep: the
+        // predictor Ticks every frame (~16 ms) but Reconciles only per snapshot (~50 ms). During rapid down/left
+        // (S/W) spam the predictor accepts several un-reconciled steps between reconciles and the per-turn
+        // misprediction COMPOUNDS — pre-fix the lead (PredictedStepSeq - server StepSequence) ran away to ~6 and,
+        // because every while-moving confirm benignly MATCHES the step it confirms, the idle/stop clause never
+        // fired while the key stayed held, so the gap NEVER recovered (the latch the human reproduced by spamming
+        // down/left). This test FAILS before the lead bound (the lead assertion trips at ~6) and PASSES after
+        // (capped at MaxPredictedLeadSteps), and then — once the key is released and steady stopped snapshots
+        // arrive — asserts the predicted tile re-converges EXACTLY to the server tile within a few snapshots.
+        const int tickRate = 20;
+        const double tickMs = 1000d / tickRate;   // 50 ms server tick
+        const uint stepCooldownTicks = 3;         // 150 ms
+        const uint turnDelayTicks = 2;            // 100 ms
+        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
+        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
+        const uint leadBound = 2; // MaxPredictedLeadSteps
+
+        var grid = new TileGrid(256, 256, []);
+        var start = new TileCoord(100, 100);
+        var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.S,
+            "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var predictor = new LocalPlayerPredictor(start, Direction8.S, stepCadenceMs,
+            t => grid.IsWalkable(t), turnDelayMs, tickMs);
+
+        // Worst-case timing from the S82 sweep: a ~30 fps frame (33 ms) is SLOWER than the 50 ms tick is fast,
+        // so several tick boundaries elapse per Tick call between the ~50 ms reconciles — that is exactly what
+        // lets the per-turn misprediction compound. Pre-fix this config drove the lead to ~13.
+        const double frameMs = 33d;     // ~30 fps client poll
+        const double netDelayMs = 10d;  // one-way delay for intents up and snapshots down
+        const int spamUntilMs = 3000;   // rapid S/W flips through here
+        const int releaseAtMs = 3400;   // settle S a moment, then release the key
+        const int totalMs = 6000;       // run on with steady stopped snapshots so it can re-converge
+        const int flipEveryMs = 30;     // off the 50 ms grid
+
+        // What the client's held intent is at wall time ms: spam S<->W, then settle S, then release.
+        (bool moving, Direction8 dir) ClientIntentAt(double ms)
+        {
+            if (ms >= releaseAtMs) return (false, Direction8.S);
+            if (ms >= spamUntilMs) return (true, Direction8.S);
+            var flips = (int)(ms / flipEveryMs);
+            return (true, (flips % 2 == 0) ? Direction8.S : Direction8.W);
+        }
+
+        // Intents in flight to the server (delivered after netDelayMs); snapshots in flight to the client.
+        var pendingIntents = new List<(double arriveMs, bool moving, Direction8 dir)>();
+        var pendingSnaps = new List<(double arriveMs, long serverTick, TileCoord tile, Direction8 facing, uint stepSeq)>();
+        var serverMoving = true;
+        var serverHeld = Direction8.S;
+
+        // Press at t=0 (both the predictor and the wire).
+        predictor.SetIntent(true, Direction8.S, TimeSpan.Zero);
+        pendingIntents.Add((netDelayMs, true, Direction8.S));
+        var clientMoving = true;
+        var clientHeld = Direction8.S;
+
+        uint nextServerTick = 0;
+        double nextFrame = 0;
+        var maxLeadDuringSpam = 0;
+
+        for (double ms = 0; ms <= totalMs; ms += 1)
+        {
+            // ---- client samples its input each ms; sends on change (keydown/keyup/direction change) ----
+            var (wantMoving, wantDir) = ClientIntentAt(ms);
+            if (wantMoving != clientMoving || (wantMoving && wantDir != clientHeld))
+            {
+                predictor.SetIntent(wantMoving, wantDir, TimeSpan.FromMilliseconds(ms));
+                pendingIntents.Add((ms + netDelayMs, wantMoving, wantDir));
+                clientMoving = wantMoving;
+                clientHeld = wantDir;
+            }
+
+            // ---- intents arrive at the server ----
+            for (var i = pendingIntents.Count - 1; i >= 0; i--)
+            {
+                if (pendingIntents[i].arriveMs <= ms)
+                {
+                    serverMoving = pendingIntents[i].moving;
+                    if (pendingIntents[i].moving)
+                    {
+                        serverHeld = pendingIntents[i].dir;
+                    }
+
+                    pendingIntents.RemoveAt(i);
+                }
+            }
+
+            // ---- server steps on its tick grid + emits a snapshot each tick ----
+            while (nextServerTick * tickMs <= ms)
+            {
+                if (serverMoving)
+                {
+                    entity.TryStep(serverHeld, nextServerTick, stepCooldownTicks, turnDelayTicks, grid);
+                }
+
+                pendingSnaps.Add((nextServerTick * tickMs + netDelayMs, nextServerTick + 1000, entity.Tile, entity.Facing, entity.StepSequence));
+                nextServerTick++;
+            }
+
+            // ---- client frame: PollEvents (calibrate+reconcile each delivered snapshot) THEN Tick ----
+            if (ms >= nextFrame)
+            {
+                for (var i = 0; i < pendingSnaps.Count; i++)
+                {
+                    if (pendingSnaps[i].arriveMs <= ms)
+                    {
+                        var snap = pendingSnaps[i];
+                        predictor.CalibrateToServerTick(snap.serverTick, TimeSpan.FromMilliseconds(ms));
+                        predictor.Reconcile(snap.tile, snap.stepSeq, TimeSpan.FromMilliseconds(ms));
+                        predictor.ConfirmFacing(snap.facing);
+                        pendingSnaps.RemoveAt(i);
+                        i--;
+                    }
+                }
+
+                predictor.Tick(TimeSpan.FromMilliseconds(ms));
+                nextFrame += frameMs;
+
+                // THE BUG SIGNAL: during the spam the prediction's lead over the server-confirmed step-seq must
+                // stay bounded. Pre-fix it climbed to ~6 here (and never recovered while the key was held).
+                if (ms < spamUntilMs)
+                {
+                    var lead = (int)((long)predictor.PredictedStepSeq - entity.StepSequence);
+                    if (lead > maxLeadDuringSpam)
+                    {
+                        maxLeadDuringSpam = lead;
+                    }
+                }
+            }
+        }
+
+        // (1) The runaway is capped: the prediction never led the server-confirmed step-seq by more than the
+        // bound during the spam. This is the assertion that FAILS pre-fix (the lead reached ~6).
+        Assert.True(maxLeadDuringSpam <= (int)leadBound,
+            $"prediction lead ran away during spam: max {maxLeadDuringSpam} > bound {leadBound}");
+
+        // (2) After the key is released and steady stopped snapshots have arrived, the prediction has fully
+        // re-converged to the server's authoritative tile and step-seq — no permanent latch.
+        Assert.False(predictor.IsMoving);
+        Assert.Equal(entity.Tile, predictor.PredictedTile);
+        Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
+    }
+
+    [Fact]
     public void TurnPathParity_AgainstRealWorldEntity_DiagonalCornerCutRejectedIdentically()
     {
         // S75 corner-cut parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
