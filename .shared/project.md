@@ -81,6 +81,12 @@ for a review request.
 - Measure before optimizing.
 - Use the repo-local SDK at `.tools\dotnet\dotnet.exe`.
 - Use `.shared\skills\mmo-dev\scripts\run-checks.cmd` for the standard build/test check.
+- **Diagnostics are live, in-client toggles — not launch flags.** Any opt-in debug utility (frame-log
+  CSV dump, uncap-FPS, motion/perf overlays, future tracing) is exposed as a runtime control — an F5
+  visual-panel checkbox or a hotkey — that flips on/off **while the client is running**. Do NOT gate a
+  diagnostic behind a launch-time env var or anything that needs a client or server restart. Minimize
+  restarts: every avoided client/server restart tightens the debug loop. (Precedents: the F5 uncap-FPS
+  checkbox; the F5 "Frame log (CSV)" toggle, S68.)
 
 ## Safe Local Execution (binds BOTH agents)
 
