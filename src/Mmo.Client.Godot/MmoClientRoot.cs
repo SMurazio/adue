@@ -43,6 +43,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private const float CameraZoomStep = 2.5f;
 	private CheckBox? _uncapFpsCheck;
 	private bool _fpsUncapped;
+	private CheckBox? _frameCsvCheck;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -206,6 +207,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (!string.IsNullOrWhiteSpace(ReadString("MMO_DEBUG_FRAME_LOG", string.Empty)))
 		{
 			OpenFrameCsv();
+			_frameCsvCheck?.SetPressedNoSignal(true);
 		}
 		// MMO_UNCAP_FPS: set to any value to START with vsync off / fps uncapped (perf testing — shows true
 		// frame-time headroom in the F3 HUD). Off by default; toggle live anytime via the F5 visual panel
@@ -705,6 +707,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(uncapFps);
 		_uncapFpsCheck = uncapFps;
 
+		// Live frame-CSV toggle — flips on click, no Apply needed: start/stop the per-frame .run/client-frames-<player>.csv
+		// dump while running (S67 16-column motion trace). Reflects current state (checked if MMO_DEBUG_FRAME_LOG
+		// auto-started it); toggling on opens a fresh file, toggling off flushes + disposes the writer.
+		var frameCsv = new CheckBox { Name = "FrameCsv", Text = "Frame log (CSV)", ButtonPressed = _frameCsv is not null };
+		frameCsv.AddThemeFontSizeOverride("font_size", 13);
+		frameCsv.Toggled += ApplyFrameCsvDump;
+		rows.AddChild(frameCsv);
+		_frameCsvCheck = frameCsv;
+
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
@@ -725,6 +736,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			: DisplayServer.VSyncMode.Enabled);
 		Engine.MaxFps = 0;
 		_fpsUncapped = uncapped;
+	}
+
+	// Live frame-CSV toggle, shared by the F5 checkbox. On = open a fresh .run/client-frames-<player>.csv and start
+	// appending per-frame rows; off = flush + dispose the writer so the partial capture is saved. OpenFrameCsv already
+	// truncates (append: false) and CloseFrameCsv flushes, so each toggle-on starts a clean trace. Mirrors the
+	// MMO_DEBUG_FRAME_LOG launch path; AppendFrameCsvRow no-ops while the writer is null.
+	private void ApplyFrameCsvDump(bool enabled)
+	{
+		if (enabled)
+		{
+			OpenFrameCsv();
+		}
+		else
+		{
+			CloseFrameCsv();
+		}
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
