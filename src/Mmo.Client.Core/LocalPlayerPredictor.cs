@@ -106,6 +106,22 @@ public sealed class LocalPlayerPredictor
     private bool _moving;
     private Direction8 _direction;
 
+    // S87 — OPTIONAL input-lag matching (default 0 = instant, byte-identical to the pre-S87 behaviour). The
+    // predictor flips its held direction the instant the player inputs, but the server only sees that change
+    // ~one arrival-lag later (the MoveIntent crosses the wire + lands in its next tick poll), so during direction
+    // spam the two make different turn-vs-step decisions for the SAME tick and the prediction diverges a tile
+    // (S83 bounds + corrects it — the visible spam wobble). When _inputLagTicks > 0 we DELAY the effect of a
+    // MID-MOVE direction change by that many ticks so the predictor samples the held direction at the SAME tick
+    // the server does, cancelling the skew at the source. The idle->move START is recorded backdated by the lag
+    // (so a fresh press stays crisp — only changes while already moving pay it). The effective direction at each
+    // action boundary is sampled from a small input history keyed by tick. Live-tunable from the client so the
+    // feel can be A/B'd without a restart.
+    private const int InputHistoryCapacity = 32;
+    private readonly (long tick, Direction8 dir)[] _inputHistory = new (long, Direction8)[InputHistoryCapacity];
+    private int _inputHistoryHead;   // next write slot (ring)
+    private int _inputHistoryCount;
+    private uint _inputLagTicks;
+
     // ---- Tick grid (S81) -------------------------------------------------------------------------------
     // The server's tick interval in ms; the unit of the whole gate. cadence/turn-delay are expressed as an
     // INTEGER number of these ticks so the predictor steps exactly where WorldEntity.TryStep does.
@@ -224,6 +240,19 @@ public sealed class LocalPlayerPredictor
         RecomputeTickCounts();
     }
 
+    // S87: the input-lag (in whole server ticks) applied to MID-MOVE direction changes so the predictor mirrors
+    // the server's one-arrival-lag-delayed view of the held intent — kills the direction-spam wobble at the
+    // source, at the cost of a slightly softer turn. 0 = instant (default, unchanged). Live-tunable from the
+    // client so the feel can be A/B'd without a restart; takes effect on the next direction change (a still-empty
+    // history falls back to the current held direction, so enabling mid-move is a benign no-op until the next
+    // flip).
+    public uint InputLagTicks => _inputLagTicks;
+
+    public void SetInputLagTicks(uint ticks)
+    {
+        _inputLagTicks = ticks;
+    }
+
     // S81: re-anchors the wall-clock → serverTick calibration on a snapshot whose authoritative tick is known.
     // serverTick is the tick the snapshot was produced at; receivedAt is when it arrived (wall clock). We want
     // serverTick(receivedAt) to read serverTick. A RAW re-base (set ref = serverTick @ receivedAt) would jump on
@@ -299,6 +328,20 @@ public sealed class LocalPlayerPredictor
                 _nextEligibleTick = _nextEligibleTick.HasValue
                     ? Math.Max(_nextEligibleTick.Value, pressTick)
                     : pressTick;
+                // S87: a fresh idle->move records the start direction BACKDATED by the lag so the first step is
+                // immediately effective (no lag on a fresh press — only mid-move changes pay it). No-op at lag 0.
+                if (_inputLagTicks > 0)
+                {
+                    _inputHistoryHead = 0;
+                    _inputHistoryCount = 0;
+                    RecordInput(EstimateTick(now.TotalMilliseconds) - _inputLagTicks, direction);
+                }
+            }
+            else if (_inputLagTicks > 0 && direction != _direction)
+            {
+                // S87: a MID-MOVE direction change is recorded at the current tick so EffectiveDirectionAt samples
+                // it _inputLagTicks later, mirroring the server's delayed view of the new intent.
+                RecordInput(EstimateTick(now.TotalMilliseconds), direction);
             }
 
             _moving = true;
@@ -333,25 +376,30 @@ public sealed class LocalPlayerPredictor
             {
                 var actionTick = _nextEligibleTick.Value;
 
+                // S87: the held direction IN EFFECT at this boundary — with input-lag, the input the player held
+                // _inputLagTicks ago (so we decide turn-vs-step on the same direction the server does); with lag 0
+                // it is just the current held direction (today's behaviour, zero overhead).
+                var dir = EffectiveDirectionAt(actionTick);
+
                 // Turn-then-move (S59) + turn delay (S63): a step in a direction we don't already face just
                 // TURNS (no tile move). The next action is freed after turnDelayTicks (mirrors the server
                 // stamping _nextEligibleTick = turnTick + turnDelayTicks), so whipping the cursor rotates
                 // quickly while settling steps at the normal cadence.
-                if (_direction != _facing)
+                if (dir != _facing)
                 {
-                    _facing = _direction;
+                    _facing = dir;
                     _nextEligibleTick = actionTick + _turnDelayTicks;
                     continue;
                 }
 
-                var delta = _direction.Delta();
+                var delta = dir.Delta();
                 var target = _predictedTile.Offset(delta.X, delta.Y);
                 if (!IsStepWalkable(delta, target))
                 {
                     // Blocked: hold at the wall. The cooldown is NOT consumed (the server only advances its
                     // step tick on an accepted move), so we keep facing and re-test the NEXT tick — advance
                     // _nextEligibleTick by one tick so the loop makes progress without consuming the cooldown.
-                    _facing = _direction;
+                    _facing = dir;
                     _nextEligibleTick = actionTick + 1;
                     continue;
                 }
@@ -362,7 +410,7 @@ public sealed class LocalPlayerPredictor
                 // continuously) toward the new tile center, over one cadence, beginning at the boundary's
                 // wall-clock time so a late frame doesn't shorten the tween.
                 var stepStartedAt = TimeSpan.FromMilliseconds(TickToWallMs(actionTick));
-                AdvanceOneStep(_direction, stepStartedAt, startTween: true, tweenFrom: SampleInternal(now), now);
+                AdvanceOneStep(dir, stepStartedAt, startTween: true, tweenFrom: SampleInternal(now), now);
                 _nextEligibleTick = actionTick + _stepCooldownTicks;
                 changed = true;
             }
@@ -548,7 +596,7 @@ public sealed class LocalPlayerPredictor
         var correctedNowTick = EstimateTick(now.TotalMilliseconds);
         if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value <= correctedNowTick)
         {
-            var actionDelay = _direction != _facing ? _turnDelayTicks : _stepCooldownTicks;
+            var actionDelay = EffectiveDirectionAt(correctedNowTick) != _facing ? _turnDelayTicks : _stepCooldownTicks;
             _nextEligibleTick = correctedNowTick + actionDelay;
         }
 
@@ -590,6 +638,42 @@ public sealed class LocalPlayerPredictor
         }
 
         return true;
+    }
+
+    // S87: append an input (the held direction at a server tick) to the bounded history ring.
+    private void RecordInput(long tick, Direction8 dir)
+    {
+        _inputHistory[_inputHistoryHead] = (tick, dir);
+        _inputHistoryHead = (_inputHistoryHead + 1) % InputHistoryCapacity;
+        if (_inputHistoryCount < InputHistoryCapacity)
+        {
+            _inputHistoryCount++;
+        }
+    }
+
+    // S87: the held direction IN EFFECT at an action boundary. With input-lag this is the input the player held
+    // (_inputLagTicks) ago — the latest recorded input at or before actionTick - lag — mirroring the server acting
+    // on the intent it received one arrival-lag earlier; an input older than the ring window or an empty ring
+    // falls back to the current held direction. With lag 0 it is simply the current held direction (the pre-S87
+    // path, zero overhead and zero history writes).
+    private Direction8 EffectiveDirectionAt(long actionTick)
+    {
+        if (_inputLagTicks == 0)
+        {
+            return _direction;
+        }
+
+        var sampleTick = actionTick - _inputLagTicks;
+        for (var i = 1; i <= _inputHistoryCount; i++)
+        {
+            var idx = (_inputHistoryHead - i + InputHistoryCapacity) % InputHistoryCapacity;
+            if (_inputHistory[idx].tick <= sampleTick)
+            {
+                return _inputHistory[idx].dir;
+            }
+        }
+
+        return _direction;
     }
 
     // ---- Tick-grid helpers (S81) -----------------------------------------------------------------------

@@ -57,6 +57,7 @@ public sealed class MmoClient : IDisposable
     // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
     private bool _predictionEnabled = true;
+    private uint _predictionInputLagTicks;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -197,6 +198,21 @@ public sealed class MmoClient : IDisposable
         set => _predictionEnabled = value;
     }
 
+    // S87: the input-lag (whole server ticks) the local predictor applies to MID-MOVE direction changes so it
+    // mirrors the server's one-arrival-lag-delayed view of the held intent — trading a slightly softer turn for
+    // killing the direction-spam wobble at the source. 0 = instant (default). Live-tunable (an F5/hotkey client
+    // control) for an A/B feel check without a restart; applied immediately to the live predictor and re-applied
+    // whenever a fresh predictor attaches.
+    public uint PredictionInputLagTicks
+    {
+        get => _predictionInputLagTicks;
+        set
+        {
+            _predictionInputLagTicks = value;
+            _predictor?.SetInputLagTicks(value);
+        }
+    }
+
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
     // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
     // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
@@ -259,6 +275,9 @@ public sealed class MmoClient : IDisposable
         }
 
         _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay(), ResolveTickMs());
+        // S87: carry the live input-lag setting onto the freshly attached predictor (it defaults to 0 on a new
+        // predictor, but a respawn/re-attach must keep whatever the player dialed in).
+        _predictor.SetInputLagTicks(_predictionInputLagTicks);
     }
 
     // Resolves the predictor's turn delay (ms): the ServerHello-advertised, tick-quantised value so the
