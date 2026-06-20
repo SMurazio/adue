@@ -203,6 +203,13 @@ public sealed class MmoClient : IDisposable
     // server will reject from its authoritative position.
     public TileCoord? PredictedLocalTile => _predictor?.PredictedTile;
 
+    // S79 diagnostic accessor: the local player's predicted tile when prediction is active, else the
+    // confirmed/server tile. Unlike PredictedLocalTile (which is null whenever no predictor is attached),
+    // this always yields a usable tile once the local entity exists, so the F5 "Prediction tiles" overlay
+    // can paint the predicted marker without special-casing the pre-prediction path — when prediction is
+    // off/not yet attached the predicted marker simply coincides with the confirmed one.
+    public TileCoord? LocalPredictedTile => _predictor?.PredictedTile ?? LocalTile;
+
     public void Disconnect()
     {
         if (_disposed)

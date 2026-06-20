@@ -39,6 +39,14 @@ public sealed class VisualTuning
     // player visuals on toggle so the swap is immediate.
     public bool DebugFacingBox { get; set; }
 
+    // S79 diagnostic: when true, the local player's PREDICTED tile and CONFIRMED/server tile are each painted
+    // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
+    // frame. They overlap when prediction and server agree and separate visibly under lag, so the human can
+    // SEE the residual movement divergence in real time. Flipped live by the F5 "Prediction tiles" checkbox;
+    // default off = zero render change (the markers are hidden and not repositioned). MmoClientRoot owns the
+    // two marker nodes and reads this flag each _Process frame; nothing in the visual hierarchy reads it.
+    public bool DebugPredictionTiles { get; set; }
+
     // Shared label font/outline styling (constant; not panel-tunable). Kept here so every visual builds an
     // identical Label3D without duplicating the magic numbers.
     public const int LabelFontSize = 64;

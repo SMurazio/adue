@@ -45,6 +45,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _fpsUncapped;
 	private CheckBox? _frameCsvCheck;
 	private CheckBox? _debugFacingBoxCheck;
+	private CheckBox? _predictionTilesCheck;
+	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
+	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
+	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
+	private MeshInstance3D? _predictedTileMarker;
+	private MeshInstance3D? _confirmedTileMarker;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -264,6 +270,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateEntities();
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
+		UpdatePredictionTileMarkers();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
 		var t4 = Time.GetTicksUsec();
@@ -737,6 +744,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(debugFacingBox);
 		_debugFacingBoxCheck = debugFacingBox;
 
+		// S79 live debug toggle — flips on click, no Apply needed: paint the local player's PREDICTED tile (green)
+		// and CONFIRMED/server tile (magenta) as flat ground markers, refreshed each frame. They overlap when in
+		// sync and separate under lag, so the human can SEE the residual movement divergence while walking. Off
+		// hides the markers (and skips repositioning them) so the default path is unchanged.
+		var predictionTiles = new CheckBox { Name = "PredictionTiles", Text = "Prediction tiles", ButtonPressed = _tuning.DebugPredictionTiles };
+		predictionTiles.AddThemeFontSizeOverride("font_size", 13);
+		predictionTiles.Toggled += ApplyPredictionTiles;
+		rows.AddChild(predictionTiles);
+		_predictionTilesCheck = predictionTiles;
+
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
@@ -784,6 +801,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	{
 		_tuning.DebugFacingBox = enabled;
 		_renderer?.RebuildPlayerVisuals();
+	}
+
+	// S79 live debug toggle (F5 "Prediction tiles"). Flip the shared flag and ensure the two ground markers
+	// exist (created lazily on first enable). When off, hide them immediately so nothing is drawn and the
+	// per-frame UpdatePredictionTileMarkers reposition is skipped; when on, the next _Process frame positions
+	// and shows them. Admin-gated like the rest of F5 (the panel only shows for an Admin session).
+	private void ApplyPredictionTiles(bool enabled)
+	{
+		_tuning.DebugPredictionTiles = enabled;
+		if (enabled)
+		{
+			EnsurePredictionTileMarkers();
+		}
+		else if (_predictedTileMarker is not null)
+		{
+			_predictedTileMarker.Visible = false;
+			if (_confirmedTileMarker is not null)
+			{
+				_confirmedTileMarker.Visible = false;
+			}
+		}
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
@@ -1815,6 +1853,90 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private static Vector3 TileToWorld(TileCoord tile, float y = 0f)
 	{
 		return new Vector3(tile.X, y, tile.Y);
+	}
+
+	// S79: shared flat quad for the two prediction-tile markers (one tile, slightly inset so adjacent markers
+	// read as distinct). Reused by both markers — one mesh, two material overrides. Built once on first enable.
+	private static readonly PlaneMesh PredictionTileMarkerMesh = new() { Size = new Vector2(0.9f, 0.9f) };
+	// Predicted = green, confirmed/server = magenta. Unshaded + transparent so they sit flat on the ground and
+	// stay legible over any terrain; magenta is deliberately off the terrain palette. The confirmed marker hovers
+	// a hair lower than the predicted one so when they coincide the predicted (green) wins the z-fight rather than
+	// flickering — the human still sees green-over-magenta as "in sync".
+	private static readonly StandardMaterial3D PredictedTileMarkerMaterial = MarkerMaterial(new Color(0.20f, 0.95f, 0.25f, 0.55f));
+	private static readonly StandardMaterial3D ConfirmedTileMarkerMaterial = MarkerMaterial(new Color(0.95f, 0.10f, 0.80f, 0.55f));
+
+	private static StandardMaterial3D MarkerMaterial(Color color)
+	{
+		return new StandardMaterial3D
+		{
+			AlbedoColor = color,
+			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+			CullMode = BaseMaterial3D.CullModeEnum.Disabled
+		};
+	}
+
+	// S79: create the two prediction-tile markers under the world root on first toggle-on. Idempotent — once
+	// built it just leaves them in place. They start hidden; UpdatePredictionTileMarkers shows + positions them
+	// each frame while the toggle is on. No-op until the world root exists (pre-zone).
+	private void EnsurePredictionTileMarkers()
+	{
+		if (_worldRoot is null || _predictedTileMarker is not null)
+		{
+			return;
+		}
+
+		_confirmedTileMarker = new MeshInstance3D
+		{
+			Name = "ConfirmedTileMarker",
+			Mesh = PredictionTileMarkerMesh,
+			MaterialOverride = ConfirmedTileMarkerMaterial,
+			Visible = false
+		};
+		_predictedTileMarker = new MeshInstance3D
+		{
+			Name = "PredictedTileMarker",
+			Mesh = PredictionTileMarkerMesh,
+			MaterialOverride = PredictedTileMarkerMaterial,
+			Visible = false
+		};
+		_worldRoot.AddChild(_confirmedTileMarker);
+		_worldRoot.AddChild(_predictedTileMarker);
+	}
+
+	// S79: per-frame reposition of the predicted (green) + confirmed (magenta) ground markers at the local
+	// player's predicted and confirmed tiles. Called every _Process frame; cheap no-op (early return) when the
+	// toggle is off — markers stay hidden and nothing is touched. When on, both markers track the two tiles
+	// every frame: they overlap when in sync and separate visibly under lag. Hidden whenever the local tile is
+	// unknown (pre-login / between snapshots) so a stale marker never lingers off the player.
+	private void UpdatePredictionTileMarkers()
+	{
+		if (!_tuning.DebugPredictionTiles)
+		{
+			return;
+		}
+
+		EnsurePredictionTileMarkers();
+		if (_predictedTileMarker is null || _confirmedTileMarker is null)
+		{
+			return;
+		}
+
+		var confirmed = _client?.LocalTile;
+		var predicted = _client?.LocalPredictedTile;
+		if (confirmed is not TileCoord confirmedTile || predicted is not TileCoord predictedTile)
+		{
+			_predictedTileMarker.Visible = false;
+			_confirmedTileMarker.Visible = false;
+			return;
+		}
+
+		// Just above the ground (ground top sits at y=0; the grid plane at 0.02) so the markers read clearly
+		// over terrain. Predicted sits a touch higher than confirmed so green wins the overlap z-fight.
+		_confirmedTileMarker.Position = TileToWorld(confirmedTile, 0.04f);
+		_predictedTileMarker.Position = TileToWorld(predictedTile, 0.05f);
+		_confirmedTileMarker.Visible = true;
+		_predictedTileMarker.Visible = true;
 	}
 
 	private static ShaderMaterial CreateGridMaterial()
