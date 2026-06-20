@@ -46,6 +46,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private CheckBox? _frameCsvCheck;
 	private CheckBox? _debugFacingBoxCheck;
 	private CheckBox? _predictionTilesCheck;
+	private CheckBox? _inputLagMatchCheck;
 	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
 	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
 	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
@@ -760,6 +761,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
+		// S87 live A/B toggle — flips on click, no Apply needed: ON sets the predictor's input-lag to 1 tick so a
+		// MID-MOVE direction change takes effect on the same tick the server acts on it, cancelling the
+		// direction-spam wobble at the source (at the cost of a slightly softer turn); OFF (default) restores the
+		// instant-prediction behaviour. Client-local, so it lives in the F5 panel, not the server-side F4 one.
+		var inputLagMatch = new CheckBox
+		{
+			Name = "InputLagMatch",
+			Text = "Input-lag match (turn skew)",
+			ButtonPressed = (_client?.PredictionInputLagTicks ?? 0u) > 0u,
+		};
+		inputLagMatch.AddThemeFontSizeOverride("font_size", 13);
+		inputLagMatch.Toggled += ApplyInputLagMatch;
+		rows.AddChild(inputLagMatch);
+		_inputLagMatchCheck = inputLagMatch;
+
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
@@ -807,6 +823,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	{
 		_tuning.DebugFacingBox = enabled;
 		_renderer?.RebuildPlayerVisuals();
+	}
+
+	// S87 live A/B toggle (F5 "Input-lag match"). Sets the local predictor's input-lag to 1 tick when on, 0 when
+	// off (instant — the default), so the human can feel the direction-spam wobble fix on/off without a restart.
+	// Applied straight onto the live MmoClient (which forwards to the attached predictor and re-applies on
+	// re-attach). No-op before login (no client yet); the checkbox seeds its state from the client on panel open.
+	private void ApplyInputLagMatch(bool enabled)
+	{
+		if (_client is not null)
+		{
+			_client.PredictionInputLagTicks = enabled ? 1u : 0u;
+		}
 	}
 
 	// S79 live debug toggle (F5 "Prediction tiles"). Flip the shared flag and ensure the two ground markers
