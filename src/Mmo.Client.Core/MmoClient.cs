@@ -37,6 +37,10 @@ public sealed class MmoClient : IDisposable
     private NetPeer? _serverPeer;
     private PendingSnapshot? _pendingSnapshot;
     private uint? _lastAppliedSnapshotSequence;
+    // S76: the recipient-scoped step sequence from the most recent snapshot header (the server's count of our
+    // own accepted tile moves). Stashed only — the predictor's reconcile is UNCHANGED this stage; S77 will
+    // match this against the predicted step to fix the reconcile rubberband.
+    private uint _lastRecipientStepSeq;
     private uint _moveSequence;
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
@@ -107,6 +111,11 @@ public sealed class MmoClient : IDisposable
     public int EntityCount => _entities.Count;
 
     public bool DebugMovementEnabled => _movementTrace.Enabled;
+
+    // S76: the recipient-scoped step sequence from the latest snapshot header (server's count of our own
+    // accepted tile moves). Exposed read-only for diagnostics / S77's reconcile; not yet consumed by the
+    // predictor this stage.
+    public uint LastRecipientStepSeq => _lastRecipientStepSeq;
 
     public MovementDebugSnapshot MovementDebug => _movementTrace.Snapshot;
 
@@ -466,6 +475,10 @@ public sealed class MmoClient : IDisposable
         {
             return;
         }
+
+        // S76: stash the recipient-scoped step sequence off the header. Rides every snapshot (real-delta AND
+        // keep-alive). Stash only — no reconcile change this stage (S77 consumes it).
+        _lastRecipientStepSeq = snapshot.RecipientStepSeq;
 
         if (snapshot.ChunkCount <= 1)
         {

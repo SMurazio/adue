@@ -30,12 +30,14 @@ public sealed class ProtocolCodecTests
             new[]
             {
                 new EntityStateSnapshot(99, new TileCoord(12, -25), Direction8.NE)
-            });
+            },
+            RecipientStepSeq: 555);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(original.ServerTick, decoded.ServerTick);
         Assert.Equal(77u, decoded.SnapshotSequence);
+        Assert.Equal(555u, decoded.RecipientStepSeq);
         Assert.Equal(120, decoded.TotalEntities);
         Assert.False(decoded.IsComplete);
         Assert.Equal(2, decoded.ChunkIndex);
@@ -100,6 +102,63 @@ public sealed class ProtocolCodecTests
 
         Assert.True(decoded.Entities[0].Depleted);
         Assert.False(decoded.Entities[1].Depleted);
+    }
+
+    [Fact]
+    public void WorldSnapshotRecipientStepSeqRoundTripsEmptyKeepAlive()
+    {
+        // S76: an empty/keep-alive snapshot (no entity payload, isComplete=false) must still carry the
+        // recipient step seq on its header — this is exactly the idle-player case the field must survive.
+        var original = new WorldSnapshotMessage(
+            serverTick: 9,
+            snapshotSequence: 3,
+            totalEntities: 4,
+            isComplete: false,
+            entities: Array.Empty<EntityStateSnapshot>())
+        {
+            RecipientStepSeq = 4242,
+        };
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Empty(decoded.Entities);
+        Assert.False(decoded.IsComplete);
+        Assert.Equal(4, decoded.TotalEntities);
+        Assert.Equal(4242u, decoded.RecipientStepSeq);
+    }
+
+    [Fact]
+    public void WorldSnapshotRecipientStepSeqRoundTripsChunked()
+    {
+        // S76: the seq rides a (non-first) chunk header too — every chunk carries it identically.
+        var original = new WorldSnapshotMessage(
+            5,
+            2,
+            10,
+            false,
+            1,
+            3,
+            new[] { new EntityStateSnapshot(7, new TileCoord(1, 2), Direction8.W) },
+            RecipientStepSeq: 99);
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(1, decoded.ChunkIndex);
+        Assert.Equal(3, decoded.ChunkCount);
+        Assert.Equal(99u, decoded.RecipientStepSeq);
+    }
+
+    [Fact]
+    public void WorldSnapshotRecipientStepSeqDefaultsToZero()
+    {
+        // The convenience constructors leave it 0 (no recipient scoping) and that survives the round-trip.
+        var original = new WorldSnapshotMessage(
+            7,
+            [new EntityStateSnapshot(11, new TileCoord(3, 4), Direction8.S)]);
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(0u, decoded.RecipientStepSeq);
     }
 
     [Fact]
@@ -187,9 +246,9 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsEighteen()
+    public void ProtocolVersionIsNineteen()
     {
-        Assert.Equal(18, ProtocolCodec.Version);
+        Assert.Equal(19, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -224,6 +283,7 @@ public sealed class ProtocolCodecTests
             writer,
             42,
             77,
+            555,
             120,
             false,
             2,
@@ -233,6 +293,7 @@ public sealed class ProtocolCodecTests
         var snapshot = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(stream.ToArray()));
         Assert.Equal(42u, snapshot.ServerTick);
         Assert.Equal(77u, snapshot.SnapshotSequence);
+        Assert.Equal(555u, snapshot.RecipientStepSeq);
         Assert.Equal(120, snapshot.TotalEntities);
         Assert.False(snapshot.IsComplete);
         Assert.Equal(2, snapshot.ChunkIndex);

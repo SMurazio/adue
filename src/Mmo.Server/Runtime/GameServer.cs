@@ -663,6 +663,11 @@ public sealed class GameServer
             return;
         }
 
+        // S76: the recipient-scoped step sequence for this build. Read once from the recipient's OWN entity and
+        // ride it on every snapshot header (real-delta AND keep-alive), even when that entity is idle and gets
+        // delta'd out of the payload below — it is recipient metadata, not entity payload.
+        var recipientStepSeq = recipientEntity.StepSequence;
+
         // Acked-baseline selection (S46): send an entity iff its current revision differs from the revision
         // the CLIENT has acknowledged. A dropped snapshot is never acked, so its entities stay unacked and
         // are re-included next tick → self-healing under loss, no periodic full heartbeat needed. A viewer
@@ -692,7 +697,7 @@ public sealed class GameServer
             // win (no full resend) is preserved.
             if (recipient.ShouldSendKeepAlive(_serverTick, SnapshotKeepAliveTicks))
             {
-                SendKeepAliveSnapshot(recipient, visible.Count, tickBudget, ref sentBytes, ref sentPackets);
+                SendKeepAliveSnapshot(recipient, recipientStepSeq, visible.Count, tickBudget, ref sentBytes, ref sentPackets);
             }
 
             visibleCount = visible.Count;
@@ -738,6 +743,7 @@ public sealed class GameServer
                 packet = _snapshotEncodeBuffer.EncodeWorldSnapshot(
                     _serverTick,
                     snapshotSequence,
+                    recipientStepSeq,
                     visible.Count,
                     isComplete,
                     chunkIndex,
@@ -776,6 +782,7 @@ public sealed class GameServer
     // RememberSnapshotSentTick. The client acks it like any snapshot, refreshing its silence clock on ack.
     private void SendKeepAliveSnapshot(
         ClientSession recipient,
+        uint recipientStepSeq,
         int totalVisible,
         TickBudgetRecorder tickBudget,
         ref int sentBytes,
@@ -787,9 +794,13 @@ public sealed class GameServer
         EncodedPacket packet;
         using (tickBudget.Measure(TickBudgetCategory.Serialize))
         {
+            // S76: the keep-alive carries the recipient's step seq in the header even though its payload is
+            // empty — an idle player's own entity is exactly the case that gets no entity delta, so without
+            // this the seq would never reach an idle client.
             packet = _snapshotEncodeBuffer.EncodeWorldSnapshot(
                 _serverTick,
                 snapshotSequence,
+                recipientStepSeq,
                 totalVisible,
                 isComplete: false,
                 chunkIndex: 0,
@@ -1689,6 +1700,7 @@ internal sealed class ProtocolEncodeBuffer
     public EncodedPacket EncodeWorldSnapshot(
         uint serverTick,
         uint snapshotSequence,
+        uint recipientStepSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -1700,6 +1712,7 @@ internal sealed class ProtocolEncodeBuffer
             _writer,
             serverTick,
             snapshotSequence,
+            recipientStepSeq,
             totalEntities,
             isComplete,
             chunkIndex,

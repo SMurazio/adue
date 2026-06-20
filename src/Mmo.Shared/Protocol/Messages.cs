@@ -84,6 +84,12 @@ public sealed record LoginResultMessage(
     public MessageType Type => MessageType.LoginResult;
 }
 
+// RecipientStepSeq (S76, protocol v19) is a per-snapshot HEADER field scoped to the recipient's OWN entity:
+// the value of that entity's WorldEntity.StepSequence (accepted-tile-move count) at snapshot-build time. It is
+// recipient metadata, NOT a per-entity field — it rides every snapshot to a client (real-delta AND empty
+// keep-alive) even when the recipient's own entity is delta'd out of the payload because it is idle. This
+// stage only emits it; the client decodes it but does not yet reconcile against it (S77). Defaults to 0 in the
+// convenience constructors (tests / non-recipient-scoped uses).
 public sealed record WorldSnapshotMessage(
     uint ServerTick,
     uint SnapshotSequence,
@@ -91,7 +97,8 @@ public sealed record WorldSnapshotMessage(
     bool IsComplete,
     int ChunkIndex,
     int ChunkCount,
-    IReadOnlyList<EntityStateSnapshot> Entities) : IProtocolMessage
+    IReadOnlyList<EntityStateSnapshot> Entities,
+    uint RecipientStepSeq = 0) : IProtocolMessage
 {
     public WorldSnapshotMessage(uint serverTick, IReadOnlyList<EntityStateSnapshot> entities)
         : this(serverTick, 0, entities.Count, true, 0, 1, entities)

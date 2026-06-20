@@ -221,6 +221,56 @@ public sealed class WorldEntityMovementTests
         Assert.Equal(first.Tile, second.Tile);
     }
 
+    [Fact]
+    public void StepSequenceIncrementsOncePerAcceptedStep()
+    {
+        // S76: StepSequence starts at 0 and bumps by exactly 1 per ACCEPTED tile move.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.Equal(0u, entity.StepSequence);
+
+        Assert.True(entity.TryStep(Direction8.E, 10, 4, TurnDelayTicks, grid)); // accepted
+        Assert.Equal(1u, entity.StepSequence);
+
+        Assert.True(entity.TryStep(Direction8.E, 14, 4, TurnDelayTicks, grid)); // accepted (cooldown elapsed)
+        Assert.Equal(2u, entity.StepSequence);
+    }
+
+    [Fact]
+    public void StepSequenceUnchangedOnTurnOnly()
+    {
+        // S76: a turn-then-move first action turns in place (no tile move) — StepSequence must NOT bump on the
+        // turn, only on the subsequent accepted move.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.False(entity.TryStep(Direction8.NE, 10, 4, TurnDelayTicks, grid, out var turn)); // turn only
+        Assert.True(turn.Turned);
+        Assert.Equal(0u, entity.StepSequence); // turn did not move
+
+        Assert.True(entity.TryStep(Direction8.NE, 12, 4, TurnDelayTicks, grid)); // now moves
+        Assert.Equal(1u, entity.StepSequence);
+    }
+
+    [Fact]
+    public void StepSequenceUnchangedOnBlockedAndCooldownStep()
+    {
+        // S76: a blocked step (and an early/cooldown step) is rejected without moving — StepSequence must not
+        // bump on either.
+        var blockedGrid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
+        var blocked = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        Assert.False(blocked.TryStep(Direction8.E, 10, 4, TurnDelayTicks, blockedGrid)); // blocked
+        Assert.Equal(0u, blocked.StepSequence);
+
+        var openGrid = new TileGrid(16, 16, []);
+        var cooldown = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        Assert.True(cooldown.TryStep(Direction8.E, 10, 4, TurnDelayTicks, openGrid)); // accepted -> seq 1
+        Assert.Equal(1u, cooldown.StepSequence);
+        Assert.False(cooldown.TryStep(Direction8.E, 12, 4, TurnDelayTicks, openGrid)); // early/cooldown drop
+        Assert.Equal(1u, cooldown.StepSequence); // unchanged
+    }
+
     private static WorldEntity CreateEntity(
         uint networkId = 1,
         TileCoord? tile = null,

@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 18;
+    public const byte Version = 19;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -81,6 +81,7 @@ public static class ProtocolCodec
                     writer,
                     value.ServerTick,
                     value.SnapshotSequence,
+                    value.RecipientStepSeq,
                     value.TotalEntities,
                     value.IsComplete,
                     value.ChunkIndex,
@@ -124,6 +125,7 @@ public static class ProtocolCodec
         BinaryWriter writer,
         uint serverTick,
         uint snapshotSequence,
+        uint recipientStepSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -131,7 +133,7 @@ public static class ProtocolCodec
         IReadOnlyList<EntityStateSnapshot> entities)
     {
         WriteHeader(writer, MessageType.WorldSnapshot);
-        WriteWorldSnapshotPayload(writer, serverTick, snapshotSequence, totalEntities, isComplete, chunkIndex, chunkCount, entities);
+        WriteWorldSnapshotPayload(writer, serverTick, snapshotSequence, recipientStepSeq, totalEntities, isComplete, chunkIndex, chunkCount, entities);
     }
 
     public static void EncodeEntitySpawn(
@@ -278,6 +280,7 @@ public static class ProtocolCodec
         BinaryWriter writer,
         uint serverTick,
         uint snapshotSequence,
+        uint recipientStepSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -286,6 +289,9 @@ public static class ProtocolCodec
     {
         writer.Write(serverTick);
         writer.Write(snapshotSequence);
+        // S76 (v19): recipient-scoped step sequence rides the header, immediately after SnapshotSequence and
+        // before the chunk/entity metadata. Mirrored at the same position in ReadWorldSnapshot.
+        writer.Write(recipientStepSeq);
         WriteSnapshotMetadata(writer, totalEntities, isComplete, chunkIndex, chunkCount, entities.Count);
         WriteEntityStates(writer, entities);
     }
@@ -329,6 +335,8 @@ public static class ProtocolCodec
     {
         var tick = reader.ReadUInt32();
         var sequence = reader.ReadUInt32();
+        // S76 (v19): mirrors the write order — recipient step seq immediately after SnapshotSequence.
+        var recipientStepSeq = reader.ReadUInt32();
         var totalEntities = reader.ReadUInt16();
         var isComplete = reader.ReadBoolean();
         var chunkIndex = reader.ReadUInt16();
@@ -344,7 +352,7 @@ public static class ProtocolCodec
             throw new ProtocolException($"Invalid snapshot chunk {chunkIndex}/{chunkCount}.");
         }
 
-        return new WorldSnapshotMessage(tick, sequence, totalEntities, isComplete, chunkIndex, chunkCount, entities);
+        return new WorldSnapshotMessage(tick, sequence, totalEntities, isComplete, chunkIndex, chunkCount, entities, recipientStepSeq);
     }
 
     private static IReadOnlyList<EntityStateSnapshot> ReadEntityStates(BinaryReader reader)

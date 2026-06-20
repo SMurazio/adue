@@ -105,6 +105,14 @@ public sealed class WorldEntity
 
     public uint StateRevision { get; private set; } = 1;
 
+    // S76: a per-entity counter of ACCEPTED tile moves only — it bumps exactly when Tile actually advances
+    // (the accepted-step branch in TryStep), and NOT on a turn or a blocked/cooldown step. This is distinct
+    // from StateRevision (which also bumps on turns and resource state changes): StepSequence counts the same
+    // events the client predictor's _predictedTile advances on, so Stage 2 (S77) can match a snapshot confirm
+    // to the predicted step it corresponds to. Emitted on the wire as the recipient-scoped RecipientStepSeq;
+    // this stage only puts it on the wire (no reconcile change).
+    public uint StepSequence { get; private set; }
+
     // Harvests the node: marks it depleted, schedules respawn, and bumps StateRevision so the change
     // re-replicates through the AOI snapshot delta path. Caller must have validated availability.
     public void DepleteResource(uint serverTick)
@@ -218,6 +226,9 @@ public sealed class WorldEntity
         Facing = direction;
         _nextEligibleTick = serverTick + stepCooldownTicks;
         StateRevision++;
+        // S76: count this accepted tile move. ONLY here — turns and blocked/cooldown steps above return early
+        // without touching StepSequence, so it advances in lockstep with the actual tile.
+        StepSequence++;
         result = new MovementStepResult(
             direction,
             from,
