@@ -193,8 +193,13 @@ public sealed class WorldEntity
 
         var delta = direction.Delta();
         var target = Tile.Offset(delta.X, delta.Y);
-        // TODO: reject diagonal corner-cutting once tiles can carry richer collision flags.
-        if (!grid.IsWalkable(target))
+        // S75: reject diagonal corner-cutting. A diagonal step (both axes non-zero) also slices between the two
+        // orthogonally-adjacent tiles it passes; if EITHER of those side tiles is blocked, the move would slip
+        // diagonally THROUGH a wall corner. So a diagonal is walkable only when the destination AND both side
+        // tiles ((Tile.X+dx, Tile.Y) and (Tile.X, Tile.Y+dy)) are walkable. Cardinal steps (one axis zero) are
+        // unchanged: only the destination matters. The client predictor (LocalPlayerPredictor.Tick) applies the
+        // IDENTICAL rule via its walkability oracle so prediction still mirrors the server exactly.
+        if (!IsStepWalkable(delta, target, grid))
         {
             result = new MovementStepResult(
                 direction,
@@ -222,6 +227,26 @@ public sealed class WorldEntity
             Accepted: true,
             "accepted",
             Tile);
+        return true;
+    }
+
+    // S75: walkability of a step from the current tile, with diagonal corner-cutting rejected. The destination
+    // must always be walkable. For a DIAGONAL step (both delta axes non-zero) the two orthogonally-adjacent
+    // tiles it cuts between must ALSO be walkable, so the entity can't slip diagonally through a wall corner.
+    // Cardinal steps (one axis zero) check the destination only. The client predictor mirrors this rule exactly
+    // (LocalPlayerPredictor) so server and prediction reject the identical set of diagonal steps.
+    private bool IsStepWalkable(TileCoord delta, TileCoord target, TileGrid grid)
+    {
+        if (!grid.IsWalkable(target))
+        {
+            return false;
+        }
+
+        if (delta.X != 0 && delta.Y != 0)
+        {
+            return grid.IsWalkable(Tile.Offset(delta.X, 0)) && grid.IsWalkable(Tile.Offset(0, delta.Y));
+        }
+
         return true;
     }
 }

@@ -134,6 +134,81 @@ public sealed class WorldEntityMovementTests
     }
 
     [Fact]
+    public void DiagonalStepThroughCornerIsRejected_OneSideBlocked()
+    {
+        // S75: a diagonal NE step from (8,8) to (9,7) cuts between the side tiles (9,8) and (8,7). The
+        // destination (9,7) is open, but one side (9,8) is blocked — the move would slip diagonally through the
+        // wall corner, so it must be rejected and held (same shape as a blocked cardinal).
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
+        var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
+
+        var moved = entity.TryStep(Direction8.NE, 10, 4, TurnDelayTicks, grid, out var result);
+
+        Assert.False(moved);
+        Assert.Equal(new TileCoord(8, 8), entity.Tile); // held — did not slip through the corner
+        Assert.Equal(Direction8.NE, entity.Facing);
+        Assert.Equal(1u, entity.StateRevision);
+        Assert.False(result.TargetWalkable);
+        Assert.Equal("blocked", result.Reason); // in bounds, just blocked by the corner
+    }
+
+    [Fact]
+    public void DiagonalStepThroughCornerIsRejected_BothSidesBlocked()
+    {
+        // S75: both side tiles (9,8) and (8,7) blocked — a fully-walled corner. The open destination (9,7) is
+        // unreachable diagonally; the step is rejected and held.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
+        var grid = new TileGrid(16, 16, [new TileCoord(9, 8), new TileCoord(8, 7)]);
+
+        var moved = entity.TryStep(Direction8.NE, 10, 4, TurnDelayTicks, grid, out var result);
+
+        Assert.False(moved);
+        Assert.Equal(new TileCoord(8, 8), entity.Tile);
+        Assert.Equal(1u, entity.StateRevision);
+        Assert.False(result.TargetWalkable);
+        Assert.Equal("blocked", result.Reason);
+    }
+
+    [Fact]
+    public void DiagonalStepThroughOpenSpaceStillSucceeds()
+    {
+        // S75: both side tiles open ⇒ the diagonal is a clean move (corner check only rejects when a side is
+        // blocked, never an open diagonal).
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
+        var grid = new TileGrid(16, 16, []);
+
+        var moved = entity.TryStep(Direction8.NE, 10, 4, TurnDelayTicks, grid, out var result);
+
+        Assert.True(moved);
+        Assert.Equal(new TileCoord(9, 7), entity.Tile);
+        Assert.Equal(Direction8.NE, entity.Facing);
+        Assert.True(result.Accepted);
+        Assert.Equal("accepted", result.Reason);
+    }
+
+    [Fact]
+    public void CardinalStepIntoWallStillHolds_NoCornerRuleApplied()
+    {
+        // S75 guard: the corner rule must not touch cardinal steps. A blocked E target still holds with the same
+        // "blocked" result, and an OPEN cardinal step past an adjacent-but-irrelevant blocked tile still moves
+        // (a cardinal has no side tiles to check).
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var blockedAdjacent = new TileGrid(16, 16, [new TileCoord(8, 7)]); // (8,7) is N of us, irrelevant to E
+
+        var moved = entity.TryStep(Direction8.E, 10, 4, TurnDelayTicks, blockedAdjacent, out var openResult);
+        Assert.True(moved); // cardinal E to (9,8): destination open, no side-tile rule
+        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.True(openResult.Accepted);
+
+        // Cardinal into a wall still holds (unchanged blocked behaviour).
+        var wallEast = new TileGrid(16, 16, [new TileCoord(10, 8)]);
+        var blocked = entity.TryStep(Direction8.E, 14, 4, TurnDelayTicks, wallEast, out var wallResult);
+        Assert.False(blocked);
+        Assert.Equal(new TileCoord(9, 8), entity.Tile); // held at the wall
+        Assert.Equal("blocked", wallResult.Reason);
+    }
+
+    [Fact]
     public void EntitiesMayShareTile()
     {
         var first = CreateEntity(networkId: 1, tile: new TileCoord(8, 8), facing: Direction8.E);

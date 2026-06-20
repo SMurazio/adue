@@ -209,7 +209,7 @@ public sealed class LocalPlayerPredictor
 
                 var delta = _direction.Delta();
                 var target = _predictedTile.Offset(delta.X, delta.Y);
-                if (!_isWalkable(target))
+                if (!IsStepWalkable(delta, target))
                 {
                     // Blocked: hold at the wall. The cooldown is NOT consumed (the server only advances its
                     // step tick on an accepted move), so we keep facing and re-test next tick / on redirect.
@@ -320,6 +320,27 @@ public sealed class LocalPlayerPredictor
         {
             _facing = facing;
         }
+    }
+
+    // S75: walkability of a step from the predicted tile, with diagonal corner-cutting rejected — the EXACT
+    // mirror of the server's WorldEntity.IsStepWalkable. The destination must be walkable; a DIAGONAL step (both
+    // delta axes non-zero) additionally requires both orthogonally-adjacent tiles it cuts between to be walkable
+    // (so the local avatar can't predict a slip through a wall corner the server would reject). Cardinal steps
+    // (one axis zero) check the destination only. Uses the same _isWalkable oracle (MmoClient.IsWalkableFor
+    // Prediction) the server's grid.IsWalkable is fed from, so server and predictor reject identical diagonals.
+    private bool IsStepWalkable(TileCoord delta, TileCoord target)
+    {
+        if (!_isWalkable(target))
+        {
+            return false;
+        }
+
+        if (delta.X != 0 && delta.Y != 0)
+        {
+            return _isWalkable(_predictedTile.Offset(delta.X, 0)) && _isWalkable(_predictedTile.Offset(0, delta.Y));
+        }
+
+        return true;
     }
 
     private void StartTween(RenderPosition from, RenderPosition to, TimeSpan startedAt, double durationMs)

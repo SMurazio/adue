@@ -444,6 +444,46 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
+    public void TurnPathParity_AgainstRealWorldEntity_DiagonalCornerCutRejectedIdentically()
+    {
+        // S75 corner-cut parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
+        // held-intent timeline, but now over a TileGrid with a blocked corner. The entity faces NE and holds it,
+        // trying to slip diagonally from (10,10) to (11,9) — but the side tile (11,10) is blocked, so BOTH the
+        // server and the predictor must reject the diagonal and hold every tick. A divergence here is exactly
+        // the "client thinks it can cut the corner, server says no" desync this rule must prevent.
+        const int tickRate = 20;                 // 50 ms/tick
+        const double tickMs = 1000d / tickRate;  // 50 ms
+        const uint stepCooldownTicks = 3;        // 150 ms
+        const uint turnDelayTicks = 2;           // 100 ms
+        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);     // 150 ms
+        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);          // 100 ms
+
+        // (11,10) is the side tile E of the start; (11,9) (the NE destination) is OPEN, so a target-only check
+        // would WRONGLY let the diagonal through. The corner rule must block it on both sides.
+        var grid = new TileGrid(64, 64, [new TileCoord(11, 10)]);
+        var entity = new WorldEntity(1, 1, EntityKind.Player, new TileCoord(10, 10), Direction8.NE,
+            "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var predictor = new LocalPlayerPredictor(new TileCoord(10, 10), Direction8.NE, stepCadenceMs,
+            t => grid.IsWalkable(t), turnDelayMs);
+
+        // Held NE the whole time (already facing NE, so each eligible tick is a MOVE attempt into the corner).
+        var held = Direction8.NE;
+        predictor.SetIntent(true, held, TimeSpan.Zero);
+
+        for (uint tick = 0; tick <= 30; tick++)
+        {
+            entity.TryStep(held, tick, stepCooldownTicks, turnDelayTicks, grid);
+            predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
+
+            // Both must HOLD at the start tile (the diagonal is corner-cut-rejected) — tile AND facing parity
+            // every tick, never slipping to (11,9).
+            Assert.Equal(new TileCoord(10, 10), entity.Tile);
+            Assert.Equal(entity.Tile, predictor.PredictedTile);
+            Assert.Equal(entity.Facing, predictor.Facing);
+        }
+    }
+
+    [Fact]
     public void StartStopBoundary_ConvergesToServerStopTile()
     {
         // Predict three steps, stop, then the server's final confirmation lands one tile short of the
