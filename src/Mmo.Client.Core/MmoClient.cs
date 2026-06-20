@@ -258,13 +258,22 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
-        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay());
+        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay(), ResolveTickMs());
     }
 
     // Resolves the predictor's turn delay (ms): the ServerHello-advertised, tick-quantised value so the
     // predicted turn cost matches the server's TurnDelayTicks exactly. Falls back to the 80 ms default until
     // ServerHello lands (same default ServerOptions/the predictor ctor use).
     private double ResolveTurnDelay() => Server?.EffectiveTurnDelayMs ?? 80d;
+
+    // S81: resolves the server tick interval in ms (1000 / TickRate) — the unit of the predictor's tick-grid
+    // gate. Falls back to 50 ms (20 Hz, the ServerOptions default) until ServerHello lands. The predictor maps
+    // wall-clock to serverTick at this granularity and derives its integer step/turn tick counts from it.
+    private double ResolveTickMs()
+    {
+        var tickRate = Server?.TickRate ?? 20;
+        return tickRate > 0 ? 1000d / tickRate : 50d;
+    }
 
     // Drops the local entity reference and its predictor (local despawn / AOI exit / logout). Nulling the
     // predictor lets EnsurePredictor re-attach a fresh one (anchored to the new confirmed tile) when the
@@ -470,10 +479,12 @@ public sealed class MmoClient : IDisposable
     {
         Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.TurnDelayMs, hello.InterestRadiusTiles);
         RefreshInterpolatorCadence();
-        // S63: adopt the advertised turn delay if the predictor is already attached (ServerHello can arrive
-        // after the local entity spawned in a re-hello). New predictors seed it via EnsurePredictor.
+        // S63/S81: adopt the advertised turn delay AND tick interval if the predictor is already attached
+        // (ServerHello can arrive after the local entity spawned in a re-hello). New predictors seed both via
+        // EnsurePredictor.
         _entities.TryGetValue(LocalNetworkId ?? 0, out var local);
         local?.SetPredictorTurnDelay(ResolveTurnDelay());
+        local?.SetPredictorTickMs(ResolveTickMs());
     }
 
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
@@ -536,7 +547,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, state.Depleted);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -641,7 +652,7 @@ public sealed class MmoClient : IDisposable
 
             // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
             // last snapshot set rather than resetting a known-depleted node to available.
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, existing.Depleted);
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -809,7 +820,7 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, bool depleted = false)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false)
         {
             var previousTile = Tile;
             // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -820,6 +831,15 @@ public sealed class MmoClient : IDisposable
             LastSeenSnapshotSequence = snapshotSequence;
             if (_predictor is not null)
             {
+                // S81: re-anchor the predictor's wall-clock -> serverTick calibration to this snapshot's
+                // authoritative tick (smoothed/clamped internally so jitter can't jump the grid) BEFORE
+                // reconciling, so the gate runs on the server's true tick phase. Only when a real snapshot tick
+                // is available (the EntitySpawn path passes null).
+                if (serverTick.HasValue)
+                {
+                    _predictor.CalibrateToServerTick(serverTick.Value, receivedAt);
+                }
+
                 // Local predicted entity: re-base the prediction off the confirmed tile, matched by the
                 // recipient-scoped step sequence (S77) so a benign trailing/old-direction confirm is recognised
                 // by the step it confirms instead of being yanked backward. The predictor owns its own
@@ -848,9 +868,9 @@ public sealed class MmoClient : IDisposable
         // step-tween (the buffered interpolator is bypassed for the local player). Anchored to the current
         // confirmed tile + facing. Returns the predictor so the client can feed it held intent and tick it.
         // Idempotent: returns the existing one if already set.
-        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double turnDelayMs)
+        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double turnDelayMs, double tickMs)
         {
-            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, turnDelayMs);
+            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, turnDelayMs, tickMs);
             return _predictor;
         }
 
@@ -859,6 +879,12 @@ public sealed class MmoClient : IDisposable
         public void SetPredictorTurnDelay(double turnDelayMs)
         {
             _predictor?.SetTurnDelay(turnDelayMs);
+        }
+
+        // S81: live-sets the predictor's server tick interval (ServerHello TickRate). No-op if no predictor.
+        public void SetPredictorTickMs(double tickMs)
+        {
+            _predictor?.SetTickMs(tickMs);
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
