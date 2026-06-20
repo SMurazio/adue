@@ -140,6 +140,30 @@ public sealed class LocalPlayerCosmeticTests
         Assert.True(glide.X <= 2.0 + 1e-9, "still bounded by one tile ahead of the new confirmed tile");
     }
 
+    // ---- S91: release snaps instantly to the confirmed tile (no backward drift) -------------------
+
+    [Fact]
+    public void Release_SnapsInstantlyToConfirmedTile_NoBackwardDrift()
+    {
+        // Glide east off the confirmed-tile center, then release. The render must be EXACTLY the confirmed-tile
+        // center IMMEDIATELY at release time — not a cadence later. (Before S91 the release tweened back over a
+        // full cadence, so Sample(now) would still be mid-glide east of center; after S91 it snaps.)
+        var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        var lead = cosmetic.Sample(Ms(100));
+        Assert.True(lead.X > 4.0, $"precondition: render glided east of the confirmed center; was {lead.X}");
+
+        // Release at t=100. The confirmed tile is still (4,4); the render must snap to it at the SAME instant.
+        cosmetic.SetIntent(false, Direction8.E, Ms(100));
+
+        var atRelease = cosmetic.Sample(Ms(100));
+        Assert.Equal(4.0, atRelease.X, 6);
+        Assert.Equal(4.0, atRelease.Y, 6);
+        Assert.Equal(new TileCoord(4, 4), cosmetic.ConfirmedTile);
+    }
+
     // ---- Invariant 4: at rest == confirmed exactly (no latch) -------------------------------------
 
     [Fact]

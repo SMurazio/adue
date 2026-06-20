@@ -130,11 +130,14 @@ public sealed class LocalPlayerCosmetic
         else
         {
             _moving = false;
-            // Stop extending the lead and settle back onto the confirmed tile over one cadence. The confirmed
-            // tile IS truth, so this converges exactly — no latch is possible.
+            // S91: on release, SNAP instantly to the confirmed-tile center instead of tweening back over a
+            // cadence (the old ~150ms backward drift felt wrong). The confirmed tile IS truth, so locking the
+            // render straight onto it is exact — no latch is possible. A degenerate same-from/to tween makes
+            // SampleInternal(now) return the center immediately on any subsequent Sample/Tick.
             _leadTarget = null;
-            StartTween(SampleInternal(now), RenderPosition.FromTile(_confirmedTile), now, _cadenceMs);
-            _renderPosition = SampleInternal(now);
+            var center = RenderPosition.FromTile(_confirmedTile);
+            StartTween(center, center, now, _cadenceMs);
+            _renderPosition = center;
         }
     }
 
