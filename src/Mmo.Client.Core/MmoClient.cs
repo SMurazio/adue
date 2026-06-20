@@ -4,6 +4,15 @@ using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
 
+// S89: which local-player render model drives the avatar (live F5 A/B). Predicted is model A (the shipped
+// default, LocalPlayerPredictor); CosmeticLead is model B (LocalPlayerCosmetic). See MmoClient.RenderMode and
+// docs/movement-input-model.md.
+public enum MovementRenderMode
+{
+    Predicted = 0,
+    CosmeticLead = 1,
+}
+
 public sealed class MmoClient : IDisposable
 {
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
@@ -57,6 +66,9 @@ public sealed class MmoClient : IDisposable
     // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
     private bool _predictionEnabled = true;
+    // S89: the active local-player render model. Predicted (model A) is the shipped default; CosmeticLead
+    // (model B) is the F5 opt-in. See RenderMode / SetMovementRenderMode.
+    private MovementRenderMode _renderMode = MovementRenderMode.Predicted;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -184,9 +196,20 @@ public sealed class MmoClient : IDisposable
         ThrowIfDisposed();
         _currentTime = now;
         _netManager.PollEvents();
-        // Advance the local-player prediction AFTER draining inbound messages, so a snapshot that arrived
-        // this poll re-bases the prediction before we project it forward to "now".
-        _predictor?.Tick(now);
+        // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
+        // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
+        if (_renderMode == MovementRenderMode.CosmeticLead)
+        {
+            // S89 model B: tick the cosmetic driver (glides the render early toward the held direction).
+            if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+            {
+                local.TickCosmetic(now);
+            }
+        }
+        else
+        {
+            _predictor?.Tick(now);
+        }
     }
 
     // Whether local-player movement prediction is active (S53). Disabling it (e.g. for an A/B feel check)
@@ -195,6 +218,36 @@ public sealed class MmoClient : IDisposable
     {
         get => _predictionEnabled;
         set => _predictionEnabled = value;
+    }
+
+    // S89: which local-player render model drives the avatar. Predicted (model A, the shipped default) =
+    // LocalPlayerPredictor (PredictedTile ahead + Reconcile). CosmeticLead (model B, F5 opt-in) =
+    // LocalPlayerCosmetic (no banked tile; the render glides early on input and cuts to the confirmed tile on a
+    // disagreeing ack). The mode routes the local-player driver at SendMoveIntent, the per-Poll Tick,
+    // ApplySnapshot, and the ToRenderState render-source selection. See docs/movement-input-model.md.
+    public MovementRenderMode RenderMode
+    {
+        get => _renderMode;
+        set => SetMovementRenderMode(value);
+    }
+
+    // S89: flips the local-player render model LIVE (F5 — no restart). Re-anchors the newly-active driver from
+    // the local entity's current confirmed tile + current render position so the avatar does NOT pop on the
+    // switch, then routes all four touch points to the new mode. A->B seeds the cosmetic driver where the
+    // predictor was showing; B->A re-anchors the predictor (its PredictedTile re-seeds onto the confirmed tile,
+    // its render tween onto the current render position) so there is no jump either way.
+    public void SetMovementRenderMode(MovementRenderMode mode)
+    {
+        if (mode == _renderMode)
+        {
+            return;
+        }
+
+        _renderMode = mode;
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
+        }
     }
 
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
@@ -242,7 +295,20 @@ public sealed class MmoClient : IDisposable
         // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
         // step. Created lazily here once the zone + local entity + cadence are all available.
         EnsurePredictor();
-        _predictor?.SetIntent(moving, direction, _currentTime);
+        if (_renderMode == MovementRenderMode.CosmeticLead)
+        {
+            // S89 model B: feed the held intent to the cosmetic driver (no tile is banked; it only records the
+            // held direction so Tick can glide the render early).
+            if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+            {
+                local.SetCosmeticIntent(moving, direction, _currentTime);
+            }
+        }
+        else
+        {
+            _predictor?.SetIntent(moving, direction, _currentTime);
+        }
+
         return sequence;
     }
 
@@ -259,6 +325,15 @@ public sealed class MmoClient : IDisposable
         }
 
         _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay(), ResolveTickMs());
+        // S89 model B: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile.
+        // It only DRIVES the render while RenderMode == CosmeticLead; in the default Predicted mode it is dormant.
+        local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
+        // If the player flipped to model B before the local entity attached (or it just respawned), activate the
+        // freshly-attached cosmetic driver so the live mode is honoured without needing another F5 toggle.
+        if (_renderMode == MovementRenderMode.CosmeticLead)
+        {
+            local.ReanchorLocalDriver(MovementRenderMode.CosmeticLead, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
+        }
     }
 
     // Resolves the predictor's turn delay (ms): the ServerHello-advertised, tick-quantised value so the
@@ -779,6 +854,11 @@ public sealed class MmoClient : IDisposable
         // renders confirmed state in the past for jitter smoothing — is bypassed for the local player, the
         // attempt-1 rubber-band fix). Snapshots re-base the predictor instead of confirming the interpolator.
         private LocalPlayerPredictor? _predictor;
+        // S89 model B: the parallel cosmetic-lead driver (non-null only for the local player once attached). It
+        // DRIVES the render only while _cosmeticActive (RenderMode == CosmeticLead); otherwise it is dormant and
+        // the predictor owns the render exactly as today. Reverting S89 removes this field and restores A.
+        private LocalPlayerCosmetic? _cosmetic;
+        private bool _cosmeticActive;
 
         public ClientEntity(
             uint networkId,
@@ -853,6 +933,21 @@ public sealed class MmoClient : IDisposable
             Tile = tile;
             Depleted = depleted;
             LastSeenSnapshotSequence = snapshotSequence;
+            // S89 model B: the cosmetic driver owns the render. The confirmed tile advances ONLY here (the server
+            // ack). No step-seq / reconcile / replay — Confirm cuts/snaps the render to the confirmed tile. The
+            // predictor is left dormant (re-seeded on a live A<->B switch), so model A is byte-for-byte unchanged
+            // when this branch is not taken.
+            if (_cosmetic is not null && _cosmeticActive)
+            {
+                _cosmetic.Confirm(tile, facing, receivedAt);
+                Facing = _cosmetic.Facing;
+                return new EntityConfirmationDebug(
+                    tile != previousTile,
+                    0,
+                    _cosmetic.CadenceMs,
+                    _cosmetic.RenderPosition);
+            }
+
             if (_predictor is not null)
             {
                 // S81: re-anchor the predictor's wall-clock -> serverTick calibration to this snapshot's
@@ -898,6 +993,57 @@ public sealed class MmoClient : IDisposable
             return _predictor;
         }
 
+        // S89: attaches the parallel model-B cosmetic driver (idempotent), anchored to the current confirmed tile
+        // + facing. It is dormant until RenderMode flips to CosmeticLead (ReanchorLocalDriver activates it). The
+        // isWalkable oracle is the SAME one model A uses (cosmetic glide-direction gate; no tile banked).
+        public LocalPlayerCosmetic AttachCosmetic(double cadenceMs, Func<TileCoord, bool> isWalkable)
+        {
+            _cosmetic ??= new LocalPlayerCosmetic(Tile, Facing, cadenceMs, isWalkable);
+            return _cosmetic;
+        }
+
+        // S89: feeds held intent to the cosmetic driver (no tile banked — records the held direction so
+        // TickCosmetic glides the render early). No-op if the cosmetic driver isn't attached yet.
+        public void SetCosmeticIntent(bool moving, Direction8 direction, TimeSpan now)
+        {
+            _cosmetic?.SetIntent(moving, direction, now);
+        }
+
+        // S89: advances the cosmetic render to now (the early-lead glide). No-op if not attached.
+        public void TickCosmetic(TimeSpan now)
+        {
+            _cosmetic?.Tick(now);
+        }
+
+        // S89: switches the active local-player render model LIVE, re-anchoring the newly-active driver from the
+        // CURRENT render position so the avatar doesn't pop. A->B seeds the cosmetic driver where the predictor
+        // is showing; B->A re-seeds the predictor (its PredictedTile onto the confirmed tile, its render tween
+        // onto the current render position). The freshly-attached drivers are created if missing.
+        public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double turnDelayMs, double tickMs)
+        {
+            if (mode == MovementRenderMode.CosmeticLead)
+            {
+                var currentRender = _predictor is not null ? _predictor.RenderPosition : _interpolator.RenderPosition;
+                AttachCosmetic(cadenceMs, isWalkable);
+                _cosmetic!.ReanchorTo(Tile, Facing, currentRender, now);
+                _cosmeticActive = true;
+            }
+            else
+            {
+                var currentRender = _cosmetic is not null ? _cosmetic.RenderPosition : _interpolator.RenderPosition;
+                _cosmeticActive = false;
+                if (_predictor is not null)
+                {
+                    // Re-anchor model A onto the confirmed tile + current render position so resuming prediction
+                    // doesn't jump (Reconcile re-bases the predicted tile; the snap-distance is 0 so the render
+                    // tween settles onto the current position).
+                    _predictor.Reconcile(Tile, _predictor.PredictedStepSeq, now);
+                    _predictor.Sample(now);
+                    _ = currentRender;
+                }
+            }
+        }
+
         // S63: live-retunes the predictor's turn delay (F4 move.turnDelayMs). No-op if no predictor (the local
         // entity isn't predicting yet); EnsurePredictor seeds the current value when it attaches.
         public void SetPredictorTurnDelay(double turnDelayMs)
@@ -939,10 +1085,27 @@ public sealed class MmoClient : IDisposable
         {
             // S53: the local predicted player renders from the predictor's OWN present-time tween (snappy, no
             // playout delay). Everything else (remote players, resources) keeps the buffered interpolator.
-            var position = _predictor is not null ? _predictor.Sample(now) : _interpolator.Sample(now);
-            // S59: render the predictor's LIVE facing for the local entity, so a predicted turn (no tile move)
-            // rotates the avatar immediately instead of waiting for the next snapshot to sync Facing.
-            var facing = _predictor is not null ? _predictor.Facing : Facing;
+            // S89: in CosmeticLead mode the local player renders from the cosmetic driver instead (no banked
+            // tile; glides early on input). Render-source selection only — Tile stays confirmed in both modes.
+            RenderPosition position;
+            Direction8 facing;
+            if (_cosmetic is not null && _cosmeticActive)
+            {
+                position = _cosmetic.Sample(now);
+                facing = _cosmetic.Facing;
+            }
+            else if (_predictor is not null)
+            {
+                position = _predictor.Sample(now);
+                // S59: render the predictor's LIVE facing for the local entity, so a predicted turn (no tile
+                // move) rotates the avatar immediately instead of waiting for the next snapshot to sync Facing.
+                facing = _predictor.Facing;
+            }
+            else
+            {
+                position = _interpolator.Sample(now);
+                facing = Facing;
+            }
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted);
         }
     }

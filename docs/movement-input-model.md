@@ -65,3 +65,30 @@ was straining to achieve from the client side.
 - Stress: move/s inbound drops sharply vs today (the N21 goal, achieved by the model not a tuning knob);
   server step cadence stays even (no freeze).
 - **Human feel-check (required):** smooth movement, responsive start/stop, no runaway on key release.
+
+## Local-player render models — A / B / C vocabulary (S89)
+
+The *input* model above (held intent → server steps) is shared by every client. How the LOCAL avatar's
+*pixels* are driven on top of it is a separate, live-switchable choice. Three named models, kept distinct:
+
+- **A — full tile prediction (the shipped default).** `LocalPlayerPredictor`. The client owns a
+  `PredictedTile` AHEAD of the server's confirm, mirrors the server's tick-grid step loop, and
+  reconciles/re-projects on every snapshot (re-anchor + capped in-flight replay). Logic (harvest/targeting)
+  reads the confirmed `LocalTile`, but a predicted tile exists and the F5 green (predicted) marker can
+  diverge from magenta (server) under lag/spam. NOT cosmetic.
+- **B — cosmetic lead (S89, opt-in via the F5 "Cosmetic lead (model B)" toggle).** `LocalPlayerCosmetic`.
+  The ONLY state is the confirmed tile, which advances ONLY on a server ack (`Confirm`, from
+  `EntityState.ApplySnapshot`). The avatar's *pixels* may glide toward the held-input direction early — a
+  bounded **cosmetic lead** of `CosmeticLeadTiles = 1.0` tile, walkability-gated on the glide direction
+  (the same S75 corner-cut oracle model A uses, gating direction only) — but **no tile is ever banked
+  ahead for logic**: there is no `PredictedTile`, no step-seq, no `Reconcile`/replay. An *agreeing* confirm
+  flows seamlessly into the confirmed step; a *disagreeing* confirm CUTS the render to the confirmed tile
+  (a ≤1-cadence blend, no reproject). "No positional prediction," not "no prediction" — UO-per-step-approve
+  in spirit: the server gates each tile, the client animates early. By construction B cannot produce A's
+  at-rest latch or the spam desync: there is no predicted tile, so there is no green F5 marker to diverge.
+  At high latency the glide holds at the 1-tile cap (paced by the confirm rate). The A↔B switch is LIVE
+  (F5, no restart) and re-anchors the newly-active driver from the current render position so the avatar
+  does not pop.
+- **C — full server follow (rejected, not built).** The local player treated like a remote entity:
+  confirmed tiles only, buffered interpolator, playout delay → laggy. B is NOT C — B leads early on input;
+  C lags. Do not build C and do not call B "follow the server."
