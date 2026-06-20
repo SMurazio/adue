@@ -32,6 +32,13 @@ public sealed class VisualTuning
     public float TreeModelScale { get; set; } = 1.2f;
     public float PlantModelScale { get; set; } = 1.0f;
 
+    // S73 diagnostic: when true, every Player-kind entity (local + remote) renders as a plain box with a small
+    // facing arrow at its base instead of the character model — makes facing + per-step movement legible while
+    // debugging movement feel. Flipped live by the F5 "Debug facing box" checkbox; default off = zero render
+    // change. The factory reads this when choosing a player's archetype; the EntityRenderer rebuilds existing
+    // player visuals on toggle so the swap is immediate.
+    public bool DebugFacingBox { get; set; }
+
     // Shared label font/outline styling (constant; not panel-tunable). Kept here so every visual builds an
     // identical Label3D without duplicating the magic numbers.
     public const int LabelFontSize = 64;

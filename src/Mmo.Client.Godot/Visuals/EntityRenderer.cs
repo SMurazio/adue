@@ -83,6 +83,28 @@ public sealed class EntityRenderer
         }
     }
 
+    // S73: the F5 "Debug facing box" toggle flipped VisualTuning.DebugFacingBox; rebuild every already-spawned
+    // player so the swap (model rig <-> debug box+arrow) is immediate, not just for future spawns. Release the
+    // active player/debug-box visuals (parking them in their archetype pool) and clear them from the active set;
+    // the next Sync re-acquires each from the factory/pool under the NEW flag, so they reappear in the chosen
+    // form on the very next frame. Resources/NPCs are untouched.
+    public void RebuildPlayerVisuals()
+    {
+        _stale.Clear();
+        foreach (var (networkId, visual) in _active)
+        {
+            if (visual.Archetype is VisualArchetype.Player or VisualArchetype.DebugFacingBox)
+            {
+                _stale.Add(networkId);
+            }
+        }
+
+        foreach (var networkId in _stale)
+        {
+            ReleaseVisual(networkId);
+        }
+    }
+
     // Release-all seam for a future zone change: park every active visual back in its pool, leaving the
     // renderer clean for a rebuild. Wired now even though no zone change drives it yet.
     public void Reset()
@@ -101,7 +123,7 @@ public sealed class EntityRenderer
 
     private EntityVisual AcquireVisual(EntityRenderState state)
     {
-        var archetype = EntityVisualFactory.ChooseArchetype(state);
+        var archetype = EntityVisualFactory.ChooseArchetype(state, _tuning.DebugFacingBox);
         if (_pools.TryGetValue(archetype, out var pool) && pool.Count > 0)
         {
             var pooled = pool.Pop();

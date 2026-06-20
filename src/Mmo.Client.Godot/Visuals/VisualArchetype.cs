@@ -9,6 +9,10 @@ namespace Mmo.Client.Godot.Visuals;
 public enum VisualArchetype
 {
     Player,
+    // S73 debug-only: a Player rendered as a box + facing arrow instead of the model rig, chosen when the F5
+    // "Debug facing box" toggle is on. Pooled separately from Player so a parked debug box never reuses (or is
+    // reused as) a real PlayerVisual.
+    DebugFacingBox,
     Rock,
     Tree,
     Portal,

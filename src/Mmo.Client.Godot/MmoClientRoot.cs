@@ -44,6 +44,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private CheckBox? _uncapFpsCheck;
 	private bool _fpsUncapped;
 	private CheckBox? _frameCsvCheck;
+	private CheckBox? _debugFacingBoxCheck;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -727,6 +728,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(frameCsv);
 		_frameCsvCheck = frameCsv;
 
+		// S73 live debug toggle — flips on click, no Apply needed: render every Player (local + remote) as a
+		// plain box + facing arrow instead of the character model, so facing + per-step movement are legible
+		// while debugging movement feel. Toggling rebuilds already-spawned players so the swap is immediate.
+		var debugFacingBox = new CheckBox { Name = "DebugFacingBox", Text = "Debug facing box", ButtonPressed = _tuning.DebugFacingBox };
+		debugFacingBox.AddThemeFontSizeOverride("font_size", 13);
+		debugFacingBox.Toggled += ApplyDebugFacingBox;
+		rows.AddChild(debugFacingBox);
+		_debugFacingBoxCheck = debugFacingBox;
+
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
@@ -763,6 +773,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			CloseFrameCsv();
 		}
+	}
+
+	// S73 live debug toggle (F5 "Debug facing box"). Flip the shared VisualTuning flag and rebuild the
+	// already-spawned player visuals so the swap (model rig <-> debug box+arrow) lands instantly — the renderer
+	// releases each active player back to its pool and the next Sync re-acquires it under the new flag. Off
+	// restores the normal PlayerVisual model. Resources/NPCs are untouched. Admin-gated like the rest of F5
+	// (the panel only shows for an Admin session).
+	private void ApplyDebugFacingBox(bool enabled)
+	{
+		_tuning.DebugFacingBox = enabled;
+		_renderer?.RebuildPlayerVisuals();
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
