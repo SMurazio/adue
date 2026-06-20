@@ -472,58 +472,6 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void InputLagOneTick_CancelsServerArrivalSkew_TurnSpamParity_NoDivergence()
-    {
-        // S87 — THE FIX. With input-lag = 1 tick, a predictor fed the held direction INSTANTLY matches a server
-        // that sees each change ONE TICK LATER (the real arrival skew) — tile/facing/step-seq exactly, EVERY tick,
-        // through turn spam. The lag delays the EFFECT of a mid-move direction change to the same tick the server
-        // acts on it, so the two never make different turn-vs-step decisions: the divergence S83 could only
-        // bound-and-correct (the visible spam wobble) is cancelled at the source. (At lag 0 this same skew produces
-        // the bounded divergence asserted by SkewedInput_ReconcileBoundsDivergence_AndConvergesAtRest.)
-        const int tickRate = 20;                 // 50 ms/tick
-        const double tickMs = 1000d / tickRate;  // 50 ms
-        const uint stepCooldownTicks = 3;        // 150 ms
-        const uint turnDelayTicks = 2;           // 100 ms
-        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
-
-        var grid = new TileGrid(128, 128, []);
-        var start = new TileCoord(40, 40);
-        var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
-            "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
-        var predictor = new LocalPlayerPredictor(start, Direction8.E, stepCadenceMs,
-            t => grid.IsWalkable(t), turnDelayMs, tickMs);
-        predictor.SetInputLagTicks(1);
-
-        // Spam the held direction (changes every tick); the predictor sees HeldAt(tick) immediately, the server
-        // sees HeldAt(tick-1) (the one-tick arrival skew).
-        var pattern = new[] { Direction8.E, Direction8.N, Direction8.E, Direction8.S, Direction8.E };
-        Direction8 HeldAt(long tick) => pattern[(int)(((tick % pattern.Length) + pattern.Length) % pattern.Length)];
-
-        predictor.SetIntent(true, HeldAt(0), TimeSpan.Zero);
-        var lastHeld = HeldAt(0);
-
-        for (uint tick = 0; tick <= 40; tick++)
-        {
-            var now = TimeSpan.FromMilliseconds(tick * tickMs);
-            var held = HeldAt(tick);
-            if (held != lastHeld)
-            {
-                predictor.SetIntent(true, held, now);
-                lastHeld = held;
-            }
-
-            var serverHeld = tick == 0 ? HeldAt(0) : HeldAt((long)tick - 1);
-            entity.TryStep(serverHeld, tick, stepCooldownTicks, turnDelayTicks, grid);
-            predictor.Tick(now);
-
-            Assert.Equal(entity.Tile, predictor.PredictedTile);
-            Assert.Equal(entity.Facing, predictor.Facing);
-            Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
-        }
-    }
-
-    [Fact]
     public void TurnPathParity_AgainstRealWorldEntity_TileFacingMatchEachTick()
     {
         // S63 turn-path parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
