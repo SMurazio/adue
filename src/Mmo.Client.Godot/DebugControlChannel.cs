@@ -319,6 +319,11 @@ internal sealed class DebugControlChannel : IDisposable
             writer.WriteNumber("gen2", t.Gc2);
             writer.WriteEndObject();
             writer.WriteNumber("hitchCount", t.HitchCount);
+            writer.WriteStartObject("motion");
+            writer.WriteNumber("maxDivergence", t.MaxDivergence);
+            writer.WriteNumber("snapCount", t.SnapCount);
+            writer.WriteNumber("currentSpeed", t.CurrentSpeed);
+            writer.WriteEndObject();
         });
     }
 

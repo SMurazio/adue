@@ -49,7 +49,10 @@ internal readonly record struct ControlTelemetry(
     long Gc0,
     long Gc1,
     long Gc2,
-    long HitchCount);
+    long HitchCount,
+    double MaxDivergence,
+    long SnapCount,
+    double CurrentSpeed);
 
 internal readonly record struct ControlState(
     string Connection,

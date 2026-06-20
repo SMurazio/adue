@@ -155,6 +155,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private int _frameCsvGc1;
 	private int _frameCsvGc2;
 
+	// S67 motion-quality instrumentation (diagnostics only; computed in SampleMotionMetrics each frame).
+	// Snap = divergence jumping more than this between consecutive frames (a reconcile teleport, not a glide).
+	private const double MotionSnapThresholdTiles = 0.75;
+	private bool _hasLocalRender;
+	private float _localRenderX;
+	private float _localRenderY;
+	private bool _hasConfirmed;
+	private int _confirmedX;
+	private int _confirmedY;
+	private double _renderDivergence;
+	private double _maxRenderDivergence;
+	private int _renderSnapCount;
+	private double _renderFrameDelta;
+	private double _currentSpeedTilesPerSec;
+	private bool _hasPrevRenderPos;
+	private float _prevRenderX;
+	private float _prevRenderY;
+	private bool _hasPrevDivergence;
+	private double _prevDivergence;
+
 	// Per-_Process-section timing (ms), surfaced in the F3 HUD and read by the telemetry channel (T2).
 	internal double LastPollMs => _lastPollMs;
 	internal double LastRenderStateMs => _lastRenderStateMs;
@@ -235,6 +255,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var t4 = Time.GetTicksUsec();
 
 		RecordSectionTiming(pollUsec, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+		SampleMotionMetrics();
 		AppendFrameCsvRow();
 	}
 
@@ -796,6 +817,67 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_client?.CopyRenderStatesTo(_renderStates, now);
 	}
 
+	// S67: per-frame motion quality for the local player. Runs after SampleRenderStates so _renderStates
+	// holds THIS frame's continuous (predictor-tweened) position. Diagnostics only — a handful of
+	// subtractions, no allocation, no movement-behavior effect. Feeds the CSV row, F3 HUD, and telemetry.
+	private void SampleMotionMetrics()
+	{
+		_hasLocalRender = TryGetLocalRenderPosition(out _localRenderX, out _localRenderY);
+
+		if (_client?.LocalTile is TileCoord confirmed)
+		{
+			_hasConfirmed = true;
+			_confirmedX = confirmed.X;
+			_confirmedY = confirmed.Y;
+		}
+		else
+		{
+			_hasConfirmed = false;
+		}
+
+		// Render <-> confirmed divergence (tiles). Only meaningful when both are known this frame.
+		if (_hasLocalRender && _hasConfirmed)
+		{
+			var ddx = _localRenderX - _confirmedX;
+			var ddy = _localRenderY - _confirmedY;
+			_renderDivergence = Math.Sqrt((ddx * ddx) + (ddy * ddy));
+			_maxRenderDivergence = Math.Max(_maxRenderDivergence, _renderDivergence);
+
+			// A reconcile snap: divergence jumping more than the threshold between consecutive frames.
+			if (_hasPrevDivergence && Math.Abs(_renderDivergence - _prevDivergence) > MotionSnapThresholdTiles)
+			{
+				_renderSnapCount++;
+			}
+
+			_prevDivergence = _renderDivergence;
+			_hasPrevDivergence = true;
+		}
+		else
+		{
+			_renderDivergence = 0d;
+			_hasPrevDivergence = false;
+		}
+
+		// Per-frame motion delta: how far the continuous render position moved since last frame (~speed).
+		if (_hasLocalRender && _hasPrevRenderPos)
+		{
+			var mdx = _localRenderX - _prevRenderX;
+			var mdy = _localRenderY - _prevRenderY;
+			_renderFrameDelta = Math.Sqrt((mdx * mdx) + (mdy * mdy));
+		}
+		else
+		{
+			_renderFrameDelta = 0d;
+		}
+
+		// Instantaneous speed (tiles/s) from the per-frame delta and the frame duration.
+		_currentSpeedTilesPerSec = _lastFrameMs > 0d ? _renderFrameDelta / (_lastFrameMs / 1000d) : 0d;
+
+		_prevRenderX = _localRenderX;
+		_prevRenderY = _localRenderY;
+		_hasPrevRenderPos = _hasLocalRender;
+	}
+
 	private void SampleFrameTiming(double delta)
 	{
 		var currentGc0 = GC.CollectionCount(0);
@@ -1255,6 +1337,32 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				.AppendLine();
 		}
 
+		// S67 motion line: continuous render position, instantaneous speed (tiles/s), max render<->confirmed
+		// divergence, and the reconcile-snap count — sub-tile motion quality alongside the perf rows.
+		_perfText.Append("motion ");
+		if (_hasLocalRender)
+		{
+			_perfText.Append('(')
+				.Append(_localRenderX.ToString("0.00", CultureInfo.InvariantCulture))
+				.Append(", ")
+				.Append(_localRenderY.ToString("0.00", CultureInfo.InvariantCulture))
+				.Append(')');
+		}
+		else
+		{
+			_perfText.Append('-');
+		}
+
+		_perfText.Append(" spd=")
+			.Append(_currentSpeedTilesPerSec.ToString("0.00", CultureInfo.InvariantCulture))
+			.Append("t/s div=")
+			.Append(_renderDivergence.ToString("0.00", CultureInfo.InvariantCulture))
+			.Append(" max=")
+			.Append(_maxRenderDivergence.ToString("0.00", CultureInfo.InvariantCulture))
+			.Append(" snaps=")
+			.Append(_renderSnapCount.ToString(CultureInfo.InvariantCulture))
+			.AppendLine();
+
 		SetTextIfChanged(_perfLabel, _perfText.ToString());
 	}
 
@@ -1430,7 +1538,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_clientGc0Count,
 			_clientGc1Count,
 			_clientGc2Count,
-			_frameHitchCount);
+			_frameHitchCount,
+			_maxRenderDivergence,
+			_renderSnapCount,
+			_currentSpeedTilesPerSec);
 	}
 
 	MovementDebugSnapshot IControlHost.ReadMovementDebug()
@@ -1540,7 +1651,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			{
 				AutoFlush = false
 			};
-			_frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2");
+			_frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2,localRenderX,localRenderY,confirmedX,confirmedY,divergence,frameDelta");
 			_frameCsvGc0 = GC.CollectionCount(0);
 			_frameCsvGc1 = GC.CollectionCount(1);
 			_frameCsvGc2 = GC.CollectionCount(2);
@@ -1569,8 +1680,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_frameCsvGc1 = gc1;
 		_frameCsvGc2 = gc2;
 
+		// S67 motion columns. Render/confirmed cells are left blank when unknown this frame (pre-spawn);
+		// divergence is only written when both are known, frameDelta only when a previous render pos exists.
+		var renderX = _hasLocalRender ? _localRenderX.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
+		var renderY = _hasLocalRender ? _localRenderY.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
+		var confX = _hasConfirmed ? _confirmedX.ToString(CultureInfo.InvariantCulture) : string.Empty;
+		var confY = _hasConfirmed ? _confirmedY.ToString(CultureInfo.InvariantCulture) : string.Empty;
+		var divergence = _hasLocalRender && _hasConfirmed ? _renderDivergence.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
+		var frameDelta = _hasLocalRender ? _renderFrameDelta.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
+
 		var row = string.Create(CultureInfo.InvariantCulture,
-			$"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2}");
+			$"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2},{renderX},{renderY},{confX},{confY},{divergence},{frameDelta}");
 		try
 		{
 			_frameCsv.WriteLine(row);
