@@ -28,14 +28,11 @@ public sealed partial class CatoSpriteVisual : EntityVisual
     private const string AnimIdle = "idle";
     private const string AnimWalk = "walk";
 
-    // World size of one texture pixel. The art is 512px tall; PixelSize 0.0033 ≈ 1.7 tiles tall — a character
-    // reading a bit taller than a tile. First-guess; human eyeballs it. TUNABLE.
-    private const float SpritePixelSize = 0.0033f;
-
-    // Lift the centered sprite so its feet sit on the ground plane (y=0). For a ~1.7-tile-tall centered sprite
-    // the pivot is at the middle, so ~0.85 up puts the bottom edge on the floor. Recompute if PixelSize changes.
-    // TUNABLE.
-    private const float GroundOffset = 0.85f;
+    // S99: scale + offset are LIVE-tunable via the F5 panel (Tuning.CatoPixelSize / CatoYOffset / CatoXOffset),
+    // mirroring the per-archetype model scales. Defaults live on VisualTuning: PixelSize 0.0066 ≈ 3.4 tiles tall
+    // (2× the S96 first-guess), YOffset 1.0 lifts the cat body onto the tile (the centred pivot sits above the
+    // cat because the wand extends up-right), XOffset 0. BuildChildren seeds from Tuning; ApplyPlacement pushes a
+    // live F5 edit onto the already-spawned sprite without a respawn. The human fine-tunes via F5.
 
     // Animation playback rates (frames per second). TUNABLE.
     private const float IdleFps = 8f;
@@ -139,8 +136,8 @@ public sealed partial class CatoSpriteVisual : EntityVisual
             Name = "Cato",
             SpriteFrames = frames,
             Animation = AnimIdle,
-            PixelSize = SpritePixelSize,
-            Position = new Vector3(0f, GroundOffset, 0f),
+            PixelSize = Tuning.CatoPixelSize,
+            Position = new Vector3(Tuning.CatoXOffset, Tuning.CatoYOffset, 0f),
             Billboard = Billboard,
             // Explicit sorting like SpriteVisual: alpha-scissor (cutout) writes depth so the sprite occludes /
             // is occluded by the 3D models correctly instead of alpha-blending on top of them.
@@ -196,6 +193,26 @@ public sealed partial class CatoSpriteVisual : EntityVisual
         // horizontal facings change the latch; vertical-only facings + idle keep the last flip.
         _lastFlipH = CatoFacingFlip.Resolve(state.Facing, _lastFlipH);
         _sprite.FlipH = _lastFlipH;
+    }
+
+    // S99: re-apply the live placement (size + offset) to an ALREADY-spawned sprite so an F5 apply lands
+    // instantly without a respawn. Reads the current Tuning values (the panel mutates them before pushing).
+    public override void ApplyCatoPlacement()
+    {
+        ApplyPlacement(Tuning.CatoPixelSize, Tuning.CatoXOffset, Tuning.CatoYOffset);
+    }
+
+    // S99: set the sprite's world pixel size + horizontal/vertical offset directly. Used by ApplyCatoPlacement
+    // (the F5 live push) and callable standalone. No-op until the sprite is built (null-fallback-to-box case).
+    public void ApplyPlacement(float pixelSize, float xOffset, float yOffset)
+    {
+        if (_sprite is null)
+        {
+            return;
+        }
+
+        _sprite.PixelSize = pixelSize;
+        _sprite.Position = new Vector3(xOffset, yOffset, 0f);
     }
 
     private void DriveAnimation(bool moving)

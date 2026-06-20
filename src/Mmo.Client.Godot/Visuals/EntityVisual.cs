@@ -128,6 +128,11 @@ public abstract partial class EntityVisual : Node3D
     // player capsule / sprite has no tunable scale); ModelVisual + BoxVisual override it.
     public virtual void ApplyModelScale() { }
 
+    // S99: push the live Cato placement (Tuning.CatoPixelSize / CatoXOffset / CatoYOffset) onto this already-
+    // spawned visual so an F5-panel apply moves/resizes the sprite WITHOUT a respawn. Default no-op; only
+    // CatoSpriteVisual overrides it.
+    public virtual void ApplyCatoPlacement() { }
+
     // ---- subclass extension points -----------------------------------------------------------------
     protected virtual void OnAcquire(EntityRenderState state) { }
     protected virtual void OnReset() { }

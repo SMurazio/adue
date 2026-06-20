@@ -83,6 +83,17 @@ public sealed class EntityRenderer
         }
     }
 
+    // S99: push the live Cato placement (pixel size + X/Y offset) onto every active visual so an F5-panel apply
+    // resizes/moves the spawned Cato sprites instantly without a respawn. Only CatoSpriteVisual reacts; the rest
+    // no-op. Pooled (parked) visuals re-seed from Tuning on their next acquire, so this only walks the active set.
+    public void ApplyCatoPlacementToExisting()
+    {
+        foreach (var visual in _active.Values)
+        {
+            visual.ApplyCatoPlacement();
+        }
+    }
+
     // S73/S96: an F5 player-visual toggle flipped (Debug facing box or Cato sprite); rebuild every already-spawned
     // player so the swap (model rig <-> debug box+arrow <-> Cato sprite) is immediate, not just for future spawns. Release the
     // active player/debug-box visuals (parking them in their archetype pool) and clear them from the active set;

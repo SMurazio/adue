@@ -46,6 +46,19 @@ public sealed class VisualTuning
     // player visuals on toggle so the swap is immediate.
     public bool DebugCatoSprite { get; set; }
 
+    // S99: live-tunable placement for the Cato AnimatedSprite3D billboard, mirroring the per-archetype model
+    // scales above. The art is a 512px frame with the cat low-center and a wand extending up-right (so the frame
+    // CENTRE sits above the cat body). These three knobs are pushed onto live Cato visuals from the F5 panel
+    // without a respawn (CatoSpriteVisual.ApplyPlacement), so the human can eyeball the fit while the client runs.
+    //   * CatoPixelSize — world size of one texture pixel. 0.0066 ≈ 3.4 tiles tall (2× the S96 first-guess 0.0033).
+    //   * CatoYOffset   — vertical placement of the sprite pivot above the ground plane (lifts the cat onto the
+    //     tile; the centred pivot is above the cat body, so this is less than half the sprite height).
+    //   * CatoXOffset   — horizontal nudge (the wand extends right, biasing the frame centre, so a small offset can
+    //     re-centre the cat body over the tile). Default 0 = no horizontal shift. The F5 panel clamps these.
+    public float CatoPixelSize { get; set; } = 0.0066f;
+    public float CatoYOffset { get; set; } = 1.0f;
+    public float CatoXOffset { get; set; }
+
     // S79 diagnostic: when true, the local player's PREDICTED tile and CONFIRMED/server tile are each painted
     // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
     // frame. They overlap when prediction and server agree and separate visibly under lag, so the human can

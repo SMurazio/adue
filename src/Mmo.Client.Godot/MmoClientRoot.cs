@@ -108,6 +108,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// rate, 0 = hard-follow). Defaults (1.0 / 0) reproduce today's camera.
 	private LineEdit? _tuneCameraFollowBlend;
 	private LineEdit? _tuneCameraSmoothing;
+	// S99: live Cato sprite placement — world pixel size (scale), Y offset (lift onto the tile), X offset
+	// (horizontal nudge). Pushed onto active Cato visuals on Apply without a respawn. Defaults on VisualTuning.
+	private LineEdit? _tuneCatoPixelSize;
+	private LineEdit? _tuneCatoYOffset;
+	private LineEdit? _tuneCatoXOffset;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -760,6 +765,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow (today).
 		// Higher = the camera glides toward the focus instead of snapping, so model B's release snap no longer pops.
 		_tuneCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnVisualApplyPressed);
+		// S99: live Cato sprite placement. Applied INSTANTLY client-side on Apply/Enter (no respawn): pushed onto
+		// every active Cato visual via the renderer. Scale (px size) 2× the S96 first-guess by default; the Y/X
+		// offsets centre the cat body on the tile (the frame centre sits above the cat, wand extending up-right).
+		_tuneCatoPixelSize = AddTuningField(rows, "Cato scale (px size)", OnVisualApplyPressed);
+		_tuneCatoYOffset = AddTuningField(rows, "Cato Y offset", OnVisualApplyPressed);
+		_tuneCatoXOffset = AddTuningField(rows, "Cato X offset", OnVisualApplyPressed);
 
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
@@ -1373,6 +1384,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S95: seed from the live camera blend/smoothing so re-opening the panel shows the current values (1.0 / 0).
 		SetField(_tuneCameraFollowBlend, _cameraFollowBlend);
 		SetField(_tuneCameraSmoothing, _cameraSmoothing);
+		// S99: seed from the live Cato placement so re-opening the panel shows the current values.
+		SetField(_tuneCatoPixelSize, _tuning.CatoPixelSize);
+		SetField(_tuneCatoYOffset, _tuning.CatoYOffset);
+		SetField(_tuneCatoXOffset, _tuning.CatoXOffset);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1484,10 +1499,29 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_cameraSmoothing = Mathf.Clamp((float)cameraSmoothing, 0f, 30f);
 		}
 
+		// S99: live-apply the Cato sprite placement. Scale (px size) clamped to the sane sprite range used by the
+		// label fields; offsets clamped to a generous tile range. Mirrored into _tuning (CatoSpriteVisual reads it
+		// on next acquire) and pushed onto active Cato visuals below so the change lands without a respawn.
+		if (TryReadField(_tuneCatoPixelSize, out var catoPixelSize))
+		{
+			_tuning.CatoPixelSize = Mathf.Clamp((float)catoPixelSize, 0.0001f, 0.05f);
+		}
+
+		if (TryReadField(_tuneCatoYOffset, out var catoYOffset))
+		{
+			_tuning.CatoYOffset = Mathf.Clamp((float)catoYOffset, -10f, 10f);
+		}
+
+		if (TryReadField(_tuneCatoXOffset, out var catoXOffset))
+		{
+			_tuning.CatoXOffset = Mathf.Clamp((float)catoXOffset, -10f, 10f);
+		}
+
 		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly
 		// without a respawn (the renderer walks its live visuals; pooled ones re-read on next acquire).
 		_renderer?.ApplyLabelTuningToExisting();
 		_renderer?.ApplyModelScaleToExisting();
+		_renderer?.ApplyCatoPlacementToExisting();
 
 		ShowInteractFeedback("Visual tuning applied.");
 	}
