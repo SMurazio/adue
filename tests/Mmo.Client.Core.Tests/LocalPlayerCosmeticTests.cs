@@ -353,4 +353,86 @@ public sealed class LocalPlayerCosmeticTests
 
         Assert.Equal(new TileCoord(7, 7), cosmetic.ConfirmedTile);
     }
+
+    // ---- S94: live-tunable cosmetic lead distance (MaxLeadTiles) ----------------------------------
+    //
+    // MaxLeadTiles bounds how far model B's render glides ahead of the confirmed tile before holding. Default 1.0
+    // = current model B (the EarlyGlide_BoundedByOneTile invariant above pins it). A lower value shortens the
+    // visible lead: 0.5 holds the held render at half a tile; 0.0 keeps the render on the confirmed center while
+    // moving (no visible lead — like accept/deny, but via the bound, with LeadEnabled still true). The setter
+    // clamps to [0, 1].
+
+    [Fact]
+    public void MaxLeadTiles_Half_HeldRenderSettlesAtHalfTile()
+    {
+        // Glide east with NO confirm: with MaxLeadTiles = 0.5 the held render must settle at ~0.5 tile from the
+        // confirmed center (the lever bounds the lead) — not ~1.0 as with the default.
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.MaxLeadTiles = 0.5d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        RenderPosition pos = default;
+        for (var t = 0; t <= 2000; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+            pos = cosmetic.Sample(Ms(t));
+        }
+
+        Assert.Equal(0.5d, pos.X, 6);
+        Assert.Equal(0.0d, pos.Y, 6);
+        Assert.Equal(new TileCoord(0, 0), cosmetic.ConfirmedTile);
+    }
+
+    [Fact]
+    public void MaxLeadTiles_Half_NeverExceedsHalfTileWhileGliding()
+    {
+        // Across the whole glide the render must never exceed the 0.5-tile bound (not just at the held endpoint).
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.MaxLeadTiles = 0.5d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        for (var t = 0; t <= 2000; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+            var pos = cosmetic.Sample(Ms(t));
+            Assert.True(pos.X <= 0.5d + 1e-9, $"render must stay within the 0.5-tile lead bound; was {pos.X}");
+        }
+    }
+
+    [Fact]
+    public void MaxLeadTiles_Zero_NoVisibleLead_RenderStaysOnConfirmedCenter()
+    {
+        // MaxLeadTiles = 0.0 => the render holds on the confirmed-tile center while moving (no visible lead), even
+        // though LeadEnabled is true (the bound, not LeadEnabled, suppresses the visible glide).
+        var cosmetic = NewCosmetic(new TileCoord(3, 3), Direction8.E);
+        cosmetic.MaxLeadTiles = 0.0d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        for (var t = 0; t <= 1000; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+            var pos = cosmetic.Sample(Ms(t));
+            Assert.Equal(3.0d, pos.X, 6);
+            Assert.Equal(3.0d, pos.Y, 6);
+        }
+
+        Assert.Equal(new TileCoord(3, 3), cosmetic.ConfirmedTile);
+    }
+
+    [Fact]
+    public void MaxLeadTiles_DefaultIsOne_AndSetterClampsToUnitRange()
+    {
+        // Default is 1.0 (= current model B). The setter clamps out-of-range inputs to [0, 1].
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        Assert.Equal(1.0d, cosmetic.MaxLeadTiles, 6);
+
+        cosmetic.MaxLeadTiles = 5.0d;
+        Assert.Equal(1.0d, cosmetic.MaxLeadTiles, 6);
+
+        cosmetic.MaxLeadTiles = -2.0d;
+        Assert.Equal(0.0d, cosmetic.MaxLeadTiles, 6);
+
+        cosmetic.MaxLeadTiles = 0.25d;
+        Assert.Equal(0.25d, cosmetic.MaxLeadTiles, 6);
+    }
 }

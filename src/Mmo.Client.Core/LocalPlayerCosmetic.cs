@@ -30,9 +30,23 @@ public sealed class LocalPlayerCosmetic
 {
     // The bounded cosmetic lead, in tiles: the render may glide at most this far ahead of the confirmed tile
     // toward the held-input direction before a confirm advances the confirmed tile. 1.0 = exactly one tile (the
-    // adjacent tile center). On LAN confirms arrive ~every tick so the cap is rarely reached; at high latency the
-    // glide HOLDS at the cap (paced by the confirm rate) until the next confirm.
-    private const double CosmeticLeadTiles = 1.0d;
+    // adjacent tile center) — the current behaviour and the MAX meaningful lead in the single-tile cosmetic model.
+    // On LAN confirms arrive ~every tick so the cap is rarely reached; at high latency the glide HOLDS at the cap
+    // (paced by the confirm rate) until the next confirm.
+    //
+    // S94: live-tunable [0.0, 1.0] (was the const CosmeticLeadTiles = 1.0). The forward glide still targets the
+    // adjacent tile center; ClampLead caps the SAMPLED render at MaxLeadTiles from the confirmed tile, so this
+    // value controls how far the visible lead REACHES before holding. 0.0 ≈ no visible lead (render stays on the
+    // confirmed center, like accept/deny); 1.0 = one full tile (current model B, byte-for-byte). Values > 1 would
+    // require multi-tile cosmetic prediction (a banked-ahead tile), which is out of scope here. Default 1.0 keeps
+    // model B unchanged. Set via MmoClient.SetCosmeticLeadTiles (F5 "Cosmetic lead (tiles)"); clamped on set.
+    public double MaxLeadTiles
+    {
+        get => _maxLeadTiles;
+        set => _maxLeadTiles = Math.Clamp(value, 0.0d, 1.0d);
+    }
+
+    private double _maxLeadTiles = 1.0d;
 
     // The walkability oracle (MmoClient.IsWalkableForPrediction): the SAME one model A's predictor uses, with the
     // S75 diagonal corner-cut rule. Here it gates only the glide DIRECTION (no tile is banked) — a cosmetic gate
@@ -157,7 +171,7 @@ public sealed class LocalPlayerCosmetic
 
     // Advances the COSMETIC render to wall-clock time now. While moving, once the render has settled on the
     // confirmed tile, begin (or continue) gliding from the confirmed tile toward the ADJACENT tile in the held
-    // direction, bounded to CosmeticLeadTiles ahead — walkability-gated on the glide direction. NO tile is ever
+    // direction, bounded to MaxLeadTiles ahead — walkability-gated on the glide direction. NO tile is ever
     // banked; the confirmed tile is untouched here. Returns true if a new lead glide was started this call.
     // Always samples the tween forward to now so the avatar glides smoothly.
     public bool Tick(TimeSpan now)
@@ -272,13 +286,14 @@ public sealed class LocalPlayerCosmetic
         return true;
     }
 
-    // Clamps a sampled render position so it never glides more than CosmeticLeadTiles ahead of the confirmed
-    // tile (the soft "hold at the cap" at high latency). The tween itself targets at most the adjacent tile, so
-    // this is a belt-and-braces bound on the per-axis lead distance from the confirmed center.
+    // Clamps a sampled render position so it never glides more than MaxLeadTiles ahead of the confirmed tile
+    // (the soft "hold at the cap" at high latency, and the S94 lever's bound). The tween itself targets at most
+    // the adjacent tile, so for MaxLeadTiles < 1 this actively caps the per-axis lead distance from the confirmed
+    // center (MaxLeadTiles == 0 holds the render on the confirmed tile while moving — no visible lead).
     private RenderPosition ClampLead(RenderPosition pos)
     {
-        var dx = Math.Clamp(pos.X - _confirmedTile.X, -CosmeticLeadTiles, CosmeticLeadTiles);
-        var dy = Math.Clamp(pos.Y - _confirmedTile.Y, -CosmeticLeadTiles, CosmeticLeadTiles);
+        var dx = Math.Clamp(pos.X - _confirmedTile.X, -_maxLeadTiles, _maxLeadTiles);
+        var dy = Math.Clamp(pos.Y - _confirmedTile.Y, -_maxLeadTiles, _maxLeadTiles);
         return new RenderPosition(_confirmedTile.X + dx, _confirmedTile.Y + dy);
     }
 

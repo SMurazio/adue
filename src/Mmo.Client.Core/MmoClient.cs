@@ -80,6 +80,12 @@ public sealed class MmoClient : IDisposable
     // the F5 opt-in (cosmetic driver with the forward lead off). See RenderMode / SetMovementRenderMode.
     private MovementRenderMode _renderMode = MovementRenderMode.CosmeticLead;
 
+    // S94: the live-tunable cosmetic lead distance (tiles) for model B, [0.0, 1.0], default 1.0 (= current model B
+    // byte-for-byte). Held at the client level so a value set before the local entity attaches — or after a
+    // respawn re-creates the cosmetic driver — is honoured: AttachCosmetic seeds the freshly-attached driver from
+    // this. SetCosmeticLeadTiles routes it live to the active driver (no restart). Clamped on set.
+    private double _cosmeticLeadTiles = 1.0d;
+
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
     {
@@ -274,6 +280,24 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // S94: the live cosmetic lead distance (tiles) — how far model B glides ahead of the confirmed tile before
+    // holding. [0.0, 1.0]; default 1.0 = current model B. Reflects the value last set (seeded into the F5 field
+    // on panel open). Only model B's render reads it; the value is inert in Predicted/AcceptDeny.
+    public double CosmeticLeadTiles => _cosmeticLeadTiles;
+
+    // S94: live-tunes the cosmetic lead distance (F5 "Cosmetic lead (tiles)"). Clamped to [0.0, 1.0] (0 ≈ no
+    // visible lead, 1.0 = one full tile / current model B). Routed to the active cosmetic driver immediately (no
+    // restart); stored at the client level too so a value set before the local entity attaches, or after a
+    // respawn re-creates the driver, is re-applied by AttachCosmetic. No-op safe when no cosmetic driver yet.
+    public void SetCosmeticLeadTiles(double tiles)
+    {
+        _cosmeticLeadTiles = Math.Clamp(tiles, 0.0d, 1.0d);
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
+        }
+    }
+
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
     // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
     // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
@@ -354,6 +378,10 @@ public sealed class MmoClient : IDisposable
         // DRIVES the render whenever RenderMode != Predicted (CosmeticLead, the default, or AcceptDeny); only in
         // the explicit Predicted mode is it dormant and the predictor owns the render.
         local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
+        // S94: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current lead-distance
+        // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence/turn-delay
+        // are threaded). Default 1.0 keeps model B byte-for-byte.
+        local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
         // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
         // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
         // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
@@ -1083,6 +1111,16 @@ public sealed class MmoClient : IDisposable
         public void TickCosmetic(TimeSpan now)
         {
             _cosmetic?.Tick(now);
+        }
+
+        // S94: live-sets the cosmetic lead distance (tiles) on the cosmetic driver. No-op if the driver isn't
+        // attached yet; MmoClient.EnsurePredictor re-seeds the current value when AttachCosmetic creates it.
+        public void SetCosmeticLeadTiles(double tiles)
+        {
+            if (_cosmetic is not null)
+            {
+                _cosmetic.MaxLeadTiles = tiles;
+            }
         }
 
         // S89: switches the active local-player render model LIVE, re-anchoring the newly-active driver from the

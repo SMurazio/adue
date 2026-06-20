@@ -92,6 +92,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tuneLabelHeight;
 	// S93: live artificial one-way network latency (ms) injected on this client's traffic (debug tooling).
 	private LineEdit? _tuneNetLatencyMs;
+	// S94: live cosmetic lead distance (tiles) for model B — how far the render glides ahead of the confirmed
+	// tile before holding. [0, 1]; default 1.0 = current model B.
+	private LineEdit? _tuneCosmeticLeadTiles;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -712,7 +715,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void BuildVisualPanel(CanvasLayer layer)
 	{
 		// To the right of the F4 panel so the two admin panels can be open side-by-side without overlapping.
-		var panel = CreateOverlayPanel("VisualPanel", new Vector2(860, 154), new Vector2(360, 330));
+		var panel = CreateOverlayPanel("VisualPanel", new Vector2(860, 154), new Vector2(360, 360));
 		var rows = CreatePanelVBox(panel);
 
 		var title = CreateOverlayLabel("VisualTitle", 15);
@@ -732,6 +735,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S93: artificial one-way network latency (ms each way). Applied INSTANTLY client-side on Apply/Enter —
 		// no server round-trip, no restart. 0 = off (default I/O path unchanged). Felt round-trip ≈ 2× this.
 		_tuneNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnVisualApplyPressed);
+		// S94: how far model B's cosmetic lead glides ahead of the confirmed tile, in tiles. Applied INSTANTLY
+		// client-side on Apply/Enter (no server round-trip, no restart). [0, 1]: 0 ≈ no visible lead (like
+		// accept/deny), 1.0 = one full tile (current model B / max in the single-tile cosmetic model). Lower values
+		// shorten the visible lead (and the release snap).
+		_tuneCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnVisualApplyPressed);
 
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
@@ -1308,6 +1316,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneLabelHeight, _tuning.PlayerLabelHeight);
 		// S93: seed from the current injected latency so re-opening the panel shows the live value (0 by default).
 		SetField(_tuneNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
+		// S94: seed from the live cosmetic lead distance so re-opening the panel shows the current value (1.0 default).
+		SetField(_tuneCosmeticLeadTiles, _client?.CosmeticLeadTiles ?? 1.0d);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1406,6 +1416,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_tuneNetLatencyMs, out var netLatency))
 		{
 			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
+		}
+
+		// S94: live-apply the cosmetic lead distance (tiles) for model B. Clamped [0, 1] (the client clamps again);
+		// routed straight to the active cosmetic driver — no server round-trip, no restart. Default 1.0 = current
+		// model B; lower values shorten the visible lead (and the release snap).
+		if (TryReadField(_tuneCosmeticLeadTiles, out var leadTiles))
+		{
+			_client.SetCosmeticLeadTiles(Mathf.Clamp((float)leadTiles, 0f, 1f));
 		}
 
 		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly
