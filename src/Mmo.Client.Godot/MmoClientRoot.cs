@@ -90,6 +90,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tunePlantScale;
 	private LineEdit? _tuneLabelPixelSize;
 	private LineEdit? _tuneLabelHeight;
+	// S93: live artificial one-way network latency (ms) injected on this client's traffic (debug tooling).
+	private LineEdit? _tuneNetLatencyMs;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -727,6 +729,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_tunePlantScale = AddTuningField(rows, "plant.modelScale", OnVisualApplyPressed);
 		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
 		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
+		// S93: artificial one-way network latency (ms each way). Applied INSTANTLY client-side on Apply/Enter —
+		// no server round-trip, no restart. 0 = off (default I/O path unchanged). Felt round-trip ≈ 2× this.
+		_tuneNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnVisualApplyPressed);
 
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
@@ -1301,6 +1306,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tunePlantScale, _tuning.PlantModelScale);
 		SetField(_tuneLabelPixelSize, _tuning.LabelPixelSize);
 		SetField(_tuneLabelHeight, _tuning.PlayerLabelHeight);
+		// S93: seed from the current injected latency so re-opening the panel shows the live value (0 by default).
+		SetField(_tuneNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1393,6 +1400,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_tuning.PlayerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
 		}
 
+		// S93: live-apply the artificial one-way network latency (ms). 0 = off; clamped to a sane debug range.
+		// Applied directly to the client (no server round-trip) — the injected delay flows through the existing
+		// send/receive paths so the movement models can be felt under real-world RTT (felt ≈ 2× this value).
+		if (TryReadField(_tuneNetLatencyMs, out var netLatency))
+		{
+			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
+		}
+
 		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly
 		// without a respawn (the renderer walks its live visuals; pooled ones re-read on next acquire).
 		_renderer?.ApplyLabelTuningToExisting();
@@ -1468,6 +1483,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				.Append("ms conf=")
 				.Append(md.LastConfirmedTile?.ToString() ?? "-")
 				.AppendLine();
+
+			// S93: show the active artificial latency only while it is injected (0 = off, line omitted so the
+			// default HUD is unchanged). One-way value; felt round-trip ≈ 2× (e.g. 100 ⇒ ~200ms RTT).
+			if (_client.SimulatedLatencyMs > 0)
+			{
+				_perfText.Append("net-sim lat=")
+					.Append(_client.SimulatedLatencyMs.ToString(CultureInfo.InvariantCulture))
+					.Append("ms/way (~")
+					.Append((_client.SimulatedLatencyMs * 2).ToString(CultureInfo.InvariantCulture))
+					.AppendLine("ms RTT)");
+			}
 		}
 
 		// S67 motion line: continuous render position, instantaneous speed (tiles/s), max render<->confirmed

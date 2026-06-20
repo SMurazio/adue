@@ -42,6 +42,11 @@ public sealed class MmoClient : IDisposable
     private readonly ClientMovementTrace _movementTrace;
     private readonly ClientInventory _inventory = new();
 
+    // S93: client-only artificial-latency injector (debug tooling, live F5). Inactive by default (0 ms ⇒ the
+    // default I/O path is unchanged); when set > 0 it holds both outbound sends and inbound (decoded) messages
+    // for a symmetric one-way delay so the movement models can be felt under real-world RTT.
+    private readonly NetLatencySimulator _latency = new();
+
     // Acks the highest *contiguously*-received snapshot sequence (S47a), not the latest one seen, so the
     // server never advances a viewer's acked baseline past a sequence the client missed under UDP
     // loss/reorder — the prerequisite that makes S47b's cumulative step-deltas safe.
@@ -200,7 +205,20 @@ public sealed class MmoClient : IDisposable
     {
         ThrowIfDisposed();
         _currentTime = now;
+        // PollEvents fires NetworkReceive synchronously: with latency inactive each message is handled inline
+        // (default path); with latency active each decoded message is buffered into the inbound queue instead.
         _netManager.PollEvents();
+        // S93: when artificial latency is active, flush the symmetric delay queues for "now". Inbound is drained
+        // BEFORE the driver tick (below) so a snapshot whose delay just elapsed re-bases the prediction this same
+        // poll; outbound is flushed so held sends leave on schedule. HasPending keeps draining in-flight items
+        // even right after latency is lowered to 0, so nothing queued under the old delay is stranded. At 0 ms
+        // with empty queues this is a pair of cheap counter checks, so the default path stays free.
+        if (_latency.Active || _latency.HasPending)
+        {
+            _latency.FlushInboundDue(now, HandleMessage);
+            _latency.FlushOutboundDue(now, SendNow);
+        }
+
         // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
         // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
         if (_renderMode != MovementRenderMode.Predicted)
@@ -445,7 +463,20 @@ public sealed class MmoClient : IDisposable
     {
         try
         {
-            HandleMessage(ProtocolCodec.Decode(reader.GetRemainingBytes()));
+            // Decode synchronously (the reader/packet is recycled in the finally below). The DECODED message is
+            // what gets buffered under S93 latency injection — never the raw reader.
+            var message = ProtocolCodec.Decode(reader.GetRemainingBytes());
+            if (_latency.Active)
+            {
+                // S93: hold the decoded inbound message for the one-way delay instead of handling it now; Poll
+                // drains due items into HandleMessage in arrival order. At 0 ms this branch is skipped and the
+                // message is handled inline exactly as before.
+                _latency.EnqueueInbound(message, _currentTime);
+            }
+            else
+            {
+                HandleMessage(message);
+            }
         }
         catch (Exception exception)
         {
@@ -842,6 +873,22 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
+        // S93: when artificial latency is active, hold the send for the one-way delay instead of dispatching
+        // now; Poll flushes due items. At 0 ms the simulator is inactive and this branch is skipped entirely,
+        // so the default path is unchanged.
+        if (_latency.Active)
+        {
+            _latency.EnqueueOutbound(message, deliveryMethod, _currentTime);
+            return;
+        }
+
+        SendNow(message, deliveryMethod);
+    }
+
+    // The actual wire send. Used directly when no artificial latency is active, and as the flush sink for the
+    // S93 latency simulator's outbound queue.
+    private void SendNow(IProtocolMessage message, DeliveryMethod deliveryMethod)
+    {
         if (_serverPeer is null)
         {
             throw new InvalidOperationException("Client is not connected.");
@@ -849,6 +896,20 @@ public sealed class MmoClient : IDisposable
 
         _serverPeer.Send(ProtocolCodec.Encode(message), deliveryMethod);
     }
+
+    // S93: live-sets the artificial one-way network latency (ms) added symmetrically to both directions, so
+    // the felt round-trip ≈ 2× this value. 0 disables injection (default path, zero overhead). Live F5 — no
+    // restart. Client-only; the injected delay flows through the EXISTING send/receive paths so the predictor
+    // calibration, reconcile, and accept/deny confirms all naturally see the delayed traffic. Negative inputs
+    // are clamped to 0 by the simulator.
+    public void SetSimulatedLatencyMs(int oneWayMs)
+    {
+        _latency.SetLatencyMs(oneWayMs);
+    }
+
+    // S93: the active artificial one-way latency in ms (0 = injection off). Read-only; used to seed the F5
+    // field on panel open and to show the value in the perf HUD.
+    public int SimulatedLatencyMs => _latency.LatencyMs;
 
     private void ThrowIfDisposed()
     {
