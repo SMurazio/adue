@@ -251,26 +251,35 @@ public sealed class LocalPlayerPredictor
 
         var correction = ChebyshevDistance(_predictedTile, confirmedTile);
         _predictedTile = confirmedTile;
-        // Re-arm: the very next predicted step happens a full cadence after the correction so we don't
-        // immediately re-diverge from the freshly anchored truth. Anchor _nextEligibleAt at now + cadence too,
-        // so a stop->start after a reconcile respects the cadence from here (consistent with Tick).
-        _nextEligibleAt = now + TimeSpan.FromMilliseconds(_cadenceMs);
-        if (_moving)
-        {
-            _nextStepAt = _nextEligibleAt;
-        }
 
         var confirmedPos = RenderPosition.FromTile(confirmedTile);
         if (correction > SnapCorrectionThresholdTiles)
         {
             // Large jump (teleport/knockback/desync): snap the render instantly rather than smear a long slide.
+            // Re-arm the schedule: the very next predicted step happens a full cadence after this snap so we
+            // don't immediately re-diverge from the freshly anchored truth. Anchor _nextEligibleAt at
+            // now + cadence too, so a stop->start after a snap respects the cadence from here (consistent with
+            // Tick). The re-arm is confined to this snap branch ON PURPOSE (S71): on a small Corrected reconcile
+            // while moving we must NOT freeze a full cadence — that freeze stalled prediction for a cadence
+            // while the server kept stepping through a reversal, turning a 1-tile transient into a ~3-tile
+            // lag-then-jump. A snap is a genuine desync where a clean cadence re-base is correct.
+            _nextEligibleAt = now + TimeSpan.FromMilliseconds(_cadenceMs);
+            if (_moving)
+            {
+                _nextStepAt = _nextEligibleAt;
+            }
+
             StartTween(confirmedPos, confirmedPos, now, _cadenceMs);
             _renderPosition = confirmedPos;
             return ReconcileOutcome.Snapped;
         }
 
-        // Small disagreement: blend from where we're showing now to the truth over one cadence so a normal
-        // start/stop boundary settles smoothly instead of popping.
+        // Small disagreement: re-anchor the predicted tile on truth and blend the render from where we're
+        // showing now to that truth over one cadence so a normal start/stop boundary settles smoothly instead
+        // of popping. Crucially (S71) we leave _nextStepAt / _nextEligibleAt on their EXISTING schedule: if the
+        // predictor is moving it resumes stepping at the already-armed boundary and keeps tracking the server
+        // cadence through a reversal, instead of freezing a full cadence and falling multiple tiles behind. An
+        // idle predictor has no pending step, so there is nothing to re-arm.
         StartTween(SampleInternal(now), confirmedPos, now, _cadenceMs);
         _renderPosition = SampleInternal(now);
         return ReconcileOutcome.Corrected;

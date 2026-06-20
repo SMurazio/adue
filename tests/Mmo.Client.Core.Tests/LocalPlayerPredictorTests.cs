@@ -462,4 +462,45 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
     }
+
+    // ---- S71: a stale old-direction confirm after a reversal must NOT freeze a full cadence ----------
+
+    [Fact]
+    public void ReversalThenStaleConfirm_DoesNotStallAFullCadence_KeepsStepping()
+    {
+        // The S71 bug: held E for a while, then flip to W. The server's already-in-flight EAST confirmations
+        // keep arriving AFTER the flip. Such a confirm misses IsBehindOnPredictedLine (which only knows the new
+        // direction W), so Reconcile takes the small-Corrected branch. The OLD code re-armed _nextStepAt to
+        // now + cadence on every Corrected reconcile, freezing predicted stepping for a whole cadence while the
+        // server kept stepping — the ~3-tile lag-then-jump. Option B leaves the schedule on its existing cadence
+        // for a moving Corrected, so the predictor resumes stepping at the next boundary and tracks the server
+        // through the reversal. This test pins that: after the stale confirm the predicted tile keeps advancing
+        // WEST on the normal cadence, it does not stall a full cadence past the correction.
+
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.W);
+        // Already facing W so steps are moves (no turn-then-move delay clouding the schedule under test).
+        predictor.SetIntent(true, Direction8.W, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (-1,0) at t=0, next step armed t=150
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (-2,0) at t=150, next step armed t=300
+        Assert.Equal(new TileCoord(-2, 0), predictor.PredictedTile);
+
+        // A stale confirm from BEFORE the flip lands at t=160. It is a small (Chebyshev 2) but OFF-LINE
+        // disagreement: the W back-walk from (-2,0) only visits y=0 tiles (-1,0),(0,0),(1,0), so a tile at
+        // y=1 can never match — it falls through to the Corrected branch, exactly the live reversal case where
+        // a stale old-direction confirm sits off the new predicted line.
+        var outcome = predictor.Reconcile(new TileCoord(0, 1), TimeSpan.FromMilliseconds(160));
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        Assert.Equal(new TileCoord(0, 1), predictor.PredictedTile);       // re-anchored on truth (expected)
+
+        // The schedule was NOT frozen to t=160+150=310: the next step is still due at the ORIGINAL boundary
+        // t=300 (the pre-correction cadence). With the OLD freeze it would not step until t=310.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(299)));
+        Assert.Equal(new TileCoord(0, 1), predictor.PredictedTile);
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));      // resumes stepping ON the existing cadence
+        Assert.Equal(new TileCoord(-1, 1), predictor.PredictedTile);      // stepped W from (0,1)
+
+        // And it keeps marching west at cadence — no multi-tile trail, no full-cadence stall.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(450)));
+        Assert.Equal(new TileCoord(-2, 1), predictor.PredictedTile);
+    }
 }
