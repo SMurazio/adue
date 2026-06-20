@@ -127,8 +127,10 @@ public sealed class LocalPlayerPredictorTests
             predictor.Tick(now);
 
             // Server confirms its position from the PREVIOUS step (trails by one in-flight step), the worst
-            // realistic steady-state lag. Must not yank the prediction back.
-            var outcome = predictor.Reconcile(serverTile, now);
+            // realistic steady-state lag. The confirm's step-seq trails the prediction by one too (the predictor
+            // is at seq step+1, the server confirms seq step). The history tile at that seq matches, so it must
+            // not yank the prediction back.
+            var outcome = predictor.Reconcile(serverTile, (uint)step, now);
             Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
 
             // Predicted tile is exactly `step+1` tiles east of origin — tile-for-tile with what the server
@@ -150,7 +152,7 @@ public sealed class LocalPlayerPredictorTests
         {
             var now = TimeSpan.FromMilliseconds(step * 150);
             predictor.Tick(now);
-            var outcome = predictor.Reconcile(predictor.PredictedTile, now);
+            var outcome = predictor.Reconcile(predictor.PredictedTile, predictor.PredictedStepSeq, now);
             Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
         }
     }
@@ -166,19 +168,24 @@ public sealed class LocalPlayerPredictorTests
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
 
-        predictor.Tick(TimeSpan.Zero);                   // predict (1,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(150));   // predict (2,0) -- the disputed tile
+        predictor.Tick(TimeSpan.Zero);                   // predict (1,0) at seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));   // predict (2,0) at seq 2 -- the disputed tile
 
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
 
         // Player releases the key (so the server's confirmation is its FINAL answer, not a catch-up).
         predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(160));
 
-        // Server's authoritative truth: it stopped at (1,0) (rejected the (2,0) step).
-        var outcome = predictor.Reconcile(new TileCoord(1, 0), TimeSpan.FromMilliseconds(200));
+        // S77: the server's authoritative truth at the SAME step the prediction reached (seq 2) is (1,0), not
+        // the predicted (2,0) — a genuine divergence at that step (the server's step-2 move went elsewhere /
+        // was held). The history tile at seq 2 (2,0) mismatches the confirm, so reconcile corrects EXACTLY to
+        // the server's truth.
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 2u, TimeSpan.FromMilliseconds(200));
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
         Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);   // EXACT reconciliation
+        Assert.Equal(2u, predictor.PredictedStepSeq);                 // seq re-anchored on the confirm
     }
 
     [Fact]
@@ -210,8 +217,10 @@ public sealed class LocalPlayerPredictorTests
         predictor.Tick(TimeSpan.Zero);                   // (1,0)
         predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(10));
 
-        // Server teleported the player far away (knockback / admin tp): a large correction snaps.
-        var outcome = predictor.Reconcile(new TileCoord(40, 40), TimeSpan.FromMilliseconds(20));
+        // Server teleported the player far away (knockback / admin tp): a large correction snaps. The confirm's
+        // step-seq (1) matches the predicted step's seq but its tile (40,40) is wildly off the history tile
+        // (1,0) — a mismatch, and the Chebyshev jump exceeds the snap threshold, so it snaps rather than blends.
+        var outcome = predictor.Reconcile(new TileCoord(40, 40), 1u, TimeSpan.FromMilliseconds(20));
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Snapped, outcome);
         Assert.Equal(new TileCoord(40, 40), predictor.PredictedTile);
@@ -440,6 +449,10 @@ public sealed class LocalPlayerPredictorTests
 
             Assert.Equal(entity.Tile, predictor.PredictedTile);
             Assert.Equal(entity.Facing, predictor.Facing);
+            // S77: the predictor's step-seq mirrors the server's StepSequence by the SAME construction as the
+            // tile parity — both bump only on an accepted tile move (never a turn/block), so they agree every
+            // tick. This is what lets Reconcile match a confirm to the exact predicted step.
+            Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
         }
     }
 
@@ -484,23 +497,57 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void StartStopBoundary_ConvergesToServerStopTile()
+    public void StartStopBoundary_ServerSettledBehind_ConvergesDownToStopTile()
     {
-        // Predict three steps, stop, then the server's final confirmation lands one tile short of the
-        // prediction (the last in-flight step had not been processed when the player released). Reconcile
-        // must converge exactly to the server's stop tile with a small (non-snapping) correction.
+        // The REAL stop-boundary over-prediction: predict three steps E to (3,0) (seq 3), then STOP. The
+        // server only ever took TWO steps — the 3rd step's intent arrived AFTER the player released — so its
+        // authoritative truth settles at (2,0) at seq 2 and it will NEVER emit a seq-3 confirm (it is stopped).
+        // The benign-match path would see MatchesHistory(2,(2,0)) -> Matched and leave us stranded at (3,0)
+        // forever. The idle/stop clause fires (!_moving && serverStepSeq 2 < predictedStepSeq 3) and converges
+        // DOWN to the server's stop tile (2,0) with a small (non-snapping) blend.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
-        predictor.Tick(TimeSpan.Zero);                   // (1,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(150));   // (2,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(300));   // (3,0)
+        predictor.Tick(TimeSpan.Zero);                   // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
 
         predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
 
-        var outcome = predictor.Reconcile(new TileCoord(2, 0), TimeSpan.FromMilliseconds(360));
+        // Server settled at (2,0) at seq 2 — one step short of the prediction. (2,0)@seq2 is exactly what
+        // history holds, so the OLD code matched and left us at (3,0); the idle clause converges down to it.
+        var outcome = predictor.Reconcile(new TileCoord(2, 0), 2u, TimeSpan.FromMilliseconds(360));
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
+    }
+
+    [Fact]
+    public void StartStopBoundary_CleanStop_ServerTookAllSteps_MatchedNoRenderMove()
+    {
+        // The clean stop: predict three steps E to (3,0) (seq 3), then STOP, and the server DID take all three
+        // — it confirms (3,0)@seq3. The idle clause must NOT fire (serverStepSeq 3 is not < predictedStepSeq 3):
+        // the prediction already agrees with the truth, so this is a benign Matched with no render move.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                   // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
+        var renderBefore = predictor.Sample(TimeSpan.FromMilliseconds(360));
+
+        var outcome = predictor.Reconcile(new TileCoord(3, 0), 3u, TimeSpan.FromMilliseconds(360));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+        var renderAfter = predictor.Sample(TimeSpan.FromMilliseconds(360));
+        Assert.Equal(renderBefore.X, renderAfter.X, 6);
+        Assert.Equal(renderBefore.Y, renderAfter.Y, 6);
     }
 
     // ---- S71: a stale old-direction confirm after a reversal must NOT freeze a full cadence ----------
@@ -524,11 +571,10 @@ public sealed class LocalPlayerPredictorTests
         predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (-2,0) at t=150, next step armed t=300
         Assert.Equal(new TileCoord(-2, 0), predictor.PredictedTile);
 
-        // A stale confirm from BEFORE the flip lands at t=160. It is a small (Chebyshev 2) but OFF-LINE
-        // disagreement: the W back-walk from (-2,0) only visits y=0 tiles (-1,0),(0,0),(1,0), so a tile at
-        // y=1 can never match — it falls through to the Corrected branch, exactly the live reversal case where
-        // a stale old-direction confirm sits off the new predicted line.
-        var outcome = predictor.Reconcile(new TileCoord(0, 1), TimeSpan.FromMilliseconds(160));
+        // A confirm at the step the prediction reached (seq 2) reports an OFF-LINE tile (0,1) — the history
+        // tile at seq 2 is (-2,0), so this is a genuine mismatch that re-anchors (the live reversal case where
+        // the server's authoritative step-2 tile diverged from the prediction). It falls through to Corrected.
+        var outcome = predictor.Reconcile(new TileCoord(0, 1), 2u, TimeSpan.FromMilliseconds(160));
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
         Assert.Equal(new TileCoord(0, 1), predictor.PredictedTile);       // re-anchored on truth (expected)
 
@@ -544,66 +590,139 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(new TileCoord(-2, 1), predictor.PredictedTile);
     }
 
-    // ---- S72: a stale OLD-direction confirm on the recent path is benign — no backward re-anchor -----
+    // ---- S77: a benign trailing/old-direction confirm MATCHES its step — no backward re-anchor ---------
 
     [Fact]
-    public void StaleOldDirectionConfirm_OnRecentPath_IsBenign_NoBackwardReanchor()
+    public void BenignTrailingConfirm_MatchedByStepSeq_NoRenderMove()
     {
-        // The S72 "rubberband": drive E for a few tiles, then flip to W. The server's already-in-flight EAST
-        // confirmations keep arriving AFTER the flip. The OLD straight-line back-walk only knew the NEW
-        // direction (W), so a stale EAST confirm missed it and Reconcile re-anchored _predictedTile BACKWARD
-        // onto the lagging confirm and blended the render back — the residual backward pull. With the recent-
-        // path ring, that EAST tile is one we actually occupied, so Reconcile recognises it as a benign
-        // trailing confirm: Matched, prediction untouched, no backward render move.
+        // The S72 "rubberband", now resolved by step-seq (replaces StaleOldDirectionConfirm_OnRecentPath). Drive
+        // E for three tiles (seq 3, (3,0)). A stale in-flight EAST confirm from seq 1 lands — the server simply
+        // hasn't processed the steps that carried us forward. The history tile at seq 1 IS (1,0), so the confirm
+        // matches the exact step we predicted: Matched, prediction untouched, no backward render move.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
-        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0)
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
         Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
-
-        // Flip to W mid-cadence. The predictor is still at (3,0) (the turn/move hasn't fired yet) but is now
-        // predicting the WEST line; the recent path still holds the EAST tiles (3,0),(2,0),(1,0),(0,0).
-        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(310));
+        Assert.Equal(3u, predictor.PredictedStepSeq);
 
         var renderBefore = predictor.Sample(TimeSpan.FromMilliseconds(320));
 
-        // A stale EAST in-flight confirm from BEFORE the flip lands: the server is still at (1,0), a tile we
-        // already occupied. The OLD code re-anchored backward to (1,0) and blended the render back. Now it is
-        // recognised as a benign trailing confirm.
-        var outcome = predictor.Reconcile(new TileCoord(1, 0), TimeSpan.FromMilliseconds(320));
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(320));
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
         Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);       // NOT re-anchored backward
-        // The render did not get yanked backward toward (1,0): it stayed where it was showing.
+        Assert.Equal(3u, predictor.PredictedStepSeq);                     // seq untouched
+        // The render did not get yanked backward toward (1,0): it stayed exactly where it was showing.
         var renderAfter = predictor.Sample(TimeSpan.FromMilliseconds(320));
-        Assert.Equal(renderBefore.X, renderAfter.X, 3);
-        Assert.Equal(renderBefore.Y, renderAfter.Y, 3);
-
-        // A genuine OFF-path confirm (a tile we never occupied — e.g. the server held us off-line) still
-        // corrects: the recent-path latitude does not swallow a real divergence.
-        var offPath = predictor.Reconcile(new TileCoord(3, 5), TimeSpan.FromMilliseconds(330));
-        Assert.True(offPath is LocalPlayerPredictor.ReconcileOutcome.Corrected
-            or LocalPlayerPredictor.ReconcileOutcome.Snapped);
-        Assert.Equal(new TileCoord(3, 5), predictor.PredictedTile);
+        Assert.Equal(renderBefore.X, renderAfter.X, 6);
+        Assert.Equal(renderBefore.Y, renderAfter.Y, 6);
     }
 
     [Fact]
-    public void OffPathConfirm_WhileMoving_StillCorrects_RecentPathDoesNotSwallowDivergence()
+    public void StaleConfirm_OlderThanHistory_IsBenign_NoRenderMove()
     {
-        // Parity guard for the S72 latitude: while MOVING, a confirm that is NOT on the recent path must still
-        // correct. The predictor walks E onto (1,0),(2,0),(3,0); the server reports a tile that is genuinely
-        // off that line (a divergence / blocked step that held us off-path). It must reconcile, not be absorbed
-        // as a benign trailing confirm.
+        // A confirm for a step OLDER than anything we still remember (we have moved well past it) is benign by
+        // construction — there is nothing to compare it against and it can only be a lagging trailing confirm.
+        // Matched, prediction + render untouched.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
-        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
-        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0)
+        for (var step = 0; step < 5; step++)
+        {
+            predictor.Tick(TimeSpan.FromMilliseconds(step * 150));
+        }
 
-        var outcome = predictor.Reconcile(new TileCoord(2, 1), TimeSpan.FromMilliseconds(310));
+        Assert.Equal(new TileCoord(5, 0), predictor.PredictedTile);
+        var renderBefore = predictor.Sample(TimeSpan.FromMilliseconds(620));
+
+        // seq 0 — the start anchor, never recorded in history (history holds seq 1..5). It is older than the
+        // oldest retained entry, so it is treated as a benign already-passed match.
+        var outcome = predictor.Reconcile(new TileCoord(0, 0), 0u, TimeSpan.FromMilliseconds(620));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+        Assert.Equal(new TileCoord(5, 0), predictor.PredictedTile);
+        var renderAfter = predictor.Sample(TimeSpan.FromMilliseconds(620));
+        Assert.Equal(renderBefore.X, renderAfter.X, 6);
+        Assert.Equal(renderBefore.Y, renderAfter.Y, 6);
+    }
+
+    // ---- S77: a genuine misprediction re-anchors and REPLAYS the in-flight steps from the truth -------
+
+    [Fact]
+    public void GenuineMisprediction_ReplaysInFlightSteps_FromCorrectedAnchor()
+    {
+        // The server diverges at an EARLIER step than the prediction's head, so the in-flight steps after it
+        // must be replayed from the corrected anchor. Predict E to (3,0) seq 3. The server reports that at seq 2
+        // the tile was (2,1) (diverged one tile north of the predicted (2,0)). Reconcile re-anchors seq 2 to
+        // (2,1) and REPLAYS the recorded seq-3 step (still E) from there, recomputing the present tile as (3,1)
+        // — not a backward yank to (2,1), and not the stale (3,0).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+
+        var outcome = predictor.Reconcile(new TileCoord(2, 1), 2u, TimeSpan.FromMilliseconds(310));
 
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
-        Assert.Equal(new TileCoord(2, 1), predictor.PredictedTile);
+        // Re-anchored to the seq-2 truth (2,1) and replayed the seq-3 E step forward => present tile (3,1).
+        Assert.Equal(new TileCoord(3, 1), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);                     // seq head preserved across replay
+    }
+
+    [Fact]
+    public void BlockedHoldThenTurnAlongWall_NoBackwardRenderMove()
+    {
+        // A wall at x>=2. Hold E into it: step to (1,0) (seq 1), then the (2,0) step is blocked and the avatar
+        // holds at the wall — the seq does NOT advance on a blocked step (mirrors the server). The server
+        // confirms the held tile (1,0) at the unchanged seq 1 => Matched. Then turn S and slide along the wall.
+        // Assert: the held confirm is benign (no render move), and across the turn-then-slide the render only
+        // advances DOWN the wall, never backward, while the seq bumps only on the accepted S moves.
+        bool walkable(TileCoord t) => t.X < 2;
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E, walkable);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(1u, predictor.PredictedStepSeq);
+
+        // Hold into the wall: target (2,0) blocked, no step, seq stays 1.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(150)));
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(1u, predictor.PredictedStepSeq);
+
+        // Server confirms the held tile at the unchanged seq 1 — benign match, no render move.
+        var renderBeforeConfirm = predictor.Sample(TimeSpan.FromMilliseconds(155));
+        var held = predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(155));
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, held);
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        var renderAfterConfirm = predictor.Sample(TimeSpan.FromMilliseconds(155));
+        Assert.Equal(renderBeforeConfirm.X, renderAfterConfirm.X, 6);
+        Assert.Equal(renderBeforeConfirm.Y, renderAfterConfirm.Y, 6);
+
+        // Turn S and slide along the wall, ticking frame-by-frame. The render Y must be monotonic non-decreasing
+        // (only ever slides DOWN the wall, never snaps backward), and the X never slides off the wall column.
+        predictor.SetIntent(true, Direction8.S, TimeSpan.FromMilliseconds(160));
+        var lastY = renderAfterConfirm.Y;
+        for (var ms = 160; ms <= 600; ms += 10)
+        {
+            predictor.Tick(TimeSpan.FromMilliseconds(ms));
+            var r = predictor.Sample(TimeSpan.FromMilliseconds(ms));
+            Assert.True(r.Y >= lastY - 1e-6, $"render moved backward at t={ms}: {r.Y} < {lastY}");
+            Assert.Equal(1d, r.X, 6);                                     // stays on the wall column x=1
+            lastY = r.Y;
+        }
+
+        // Every accepted move was a single S tile, so seq == 1 (the E step) + the S moves taken; the tile is
+        // straight down the wall column and the seq mirrors exactly that many accepted moves.
+        Assert.Equal(1, predictor.PredictedTile.X);
+        Assert.Equal(1u + (uint)predictor.PredictedTile.Y, predictor.PredictedStepSeq);
+
+        // A final confirm of the present tile at the present seq is a clean match.
+        var slid = predictor.Reconcile(predictor.PredictedTile, predictor.PredictedStepSeq, TimeSpan.FromMilliseconds(610));
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, slid);
     }
 }

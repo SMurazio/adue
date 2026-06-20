@@ -529,7 +529,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, state.Depleted);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, state.Depleted);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -634,7 +634,7 @@ public sealed class MmoClient : IDisposable
 
             // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
             // last snapshot set rather than resetting a known-depleted node to available.
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, existing.Depleted);
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, existing.Depleted);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -802,7 +802,7 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, bool depleted = false)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, bool depleted = false)
         {
             var previousTile = Tile;
             // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -813,10 +813,12 @@ public sealed class MmoClient : IDisposable
             LastSeenSnapshotSequence = snapshotSequence;
             if (_predictor is not null)
             {
-                // Local predicted entity: re-base the prediction off the confirmed tile (the predictor owns
-                // its own present-time render tween — the buffered interpolator is bypassed here). Facing
-                // follows the prediction while moving, else the confirmed facing.
-                _predictor.Reconcile(tile, receivedAt);
+                // Local predicted entity: re-base the prediction off the confirmed tile, matched by the
+                // recipient-scoped step sequence (S77) so a benign trailing/old-direction confirm is recognised
+                // by the step it confirms instead of being yanked backward. The predictor owns its own
+                // present-time render tween (the buffered interpolator is bypassed here). Facing follows the
+                // prediction while moving, else the confirmed facing.
+                _predictor.Reconcile(tile, recipientStepSeq, receivedAt);
                 _predictor.ConfirmFacing(facing);
                 Facing = _predictor.Facing;
                 return new EntityConfirmationDebug(
