@@ -225,4 +225,132 @@ public sealed class LocalPlayerCosmeticTests
         Assert.Equal(0.0, pos.X, 6);
         Assert.Equal(0.0, pos.Y, 6);
     }
+
+    // ---- S92: "accept/deny only" (LeadEnabled = false) — the SAME driver with the forward lead OFF ------------
+    //
+    // With LeadEnabled = false the avatar must move ONLY on a confirmed step: no early glide (Tick never leads),
+    // a deny (unchanged-tile Confirm) leaves it put, and release never snaps (there is no lead to unwind). This is
+    // the mode the F5 "Accept/deny only (no lead)" checkbox selects; default B (LeadEnabled = true) is unchanged
+    // above. By construction it cannot produce the lead overshoot / release snap that the camera could pop on.
+
+    private static LocalPlayerCosmetic NewAcceptDeny(TileCoord start, Direction8 facing, Func<TileCoord, bool>? walkable = null)
+    {
+        var cosmetic = NewCosmetic(start, facing, walkable);
+        cosmetic.LeadEnabled = false;
+        return cosmetic;
+    }
+
+    [Fact]
+    public void AcceptDeny_NoPreMovement_RenderStaysExactlyOnConfirmedTile()
+    {
+        // SetIntent(moving) + lots of Tick with NO Confirm must leave the render EXACTLY on the confirmed-tile
+        // center — it never glides ahead (contrast the lead-enabled SetIntent_GlidesRenderEarly test).
+        var cosmetic = NewAcceptDeny(new TileCoord(5, 5), Direction8.E);
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        RenderPosition pos = default;
+        for (var t = 0; t <= 1000; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+            pos = cosmetic.Sample(Ms(t));
+        }
+
+        Assert.Equal(5.0, pos.X, 6);
+        Assert.Equal(5.0, pos.Y, 6);
+        Assert.Equal(new TileCoord(5, 5), cosmetic.ConfirmedTile);
+    }
+
+    [Fact]
+    public void AcceptDeny_MovesOnlyOnAccept_TweensTileToTileOverOneCadence()
+    {
+        // After a Confirm advances the tile, the render must tween smoothly tile-to-tile and REACH the new
+        // confirmed center over one cadence — a smooth step, not a teleport.
+        var cosmetic = NewAcceptDeny(new TileCoord(0, 0), Direction8.E);
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0)); // no lead armed (LeadEnabled = false)
+        Assert.Equal(0.0, cosmetic.Sample(Ms(0)).X, 6); // still exactly on (0,0)
+
+        // Server accepts the step east at t=0; the render tweens toward (1,0) over one cadence.
+        cosmetic.Confirm(new TileCoord(1, 0), Direction8.E, Ms(0));
+        Assert.Equal(new TileCoord(1, 0), cosmetic.ConfirmedTile);
+
+        // Mid-tween: between the two centers, not teleported.
+        var mid = cosmetic.Sample(Ms(Cadence / 2));
+        Assert.True(mid.X > 0.0 && mid.X < 1.0, $"render should be mid-step between (0,0) and (1,0); was {mid.X}");
+
+        // After one cadence it has reached the new confirmed center.
+        var done = cosmetic.Sample(Ms(Cadence + 1));
+        Assert.Equal(1.0, done.X, 6);
+        Assert.Equal(0.0, done.Y, 6);
+    }
+
+    [Fact]
+    public void AcceptDeny_DenyLeavesRenderWhereItIs()
+    {
+        // A deny = an unchanged-tile Confirm. With no lead, the render is already on the confirmed tile, so a
+        // deny must leave it exactly there (no move).
+        var cosmetic = NewAcceptDeny(new TileCoord(2, 2), Direction8.E);
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        for (var t = 0; t <= 200; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+        }
+
+        Assert.Equal(2.0, cosmetic.Sample(Ms(200)).X, 6); // never left the tile
+
+        // Deny: server confirms the tile is unchanged.
+        cosmetic.Confirm(new TileCoord(2, 2), Direction8.E, Ms(200));
+        var after = cosmetic.Sample(Ms(200 + Cadence + 1));
+        Assert.Equal(2.0, after.X, 6);
+        Assert.Equal(2.0, after.Y, 6);
+        Assert.Equal(new TileCoord(2, 2), cosmetic.ConfirmedTile);
+    }
+
+    [Fact]
+    public void AcceptDeny_ReleaseDoesNotSnap_InFlightConfirmTweenContinues()
+    {
+        // Releasing mid-Confirm-tween must NOT jump the render: there is no lead overshoot to snap away, and the
+        // in-flight tween is toward a confirmed (truth) tile, so it continues to completion. Assert no
+        // instantaneous position jump at the release instant.
+        var cosmetic = NewAcceptDeny(new TileCoord(0, 0), Direction8.E);
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Confirm(new TileCoord(1, 0), Direction8.E, Ms(0)); // accepted step; tween (0,0)->(1,0) over a cadence
+
+        // Mid-tween position just BEFORE release.
+        var before = cosmetic.Sample(Ms(Cadence / 2));
+        Assert.True(before.X > 0.0 && before.X < 1.0, $"precondition: mid-step; was {before.X}");
+
+        // Release at the SAME instant: the render must not jump (no snap to either center).
+        cosmetic.SetIntent(false, Direction8.E, Ms(Cadence / 2));
+        var atRelease = cosmetic.Sample(Ms(Cadence / 2));
+        Assert.Equal(before.X, atRelease.X, 6); // no instantaneous jump
+        Assert.Equal(before.Y, atRelease.Y, 6);
+
+        // And the in-flight tween continues to the confirmed tile (it does not stall or reverse).
+        var done = cosmetic.Sample(Ms(Cadence + 1));
+        Assert.Equal(1.0, done.X, 6);
+        Assert.Equal(0.0, done.Y, 6);
+    }
+
+    [Fact]
+    public void AcceptDeny_NeverArmsLeadTarget_ConfirmedNeverAdvancesWithoutConfirm()
+    {
+        // Belt-and-braces: across a long hold the confirmed tile must never advance without a Confirm (B banks
+        // nothing either, but here we also assert the render itself stays put — the accept/deny invariant).
+        var cosmetic = NewAcceptDeny(new TileCoord(7, 7), Direction8.N);
+
+        cosmetic.SetIntent(true, Direction8.N, Ms(0));
+        for (var t = 0; t <= 2000; t += 16)
+        {
+            cosmetic.Tick(Ms(t));
+            var pos = cosmetic.Sample(Ms(t));
+            Assert.Equal(7.0, pos.X, 6);
+            Assert.Equal(7.0, pos.Y, 6);
+        }
+
+        Assert.Equal(new TileCoord(7, 7), cosmetic.ConfirmedTile);
+    }
 }

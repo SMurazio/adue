@@ -763,11 +763,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// S89 live A/B toggle — flips on click, no Apply needed: switch the LOCAL player's render model between
-		// A (full tile prediction, the default) and B (cosmetic lead — the render glides early on input but banks
-		// NO tile; a disagreeing confirm cuts to the server tile, so the green predicted marker is absent in B and
-		// the at-rest latch / spam desync cannot occur). Off restores model A. Takes effect WHILE the client runs.
-		var cosmeticLead = new CheckBox { Name = "CosmeticLead", Text = "Cosmetic lead (model B)", ButtonPressed = false };
+		// S92 live toggle — flips on click, no Apply needed: switch the LOCAL player's render model between B
+		// (cosmetic lead — the NEW DEFAULT, unchecked: the render glides early on input toward the held direction,
+		// banks NO tile, and snaps to the confirmed tile on release) and "accept/deny only" (checked: NO early
+		// lead and NO release snap — the avatar moves ONLY when the server confirms a step, so a hard-following
+		// camera has no snap/overshoot discontinuity to pop on). Model A (full prediction) is no longer on this
+		// toggle (still reachable in code). Takes effect WHILE the client runs.
+		var cosmeticLead = new CheckBox { Name = "CosmeticLead", Text = "Accept/deny only (no lead)", ButtonPressed = false };
 		cosmeticLead.AddThemeFontSizeOverride("font_size", 13);
 		cosmeticLead.Toggled += ApplyCosmeticLead;
 		rows.AddChild(cosmeticLead);
@@ -843,14 +845,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// S89 live A/B toggle (F5 "Cosmetic lead (model B)"). Flip the local player's render model LIVE — on =
-	// model B (LocalPlayerCosmetic: render glides early, no banked tile, cuts to the confirmed tile on a
-	// disagreeing ack), off = model A (LocalPlayerPredictor, the default). SetMovementRenderMode re-anchors the
-	// newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
-	// Admin-gated like the rest of F5 (the panel only shows for an Admin session).
+	// S92 live toggle (F5 "Accept/deny only (no lead)"). Flip the local player's render model LIVE — checked =
+	// AcceptDeny (the cosmetic driver with the forward lead OFF: no early glide, no release snap; the avatar moves
+	// only on a confirmed step), unchecked = model B (CosmeticLead, the new default: lead + snap-on-release).
+	// SetMovementRenderMode re-anchors the newly-active driver from the current render position so the avatar
+	// doesn't pop on the switch. No restart. Admin-gated like the rest of F5 (the panel only shows for an Admin
+	// session).
 	private void ApplyCosmeticLead(bool enabled)
 	{
-		_client?.SetMovementRenderMode(enabled ? MovementRenderMode.CosmeticLead : MovementRenderMode.Predicted);
+		_client?.SetMovementRenderMode(enabled ? MovementRenderMode.AcceptDeny : MovementRenderMode.CosmeticLead);
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can

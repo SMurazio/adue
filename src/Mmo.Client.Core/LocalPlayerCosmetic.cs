@@ -55,6 +55,13 @@ public sealed class LocalPlayerCosmetic
 
     private double _cadenceMs;
 
+    // S92: whether the forward cosmetic lead is enabled. true (default) = model B: Tick arms the early glide and
+    // release SNAPS to the confirmed tile (S89/S91), unchanged. false = "accept/deny only": Tick never arms the
+    // lead (the render only moves via Confirm — the accepted-step tween), release does NOT snap (there is no lead
+    // overshoot to unwind), so the avatar moves ONLY on a confirmed step. Settable so a live F5 switch flips it
+    // without re-creating the driver.
+    public bool LeadEnabled { get; set; } = true;
+
     // ---- Present-time render tween (reused from LocalPlayerPredictor; NOT a playout buffer) -----------------
     private RenderPosition _renderFrom;
     private RenderPosition _renderTo;
@@ -130,14 +137,21 @@ public sealed class LocalPlayerCosmetic
         else
         {
             _moving = false;
-            // S91: on release, SNAP instantly to the confirmed-tile center instead of tweening back over a
-            // cadence (the old ~150ms backward drift felt wrong). The confirmed tile IS truth, so locking the
-            // render straight onto it is exact — no latch is possible. A degenerate same-from/to tween makes
-            // SampleInternal(now) return the center immediately on any subsequent Sample/Tick.
-            _leadTarget = null;
-            var center = RenderPosition.FromTile(_confirmedTile);
-            StartTween(center, center, now, _cadenceMs);
-            _renderPosition = center;
+            if (LeadEnabled)
+            {
+                // S91 (model B): on release, SNAP instantly to the confirmed-tile center instead of tweening back
+                // over a cadence (the old ~150ms backward drift felt wrong). The confirmed tile IS truth, so
+                // locking the render straight onto it is exact — no latch is possible. A degenerate same-from/to
+                // tween makes SampleInternal(now) return the center immediately on any subsequent Sample/Tick.
+                _leadTarget = null;
+                var center = RenderPosition.FromTile(_confirmedTile);
+                StartTween(center, center, now, _cadenceMs);
+                _renderPosition = center;
+            }
+            // S92 accept/deny (LeadEnabled == false): do NOT snap. There is no forward lead to unwind, and any
+            // in-progress tween is always toward a confirmed (truth) tile, so letting it finish is correct and
+            // avoids a release discontinuity. _leadTarget is already null (Tick never armed it). The render keeps
+            // moving only via Confirm.
         }
     }
 
@@ -149,7 +163,10 @@ public sealed class LocalPlayerCosmetic
     public bool Tick(TimeSpan now)
     {
         var startedLead = false;
-        if (_moving)
+        // S92 accept/deny (LeadEnabled == false): never arm/extend the forward lead. _leadTarget stays null and
+        // the render moves ONLY via Confirm (the accepted-step tween) — we just sample the in-flight tween forward
+        // below. Model B (LeadEnabled == true) runs the unchanged S89/S91 glide-arming block.
+        if (_moving && LeadEnabled)
         {
             var delta = _direction.Delta();
             var adjacent = _confirmedTile.Offset(delta.X, delta.Y);

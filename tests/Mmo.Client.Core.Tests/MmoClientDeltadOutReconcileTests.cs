@@ -138,6 +138,10 @@ public sealed class MmoClientDeltadOutReconcileTests
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
         Assert.NotNull(client.Zone);
+        // S92: model B (cosmetic lead) is now the default render mode, which routes the local player via the
+        // cosmetic driver (no PredictedLocalTile). These tests exercise model A's predictor reconcile at the
+        // MmoClient seam, so pin the mode to Predicted explicitly.
+        client.RenderMode = MovementRenderMode.Predicted;
         return client;
     }
 }

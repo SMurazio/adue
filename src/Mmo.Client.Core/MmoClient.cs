@@ -4,13 +4,17 @@ using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
 
-// S89: which local-player render model drives the avatar (live F5 A/B). Predicted is model A (the shipped
-// default, LocalPlayerPredictor); CosmeticLead is model B (LocalPlayerCosmetic). See MmoClient.RenderMode and
+// S89/S92: which local-player render model drives the avatar (live F5). Predicted is model A
+// (LocalPlayerPredictor); CosmeticLead is model B (LocalPlayerCosmetic with the forward lead ON) and is now the
+// DEFAULT (S92); AcceptDeny is the same cosmetic driver with the forward lead OFF — the avatar moves ONLY on a
+// confirmed step (no early glide, no release snap). Both CosmeticLead and AcceptDeny are driven by the cosmetic
+// driver (LeadEnabled distinguishes them); only Predicted uses the predictor. See MmoClient.RenderMode and
 // docs/movement-input-model.md.
 public enum MovementRenderMode
 {
     Predicted = 0,
     CosmeticLead = 1,
+    AcceptDeny = 2,
 }
 
 public sealed class MmoClient : IDisposable
@@ -66,9 +70,10 @@ public sealed class MmoClient : IDisposable
     // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
     private bool _predictionEnabled = true;
-    // S89: the active local-player render model. Predicted (model A) is the shipped default; CosmeticLead
-    // (model B) is the F5 opt-in. See RenderMode / SetMovementRenderMode.
-    private MovementRenderMode _renderMode = MovementRenderMode.Predicted;
+    // S89/S92: the active local-player render model. CosmeticLead (model B) is now the DEFAULT (S92). Predicted
+    // (model A) stays reachable in code but is no longer the default / no longer on the F5 toggle; AcceptDeny is
+    // the F5 opt-in (cosmetic driver with the forward lead off). See RenderMode / SetMovementRenderMode.
+    private MovementRenderMode _renderMode = MovementRenderMode.CosmeticLead;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -198,9 +203,10 @@ public sealed class MmoClient : IDisposable
         _netManager.PollEvents();
         // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
         // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
-        if (_renderMode == MovementRenderMode.CosmeticLead)
+        if (_renderMode != MovementRenderMode.Predicted)
         {
-            // S89 model B: tick the cosmetic driver (glides the render early toward the held direction).
+            // S89/S92: tick the cosmetic driver. With LeadEnabled (model B) it glides the render early toward the
+            // held direction; in AcceptDeny it only samples the in-flight tween forward (no early lead).
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
                 local.TickCosmetic(now);
@@ -295,10 +301,11 @@ public sealed class MmoClient : IDisposable
         // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
         // step. Created lazily here once the zone + local entity + cadence are all available.
         EnsurePredictor();
-        if (_renderMode == MovementRenderMode.CosmeticLead)
+        if (_renderMode != MovementRenderMode.Predicted)
         {
-            // S89 model B: feed the held intent to the cosmetic driver (no tile is banked; it only records the
-            // held direction so Tick can glide the render early).
+            // S89/S92: feed the held intent to the cosmetic driver (no tile is banked; it only records the held
+            // direction). With LeadEnabled (model B) Tick glides the render early; in AcceptDeny the intent only
+            // sets the cosmetic facing and the release branch (no early lead).
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
                 local.SetCosmeticIntent(moving, direction, _currentTime);
@@ -325,14 +332,16 @@ public sealed class MmoClient : IDisposable
         }
 
         _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay(), ResolveTickMs());
-        // S89 model B: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile.
-        // It only DRIVES the render while RenderMode == CosmeticLead; in the default Predicted mode it is dormant.
+        // S89/S92: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
+        // DRIVES the render whenever RenderMode != Predicted (CosmeticLead, the default, or AcceptDeny); only in
+        // the explicit Predicted mode is it dormant and the predictor owns the render.
         local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
-        // If the player flipped to model B before the local entity attached (or it just respawned), activate the
-        // freshly-attached cosmetic driver so the live mode is honoured without needing another F5 toggle.
-        if (_renderMode == MovementRenderMode.CosmeticLead)
+        // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
+        // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
+        // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
+        if (_renderMode != MovementRenderMode.Predicted)
         {
-            local.ReanchorLocalDriver(MovementRenderMode.CosmeticLead, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
+            local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
         }
     }
 
@@ -1021,11 +1030,16 @@ public sealed class MmoClient : IDisposable
         // onto the current render position). The freshly-attached drivers are created if missing.
         public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double turnDelayMs, double tickMs)
         {
-            if (mode == MovementRenderMode.CosmeticLead)
+            if (mode != MovementRenderMode.Predicted)
             {
-                var currentRender = _predictor is not null ? _predictor.RenderPosition : _interpolator.RenderPosition;
+                // CosmeticLead (model B) and AcceptDeny both ride the cosmetic driver; LeadEnabled is the only
+                // difference (B leads + snaps on release, AcceptDeny does neither).
+                var renderSource = _cosmetic is not null && _cosmeticActive
+                    ? _cosmetic.RenderPosition
+                    : _predictor is not null ? _predictor.RenderPosition : _interpolator.RenderPosition;
                 AttachCosmetic(cadenceMs, isWalkable);
-                _cosmetic!.ReanchorTo(Tile, Facing, currentRender, now);
+                _cosmetic!.LeadEnabled = mode == MovementRenderMode.CosmeticLead;
+                _cosmetic!.ReanchorTo(Tile, Facing, renderSource, now);
                 _cosmeticActive = true;
             }
             else
