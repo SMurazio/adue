@@ -55,6 +55,11 @@ public sealed partial class CatoSpriteVisual : EntityVisual
     // A tile step is ~1 unit; treat per-frame displacement above this (squared) as "moving". Mirrors PlayerVisual.
     private const double MovingEpsilonSquared = 0.0000004d;
 
+    // S101: ground unit vector toward the fixed iso camera (it sits at (24,28,24) looking at origin, so the
+    // ground-projected toward-camera direction is (1,0,1)/√2). CatoDepth (world units) is multiplied by this and
+    // added to BOTH world X and Z, moving the sprite toward (+) / away from (−) the camera on the floor plane.
+    private const float TowardCameraGround = 0.70710677f; // 1/√2
+
     // Loaded once on first Cato spawn so a build with no Cato never pays the ~27-texture load. A missing frame
     // leaves _frames null and the factory falls back to the box (the visual is never constructed in that case).
     private static SpriteFrames? _frames;
@@ -137,7 +142,10 @@ public sealed partial class CatoSpriteVisual : EntityVisual
             SpriteFrames = frames,
             Animation = AnimIdle,
             PixelSize = Tuning.CatoPixelSize,
-            Position = new Vector3(Tuning.CatoXOffset, Tuning.CatoYOffset, 0f),
+            Position = new Vector3(
+                Tuning.CatoXOffset + Tuning.CatoDepth * TowardCameraGround,
+                Tuning.CatoYOffset,
+                Tuning.CatoDepth * TowardCameraGround),
             Billboard = Billboard,
             // Explicit sorting like SpriteVisual: alpha-scissor (cutout) writes depth so the sprite occludes /
             // is occluded by the 3D models correctly instead of alpha-blending on top of them.
@@ -199,12 +207,13 @@ public sealed partial class CatoSpriteVisual : EntityVisual
     // instantly without a respawn. Reads the current Tuning values (the panel mutates them before pushing).
     public override void ApplyCatoPlacement()
     {
-        ApplyPlacement(Tuning.CatoPixelSize, Tuning.CatoXOffset, Tuning.CatoYOffset);
+        ApplyPlacement(Tuning.CatoPixelSize, Tuning.CatoXOffset, Tuning.CatoYOffset, Tuning.CatoDepth);
     }
 
-    // S99: set the sprite's world pixel size + horizontal/vertical offset directly. Used by ApplyCatoPlacement
-    // (the F5 live push) and callable standalone. No-op until the sprite is built (null-fallback-to-box case).
-    public void ApplyPlacement(float pixelSize, float xOffset, float yOffset)
+    // S99/S101: set the sprite's world pixel size + horizontal/vertical offset + toward-camera depth directly.
+    // Used by ApplyCatoPlacement (the F5 live push) and callable standalone. No-op until the sprite is built
+    // (null-fallback-to-box case). Depth shifts along the ground-projected camera direction (1,0,1)/√2.
+    public void ApplyPlacement(float pixelSize, float xOffset, float yOffset, float depth)
     {
         if (_sprite is null)
         {
@@ -212,7 +221,10 @@ public sealed partial class CatoSpriteVisual : EntityVisual
         }
 
         _sprite.PixelSize = pixelSize;
-        _sprite.Position = new Vector3(xOffset, yOffset, 0f);
+        _sprite.Position = new Vector3(
+            xOffset + depth * TowardCameraGround,
+            yOffset,
+            depth * TowardCameraGround);
     }
 
     private void DriveAnimation(bool moving)

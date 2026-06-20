@@ -109,10 +109,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tuneCameraFollowBlend;
 	private LineEdit? _tuneCameraSmoothing;
 	// S99: live Cato sprite placement — world pixel size (scale), Y offset (lift onto the tile), X offset
-	// (horizontal nudge). Pushed onto active Cato visuals on Apply without a respawn. Defaults on VisualTuning.
+	// (horizontal nudge). S101 adds depth (toward-camera). Pushed onto active Cato visuals on Apply without a
+	// respawn. Defaults on VisualTuning.
 	private LineEdit? _tuneCatoPixelSize;
 	private LineEdit? _tuneCatoYOffset;
 	private LineEdit? _tuneCatoXOffset;
+	private LineEdit? _tuneCatoDepth;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -771,6 +773,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_tuneCatoPixelSize = AddTuningField(rows, "Cato scale (px size)", OnVisualApplyPressed);
 		_tuneCatoYOffset = AddTuningField(rows, "Cato Y offset", OnVisualApplyPressed);
 		_tuneCatoXOffset = AddTuningField(rows, "Cato X offset", OnVisualApplyPressed);
+		// S101: toward-camera depth — slides Cato along the ground-projected camera direction (1,0,1)/√2,
+		// positive = toward the camera. Live-applied like the other Cato fields (no respawn).
+		_tuneCatoDepth = AddTuningField(rows, "Cato depth (toward cam)", OnVisualApplyPressed);
 
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
@@ -1388,6 +1393,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneCatoPixelSize, _tuning.CatoPixelSize);
 		SetField(_tuneCatoYOffset, _tuning.CatoYOffset);
 		SetField(_tuneCatoXOffset, _tuning.CatoXOffset);
+		SetField(_tuneCatoDepth, _tuning.CatoDepth);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1515,6 +1521,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_tuneCatoXOffset, out var catoXOffset))
 		{
 			_tuning.CatoXOffset = Mathf.Clamp((float)catoXOffset, -10f, 10f);
+		}
+
+		// S101: toward-camera depth, clamped to a small tile range.
+		if (TryReadField(_tuneCatoDepth, out var catoDepth))
+		{
+			_tuning.CatoDepth = Mathf.Clamp((float)catoDepth, -2f, 2f);
 		}
 
 		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly

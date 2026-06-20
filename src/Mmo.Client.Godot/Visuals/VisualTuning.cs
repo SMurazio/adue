@@ -50,14 +50,18 @@ public sealed class VisualTuning
     // scales above. The art is a 512px frame with the cat low-center and a wand extending up-right (so the frame
     // CENTRE sits above the cat body). These three knobs are pushed onto live Cato visuals from the F5 panel
     // without a respawn (CatoSpriteVisual.ApplyPlacement), so the human can eyeball the fit while the client runs.
-    //   * CatoPixelSize — world size of one texture pixel. 0.0066 ≈ 3.4 tiles tall (2× the S96 first-guess 0.0033).
+    //   * CatoPixelSize — world size of one texture pixel. S101 lowered the default 0.0066 → 0.0058 (~3 tiles tall;
+    //     the 2× S96 guess read a touch big). Still live-tunable.
     //   * CatoYOffset   — vertical placement of the sprite pivot above the ground plane (lifts the cat onto the
     //     tile; the centred pivot is above the cat body, so this is less than half the sprite height).
     //   * CatoXOffset   — horizontal nudge (the wand extends right, biasing the frame centre, so a small offset can
     //     re-centre the cat body over the tile). Default 0 = no horizontal shift. The F5 panel clamps these.
-    public float CatoPixelSize { get; set; } = 0.0066f;
+    //   * CatoDepth (S101) — toward-camera depth in world units along the ground-projected camera direction
+    //     (1,0,1)/√2 (the fixed iso camera sits at (24,28,24)). Positive = toward the camera. Default 0 = no shift.
+    public float CatoPixelSize { get; set; } = 0.0058f;
     public float CatoYOffset { get; set; } = 1.0f;
     public float CatoXOffset { get; set; }
+    public float CatoDepth { get; set; }
 
     // S79 diagnostic: when true, the local player's PREDICTED tile and CONFIRMED/server tile are each painted
     // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
