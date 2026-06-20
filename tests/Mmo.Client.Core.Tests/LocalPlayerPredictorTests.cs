@@ -503,4 +503,67 @@ public sealed class LocalPlayerPredictorTests
         Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(450)));
         Assert.Equal(new TileCoord(-2, 1), predictor.PredictedTile);
     }
+
+    // ---- S72: a stale OLD-direction confirm on the recent path is benign — no backward re-anchor -----
+
+    [Fact]
+    public void StaleOldDirectionConfirm_OnRecentPath_IsBenign_NoBackwardReanchor()
+    {
+        // The S72 "rubberband": drive E for a few tiles, then flip to W. The server's already-in-flight EAST
+        // confirmations keep arriving AFTER the flip. The OLD straight-line back-walk only knew the NEW
+        // direction (W), so a stale EAST confirm missed it and Reconcile re-anchored _predictedTile BACKWARD
+        // onto the lagging confirm and blended the render back — the residual backward pull. With the recent-
+        // path ring, that EAST tile is one we actually occupied, so Reconcile recognises it as a benign
+        // trailing confirm: Matched, prediction untouched, no backward render move.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0)
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+
+        // Flip to W mid-cadence. The predictor is still at (3,0) (the turn/move hasn't fired yet) but is now
+        // predicting the WEST line; the recent path still holds the EAST tiles (3,0),(2,0),(1,0),(0,0).
+        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(310));
+
+        var renderBefore = predictor.Sample(TimeSpan.FromMilliseconds(320));
+
+        // A stale EAST in-flight confirm from BEFORE the flip lands: the server is still at (1,0), a tile we
+        // already occupied. The OLD code re-anchored backward to (1,0) and blended the render back. Now it is
+        // recognised as a benign trailing confirm.
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), TimeSpan.FromMilliseconds(320));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);       // NOT re-anchored backward
+        // The render did not get yanked backward toward (1,0): it stayed where it was showing.
+        var renderAfter = predictor.Sample(TimeSpan.FromMilliseconds(320));
+        Assert.Equal(renderBefore.X, renderAfter.X, 3);
+        Assert.Equal(renderBefore.Y, renderAfter.Y, 3);
+
+        // A genuine OFF-path confirm (a tile we never occupied — e.g. the server held us off-line) still
+        // corrects: the recent-path latitude does not swallow a real divergence.
+        var offPath = predictor.Reconcile(new TileCoord(3, 5), TimeSpan.FromMilliseconds(330));
+        Assert.True(offPath is LocalPlayerPredictor.ReconcileOutcome.Corrected
+            or LocalPlayerPredictor.ReconcileOutcome.Snapped);
+        Assert.Equal(new TileCoord(3, 5), predictor.PredictedTile);
+    }
+
+    [Fact]
+    public void OffPathConfirm_WhileMoving_StillCorrects_RecentPathDoesNotSwallowDivergence()
+    {
+        // Parity guard for the S72 latitude: while MOVING, a confirm that is NOT on the recent path must still
+        // correct. The predictor walks E onto (1,0),(2,0),(3,0); the server reports a tile that is genuinely
+        // off that line (a divergence / blocked step that held us off-path). It must reconcile, not be absorbed
+        // as a benign trailing confirm.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0)
+
+        var outcome = predictor.Reconcile(new TileCoord(2, 1), TimeSpan.FromMilliseconds(310));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        Assert.Equal(new TileCoord(2, 1), predictor.PredictedTile);
+    }
 }

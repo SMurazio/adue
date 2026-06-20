@@ -37,7 +37,24 @@ public sealed class LocalPlayerPredictor
     // that, a visible jump is unavoidable, so snap cleanly rather than smear a long slide.
     private const int SnapCorrectionThresholdTiles = 3;
 
+    // S72: how many of the most-recently-occupied predicted tiles we remember as the "recent path". A confirm
+    // that lands on any of them (while moving) is a benign trailing in-flight confirm — the server hasn't yet
+    // processed the steps that carried us forward, OR it is replaying an OLD-direction confirm from just before
+    // a turn. Either way the prediction is still valid and ahead; do not re-anchor backward (that pull is the
+    // direction-change "rubberband"). Bounded ON PURPOSE: a real desync that lands OFF this short window still
+    // corrects immediately, so a genuine divergence is never silently tolerated past N tiles. 8 mirrors the
+    // Tick catch-up cap and the interpolator per-sample step cap — comfortably covers the worst realistic
+    // in-flight lag plus the few pre-turn tiles of an old-direction confirm.
+    private const int RecentPathCapacity = 8;
+
     private readonly Func<TileCoord, bool> _isWalkable;
+
+    // Bounded ring of the most-recently-occupied predicted tiles (most recent first). Seeded with the initial
+    // tile, appended on each accepted step (Tick) and on each re-anchor (Reconcile correction/snap). Read by
+    // Reconcile to recognise a benign trailing/old-direction confirm. See IsOnRecentPath.
+    private readonly TileCoord[] _recentPath = new TileCoord[RecentPathCapacity];
+    private int _recentPathCount;
+    private int _recentPathHead;
 
     private TileCoord _predictedTile;
     private Direction8 _facing;
@@ -76,6 +93,7 @@ public sealed class LocalPlayerPredictor
     {
         _isWalkable = isWalkable ?? throw new ArgumentNullException(nameof(isWalkable));
         _predictedTile = initialTile;
+        RecordRecentPath(initialTile);
         _facing = facing;
         _cadenceMs = Math.Max(1, cadenceMs);
         _turnDelayMs = Math.Max(1, turnDelayMs);
@@ -200,6 +218,7 @@ public sealed class LocalPlayerPredictor
                 }
 
                 _predictedTile = target;
+                RecordRecentPath(target);
                 _facing = _direction;
                 // Start the present-time tween from where we are showing NOW (carries any in-flight position
                 // so back-to-back steps glide continuously) toward the new tile center, over one cadence,
@@ -241,16 +260,24 @@ public sealed class LocalPlayerPredictor
             return ReconcileOutcome.Matched;
         }
 
-        // The server is simply BEHIND on the same line we're predicting (the confirmed tile is one of the
-        // in-flight tiles between our last anchor and the prediction): the prediction is still valid and
-        // ahead — leave it, the next snapshots catch up.
-        if (_moving && IsBehindOnPredictedLine(confirmedTile))
+        // S72: the confirm lies on our RECENT PATH — one of the last few tiles we actually occupied (current
+        // direction OR the pre-turn tiles before a direction change). That makes it a benign TRAILING in-flight
+        // confirm: the server simply hasn't processed the steps that carried us forward, or it is replaying an
+        // OLD-direction confirm from just before a turn. The prediction is still valid and ahead, so leave it —
+        // re-anchoring backward onto a tile we already left is the direction-change "rubberband" (S71/S72). This
+        // subsumes the old current-line back-walk AND adds the reversal case. Gated on _moving ON PURPOSE: once
+        // the player has stopped, the server's confirmation is its FINAL answer (a rejection / blocked step),
+        // not a catch-up — so a stopped disagreement must NOT be absorbed as benign and falls through to
+        // correct (preserves ServerRejectsAStep_* / StartStopBoundary_*). The ring is bounded, so an OFF-path
+        // confirm (genuine divergence / rejection / teleport) still corrects immediately.
+        if (_moving && IsOnRecentPath(confirmedTile))
         {
             return ReconcileOutcome.Matched;
         }
 
         var correction = ChebyshevDistance(_predictedTile, confirmedTile);
         _predictedTile = confirmedTile;
+        RecordRecentPath(confirmedTile);
 
         var confirmedPos = RenderPosition.FromTile(confirmedTile);
         if (correction > SnapCorrectionThresholdTiles)
@@ -319,21 +346,35 @@ public sealed class LocalPlayerPredictor
         return RenderPosition.Lerp(_renderFrom, _renderTo, elapsedMs / _tweenDurationMs);
     }
 
-    // True when confirmedTile sits between the predictor's current position and where it started predicting
-    // along the held direction — i.e. the server just hasn't processed the in-flight steps yet. We detect
-    // this conservatively: the confirmed tile is reachable from itself to the predicted tile by repeatedly
-    // applying the held direction's delta (a straight line of predicted steps). Diagonal and orthogonal both
-    // collapse to "same signed delta each step", so a simple walk back from the prediction matches.
-    private bool IsBehindOnPredictedLine(TileCoord confirmedTile)
+    // S72: pushes a tile onto the bounded recent-path ring (most-recent-first). Skips an immediate duplicate of
+    // the newest entry so a no-move re-anchor (Reconcile onto the same tile) doesn't waste a slot; the
+    // capacity is small so the oldest tiles fall off naturally and a real desync is never tolerated past N.
+    private void RecordRecentPath(TileCoord tile)
     {
-        var delta = _direction.Delta();
-        var cursor = _predictedTile;
-        // Walk backwards from the prediction up to a bounded number of in-flight steps looking for the
-        // confirmed tile. The bound matches the snap threshold so we never silently tolerate a big gap.
-        for (var i = 0; i < SnapCorrectionThresholdTiles; i++)
+        if (_recentPathCount > 0 && _recentPath[_recentPathHead] == tile)
         {
-            cursor = cursor.Offset(-delta.X, -delta.Y);
-            if (cursor == confirmedTile)
+            return;
+        }
+
+        _recentPathHead = (_recentPathHead - 1 + RecentPathCapacity) % RecentPathCapacity;
+        _recentPath[_recentPathHead] = tile;
+        if (_recentPathCount < RecentPathCapacity)
+        {
+            _recentPathCount++;
+        }
+    }
+
+    // True when confirmedTile is one of the last RecentPathCapacity tiles the predictor actually occupied — the
+    // in-flight tiles behind the current prediction (current direction) AND the pre-turn tiles from just before
+    // a direction change. The server trailing on either is benign (it hasn't processed our in-flight steps, or
+    // it is replaying an old-direction confirm). Bounded: an off-path confirm is a genuine divergence and still
+    // corrects. Subsumes the old straight-line back-walk, which only saw the current direction.
+    private bool IsOnRecentPath(TileCoord confirmedTile)
+    {
+        for (var i = 0; i < _recentPathCount; i++)
+        {
+            var index = (_recentPathHead + i) % RecentPathCapacity;
+            if (_recentPath[index] == confirmedTile)
             {
                 return true;
             }
