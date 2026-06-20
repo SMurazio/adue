@@ -6,6 +6,8 @@ param(
     [string]$ConnectionKey = 'local-dev',
     [string]$AdminNames = '',
     [int]$ControlPort = 7780,
+    [ValidateRange(1, 2)]
+    [int]$Clients = 1,
     [switch]$LogToFile,
     [string]$LogPath = '',
     [string]$ErrorLogPath = '',
@@ -127,12 +129,18 @@ if (-not $SkipBuild) {
 Start-Sleep -Seconds 2
 
 Start-GodotClient -Name $FirstName -Godot $godot -Index 1
-Start-Sleep -Milliseconds 500
-Start-GodotClient -Name $SecondName -Godot $godot -Index 2
+if ($Clients -ge 2) {
+    Start-Sleep -Milliseconds 500
+    Start-GodotClient -Name $SecondName -Godot $godot -Index 2
+}
 
 "Visual check launched."
 if ($ControlPort -gt 0) {
     "'$FirstName' has the debug control channel on port $ControlPort -> the mmo-client-control MCP can drive it."
 }
-"Verify: map renders, '$FirstName' and '$SecondName' are both visible, WASD/diagonals glide, remote movement updates."
+if ($Clients -ge 2) {
+    "Verify: map renders, '$FirstName' and '$SecondName' are both visible, WASD/diagonals glide, remote movement updates."
+} else {
+    "Verify: map renders, '$FirstName' is visible, WASD/diagonals glide."
+}
 "Stop everything with: .\.shared\skills\mmo-dev\scripts\stop-mmo.cmd"
