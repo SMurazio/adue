@@ -12,7 +12,8 @@ param(
     [string]$LogPath = '',
     [string]$ErrorLogPath = '',
     [switch]$NoStop,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipImport
 )
 
 $ErrorActionPreference = 'Stop'
@@ -124,6 +125,25 @@ if (-not [string]::IsNullOrWhiteSpace($ErrorLogPath)) {
 if (-not $SkipBuild) {
     "Building Godot client C#..."
     & $godotBuildScript
+}
+
+# Headless asset import: Godot play mode does NOT import new/changed resources (that is an editor /
+# `--headless --import` operation). Assets added without opening the editor (e.g. an agent copying PNGs)
+# have no `.import` sidecar, so `GD.Load<Texture2D>(...)` returns null at runtime and sprites fall back to
+# the box. This pass is incremental (cheap on warm projects). It runs even with -SkipBuild because the
+# import gap is independent of the C# build. `--import` can exit non-zero even on a successful incremental
+# import, so a non-zero exit is logged, not fatal -- wrapped here because $ErrorActionPreference = 'Stop'
+# would otherwise abort the launch on the native exit code.
+if (-not $SkipImport) {
+    "Importing Godot assets (headless)..."
+    try {
+        & $godot --headless --import --path $project
+        if ($LASTEXITCODE -ne 0) {
+            "Godot --import exited with code $LASTEXITCODE (non-fatal; continuing to launch)."
+        }
+    } catch {
+        "Godot --import failed: $($_.Exception.Message) (non-fatal; continuing to launch)."
+    }
 }
 
 Start-Sleep -Seconds 2
