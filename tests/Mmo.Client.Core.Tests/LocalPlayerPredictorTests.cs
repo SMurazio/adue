@@ -215,6 +215,42 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
+    public void Reconcile_Corrected_ReArmsGate_NoInstantReStepAfterCorrection()
+    {
+        // S85: after a Corrected reconcile pulls the over-prediction back, the predictor must NOT immediately
+        // re-step forward on the same frame and re-open the gap — the reconcile/predict oscillation that
+        // amplifies spam wobble. It happens when a snapshot lands AFTER the last armed step tick, so the leftover
+        // client schedule (_nextEligibleTick) is already eligible. The clamp re-arms the gate by one cooldown.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        // Over-predict 4 tiles east. Cadence 150 ms = 15 ticks (TickMs 10): steps arm the next at +150 ms.
+        predictor.Tick(TimeSpan.Zero);                                     // (1,0) seq1, armed t=150
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                    // (2,0) seq2, armed t=300
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                    // (3,0) seq3, armed t=450
+        predictor.Tick(TimeSpan.FromMilliseconds(450));                    // (4,0) seq4, armed t=600
+        Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);
+
+        // A snapshot lands at t=650 (tick 65) — PAST the last armed step tick (60) — confirming only seq 1 at
+        // (1,0). The MaxInFlightLead=2 cap re-projects 2 steps from the anchor, pulling the head back to (3,0):
+        // a real Corrected divergence. Pre-S85 _nextEligibleTick stayed 60 (<= 65), so the next Tick would step.
+        var now = TimeSpan.FromMilliseconds(650);
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 1u, now);
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+
+        // The clamp re-armed the gate to nowTick + cooldown: a Tick at the SAME instant must NOT advance the tile.
+        Assert.False(predictor.Tick(now));
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        // A Tick before the re-armed cooldown elapses still holds.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(799)));
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        // Once the cooldown elapses (t=650+150=800), stepping resumes normally.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(800)));
+        Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);
+    }
+
+    [Fact]
     public void MidMoveSpeedChange_AdoptedImmediately_ContinuesCorrectly()
     {
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);

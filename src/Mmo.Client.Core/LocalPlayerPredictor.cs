@@ -536,10 +536,26 @@ public sealed class LocalPlayerPredictor
             return ReconcileOutcome.Snapped;
         }
 
+        // S85: re-arm the action gate so this correction can't immediately re-step ahead of the server's timing.
+        // Reconcile just re-anchored us onto the server's freshly-confirmed tile (the server is itself on cooldown
+        // after that step), but the leftover client schedule may already be ELIGIBLE — when a snapshot lands after
+        // our last armed step tick (frames run 60–145 Hz, snapshots 20 Hz), so the very next Tick would step
+        // forward again and re-open the gap we just closed: a reconcile/predict oscillation at snapshot rate that
+        // amplifies the visible spam wobble. We push the gate out by ONE fresh action delay (turn-vs-step, the
+        // exact mirror of the server stamping _nextEligibleTick after its action) but ONLY when the schedule is
+        // already eligible — a still-future schedule is valid and is left untouched so the normal cadence (and the
+        // steady straight-line path, which returns Matched above and never reaches here) keeps its zero-lag timing.
+        var correctedNowTick = EstimateTick(now.TotalMilliseconds);
+        if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value <= correctedNowTick)
+        {
+            var actionDelay = _direction != _facing ? _turnDelayTicks : _stepCooldownTicks;
+            _nextEligibleTick = correctedNowTick + actionDelay;
+        }
+
         // Small disagreement: blend the render from where we're showing NOW to the re-projected present tile over
-        // one cadence so the correction settles smoothly instead of popping. We leave the schedule on its
-        // EXISTING tick grid (S71): if moving we resume stepping at the already-armed boundary and keep tracking
-        // the server cadence, instead of freezing a full cadence.
+        // one cadence so the correction settles smoothly instead of popping. We keep the schedule on its tick grid
+        // (re-armed above only if it had gone stale-eligible): if still moving we resume stepping at the armed
+        // boundary and keep tracking the server cadence, instead of freezing a full cadence.
         StartTween(oldRenderSource, presentPos, now, _cadenceMs);
         _renderPosition = SampleInternal(now);
         return ReconcileOutcome.Corrected;
