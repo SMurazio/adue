@@ -41,6 +41,31 @@ hard-snapping the rare residual like UO.
   the S69 instrumentation** (drive a zigzag, confirm maxDivergence stays small + the catch-up jumps are gone)
   after a relaunch. **Safe Local Execution** binds you.
 
+## Orchestrator decision (fork resolved 2026-06-20) — implement Option B
+The investigation (see `review/review-request-s71-predictor-lag.md`) diagnosed the cause: on a reversal,
+stale old-direction confirms miss `IsBehindOnPredictedLine` (which only knows the *new* direction), so
+`Reconcile` hits its correction branch, which (a) re-anchors `_predictedTile` on the lagging confirm and
+(b) **freezes `_nextStepAt = now + cadence`** (lines 257-261) — the freeze stalls prediction for a full
+cadence while the server keeps stepping, turning a 1-tile transient into the ~3-tile lag-then-jump. The
+existing capture confirms the bug signature (render *trailing* the confirm, not leading it).
+
+**Implement Option B (client-only, surgical):**
+- In `Reconcile`, the cadence re-arm (`_nextEligibleAt = now + cadence; if (_moving) _nextStepAt = ...`,
+  ~lines 257-261) must apply **only to the large/`Snapped` correction** (`correction >
+  SnapCorrectionThresholdTiles`). On a small **`Corrected`** reconcile while moving, do **NOT** freeze the
+  schedule — leave `_nextStepAt`/`_nextEligibleAt` on their existing cadence so the predictor resumes
+  stepping immediately and tracks the server through the reversal (the re-anchor + the present-time blend
+  stay). This removes the freeze-amplification so the predictor never trails multiple tiles.
+- Do **NOT** do Option A (reversal-aware behind-test) or Option C (lower snap threshold) in this pass —
+  measure B first. (If re-measurement still shows a visible residual nudge, A is the follow-up.)
+- **Parity:** the `Tick`-driven parity test stays green (B only touches `Reconcile`, which it never calls).
+  Re-read + update the timing expectations in the reconcile tests (`StartStopBoundary_*`,
+  `ServerRejectsAStep_*`) — their `Corrected`/tile outcomes stay valid; only the post-correction *schedule*
+  changes. **ADD a unit test** reproducing the reversal transient (stale old-direction confirm arrives after
+  a flip) that asserts the predictor does NOT stall a full cadence (no multi-tile trail) — the gap the
+  investigation found (the parity test never exercises `Reconcile`).
+- Client-only; no server/protocol change.
+
 ## Acceptance
 - `run-checks` green incl. the predictor↔server parity test. A diagnosis of the lag root cause + a tightening
   fix that keeps direction-change divergence sub-tile (or a clear surfaced fork if not safe to implement).
