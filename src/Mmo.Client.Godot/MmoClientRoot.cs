@@ -248,6 +248,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var now = TimeSpan.FromSeconds(_elapsedSeconds);
 		SampleFrameTiming(delta);
 
+		// S86: feed THIS frame's held intent to the predictor BEFORE Poll ticks it forward, so prediction reflects
+		// the current frame's WASD/mouse input instead of lagging it by one frame (phase-mismatched during fast
+		// direction spam, adding to the visible wobble). The network send is unchanged (on-change + keepalive).
+		// Injected/autopilot directions are still set below (after Poll) and read here one frame later — the same
+		// as before this reorder (they were already fed after the tick); only human input gains the frame.
+		SendHeldMovement(now);
+
 		var tPoll0 = Time.GetTicksUsec();
 		_client?.Poll(now);
 		_controlChannel?.Poll();
@@ -260,7 +267,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		AdvanceAutopilot(now);
-		SendHeldMovement(now);
 		SendStartupChat();
 		RequestMetrics(now);
 
