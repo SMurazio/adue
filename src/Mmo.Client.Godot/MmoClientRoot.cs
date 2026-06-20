@@ -41,6 +41,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMin = 8f;
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
+	// S95: camera focus blend + temporal smoothing (both live F5 levers). Defaults reproduce TODAY's camera
+	// exactly: blend 1.0 = follow the cosmetic character, smoothing 0 = hard-follow (no glide). The tracker
+	// blends the confirmed tile and cosmetic position and frame-rate-independently smooths a persistent focus
+	// toward it, snapping on the first frame and on teleports (> CameraTeleportSnapTiles).
+	private float _cameraFollowBlend = 1.0f;
+	private float _cameraSmoothing = 0f;
+	private const float CameraTeleportSnapTiles = 4f;
+	private CameraFocusTracker _cameraFocus;
+	private double _lastFrameDelta;
 	private CheckBox? _uncapFpsCheck;
 	private bool _fpsUncapped;
 	private CheckBox? _frameCsvCheck;
@@ -95,6 +104,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// S94: live cosmetic lead distance (tiles) for model B — how far the render glides ahead of the confirmed
 	// tile before holding. [0, 1]; default 1.0 = current model B.
 	private LineEdit? _tuneCosmeticLeadTiles;
+	// S95: live camera focus blend (0 = confirmed tile, 1 = cosmetic character) and follow smoothing (per-second
+	// rate, 0 = hard-follow). Defaults (1.0 / 0) reproduce today's camera.
+	private LineEdit? _tuneCameraFollowBlend;
+	private LineEdit? _tuneCameraSmoothing;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -253,6 +266,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	public override void _Process(double delta)
 	{
 		_elapsedSeconds += delta;
+		_lastFrameDelta = delta; // S95: stash for UpdateCamera's frame-rate-independent focus smoothing.
 		var now = TimeSpan.FromSeconds(_elapsedSeconds);
 		SampleFrameTiming(delta);
 
@@ -740,6 +754,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// accept/deny), 1.0 = one full tile (current model B / max in the single-tile cosmetic model). Lower values
 		// shorten the visible lead (and the release snap).
 		_tuneCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnVisualApplyPressed);
+		// S95: camera focus blend between the confirmed tile (0) and the cosmetic character (1, default = today's
+		// follow-the-character). Applied INSTANTLY client-side on Apply/Enter — no restart. Lower values mean the
+		// cosmetic lead/release-snap moves the camera less (blend 0 = camera trails on the confirmed tile, no pop).
+		_tuneCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnVisualApplyPressed);
+		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow (today).
+		// Higher = the camera glides toward the focus instead of snapping, so model B's release snap no longer pops.
+		_tuneCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnVisualApplyPressed);
 
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
@@ -1082,7 +1103,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var localState = local.Value;
-		var focus = new Vector3((float)localState.Position.X, 0, (float)localState.Position.Y);
+		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally
+		// smoothed (frame-rate independent). Defaults (blend 1.0, smoothing 0) reproduce the old hard-follow of
+		// the cosmetic position exactly. The tracker snaps on the first frame and on teleports so the camera
+		// never glides from the origin or across the map.
+		var (focusX, focusY) = _cameraFocus.Advance(
+			localState.AuthoritativeTile.X,
+			localState.AuthoritativeTile.Y,
+			localState.Position.X,
+			localState.Position.Y,
+			_cameraFollowBlend,
+			_cameraSmoothing,
+			_lastFrameDelta,
+			CameraTeleportSnapTiles);
+		var focus = new Vector3((float)focusX, 0, (float)focusY);
 		_camera.Position = focus + new Vector3(24, 28, 24);
 		_camera.LookAt(focus, Vector3.Up);
 		_camera.Size = _cameraSize;
@@ -1318,6 +1352,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
 		// S94: seed from the live cosmetic lead distance so re-opening the panel shows the current value (1.0 default).
 		SetField(_tuneCosmeticLeadTiles, _client?.CosmeticLeadTiles ?? 1.0d);
+		// S95: seed from the live camera blend/smoothing so re-opening the panel shows the current values (1.0 / 0).
+		SetField(_tuneCameraFollowBlend, _cameraFollowBlend);
+		SetField(_tuneCameraSmoothing, _cameraSmoothing);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1424,6 +1461,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_tuneCosmeticLeadTiles, out var leadTiles))
 		{
 			_client.SetCosmeticLeadTiles(Mathf.Clamp((float)leadTiles, 0f, 1f));
+		}
+
+		// S95: live-apply the camera focus blend [0,1] and follow smoothing [0,30 /s]. Client-only, no restart;
+		// the next UpdateCamera reads the new values. Defaults (1.0 / 0) reproduce today's hard-follow camera.
+		if (TryReadField(_tuneCameraFollowBlend, out var followBlend))
+		{
+			_cameraFollowBlend = Mathf.Clamp((float)followBlend, 0f, 1f);
+		}
+
+		if (TryReadField(_tuneCameraSmoothing, out var cameraSmoothing))
+		{
+			_cameraSmoothing = Mathf.Clamp((float)cameraSmoothing, 0f, 30f);
 		}
 
 		// Push the new label sizes AND model scales onto every existing visual so the change lands instantly
