@@ -27,20 +27,19 @@ namespace Mmo.Client.Core;
 // delay. Reconcile is a plain UO resync: on divergence, retarget the tween at the server's truth (a tiny
 // present-time blend for a near miss, an instant snap for a large jump); never queue backward tiles.
 //
-// S77 — server-reconciliation by step-sequence + replay (kills the rubberband). A bare confirmed tile is
-// ambiguous: the old Reconcile could not tell a benign TRAILING in-flight confirm (the server simply hasn't
-// processed the steps that carried us forward, or is replaying an OLD-direction confirm from just before a
-// turn) from a genuine divergence, so it re-anchored the render BACKWARD onto stale confirms — the rubberband.
-// Now every accepted step bumps PredictedStepSeq in lockstep with the server's WorldEntity.StepSequence (S76),
-// and the snapshot carries the recipient's authoritative step-sequence (RecipientStepSeq). Reconcile matches a
-// confirm to the EXACT predicted step:
-//   * MATCH (history tile at serverStepSeq == confirmedTile, or serverStepSeq older than our history) — the
-//     server agrees with what we predicted at that step. Touch NOTHING (tile / schedule / render); just prune
-//     the now-confirmed history. This is the common case and what removes the rubberband.
-//   * MISMATCH (history tile at serverStepSeq != confirmedTile) — a genuine misprediction. Re-anchor the tile +
-//     seq to the confirm, REPLAY the recorded directions of the in-flight steps from the corrected anchor to
-//     recompute the present tile, then blend (near miss) or snap (large jump) the render. Returns Corrected /
-//     Snapped.
+// S77/S83 — server-authoritative reconcile by step-sequence (re-anchor + re-project in-flight). Every accepted
+// step bumps PredictedStepSeq in lockstep with the server's WorldEntity.StepSequence (S76), and the snapshot
+// carries the recipient's authoritative step-sequence (RecipientStepSeq). S77 matched a confirm to a predicted
+// step in a recorded history ring and only re-anchored on a tile MISMATCH, otherwise touching nothing; its
+// while-moving convergence was gated on !_moving. S83 found the root cause of the rapid-turn desync: the
+// predictor flips its held direction INSTANTLY on input but the server sees it ONE+ tick later, so at a turn the
+// two sides feed the same-numbered tick different inputs and the prediction drifts a tile per turn — and the
+// S77 model could not pull a while-moving prediction back (the match path touched nothing; the mismatch replay
+// re-ran the SAME diverged history; only !_moving converged). S83 replaces that with the textbook resync: on
+// EVERY confirming snapshot re-anchor _predictedTile/_predictedStepSeq to the confirmed tile, then re-project
+// ONLY the genuinely in-flight steps (serverStepSeq+1 .. PredictedStepSeq) forward in the CURRENTLY HELD
+// direction. This caps divergence to the bounded in-flight count at ALL times (spam can't ratchet) and converges
+// EXACTLY to the server when input pauses (the in-flight count drains to 0). See Reconcile.
 //
 // Faithful mirror of the server rule (now on the tick grid):
 //   * each tick boundary, while the held intent is Moving and the entity is eligible (serverTick >=
@@ -61,44 +60,46 @@ public sealed class LocalPlayerPredictor
     // render instantly instead of tweening — anything within is a normal start/stop or single-step
     // disagreement and a short present-time blend. One tile covers the worst-case steady-state in-flight
     // divergence; a couple of tiles of slack absorbs a brief multi-step lag spike without snapping. Above
-    // that, a visible jump is unavoidable, so snap cleanly rather than smear a long slide. S77: this is now
-    // ONLY the blend-vs-snap render choice after a positively-identified MISMATCH — the seq match decides
-    // whether a correction happens at all, this only decides how it is shown.
+    // that, a visible jump is unavoidable, so snap cleanly rather than smear a long slide. S83: this only
+    // decides HOW a correction is shown (blend vs snap) once the re-anchor+re-project has computed the present
+    // tile — whether the present tile moved at all (Matched vs Corrected) is decided by the re-projection.
     private const int SnapCorrectionThresholdTiles = 3;
-
-    // Bounded history of the most-recent in-flight accepted steps: stepSeq -> (tile arrived at, step
-    // direction). Enough to cover the worst realistic in-flight lag (the round-trip's worth of unconfirmed
-    // steps plus a few pre-turn steps of an old-direction confirm); a confirm older than the oldest retained
-    // entry is treated as a benign already-passed match. 32 is comfortably above the Tick catch-up cap (8) and
-    // the per-snapshot step count, so a real desync is never silently tolerated past the window.
-    private const int HistoryCapacity = 32;
 
     // Cap the catch-up so a huge clock gap (e.g. a long stall / breakpoint) can't spin a pathological loop; the
     // next snapshot re-bases anyway. 8 mirrors the interpolator's per-sample step cap. Applied to the number of
     // tick boundaries processed per Tick call.
     private const int MaxTicksPerCall = 8;
 
-    private readonly Func<TileCoord, bool> _isWalkable;
+    // The maximum number of in-flight (sent-but-unacked) predicted steps Reconcile will re-project forward from
+    // the re-anchored confirmed tile. The genuine un-acked lead on a sane uplink is ~1 step; a larger
+    // predictedStepSeq - serverStepSeq is the input-arrival-skew over-prediction (the predictor's instantaneous
+    // input out-stepping the server's delayed input), which must NOT be re-projected — it is corrected toward the
+    // server. This caps the predicted head's lead over the confirmed tile at all times (no ratchet), while still
+    // letting normal prediction lead by the genuine snapshot lag. 2 absorbs a brief two-snapshot lag without
+    // clamping legitimate prediction.
+    private const int MaxInFlightLead = 2;
 
-    // Ring of the last HistoryCapacity accepted steps. _history[seq % HistoryCapacity] holds the entry whose
-    // StepSeq == seq while seq is within [oldest, PredictedStepSeq]; older slots are overwritten as new steps
-    // land. _historyCount tracks how many entries are currently retained (so the oldest retained seq is
-    // PredictedStepSeq - _historyCount + 1). See TryGetHistory / RecordHistory.
-    private readonly StepRecord[] _history = new StepRecord[HistoryCapacity];
-    private int _historyCount;
+    // Bounded ring of the DIRECTION of each accepted step keyed by its step-seq, kept only so Reconcile can
+    // re-project the genuinely in-flight steps (serverStepSeq+1 .. PredictedStepSeq) from the re-anchored
+    // confirmed tile along the path the prediction ACTUALLY took (not the latest held direction, which would
+    // transiently mis-place the head during a turn). 32 comfortably covers the worst realistic in-flight lead
+    // (a round-trip's worth of unconfirmed steps); a longer-in-flight step falls back to the held direction.
+    private const int InFlightDirCapacity = 32;
+    private readonly Direction8[] _inFlightDir = new Direction8[InFlightDirCapacity];
+
+    private readonly Func<TileCoord, bool> _isWalkable;
 
     private TileCoord _predictedTile;
     // S77: the predictor's count of ACCEPTED tile moves, the exact mirror of the server's
     // WorldEntity.StepSequence (S76) — bumped ONLY on an accepted step (AdvanceOneStep), never on a turn or a
-    // blocked/cooldown step. Reconcile uses it to match a snapshot confirm to the predicted step it
-    // corresponds to.
+    // blocked/cooldown step. Reconcile uses it (vs the snapshot's RecipientStepSeq) to size the in-flight steps.
     private uint _predictedStepSeq;
     // S77: the highest serverStepSeq ever fed to Reconcile. A defensive monotonic guard: the client already
     // drops out-of-order snapshots (MmoClient.HandleSnapshot rejects any SnapshotSequence <= the last applied,
     // and RecipientStepSeq is the server's monotonically non-decreasing count of our accepted moves, so a
     // reordered older snapshot never reaches Reconcile), but a reordered confirm carrying a LOWER serverStepSeq
-    // would otherwise wrongly trip the idle/stop clause (converge DOWN to a stale tile) or the benign-match. We
-    // ignore any Reconcile whose seq is older than one we already processed.
+    // would otherwise re-anchor onto a stale tile. We ignore any Reconcile whose seq is older than one we
+    // already processed.
     private uint _highestReconciledStepSeq;
     private bool _hasReconciled;
     private Direction8 _facing;
@@ -355,7 +356,8 @@ public sealed class LocalPlayerPredictor
                     continue;
                 }
 
-                // Accepted step: advance the tile + step-seq + history, and start the present-time tween from
+                // Accepted step: advance the tile + step-seq (recording its direction for in-flight re-projection),
+                // and start the present-time tween from
                 // where we are showing NOW (carries any in-flight position so back-to-back steps glide
                 // continuously) toward the new tile center, over one cadence, beginning at the boundary's
                 // wall-clock time so a late frame doesn't shorten the tween.
@@ -372,11 +374,13 @@ public sealed class LocalPlayerPredictor
 
     // Applies ONE accepted step in `direction` from the current predicted tile: moves the tile (iff the
     // destination is walkable; a blocked replay step holds in place, mirroring Tick's wall-hold), bumps
-    // PredictedStepSeq, records the step in history, and optionally starts the present-time render tween. The
-    // SHARED accepted-step body used by both Tick (live stepping) and Reconcile (replay of the in-flight steps
-    // from a corrected anchor). PredictedStepSeq bumps EXACTLY once per call — the same event the server's
-    // StepSequence (S76) bumps on — so the two stay in lockstep for any sequence of accepted steps. `now` only
-    // matters for sampling; when startTween is false the render is left for the caller to set after replay.
+    // PredictedStepSeq, and optionally starts the present-time render tween. The SHARED accepted-step body used
+    // by both Tick (live stepping) and Reconcile (re-projection of the in-flight steps from a corrected anchor).
+    // PredictedStepSeq bumps EXACTLY once per call — the same event the server's StepSequence (S76) bumps on — so
+    // the two stay in lockstep for any sequence of accepted steps. startTween distinguishes a LIVE step (true:
+    // record its direction for later in-flight re-projection and start the tween) from a RE-PROJECTION replay
+    // (false: the directions are being re-read from the buffer, so don't overwrite it, and the render is set
+    // once by the caller after the replay). `now` only matters for sampling.
     private void AdvanceOneStep(Direction8 direction, TimeSpan stepStartedAt, bool startTween, RenderPosition tweenFrom, TimeSpan now)
     {
         var delta = direction.Delta();
@@ -388,10 +392,10 @@ public sealed class LocalPlayerPredictor
 
         _facing = direction;
         _predictedStepSeq++;
-        RecordHistory(_predictedStepSeq, _predictedTile, direction);
 
         if (startTween)
         {
+            _inFlightDir[_predictedStepSeq % InFlightDirCapacity] = direction;
             StartTween(tweenFrom, RenderPosition.FromTile(_predictedTile), stepStartedAt, _cadenceMs);
         }
     }
@@ -403,30 +407,52 @@ public sealed class LocalPlayerPredictor
         return _renderPosition;
     }
 
-    // Re-bases the prediction on an authoritative self-snapshot, matched by STEP SEQUENCE (S77). confirmedTile
-    // is the server's truth for the local entity at serverStepSeq (the recipient-scoped RecipientStepSeq off
-    // the snapshot header — the server's count of OUR accepted tile moves at that confirm). Returns the
-    // reconciliation outcome so the caller can record divergence telemetry.
+    // Re-bases the prediction on an authoritative self-snapshot (S83 — authoritative-while-moving reconcile).
+    // confirmedTile is the server's truth for the local entity at serverStepSeq (the recipient-scoped
+    // RecipientStepSeq off the snapshot header — the server's count of OUR accepted tile moves at that confirm).
+    // Returns the reconciliation outcome so the caller can record divergence telemetry.
     //
-    //   * MATCH — serverStepSeq is older than our retained history (a confirm for a step we already moved past),
-    //     OR our history's tile at serverStepSeq equals confirmedTile (the server agrees with what we predicted
-    //     at that exact step). Either way the prediction is valid and ahead; prune the now-confirmed history
-    //     and touch NOTHING (tile / schedule / render). This is the common case — it removes the rubberband,
-    //     because a benign trailing/old-direction confirm now MATCHES the step we predicted instead of being
-    //     guessed at by distance.
-    //   * MISMATCH — our history's tile at serverStepSeq differs from confirmedTile: a genuine misprediction.
-    //     Re-anchor _predictedTile + _predictedStepSeq to the confirm, then REPLAY the recorded directions of
-    //     the in-flight steps (serverStepSeq+1 .. old PredictedStepSeq) from the corrected anchor to recompute
-    //     the present tile (intent/direction is anchor-independent; re-running it with the same walkability
-    //     rules yields the corrected present tile). Then retarget the render: blend over one cadence if the
-    //     present delta <= SnapCorrectionThresholdTiles, else snap. Returns Corrected / Snapped.
+    // THE MODEL (the standard "re-base on authoritative state + replay un-acked inputs"): on EVERY confirming
+    // snapshot — moving or not — we re-anchor _predictedTile / _predictedStepSeq to the server's confirmed tile,
+    // then re-project ONLY the genuinely in-flight steps (the ones the client predicted past the server's
+    // confirmed point: serverStepSeq+1 .. PredictedStepSeq, count = PredictedStepSeq - serverStepSeq) FORWARD
+    // from that anchor in the CURRENTLY HELD direction. The result is the present predicted tile = confirmed +
+    // (in-flight count) steps of held intent.
+    //
+    // WHY THIS FIXES THE ROOT CAUSE (S83). The predictor flips its held direction INSTANTLY on input; the server
+    // sees that direction ONE+ TICK LATER (intent crosses the wire, lands in the server's next poll). So at a
+    // turn the two sides feed predictor-tick-N and server-tick-N DIFFERENT inputs and accumulate a different
+    // count of accepted moves / a different facing phase — the prediction drifts a tile per turn and spam
+    // compounds it. The pre-S83 reconcile could not pull a *while-moving* prediction back: the dominant
+    // Matched/benign path touched nothing, the mismatch-replay re-ran the SAME diverged predicted history (so it
+    // re-landed on the same wrong head), and the only true convergence was gated on !_moving — a one-way ratchet
+    // while the key was held. By re-anchoring to the truth on EVERY snapshot and re-projecting only the CAPPED
+    // in-flight count (MaxInFlightLead), divergence is capped at the genuine un-acked amount AT ALL TIMES (spam
+    // can't ratchet — the excess that the input-skew over-predicts is corrected toward the server, not
+    // re-projected), and when input pauses the server catches up (serverStepSeq -> PredictedStepSeq), the
+    // in-flight count drains to 0, and the predicted tile converges EXACTLY onto the confirmed tile — moving or
+    // stopped.
+    //
+    // The CAP is the load-bearing change vs a naive re-anchor+replay: without it, re-projecting the full
+    // predictedStepSeq - serverStepSeq reproduces the very over-prediction that the skew generated (the predictor
+    // out-steps the delayed server, so the gap grows unbounded). The in-flight steps are re-projected along their
+    // RECORDED directions (the path the prediction actually took most recently — see _inFlightDir), not the latest
+    // held direction, which would transiently mis-place the head right after a turn.
+    //
+    // RENDER: the visible avatar glides to the RE-PROJECTED PRESENT tile (confirmed + in-flight), never the bare
+    // trailing confirmed tile — the re-anchor is internal. We blend from where the avatar is showing NOW to the
+    // re-projected present over one cadence (no backward rubberband), or snap if the jump exceeds the threshold
+    // (teleport/knockback/big desync). When the re-projected present equals the tile we were already predicting
+    // AND the render isn't moved, it is a benign Matched (the common steady-state trailing confirm) — touch the
+    // render nothing. We do NOT withhold/hold predicted steps (the reverted S82 failure mode): prediction runs
+    // forward in Tick and is corrected after the fact here.
     public ReconcileOutcome Reconcile(TileCoord confirmedTile, uint serverStepSeq, TimeSpan now)
     {
         // STALE / OUT-OF-ORDER GUARD (S77): ignore a confirm whose step-seq is older than one we already
         // reconciled. The client path already guarantees monotonic delivery (HandleSnapshot drops any snapshot
         // <= the last applied SnapshotSequence, and RecipientStepSeq only ever climbs), so this is defence in
-        // depth: were a reordered UDP confirm to slip a LOWER serverStepSeq past us, it would otherwise wrongly
-        // fire the idle/stop clause (converge DOWN to a stale tile) or a spurious benign match. Touch nothing.
+        // depth: were a reordered UDP confirm to slip a LOWER serverStepSeq past us, it would otherwise re-anchor
+        // onto a stale tile. Touch nothing.
         if (_hasReconciled && serverStepSeq < _highestReconciledStepSeq)
         {
             return ReconcileOutcome.Matched;
@@ -435,92 +461,86 @@ public sealed class LocalPlayerPredictor
         _hasReconciled = true;
         _highestReconciledStepSeq = serverStepSeq;
 
-        // IDLE / STOP-BOUNDARY clause (S77): the player has STOPPED (!_moving) and the server settled BEHIND
-        // our prediction (serverStepSeq < _predictedStepSeq). We over-predicted steps the now-stopped server
-        // will never take (the trailing step intents arrived after release), so the server will NEVER emit a
-        // confirm at our predicted head — leaving us stranded forward forever. Converge DOWN to the truth:
-        // re-anchor tile + seq to the confirm, drop the overshoot history, and blend (small) / snap (large) the
-        // render onto it. NO replay — we are stopped, there are no in-flight intent steps to re-run. Gated
-        // strictly on !_moving so the while-moving benign-match (the rubberband fix) below is untouched.
-        if (!_moving && serverStepSeq < _predictedStepSeq)
+        // The in-flight steps are the ones we predicted past the server's confirmed point — the ones genuinely
+        // sent-but-not-yet-acked. ONLY while the intent is still held: if the server has confirmed at/beyond our
+        // head (serverStepSeq >= predictedStepSeq) nothing is in flight, and once the player has STOPPED there is
+        // no held intent to re-project (the steps we predicted past the confirm are OVERSHOOT the now-stopped
+        // server will never confirm — their intents arrived after release), so we converge DOWN to the confirmed
+        // tile rather than re-project them forward (which would strand the avatar ahead forever).
+        //
+        // CAP the re-projected count at MaxInFlightLead. The genuine un-acked lead on a sane uplink is ~1 step;
+        // a larger predictedStepSeq - serverStepSeq means the predictor's instantaneous-input step decisions
+        // out-ran the server's delayed-input ones (the input-arrival skew predicting phantom steps the server
+        // never took). Those excess steps are a misprediction, not real in-flight, so we DON'T re-project them —
+        // we converge their excess toward the server. This bounds divergence DURING movement (the head can lead
+        // by at most the cap) and still converges exactly at rest. It is a reconcile-layer correction AFTER the
+        // fact (prediction still runs fully forward in Tick — snappy on input), NOT the reverted S82 forward
+        // step-withholding (which added input lag by holding requested steps back).
+        var rawInFlight = (!_moving || serverStepSeq >= _predictedStepSeq)
+            ? 0
+            : (int)(_predictedStepSeq - serverStepSeq);
+        var inFlight = Math.Min(rawInFlight, MaxInFlightLead);
+
+        var oldPredictedTile = _predictedTile;
+        var oldRenderSource = SampleInternal(now);
+
+        // Capture the directions of the MOST RECENT `inFlight` predicted steps (the ones closest to the head:
+        // predictedStepSeq-inFlight+1 .. predictedStepSeq) BEFORE re-anchoring, from the recorded buffer — so the
+        // re-projection follows the path the prediction ACTUALLY took most recently (not the latest held
+        // direction, which would transiently mis-place the head whenever a turn just happened). A step older than
+        // the buffer window falls back to the current held direction.
+        var replay = new Direction8[inFlight];
+        for (var i = 0; i < inFlight; i++)
         {
-            var idleOldTile = _predictedTile;
-            var idleRenderSource = SampleInternal(now);
-            _predictedTile = confirmedTile;
-            _predictedStepSeq = serverStepSeq;
-            ResetHistory();
-            RecordHistory(_predictedStepSeq, _predictedTile, _facing);
-
-            var idleCorrection = ChebyshevDistance(idleOldTile, confirmedTile);
-            var idleConfirmedPos = RenderPosition.FromTile(confirmedTile);
-            if (idleCorrection > SnapCorrectionThresholdTiles)
-            {
-                StartTween(idleConfirmedPos, idleConfirmedPos, now, _cadenceMs);
-                _renderPosition = idleConfirmedPos;
-                return ReconcileOutcome.Snapped;
-            }
-
-            StartTween(idleRenderSource, idleConfirmedPos, now, _cadenceMs);
-            _renderPosition = SampleInternal(now);
-            return ReconcileOutcome.Corrected;
+            var seq = _predictedStepSeq - (uint)(inFlight - i) + 1;
+            replay[i] = (_predictedStepSeq - seq) < InFlightDirCapacity
+                ? _inFlightDir[seq % InFlightDirCapacity]
+                : _direction;
         }
 
-        // MATCH: the confirm is for a step older than anything we still remember (we already moved well past
-        // it), or our recorded tile at that exact step agrees with the server. Discard the now-confirmed
-        // history and leave tile / schedule / render untouched — re-anchoring backward onto a step the server
-        // is only now catching up to is the rubberband.
-        if (serverStepSeq < OldestHistorySeq() || MatchesHistory(serverStepSeq, confirmedTile))
+        // Re-anchor on the authoritative truth, then re-project the (capped) in-flight steps forward along their
+        // recorded directions. PredictedStepSeq becomes serverStepSeq + the re-projected count (so a capped
+        // over-prediction also pulls the seq back into the bounded window — it can't run away). The per-step
+        // walkability rule still applies (a re-projected step into a wall holds in place, mirroring Tick).
+        _predictedTile = confirmedTile;
+        _predictedStepSeq = serverStepSeq;
+
+        foreach (var dir in replay)
         {
-            DiscardHistoryThrough(serverStepSeq);
+            // startTween: false — the render is set ONCE below from the recomputed present tile (a per-step tween
+            // mid-re-projection would be wrong), and the buffer must not be overwritten during replay.
+            AdvanceOneStep(dir, now, startTween: false, tweenFrom: oldRenderSource, now);
+        }
+
+        var presentPos = RenderPosition.FromTile(_predictedTile);
+        var correction = ChebyshevDistance(oldPredictedTile, _predictedTile);
+
+        // Benign steady-state: the re-projected present tile is exactly the tile we were already predicting, so
+        // the prediction was valid and ahead. Leave the render untouched (no rubberband on the common trailing
+        // confirm).
+        if (_predictedTile == oldPredictedTile)
+        {
             return ReconcileOutcome.Matched;
         }
 
-        // MISMATCH: a genuine misprediction at serverStepSeq. Capture the in-flight directions we predicted
-        // AFTER that step, re-anchor on the truth, and replay them from the corrected tile to recompute the
-        // present tile. The replay buffer is taken from the CURRENT history (before we mutate it).
-        var replay = CollectReplayDirections(serverStepSeq);
-
-        // Where the prediction stood BEFORE re-anchoring (the present tile we were showing toward) and where we
-        // are currently rendering — the first sizes the blend-vs-snap correction, the second is the render's
-        // start point for a blend so it glides from the live position rather than popping.
-        var oldPredictedTile = _predictedTile;
-        var oldRenderSource = SampleInternal(now);
-        _predictedTile = confirmedTile;
-        _predictedStepSeq = serverStepSeq;
-        ResetHistory();
-        RecordHistory(_predictedStepSeq, _predictedTile, _facing);
-
-        foreach (var direction in replay)
-        {
-            // Replay each in-flight step from the corrected anchor. startTween: false — the render is set once,
-            // below, from the recomputed present tile (a per-step tween mid-replay would be wrong).
-            AdvanceOneStep(direction, now, startTween: false, tweenFrom: oldRenderSource, now);
-        }
-
-        var correction = ChebyshevDistance(oldPredictedTile, _predictedTile);
-        var confirmedPos = RenderPosition.FromTile(_predictedTile);
         if (correction > SnapCorrectionThresholdTiles)
         {
             // Large jump (teleport/knockback/big desync): snap the render instantly rather than smear a long
             // slide. Re-arm the schedule so the very next predicted step happens a full cooldown after this snap
-            // and we don't immediately re-diverge from the freshly anchored truth (mirrors the server stamping
-            // _nextEligibleTick = stepTick + cooldown on the move that produced this truth). The re-arm is
-            // confined to this snap branch ON PURPOSE (S71): on a small Corrected reconcile while moving we must
-            // NOT freeze a full cadence — that freeze stalled prediction for a cadence while the server kept
-            // stepping, turning a 1-tile transient into a multi-tile lag-then-jump.
+            // and we don't immediately re-diverge from the freshly anchored truth.
             var nowTick = EstimateTick(now.TotalMilliseconds);
             _nextEligibleTick = nowTick + _stepCooldownTicks;
 
-            StartTween(confirmedPos, confirmedPos, now, _cadenceMs);
-            _renderPosition = confirmedPos;
+            StartTween(presentPos, presentPos, now, _cadenceMs);
+            _renderPosition = presentPos;
             return ReconcileOutcome.Snapped;
         }
 
-        // Small disagreement: blend the render from where we're showing now to the recomputed present tile over
-        // one cadence so a normal start/stop boundary settles smoothly instead of popping. Crucially (S71) we
-        // leave the schedule on its EXISTING tick grid: if moving we resume stepping at the already-armed
-        // boundary and keep tracking the server cadence, instead of freezing a full cadence.
-        StartTween(oldRenderSource, confirmedPos, now, _cadenceMs);
+        // Small disagreement: blend the render from where we're showing NOW to the re-projected present tile over
+        // one cadence so the correction settles smoothly instead of popping. We leave the schedule on its
+        // EXISTING tick grid (S71): if moving we resume stepping at the already-armed boundary and keep tracking
+        // the server cadence, instead of freezing a full cadence.
+        StartTween(oldRenderSource, presentPos, now, _cadenceMs);
         _renderPosition = SampleInternal(now);
         return ReconcileOutcome.Corrected;
     }
@@ -625,112 +645,19 @@ public sealed class LocalPlayerPredictor
         return RenderPosition.Lerp(_renderFrom, _renderTo, elapsedMs / _tweenDurationMs);
     }
 
-    // ---- Step-seq history ring (S77) -------------------------------------------------------------------
-
-    // The oldest stepSeq still retained in history. When history is empty this is PredictedStepSeq + 1 (an
-    // empty window above the current seq), so "serverStepSeq < OldestHistorySeq" is true for any seq <=
-    // PredictedStepSeq — i.e. with nothing in flight a confirm at-or-before our seq is a benign match.
-    private uint OldestHistorySeq()
-    {
-        return _historyCount == 0
-            ? _predictedStepSeq + 1
-            : _predictedStepSeq - (uint)(_historyCount - 1);
-    }
-
-    // True when history has an entry for serverStepSeq and its recorded tile equals confirmedTile.
-    private bool MatchesHistory(uint serverStepSeq, TileCoord confirmedTile)
-    {
-        return TryGetHistory(serverStepSeq, out var record) && record.Tile == confirmedTile;
-    }
-
-    private bool TryGetHistory(uint seq, out StepRecord record)
-    {
-        if (_historyCount > 0 && seq >= OldestHistorySeq() && seq <= _predictedStepSeq)
-        {
-            record = _history[seq % HistoryCapacity];
-            if (record.StepSeq == seq)
-            {
-                return true;
-            }
-        }
-
-        record = default;
-        return false;
-    }
-
-    // The directions of the in-flight steps AFTER serverStepSeq, in step order, that must be replayed from the
-    // corrected anchor on a mismatch. Reads from the current history before it is reset.
-    private Direction8[] CollectReplayDirections(uint serverStepSeq)
-    {
-        var first = serverStepSeq + 1;
-        if (_predictedStepSeq < first)
-        {
-            return [];
-        }
-
-        var count = (int)(_predictedStepSeq - serverStepSeq);
-        var directions = new Direction8[count];
-        for (var i = 0; i < count; i++)
-        {
-            var seq = first + (uint)i;
-            directions[i] = TryGetHistory(seq, out var record) ? record.Direction : _direction;
-        }
-
-        return directions;
-    }
-
-    // Records an accepted step (or the re-anchor pseudo-entry) at seq into the ring and counts it as retained.
-    private void RecordHistory(uint seq, TileCoord tile, Direction8 direction)
-    {
-        _history[seq % HistoryCapacity] = new StepRecord(seq, tile, direction);
-        if (_historyCount < HistoryCapacity)
-        {
-            _historyCount++;
-        }
-    }
-
-    // Drops every retained entry at or below serverStepSeq (now confirmed). Leaves the still-in-flight entries.
-    private void DiscardHistoryThrough(uint serverStepSeq)
-    {
-        if (_historyCount == 0)
-        {
-            return;
-        }
-
-        if (serverStepSeq >= _predictedStepSeq)
-        {
-            _historyCount = 0;
-            return;
-        }
-
-        var newOldest = serverStepSeq + 1;
-        var retained = (int)(_predictedStepSeq - newOldest + 1);
-        if (retained < _historyCount)
-        {
-            _historyCount = retained;
-        }
-    }
-
-    private void ResetHistory()
-    {
-        _historyCount = 0;
-    }
-
     private static int ChebyshevDistance(TileCoord a, TileCoord b)
     {
         return Math.Max(Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y));
     }
 
-    private readonly record struct StepRecord(uint StepSeq, TileCoord Tile, Direction8 Direction);
-
     public enum ReconcileOutcome : byte
     {
-        // The confirmed tile matched the predicted step at that sequence (or is older than our history) — no
-        // correction.
+        // The re-projected present tile equalled the tile we were already predicting — the prediction was valid
+        // and ahead, no render correction.
         Matched = 0,
-        // A genuine misprediction blended toward the recomputed present tile at present time.
+        // The re-projected present tile differed: blended toward it at present time over one cadence.
         Corrected = 1,
-        // A genuine misprediction snapped the render to the recomputed present tile.
+        // The re-projected present tile differed by more than the snap threshold: snapped the render to it.
         Snapped = 2,
     }
 }

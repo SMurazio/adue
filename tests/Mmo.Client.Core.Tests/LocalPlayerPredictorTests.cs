@@ -584,6 +584,127 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
+    public void SkewedInput_ReconcileBoundsDivergence_AndConvergesAtRest()
+    {
+        // S83 — THE TEST THAT CATCHES THE LIVE DESYNC. Every prior parity sweep feeds BOTH sides the SAME held
+        // direction at the SAME tick, so they never diverge and the reconcile path is never exercised under real
+        // conditions. Here we model the actual asymmetry the review diagnosed: the predictor flips its held
+        // direction INSTANTLY (it gets each change at tick N), but the server only sees that change ONE TICK
+        // LATER (the intent crosses the wire + lands in its next poll), so it samples the change at tick N+1.
+        // Through rapid down/left + E/W turn spam the two sides make different turn-vs-step decisions for the
+        // same tick and the prediction drifts. We reconcile the predictor against the REAL WorldEntity's
+        // authoritative tile + StepSequence every tick, and assert: (a) the reconciled predicted tile stays
+        // within a SMALL bounded divergence during the spam (no ratchet), and (b) once input stops it converges
+        // EXACTLY to the server tile. On the pre-S83 !_moving-gated reconcile this FAILS (the while-moving gap
+        // ratchets up and never closes); on the S83 re-anchor+re-project it passes.
+        const int tickRate = 20;
+        const double tickMs = 1000d / tickRate;  // 50 ms
+        const uint stepCooldownTicks = 3;        // 150 ms
+        const uint turnDelayTicks = 2;           // 100 ms
+        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
+        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
+
+        // SWEEP many flip phases: for each, spam down/left (S/W/E mix) with the one-tick input-arrival skew, then
+        // RELEASE the key and drain to rest. The genuine in-flight lead on a one-tick skew is small, but across
+        // phases the skew puts predictor-tick-N and server-tick-N out of phase on the turn-vs-step decision, so
+        // some phases leave the prediction laterally OFF the server's line at the same step-seq. The pre-S83
+        // reconcile cannot recover those WHILE MOVING (the benign-match path touches nothing; the only
+        // convergence is the !_moving idle clause, and it only fires when serverStepSeq < predictedStepSeq — a
+        // same-seq lateral miss at rest stays stuck). S83 re-anchors on every snapshot, so every phase converges
+        // EXACTLY at rest and the while-moving lead stays bounded.
+        var maxDivergence = 0;
+        var notConvergedAtRest = 0;
+        var phases = 0;
+
+        // Three rapid down/left directions cycled at several flip cadences (in ticks) and several press phases.
+        var dirs = new[] { Direction8.S, Direction8.W, Direction8.E };
+        for (var flipEvery = 1; flipEvery <= 4; flipEvery++)
+        {
+            for (var pressPhase = 0; pressPhase < 3; pressPhase++)
+            {
+                phases++;
+                var grid = new TileGrid(256, 256, []);
+                var start = new TileCoord(120, 120);
+                var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.S,
+                    "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
+                var predictor = new LocalPlayerPredictor(start, Direction8.S, stepCadenceMs,
+                    t => grid.IsWalkable(t), turnDelayMs, tickMs);
+
+                const uint spamUntilTick = 60;
+                const uint keyupTick = 60;
+                const uint totalTicks = 80;
+                Direction8 HeldAtTick(long tick)
+                {
+                    var idx = (int)((tick + pressPhase) / flipEvery) % dirs.Length;
+                    return dirs[idx];
+                }
+
+                predictor.SetIntent(true, Direction8.S, TimeSpan.Zero);
+                var predictorLastHeld = Direction8.S;
+                var predictorMoving = true;
+
+                for (uint tick = 0; tick < totalTicks; tick++)
+                {
+                    var now = TimeSpan.FromMilliseconds(tick * tickMs);
+
+                    // Predictor sees the intent change for THIS tick immediately.
+                    if (tick < keyupTick)
+                    {
+                        var held = HeldAtTick(tick);
+                        if (held != predictorLastHeld)
+                        {
+                            predictor.SetIntent(true, held, now);
+                            predictorLastHeld = held;
+                        }
+                    }
+                    else if (predictorMoving)
+                    {
+                        predictor.SetIntent(false, predictorLastHeld, now); // keyup
+                        predictorMoving = false;
+                    }
+
+                    predictor.Tick(now);
+
+                    // Server samples the held intent as of the PREVIOUS tick (the one-tick input-arrival delay),
+                    // and sees the keyup one tick late too (it keeps stepping through keyupTick).
+                    var serverMoving = tick <= keyupTick;
+                    if (serverMoving)
+                    {
+                        var serverHeld = tick == 0 ? Direction8.S : HeldAtTick((long)tick - 1);
+                        entity.TryStep(serverHeld, tick, stepCooldownTicks, turnDelayTicks, grid);
+                    }
+
+                    // Reconcile against the server's authoritative tile + step-seq, exactly as the client does on
+                    // every snapshot.
+                    predictor.Reconcile(entity.Tile, entity.StepSequence, now);
+
+                    if (tick < spamUntilTick)
+                    {
+                        var divergence = System.Math.Max(
+                            System.Math.Abs(predictor.PredictedTile.X - entity.Tile.X),
+                            System.Math.Abs(predictor.PredictedTile.Y - entity.Tile.Y));
+                        maxDivergence = System.Math.Max(maxDivergence, divergence);
+                    }
+                }
+
+                // After both sides stop and drain, the prediction must have converged EXACTLY onto the server's
+                // authoritative tile. A phase that does not converge is the stuck-at-rest desync.
+                if (predictor.PredictedTile != entity.Tile)
+                {
+                    notConvergedAtRest++;
+                }
+            }
+        }
+
+        Assert.Equal(0, notConvergedAtRest);
+        // The while-moving lead stays bounded through the spam — it must NOT ratchet away. The genuine in-flight
+        // lead on a one-tick skew is a couple of steps; a generous bound still pins it.
+        Assert.True(maxDivergence <= 3, $"prediction lead ratcheted to {maxDivergence} tiles during spam");
+        // And the spam genuinely exercised a real (bounded) divergence, so the bound proves something.
+        Assert.True(maxDivergence >= 1, "the skewed-input spam should have produced a real (bounded) divergence");
+    }
+
+    [Fact]
     public void SpamLeftRight_NoDrift_PredictedTileTracksServer()
     {
         // The human's repro: stand still, spam left-right rapidly off the tick grid, then settle and run. The
@@ -857,11 +978,17 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void StaleConfirm_OlderThanHistory_IsBenign_NoRenderMove()
+    public void DeepOverLead_IsBoundedToTheCap_NotLeftStranded()
     {
-        // A confirm for a step OLDER than anything we still remember (we have moved well past it) is benign by
-        // construction — there is nothing to compare it against and it can only be a lagging trailing confirm.
-        // Matched, prediction + render untouched.
+        // S83 (was StaleConfirm_OlderThanHistory_IsBenign_NoRenderMove). The pre-S83 reconcile treated a confirm
+        // far behind the predicted head as a BENIGN trailing confirm and touched nothing — leaving the predicted
+        // head arbitrarily far ahead. Under the authoritative model a lead larger than the genuine un-acked
+        // window (MaxInFlightLead = 2 steps) is the input-arrival-skew over-prediction the live desync is made of,
+        // so reconcile re-anchors on the confirm and re-projects only the capped in-flight count — bounding the
+        // head instead of letting it ratchet. NOTE this scenario (a single confirm 5 steps behind with NO
+        // intervening snapshots) does not occur on the real per-tick-snapshot client, where the lead never reaches
+        // 5 without a confirm; it is kept to pin the authoritative BOUND that replaces the old "deep stale =
+        // benign" contract.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
         for (var step = 0; step < 5; step++)
@@ -870,17 +997,15 @@ public sealed class LocalPlayerPredictorTests
         }
 
         Assert.Equal(new TileCoord(5, 0), predictor.PredictedTile);
-        var renderBefore = predictor.Sample(TimeSpan.FromMilliseconds(620));
+        Assert.Equal(5u, predictor.PredictedStepSeq);
 
-        // seq 0 — the start anchor, never recorded in history (history holds seq 1..5). It is older than the
-        // oldest retained entry, so it is treated as a benign already-passed match.
+        // Server confirms (0,0) at seq 0 — five steps behind the predicted head. Re-anchor on (0,0) and re-project
+        // only the capped 2 in-flight E steps => (2,0) at seq 2: the lead is bounded to the cap, not left at 5.
         var outcome = predictor.Reconcile(new TileCoord(0, 0), 0u, TimeSpan.FromMilliseconds(620));
 
-        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
-        Assert.Equal(new TileCoord(5, 0), predictor.PredictedTile);
-        var renderAfter = predictor.Sample(TimeSpan.FromMilliseconds(620));
-        Assert.Equal(renderBefore.X, renderAfter.X, 6);
-        Assert.Equal(renderBefore.Y, renderAfter.Y, 6);
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
     }
 
     // ---- S77: a genuine misprediction re-anchors and REPLAYS the in-flight steps from the truth -------
