@@ -14,20 +14,17 @@ namespace Mmo.Client.Core.Tests;
 public sealed class LocalPlayerPredictorTests
 {
     private const double Cadence = 150d;
-    // S63 turn delay: a turn costs this (not a full cadence). 80 ms is the ServerOptions default; the tests
-    // pass it explicitly so the turn-vs-step timing is unambiguous.
-    private const double TurnDelay = 80d;
-    // S81 tick grid: the predictor now gates on the server's integer tick grid. These behaviour tests use a
-    // fine 10 ms tick so Cadence (150 = 15 ticks) and TurnDelay (80 = 8 ticks) are exact whole ticks and every
-    // ms timestamp below lands on a boundary — the timings are identical to the pre-S81 ms model. The
-    // against-real-WorldEntity parity tests use the real 50 ms server tick (they drive `tick * 50`).
+    // S81 tick grid: the predictor gates on the server's integer tick grid. These behaviour tests use a fine
+    // 10 ms tick so Cadence (150 = 15 ticks) is an exact whole-tick count and every ms timestamp below lands on
+    // a boundary. The against-real-WorldEntity parity tests use the real 50 ms server tick (they drive
+    // `tick * 50`).
     private const double TickMs = 10d;
 
     // Open field: every tile walkable.
     private static bool OpenField(TileCoord _) => true;
 
     private static LocalPlayerPredictor NewPredictor(TileCoord start, Direction8 facing, Func<TileCoord, bool>? walkable = null)
-        => new(start, facing, Cadence, walkable ?? OpenField, TurnDelay, TickMs);
+        => new(start, facing, Cadence, walkable ?? OpenField, TickMs);
 
     // ---- Predict: snappy first step + faithful stepping -------------------------------------------
 
@@ -37,7 +34,7 @@ public sealed class LocalPlayerPredictorTests
         // S81: the predictor mirrors the server's tick grid, which can only act on a tick boundary. A fresh
         // press OFF the grid therefore takes its first step at the NEXT tick boundary (≤ one tick, ~25 ms avg),
         // not the same instant — the bargain that buys exact tile/seq parity through turns. Already facing E so
-        // the first action is a MOVE (no turn-then-move). Press at t=3 ms (off the 10 ms grid): the next
+        // the first action is a MOVE. Press at t=3 ms (off the 10 ms grid): the next
         // boundary is t=10, and nothing fires before it.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
 
@@ -316,23 +313,17 @@ public sealed class LocalPlayerPredictorTests
         predictor.SetIntent(true, Direction8.S, TimeSpan.FromMilliseconds(60));
         Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(60)));
 
-        // Facing only changes on a STEP (turn-then-move), and no step has been due since the first, so facing
-        // is still E even though the held direction is now S.
+        // Facing only changes on a STEP, and no step has been due since the first, so facing is still E even
+        // though the held direction is now S.
         Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
         Assert.Equal(Direction8.E, predictor.Facing);
 
-        // The next action is due a full cadence after the first (t=150). Because the held direction (S)
-        // differs from facing (E), that single action is a TURN in place — not a move.
-        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(150)));
-        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
-        Assert.Equal(Direction8.S, predictor.Facing);
-
-        // S63: the turn freed the next action after the TURN DELAY (80 ms), not a full cadence — so the move S
-        // lands at t=150+80=230, not t=300. (Before t=230 nothing fires.)
-        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(229)));
-        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
-        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(230)));
+        // The next step is due a full cadence after the first (t=150). S98: a direction change steps IMMEDIATELY
+        // in the new direction (facing set on the step) — there is no separate turn beat — so this single step
+        // MOVES S to (1,1) and faces S, at the normal cadence boundary.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(150)));
         Assert.Equal(new TileCoord(1, 1), predictor.PredictedTile);       // stepped S from (1,0)
+        Assert.Equal(Direction8.S, predictor.Facing);
     }
 
     [Fact]
@@ -351,16 +342,12 @@ public sealed class LocalPlayerPredictorTests
         Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(299)));
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
 
-        // At the next boundary (t=300) the redirect first TURNS to N (no move). S63: the move N follows a
-        // TURN DELAY (80 ms) later — t=380 — not a full cadence (t=450).
-        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(300)));     // turn to N
-        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
-        Assert.Equal(Direction8.N, predictor.Facing);
-
-        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(379)));     // turn delay not yet elapsed
-        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
-        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(380)));      // now facing N -> moves
+        // S98: at the next cadence boundary (t=300) the redirect STEPS IMMEDIATELY N (facing set on the step) —
+        // there is no separate turn beat. The post-redirect step lands at the cadence boundary, never the
+        // instant the direction changed.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));      // moves N
         Assert.Equal(new TileCoord(2, -1), predictor.PredictedTile);
+        Assert.Equal(Direction8.N, predictor.Facing);
     }
 
     [Fact]
@@ -409,9 +396,9 @@ public sealed class LocalPlayerPredictorTests
         // SAME held-intent timeline (a press, then rapid direction flips), and assert identical step counts.
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
 
-        // Server model with turn-then-move + S63 turn delay: the next action is due at serverNextEligible; a
-        // step in a new direction TURNS (no tile move) and frees the next action after the TURN DELAY, only a
-        // step in the faced direction MOVES and frees the next after a full cadence.
+        // Server model (S98 immediate-step): the next step is due at serverNextEligible; a step in ANY direction
+        // moves one tile in that direction (facing set on the step) and frees the next step after a full
+        // cadence. There is no separate turn action.
         TimeSpan? serverNextEligible = null;
         var serverFacing = Direction8.E;
         var serverTile = new TileCoord(0, 0);
@@ -438,23 +425,16 @@ public sealed class LocalPlayerPredictorTests
                 intentIndex++;
             }
 
-            // Server tick model (turn-then-move + turn delay): the next action is due at serverNextEligible. A
-            // turn frees the next after TurnDelay; a move frees it after a full Cadence.
+            // Server tick model (S98 immediate-step): the next step is due at serverNextEligible. The step faces
+            // and moves one tile in the held direction, freeing the next step after a full Cadence.
             if (serverNextEligible is null || now >= serverNextEligible.Value)
             {
                 var actionAt = serverNextEligible ?? now;
-                if (currentDir != serverFacing)
-                {
-                    serverFacing = currentDir; // turn in place
-                    serverNextEligible = actionAt + TimeSpan.FromMilliseconds(TurnDelay);
-                }
-                else
-                {
-                    var d = currentDir.Delta();
-                    serverTile = serverTile.Offset(d.X, d.Y);
-                    serverMoves++;
-                    serverNextEligible = actionAt + TimeSpan.FromMilliseconds(Cadence);
-                }
+                serverFacing = currentDir;
+                var d = currentDir.Delta();
+                serverTile = serverTile.Offset(d.X, d.Y);
+                serverMoves++;
+                serverNextEligible = actionAt + TimeSpan.FromMilliseconds(Cadence);
             }
 
             predictor.Tick(now);
@@ -472,23 +452,22 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void TurnPathParity_AgainstRealWorldEntity_TileFacingMatchEachTick()
+    public void DirectionChangeParity_AgainstRealWorldEntity_TileFacingMatchEachTick()
     {
-        // S63 turn-path parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
-        // held-intent timeline with tick-aligned cooldown/turn-delay, and assert tile + facing agree every
-        // tick. A drift here is exactly the S56 rapid-direction-change snap the turn delay must avoid.
+        // S98 direction-change parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
+        // held-intent timeline with a tick-aligned cooldown, and assert tile + facing + step-seq agree every
+        // tick under the immediate-step rule (a direction change steps in the new direction with facing on the
+        // step — no turn beat). A drift here is exactly the rapid-direction-change snap the parity must avoid.
         const int tickRate = 20;                 // 50 ms/tick
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
-        const uint turnDelayTicks = 2;           // 100 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);     // 150 ms
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);          // 100 ms
 
         var grid = new TileGrid(64, 64, []);
         var entity = new WorldEntity(1, 1, EntityKind.Player, new TileCoord(10, 10), Direction8.E,
             "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
         var predictor = new LocalPlayerPredictor(new TileCoord(10, 10), Direction8.E, stepCadenceMs,
-            t => grid.IsWalkable(t), turnDelayMs, tickMs);
+            t => grid.IsWalkable(t), tickMs);
 
         // Held-direction timeline by tick: press E, then whip through N/W/S, then settle on S.
         var dirByTick = new System.Collections.Generic.Dictionary<uint, Direction8>
@@ -506,7 +485,7 @@ public sealed class LocalPlayerPredictorTests
                 predictor.SetIntent(true, held, TimeSpan.FromMilliseconds(tick * tickMs));
             }
 
-            entity.TryStep(held, tick, stepCooldownTicks, turnDelayTicks, grid);
+            entity.TryStep(held, tick, stepCooldownTicks, grid);
             predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
 
             Assert.Equal(entity.Tile, predictor.PredictedTile);
@@ -519,22 +498,20 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void OffGridTurnParity_AgainstRealWorldEntity_Sweep_TileFacingSeqMatchEachTick()
+    public void OffGridDirectionChangeParity_AgainstRealWorldEntity_Sweep_TileFacingSeqMatchEachTick()
     {
-        // S81 — THE PROOF. The pre-S81 predictor scheduled on continuous wall-clock ms while the server acts only
-        // on its integer tick grid; on a turn they sampled the rapidly-changing held direction at DIFFERENT
-        // instants and diverged a whole tile + a step-seq (the spam-left-right gap). This sweep drives the REAL
-        // WorldEntity.TryStep and the tick-grid predictor with intents arriving BETWEEN ticks — rapid E/W
-        // alternation — over many press-phase x tick-phase offsets, and asserts tile + facing + step-seq agree at
-        // EVERY tick boundary in EVERY phase. It FAILS on the old ms model (every phase diverged in S80) and
-        // PASSES on the tick-grid mirror. The predictor polls every 1 ms (frame << tick), so it samples the held
-        // direction at the same boundary the server does.
+        // S81 — THE PROOF (updated for the S98 immediate-step rule). The pre-S81 predictor scheduled on
+        // continuous wall-clock ms while the server acts only on its integer tick grid; on a direction change
+        // they sampled the rapidly-changing held direction at DIFFERENT instants and diverged a whole tile + a
+        // step-seq (the spam-left-right gap). This sweep drives the REAL WorldEntity.TryStep and the tick-grid
+        // predictor with intents arriving BETWEEN ticks — rapid E/W alternation — over many press-phase x
+        // tick-phase offsets, and asserts tile + facing + step-seq agree at EVERY tick boundary in EVERY phase.
+        // The predictor polls every 1 ms (frame << tick), so it samples the held direction at the same boundary
+        // the server does, and both step immediately in that direction (S98).
         const int tickRate = 20;                 // 50 ms/tick
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
-        const uint turnDelayTicks = 2;           // 100 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
 
         var mismatches = 0;
         var phasesChecked = 0;
@@ -551,7 +528,7 @@ public sealed class LocalPlayerPredictorTests
                 var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
                     "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
                 var predictor = new LocalPlayerPredictor(start, Direction8.E, stepCadenceMs,
-                    t => grid.IsWalkable(t), turnDelayMs, tickMs);
+                    t => grid.IsWalkable(t), tickMs);
 
                 // The held direction over wall time: press E at pressPhaseMs, then flip E<->W every flipEveryMs.
                 Direction8 HeldAt(double ms)
@@ -594,7 +571,7 @@ public sealed class LocalPlayerPredictorTests
                         if (nextTick * tickMs >= pressPhaseMs)
                         {
                             var serverHeld = HeldAt(nextTick * tickMs);
-                            entity.TryStep(serverHeld, nextTick, stepCooldownTicks, turnDelayTicks, grid);
+                            entity.TryStep(serverHeld, nextTick, stepCooldownTicks, grid);
                             lastServerHeld = serverHeld;
 
                             // Parity at this tick boundary: tile, facing, AND accepted-step count.
@@ -636,9 +613,7 @@ public sealed class LocalPlayerPredictorTests
         const int tickRate = 20;
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
-        const uint turnDelayTicks = 2;           // 100 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
 
         // SWEEP many flip phases: for each, spam down/left (S/W/E mix) with the one-tick input-arrival skew, then
         // RELEASE the key and drain to rest. The genuine in-flight lead on a one-tick skew is small, but across
@@ -664,7 +639,7 @@ public sealed class LocalPlayerPredictorTests
                 var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.S,
                     "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
                 var predictor = new LocalPlayerPredictor(start, Direction8.S, stepCadenceMs,
-                    t => grid.IsWalkable(t), turnDelayMs, tickMs);
+                    t => grid.IsWalkable(t), tickMs);
 
                 const uint spamUntilTick = 60;
                 const uint keyupTick = 60;
@@ -707,7 +682,7 @@ public sealed class LocalPlayerPredictorTests
                     if (serverMoving)
                     {
                         var serverHeld = tick == 0 ? Direction8.S : HeldAtTick((long)tick - 1);
-                        entity.TryStep(serverHeld, tick, stepCooldownTicks, turnDelayTicks, grid);
+                        entity.TryStep(serverHeld, tick, stepCooldownTicks, grid);
                     }
 
                     // Reconcile against the server's authoritative tile + step-seq, exactly as the client does on
@@ -750,16 +725,14 @@ public sealed class LocalPlayerPredictorTests
         const int tickRate = 20;
         const double tickMs = 1000d / tickRate;
         const uint stepCooldownTicks = 3;
-        const uint turnDelayTicks = 2;
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);
 
         var grid = new TileGrid(256, 256, []);
         var start = new TileCoord(100, 100);
         var entity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
             "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
         var predictor = new LocalPlayerPredictor(start, Direction8.E, stepCadenceMs,
-            t => grid.IsWalkable(t), turnDelayMs, tickMs);
+            t => grid.IsWalkable(t), tickMs);
 
         const int spamUntilMs = 2000;
         const int totalMs = 3000;
@@ -793,7 +766,7 @@ public sealed class LocalPlayerPredictorTests
             while (nextTick * tickMs <= ms)
             {
                 var serverHeld = HeldAt(nextTick * tickMs);
-                entity.TryStep(serverHeld, nextTick, stepCooldownTicks, turnDelayTicks, grid);
+                entity.TryStep(serverHeld, nextTick, stepCooldownTicks, grid);
                 Assert.Equal(entity.Tile, predictor.PredictedTile);
                 Assert.Equal(entity.Facing, predictor.Facing);
                 Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
@@ -817,7 +790,7 @@ public sealed class LocalPlayerPredictorTests
         // double-stepping past the straight-line cadence.
         const double tickMs = 50d;
         const double cadence = 150d;            // 3 ticks
-        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, cadence, OpenField, TurnDelay, tickMs);
+        var predictor = new LocalPlayerPredictor(new TileCoord(0, 0), Direction8.E, cadence, OpenField, tickMs);
 
         // Seed the frame at server tick 1000 @ wall 0 (a realistic large server tick).
         predictor.CalibrateToServerTick(1000, TimeSpan.Zero);
@@ -850,7 +823,7 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
-    public void TurnPathParity_AgainstRealWorldEntity_DiagonalCornerCutRejectedIdentically()
+    public void CornerCutParity_AgainstRealWorldEntity_DiagonalCornerCutRejectedIdentically()
     {
         // S75 corner-cut parity: drive the REAL server WorldEntity.TryStep and the predictor on the SAME
         // held-intent timeline, but now over a TileGrid with a blocked corner. The entity faces NE and holds it,
@@ -860,9 +833,7 @@ public sealed class LocalPlayerPredictorTests
         const int tickRate = 20;                 // 50 ms/tick
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
-        const uint turnDelayTicks = 2;           // 100 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);     // 150 ms
-        var turnDelayMs = MovementCadence.EffectiveTurnDelayMs(100, tickRate);          // 100 ms
 
         // (11,10) is the side tile E of the start; (11,9) (the NE destination) is OPEN, so a target-only check
         // would WRONGLY let the diagonal through. The corner rule must block it on both sides.
@@ -870,7 +841,7 @@ public sealed class LocalPlayerPredictorTests
         var entity = new WorldEntity(1, 1, EntityKind.Player, new TileCoord(10, 10), Direction8.NE,
             "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
         var predictor = new LocalPlayerPredictor(new TileCoord(10, 10), Direction8.NE, stepCadenceMs,
-            t => grid.IsWalkable(t), turnDelayMs, tickMs);
+            t => grid.IsWalkable(t), tickMs);
 
         // Held NE the whole time (already facing NE, so each eligible tick is a MOVE attempt into the corner).
         var held = Direction8.NE;
@@ -878,7 +849,7 @@ public sealed class LocalPlayerPredictorTests
 
         for (uint tick = 0; tick <= 30; tick++)
         {
-            entity.TryStep(held, tick, stepCooldownTicks, turnDelayTicks, grid);
+            entity.TryStep(held, tick, stepCooldownTicks, grid);
             predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
 
             // Both must HOLD at the start tile (the diagonal is corner-cut-rejected) — tile AND facing parity
@@ -958,7 +929,7 @@ public sealed class LocalPlayerPredictorTests
         // WEST on the normal cadence, it does not stall a full cadence past the correction.
 
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.W);
-        // Already facing W so steps are moves (no turn-then-move delay clouding the schedule under test).
+        // Already facing W so steps are moves from the start.
         predictor.SetIntent(true, Direction8.W, TimeSpan.Zero);
         predictor.Tick(TimeSpan.Zero);                                    // (-1,0) at t=0, next step armed t=150
         predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (-2,0) at t=150, next step armed t=300
@@ -1075,9 +1046,10 @@ public sealed class LocalPlayerPredictorTests
     {
         // A wall at x>=2. Hold E into it: step to (1,0) (seq 1), then the (2,0) step is blocked and the avatar
         // holds at the wall — the seq does NOT advance on a blocked step (mirrors the server). The server
-        // confirms the held tile (1,0) at the unchanged seq 1 => Matched. Then turn S and slide along the wall.
-        // Assert: the held confirm is benign (no render move), and across the turn-then-slide the render only
-        // advances DOWN the wall, never backward, while the seq bumps only on the accepted S moves.
+        // confirms the held tile (1,0) at the unchanged seq 1 => Matched. Then redirect S and slide along the
+        // wall (S98: the S press steps immediately at the next cadence boundary, no turn beat). Assert: the held
+        // confirm is benign (no render move), and across the slide the render only advances DOWN the wall, never
+        // backward, while the seq bumps only on the accepted S moves.
         bool walkable(TileCoord t) => t.X < 2;
         var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E, walkable);
         predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);

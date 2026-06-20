@@ -109,9 +109,9 @@ public sealed class Zone
         return _spawnTiles[index];
     }
 
-    public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks, uint turnDelayTicks)
+    public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks)
     {
-        return TryStep(entity, direction, serverTick, stepCooldownTicks, turnDelayTicks, out _);
+        return TryStep(entity, direction, serverTick, stepCooldownTicks, out _);
     }
 
     public bool TryStep(
@@ -119,14 +119,13 @@ public sealed class Zone
         Direction8 direction,
         uint serverTick,
         uint stepCooldownTicks,
-        uint turnDelayTicks,
         out MovementStepResult result)
     {
         // Capture the pre-step tile so the spatial index can migrate the entity's bucket if the step is
         // accepted. WorldEntity.TryStep mutates Tile in place, so the previous tile must be read before
         // the call. Same-cell steps are a no-op inside the grid.
         var previousTile = entity.Tile;
-        var stepped = entity.TryStep(direction, serverTick, stepCooldownTicks, turnDelayTicks, _tileGrid, out result);
+        var stepped = entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
         if (stepped)
         {
             World.OnEntityMoved(entity, previousTile);

@@ -43,9 +43,9 @@ namespace Mmo.Client.Core;
 //
 // Faithful mirror of the server rule (now on the tick grid):
 //   * each tick boundary, while the held intent is Moving and the entity is eligible (serverTick >=
-//     _nextEligibleTick), it resolves ONE action exactly like WorldEntity.TryStep: a step in a direction we
-//     don't already face TURNS (no tile move, +turnDelayTicks); a step in the faced direction MOVES one tile
-//     iff walkable (same IsWalkable / no-corner-cutting rule, +stepCooldownTicks and bump PredictedStepSeq); a
+//     _nextEligibleTick), it resolves ONE step exactly like WorldEntity.TryStep: it sets facing to the held
+//     direction (S98 — a direction change steps immediately, no separate turn beat) and MOVES one tile iff
+//     walkable (same IsWalkable / no-corner-cutting rule, +stepCooldownTicks and bump PredictedStepSeq); a
 //     blocked target holds at the wall without consuming the cooldown.
 //   * the gate is timed in INTEGER server ticks (the wall clock is mapped to serverTick by calibration), so the
 //     predictor samples the held direction at the SAME tick boundaries the server does and never out-steps it.
@@ -110,11 +110,10 @@ public sealed class LocalPlayerPredictor
     // The server's tick interval in ms; the unit of the whole gate. cadence/turn-delay are expressed as an
     // INTEGER number of these ticks so the predictor steps exactly where WorldEntity.TryStep does.
     private double _tickMs;
-    // Effective per-step cooldown and per-turn delay in WHOLE ticks, the exact mirror of the server's
-    // stepCooldownTicks / turnDelayTicks. Derived from the ms cadence/turn-delay (already tick-quantised on the
-    // wire) by rounding to the nearest tick; always >= 1 (a step/turn always costs at least a beat).
+    // Effective per-step cooldown in WHOLE ticks, the exact mirror of the server's stepCooldownTicks. Derived
+    // from the ms cadence (already tick-quantised on the wire) by rounding to the nearest tick; always >= 1 (a
+    // step always costs at least a beat).
     private uint _stepCooldownTicks;
-    private uint _turnDelayTicks;
     // Wall-clock → serverTick calibration: serverTick(now) = _serverTickRef + floor((nowMs - _wallRefMs)/tickMs).
     // Anchored to a snapshot's ServerTick at its arrival wall-time (CalibrateToServerTick); defaults to
     // (0 @ wall 0) so a test driving `now = tick * tickMs` yields integer tick == that tick exactly.
@@ -129,15 +128,15 @@ public sealed class LocalPlayerPredictor
     // clamped to at most one tick of correction per snapshot so a late/early snapshot doesn't jump the estimate.
     private long _lastEstimatedTick;
     private bool _hasEstimatedTick;
-    // The earliest server tick at which the next action (step OR turn) may fire — the exact mirror of
-    // WorldEntity._nextEligibleTick. Null until the first action is armed (SetIntent on idle->move quantises it
-    // to the next tick with ceil). An accepted step sets it to actionTick + stepCooldownTicks; a turn sets it to
-    // actionTick + turnDelayTicks. SURVIVES a stop so a quick stop->start respects the cooldown/turn-delay
-    // already consumed and never double-steps.
+    // The earliest server tick at which the next step may fire — the exact mirror of
+    // WorldEntity._nextEligibleTick. Null until the first step is armed (SetIntent on idle->move quantises it to
+    // the next tick with ceil). An accepted step sets it to actionTick + stepCooldownTicks; a blocked step
+    // advances it by one tick. SURVIVES a stop so a quick stop->start respects the cooldown already consumed and
+    // never double-steps. (S98: turn-then-move removed — a direction change steps immediately, facing on the
+    // step; there is no separate turn beat or turn delay.)
     private long? _nextEligibleTick;
 
     private double _cadenceMs;
-    private double _turnDelayMs;
 
     // ---- Present-time render tween (the snappy part; NOT a playout buffer) ------------------------------
     // The local player is rendered by sampling THIS tween at the current wall-clock time — old tile center ->
@@ -149,15 +148,13 @@ public sealed class LocalPlayerPredictor
     private double _tweenDurationMs;
     private RenderPosition _renderPosition;
 
-    // turnDelayMs defaults to 80 (the server's ServerOptions default) for the legacy 4-arg callers/tests;
     // tickMs defaults to 50 (the server's 20 Hz tick). The client passes the ServerHello-advertised,
-    // tick-quantised cadence/turn-delay and the real tick interval so prediction stays in lockstep.
+    // tick-quantised cadence and the real tick interval so prediction stays in lockstep.
     public LocalPlayerPredictor(
         TileCoord initialTile,
         Direction8 facing,
         double cadenceMs,
         Func<TileCoord, bool> isWalkable,
-        double turnDelayMs = 80d,
         double tickMs = 50d)
     {
         _isWalkable = isWalkable ?? throw new ArgumentNullException(nameof(isWalkable));
@@ -165,7 +162,6 @@ public sealed class LocalPlayerPredictor
         _facing = facing;
         _tickMs = Math.Max(1, tickMs);
         _cadenceMs = Math.Max(1, cadenceMs);
-        _turnDelayMs = Math.Max(1, turnDelayMs);
         RecomputeTickCounts();
         var at = RenderPosition.FromTile(initialTile);
         _renderFrom = at;
@@ -189,8 +185,6 @@ public sealed class LocalPlayerPredictor
 
     public double CadenceMs => _cadenceMs;
 
-    public double TurnDelayMs => _turnDelayMs;
-
     public double TickMs => _tickMs;
 
     // The present-time render position for the local player: where the avatar is shown RIGHT NOW. Advanced by
@@ -207,17 +201,8 @@ public sealed class LocalPlayerPredictor
         RecomputeTickCounts();
     }
 
-    // S63: adopts a new turn delay immediately (ServerHello arrival / live F4 tuning of move.turnDelayMs).
-    // Re-derives the tick-count turn delay; subsequent turns use it. Kept in lockstep with the server's
-    // TurnDelayTicks (the caller passes the tick-quantised EffectiveTurnDelayMs).
-    public void SetTurnDelay(double turnDelayMs)
-    {
-        _turnDelayMs = Math.Max(1, turnDelayMs);
-        RecomputeTickCounts();
-    }
-
     // S81: adopts the server's tick interval (1000 / TickRate). Re-derives the integer tick counts so the gate
-    // mirrors the server's stepCooldownTicks / turnDelayTicks exactly. The client sets this from ServerHello.
+    // mirrors the server's stepCooldownTicks exactly. The client sets this from ServerHello.
     public void SetTickMs(double tickMs)
     {
         _tickMs = Math.Max(1, tickMs);
@@ -272,9 +257,9 @@ public sealed class LocalPlayerPredictor
     }
 
     // Records the held movement intent (the same state the client sends as a MoveIntent). The step schedule
-    // mirrors the server's gate EXACTLY (Mmo.Server.Runtime.WorldEntity.TryStep): the next action is due at the
-    // integer _nextEligibleTick (stepCooldownTicks after the last accepted step, or turnDelayTicks after the
-    // last turn), and a direction change updates the held direction but does NOT bring the next action earlier.
+    // mirrors the server's gate EXACTLY (Mmo.Server.Runtime.WorldEntity.TryStep): the next step is due at the
+    // integer _nextEligibleTick (stepCooldownTicks after the last accepted step), and a direction change updates
+    // the held direction but does NOT bring the next step earlier (S98: it just steps in the new direction).
     // So:
     //   * A fresh start from idle is quantised to the NEXT tick boundary (S81): the server received the intent
     //     at the press and can only act at the smallest tick >= press, so we arm the first action at
@@ -303,9 +288,9 @@ public sealed class LocalPlayerPredictor
 
             _moving = true;
             _direction = direction;
-            // S59 turn-then-move: do NOT set _facing here. The server changes Facing only inside TryStep at a
-            // step boundary (a turn), never at intent-receive; Tick mirrors that. Setting facing here would
-            // make Tick see _direction == _facing and skip the turn, desyncing from the server.
+            // Do NOT set _facing here. The server changes Facing only inside TryStep at a step boundary (S98: the
+            // step itself faces you), never at intent-receive; Tick mirrors that. _facing is updated when a step
+            // is resolved (AdvanceOneStep / the blocked-hold branch in Tick).
         }
         else
         {
@@ -333,17 +318,9 @@ public sealed class LocalPlayerPredictor
             {
                 var actionTick = _nextEligibleTick.Value;
 
-                // Turn-then-move (S59) + turn delay (S63): a step in a direction we don't already face just
-                // TURNS (no tile move). The next action is freed after turnDelayTicks (mirrors the server
-                // stamping _nextEligibleTick = turnTick + turnDelayTicks), so whipping the cursor rotates
-                // quickly while settling steps at the normal cadence.
-                if (_direction != _facing)
-                {
-                    _facing = _direction;
-                    _nextEligibleTick = actionTick + _turnDelayTicks;
-                    continue;
-                }
-
+                // S98: a direction change steps IMMEDIATELY in the new direction — there is no separate turn
+                // beat. The step itself faces you (AdvanceOneStep / the blocked-hold branch below set _facing =
+                // _direction), exactly mirroring the server's WorldEntity.TryStep after S98.
                 var delta = _direction.Delta();
                 var target = _predictedTile.Offset(delta.X, delta.Y);
                 if (!IsStepWalkable(delta, target))
@@ -541,15 +518,15 @@ public sealed class LocalPlayerPredictor
         // after that step), but the leftover client schedule may already be ELIGIBLE — when a snapshot lands after
         // our last armed step tick (frames run 60–145 Hz, snapshots 20 Hz), so the very next Tick would step
         // forward again and re-open the gap we just closed: a reconcile/predict oscillation at snapshot rate that
-        // amplifies the visible spam wobble. We push the gate out by ONE fresh action delay (turn-vs-step, the
-        // exact mirror of the server stamping _nextEligibleTick after its action) but ONLY when the schedule is
-        // already eligible — a still-future schedule is valid and is left untouched so the normal cadence (and the
-        // steady straight-line path, which returns Matched above and never reaches here) keeps its zero-lag timing.
+        // amplifies the visible spam wobble. We push the gate out by ONE fresh step cooldown (S98: every action is
+        // a step now, so the delay is always _stepCooldownTicks — the exact mirror of the server stamping
+        // _nextEligibleTick after its accepted step) but ONLY when the schedule is already eligible — a
+        // still-future schedule is valid and is left untouched so the normal cadence (and the steady straight-line
+        // path, which returns Matched above and never reaches here) keeps its zero-lag timing.
         var correctedNowTick = EstimateTick(now.TotalMilliseconds);
         if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value <= correctedNowTick)
         {
-            var actionDelay = _direction != _facing ? _turnDelayTicks : _stepCooldownTicks;
-            _nextEligibleTick = correctedNowTick + actionDelay;
+            _nextEligibleTick = correctedNowTick + _stepCooldownTicks;
         }
 
         // Small disagreement: blend the render from where we're showing NOW to the re-projected present tile over
@@ -594,13 +571,12 @@ public sealed class LocalPlayerPredictor
 
     // ---- Tick-grid helpers (S81) -----------------------------------------------------------------------
 
-    // Derives the integer step-cooldown / turn-delay tick counts from the ms cadence/turn-delay and tickMs.
-    // The ms values are already tick-quantised on the wire (MovementCadence), so a round recovers the exact
-    // server tick counts; clamped >= 1 (a step/turn always costs at least one tick).
+    // Derives the integer step-cooldown tick count from the ms cadence and tickMs. The ms value is already
+    // tick-quantised on the wire (MovementCadence), so a round recovers the exact server tick count; clamped
+    // >= 1 (a step always costs at least one tick).
     private void RecomputeTickCounts()
     {
         _stepCooldownTicks = (uint)Math.Max(1, (long)Math.Round(_cadenceMs / _tickMs, MidpointRounding.AwayFromZero));
-        _turnDelayTicks = (uint)Math.Max(1, (long)Math.Round(_turnDelayMs / _tickMs, MidpointRounding.AwayFromZero));
     }
 
     // The integer server tick for a wall-clock ms value, BEFORE monotonic smoothing.

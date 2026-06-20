@@ -30,14 +30,6 @@ public sealed record ServerOptions(
     // scatter entirely (no resource nodes placed).
     public int ResourceNodeDensityTilesPerNode { get; init; } = 28;
 
-    // S63 turn delay: the small cost (in ms) of a facing change (turn-then-move). A turn frees the next
-    // step/turn after this delay instead of paying a full StepCooldownMs, so whipping the cursor rotates in
-    // place quickly while settling on a direction steps at the normal cadence. Init-only (not a positional
-    // ctor arg) so existing ServerOptions constructions don't all have to thread it. Default 80 ms; advertised
-    // to clients in ServerHello (v18) so the predictor stays in lockstep, and live-tunable via
-    // ServerTuning/AdminSetTuning (move.turnDelayMs). Validated to [0, 1000] ms.
-    public int TurnDelayMs { get; init; } = 80;
-
     public bool DebugMovement { get; init; }
 
     public IReadOnlySet<string> DebugMovementWatchNames { get; init; } =
@@ -50,11 +42,6 @@ public sealed record ServerOptions(
     public TimeSpan StepCooldown => TimeSpan.FromMilliseconds(StepCooldownMs);
 
     public uint StepCooldownTicks => (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / TickRate)));
-
-    // Turn delay in TICKS, tick-quantised the SAME way (Ceiling) as the step cooldown so server and the
-    // client predictor round to an identical tick count (no parity drift). A turn always costs at least one
-    // tick (Max(1, …)) — a turn is never instant, preserving the rotate-in-place-on-whip beat.
-    public uint TurnDelayTicks => (uint)Math.Max(1, (int)Math.Ceiling(TurnDelayMs / (1000d / TickRate)));
 
     public TimeSpan PersistenceCheckpointInterval => TimeSpan.FromSeconds(PersistenceCheckpointSeconds);
 
@@ -79,7 +66,6 @@ public sealed record ServerOptions(
             ReadSet("MMO_ADMIN_NAMES", "Admin"))
         {
             MapSeed = ReadInt("MMO_MAP_SEED", 0),
-            TurnDelayMs = ReadInt("MMO_TURN_DELAY_MS", 80),
             ResourceNodeDensityTilesPerNode = ReadInt("MMO_RESOURCE_NODE_DENSITY_TILES", 28),
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
             DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
@@ -121,11 +107,6 @@ public sealed record ServerOptions(
         if (StepCooldownMs < 50 || StepCooldownMs > 5000)
         {
             throw new InvalidOperationException("MMO_STEP_COOLDOWN_MS must be between 50 and 5000.");
-        }
-
-        if (TurnDelayMs < 0 || TurnDelayMs > 1000)
-        {
-            throw new InvalidOperationException("MMO_TURN_DELAY_MS must be between 0 and 1000.");
         }
 
         if (PersistenceCheckpointSeconds < 1 || PersistenceCheckpointSeconds > 3600)

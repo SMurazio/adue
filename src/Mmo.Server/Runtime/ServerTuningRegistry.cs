@@ -14,16 +14,10 @@ namespace Mmo.Server.Runtime;
 public static class ServerTuningRegistry
 {
     public const string StepCooldownMsKey = "move.stepCooldownMs";
-    public const string TurnDelayMsKey = "move.turnDelayMs";
     public const string InterestRadiusKey = "aoi.interestRadius";
 
     private const int MinStepCooldownMs = 50;
     private const int MaxStepCooldownMs = 5000;
-
-    // Turn-delay live bounds mirror the startup ServerOptions.Validate() bound [0, 1000] ms. 0 is permitted at
-    // the registry level, but the tick quantisation (Max(1, …)) still costs a turn at least one tick.
-    private const int MinTurnDelayMs = 0;
-    private const int MaxTurnDelayMs = 1000;
 
     // Sane upper bound for a live AOI radius. The startup options only require > 0; here a live max guards
     // against an admin typo turning every AOI query into a near-world scan and stalling the tick loop.
@@ -49,13 +43,6 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
-            case TurnDelayMsKey:
-            {
-                var clamped = Math.Clamp((int)Math.Round(value, MidpointRounding.AwayFromZero), MinTurnDelayMs, MaxTurnDelayMs);
-                tuning.TurnDelayMs = clamped;
-                applied = clamped;
-                return true;
-            }
             case InterestRadiusKey:
             {
                 var clamped = Math.Clamp((float)value, MinInterestRadius, MaxInterestRadius);
@@ -68,7 +55,7 @@ public static class ServerTuningRegistry
         }
     }
 
-    public static bool IsKnownKey(string key) => key is StepCooldownMsKey or TurnDelayMsKey or InterestRadiusKey;
+    public static bool IsKnownKey(string key) => key is StepCooldownMsKey or InterestRadiusKey;
 
     public static string Format(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 }

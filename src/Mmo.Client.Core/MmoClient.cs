@@ -276,7 +276,7 @@ public sealed class MmoClient : IDisposable
         _renderMode = mode;
         if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
         {
-            local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
+            local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
         }
     }
 
@@ -373,28 +373,23 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
-        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTurnDelay(), ResolveTickMs());
+        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTickMs());
         // S89/S92: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
         // DRIVES the render whenever RenderMode != Predicted (CosmeticLead, the default, or AcceptDeny); only in
         // the explicit Predicted mode is it dormant and the predictor owns the render.
         local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
         // S94: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current lead-distance
-        // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence/turn-delay
-        // are threaded). Default 1.0 keeps model B byte-for-byte.
+        // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence is
+        // threaded). Default 1.0 keeps model B byte-for-byte.
         local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
         // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
         // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
         // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
         if (_renderMode != MovementRenderMode.Predicted)
         {
-            local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTurnDelay(), ResolveTickMs());
+            local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
         }
     }
-
-    // Resolves the predictor's turn delay (ms): the ServerHello-advertised, tick-quantised value so the
-    // predicted turn cost matches the server's TurnDelayTicks exactly. Falls back to the 80 ms default until
-    // ServerHello lands (same default ServerOptions/the predictor ctor use).
-    private double ResolveTurnDelay() => Server?.EffectiveTurnDelayMs ?? 80d;
 
     // S81: resolves the server tick interval in ms (1000 / TickRate) — the unit of the predictor's tick-grid
     // gate. Falls back to 50 ms (20 Hz, the ServerOptions default) until ServerHello lands. The predictor maps
@@ -445,22 +440,6 @@ public sealed class MmoClient : IDisposable
     public void SendAdminSetTuning(string key, double value)
     {
         Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
-    }
-
-    // S63: live-applies a turn delay (ms) to the LOCAL predictor so the F4 panel can retune the turn feel in
-    // lockstep with the server. The value is tick-quantised the same way the server quantises TurnDelayTicks
-    // (via MovementCadence.EffectiveTurnDelayMs) so client and server agree to the tick. The F4 handler also
-    // sends move.turnDelayMs to the server via AdminSetTuning; this keeps the predictor matched. Clamped to
-    // the same [0, 1000] ms registry bound before quantisation.
-    public void SetLocalTurnDelayMs(double turnDelayMs)
-    {
-        var clamped = Math.Clamp(turnDelayMs, 0d, 1000d);
-        var tickRate = Server?.TickRate ?? 20;
-        var quantised = MovementCadence.EffectiveTurnDelayMs((int)Math.Round(clamped, MidpointRounding.AwayFromZero), tickRate);
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.SetPredictorTurnDelay(quantised);
-        }
     }
 
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
@@ -620,13 +599,11 @@ public sealed class MmoClient : IDisposable
 
     private void HandleServerHello(ServerHelloMessage hello)
     {
-        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.TurnDelayMs, hello.InterestRadiusTiles);
+        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles);
         RefreshInterpolatorCadence();
-        // S63/S81: adopt the advertised turn delay AND tick interval if the predictor is already attached
-        // (ServerHello can arrive after the local entity spawned in a re-hello). New predictors seed both via
-        // EnsurePredictor.
+        // S81: adopt the advertised tick interval if the predictor is already attached (ServerHello can arrive
+        // after the local entity spawned in a re-hello). New predictors seed it via EnsurePredictor.
         _entities.TryGetValue(LocalNetworkId ?? 0, out var local);
-        local?.SetPredictorTurnDelay(ResolveTurnDelay());
         local?.SetPredictorTickMs(ResolveTickMs());
     }
 
@@ -1085,9 +1062,9 @@ public sealed class MmoClient : IDisposable
         // step-tween (the buffered interpolator is bypassed for the local player). Anchored to the current
         // confirmed tile + facing. Returns the predictor so the client can feed it held intent and tick it.
         // Idempotent: returns the existing one if already set.
-        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double turnDelayMs, double tickMs)
+        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double tickMs)
         {
-            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, turnDelayMs, tickMs);
+            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, tickMs);
             return _predictor;
         }
 
@@ -1127,7 +1104,7 @@ public sealed class MmoClient : IDisposable
         // CURRENT render position so the avatar doesn't pop. A->B seeds the cosmetic driver where the predictor
         // is showing; B->A re-seeds the predictor (its PredictedTile onto the confirmed tile, its render tween
         // onto the current render position). The freshly-attached drivers are created if missing.
-        public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double turnDelayMs, double tickMs)
+        public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double tickMs)
         {
             if (mode != MovementRenderMode.Predicted)
             {
@@ -1155,13 +1132,6 @@ public sealed class MmoClient : IDisposable
                     _ = currentRender;
                 }
             }
-        }
-
-        // S63: live-retunes the predictor's turn delay (F4 move.turnDelayMs). No-op if no predictor (the local
-        // entity isn't predicting yet); EnsurePredictor seeds the current value when it attaches.
-        public void SetPredictorTurnDelay(double turnDelayMs)
-        {
-            _predictor?.SetTurnDelay(turnDelayMs);
         }
 
         // S81: live-sets the predictor's server tick interval (ServerHello TickRate). No-op if no predictor.

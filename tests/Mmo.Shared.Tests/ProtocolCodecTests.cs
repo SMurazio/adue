@@ -198,7 +198,8 @@ public sealed class ProtocolCodecTests
     [Fact]
     public void ServerHelloRoundTripsStepCooldownAndInterestRadius()
     {
-        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 80, 40.5f);
+        // S98: ServerHello no longer carries turnDelayMs (turn-then-move removed); protocol bumped to v20.
+        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 40.5f);
 
         var decoded = Assert.IsType<ServerHelloMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -206,8 +207,15 @@ public sealed class ProtocolCodecTests
         Assert.Equal(ProtocolCodec.Version, decoded.ProtocolVersion);
         Assert.Equal(20, decoded.TickRate);
         Assert.Equal(140, decoded.StepCooldownMs);
-        Assert.Equal(80, decoded.TurnDelayMs);
         Assert.Equal(40.5f, decoded.InterestRadiusTiles);
+    }
+
+    [Fact]
+    public void ProtocolVersionIsTwenty()
+    {
+        // S98 protocol bump: removing ServerHello.turnDelayMs is a breaking wire change (server + client ship
+        // together). Pin the version so an accidental change is caught.
+        Assert.Equal(20, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -243,12 +251,6 @@ public sealed class ProtocolCodecTests
 
         Assert.Equal(99u, decoded.NetworkId);
         Assert.Equal((ushort)70, decoded.StepCooldownMs);
-    }
-
-    [Fact]
-    public void ProtocolVersionIsNineteen()
-    {
-        Assert.Equal(19, ProtocolCodec.Version);
     }
 
     [Fact]

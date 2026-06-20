@@ -128,10 +128,6 @@ public sealed class LocalPlayerCosmetic
     {
     }
 
-    public void SetTurnDelay(double turnDelayMs)
-    {
-    }
-
     public void SetTickMs(double tickMs)
     {
     }

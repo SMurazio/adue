@@ -128,7 +128,7 @@ public sealed class MmoClientDeltadOutReconcileTests
         // attaches; ZoneInfo establishes the blocked map (EnsurePredictor needs a Zone); Login + EntitySpawn
         // establish the local entity (LocalNetworkId). All three prerequisites must be present before the first
         // SendMoveIntent for EnsurePredictor to attach the predictor.
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, TickRate, StepCooldownMs, 80, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, TickRate, StepCooldownMs, 30));
         var zone = new ZoneModel("zone", 64, 64, 0, 1);
         client.HandleMessageForTests(new ZoneInfoMessage("zone", 64, 64, 0, 1, zone.ContentHash));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, spawn, ""));

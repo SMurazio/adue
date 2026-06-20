@@ -12,27 +12,23 @@ and our model and borrow the good solutions. Each note that becomes a code chang
 ### Target feel (what long-lived tile MMOs converge on)
 - **Two step cadences**: a deliberate **walk (~400 ms/tile)** and a snappy **run (~200 ms/tile)** (mounted
   faster). Player-chosen — that range is what makes movement feel both grounded and responsive.
-- **Turns are cheap.** Changing facing costs only a small **turn delay** (S63: `move.turnDelayMs`, default
-  80 ms), **not** a full step's cooldown. You pivot in place quickly; the *next tile move* fires at the normal
-  cadence. (We keep a one-tick floor rather than a literally-instant turn so rapid direction flips rotate
-  without moving the entity.)
+- **A direction change steps immediately** (S98). There is no turn beat: pressing a new direction steps in
+  that direction on the next eligible tick with facing set on the step. (Earlier S59/S63 turn-then-move +
+  `move.turnDelayMs` were removed in S98 — they added a turn-beat of latency to every direction change and were
+  the root of the spam-direction-change skew.)
 - **Run vs walk by cursor distance** (mouse): hold-to-move toward the cursor, **run when the cursor is far**
   (~190 px from the player), walk when near. No dead-zone — movement starts immediately on hold.
 - The client **predicts its own steps immediately**; the server is authoritative; on disagreement the client
   snaps to the server. A small bound on unconfirmed steps (~5) is plenty.
 
 ### Our takeaways (prioritized)
-1. **[DONE — S63] Make turns cheap, not a full-cooldown step.** Our S59 turn-then-move charged a **full
-   ~150 ms step cooldown** for a turn. S63 changed a turn to cost only a small, tunable **turn delay**
-   (`move.turnDelayMs`, default **80 ms**, clamped `[0, 1000]`), tick-quantised, so the next step/turn is
-   eligible after that delay instead of the full step cooldown. Whipping the cursor rotates in place quickly;
-   settling on a direction steps at the normal cadence. Note: a turn is **not literally instant/zero** — a
-   turn still costs at least one tick (the quantisation floor), which deliberately preserves
-   rotate-in-place-on-whip without letting rapid direction changes *move* the entity (instant turns would let
-   a flurry of direction flips step every tick). The turn delay is advertised in `ServerHello` (v18) and
-   mirrored EXACTLY in `WorldEntity.TryStep` (server `_nextEligibleTick`) and `LocalPlayerPredictor`
-   (client `_nextEligibleAt`) so prediction stays in lockstep (no S56 rapid-direction-change snap). It is
-   live-tunable via the F4 panel (`move.turnDelayMs`, which updates both the server and the local predictor).
+1. **[SUPERSEDED — S98 removed turn-then-move] Direction changes step immediately.** S59 turn-then-move
+   charged a full step cooldown for a turn; S63 reduced that to a small tunable `move.turnDelayMs` (default
+   80 ms). S98 removed the mechanic entirely: a direction change now steps immediately in the new direction
+   with facing set on the step (no separate turn action, no `turnDelayMs` in server config / `ServerHello` /
+   the predictor / the F4 panel). `WorldEntity.TryStep` and `LocalPlayerPredictor.Tick` set facing on the step
+   and resolve move/blocked as before; a facing-only change (e.g. pressing into a wall) still bumps
+   `StateRevision` so the new facing replicates. Protocol v20 dropped `ServerHello.turnDelayMs`.
 2. **[HIGH — feel] Walk vs Run (two cadences), run-by-cursor-distance.** Our single ~150 ms speed lacks the
    walk/run range. Add a run cadence + the cursor-distance trigger (and/or a run key). → own todo.
 3. **[VALIDATION — we're already ahead here] Our held-intent + server-paced model is anti-speedhack by

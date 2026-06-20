@@ -222,7 +222,7 @@ public sealed class GameServer
     {
         _sessions[peer] = new ClientSession(peer);
         _metrics.RecordPeerConnected();
-        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate, _options.StepCooldownMs, _options.TurnDelayMs, _options.InterestRadius), DeliveryMethod.ReliableOrdered);
+        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate, _options.StepCooldownMs, _options.InterestRadius), DeliveryMethod.ReliableOrdered);
         Log.Info($"Peer connected: {FormatPeer(peer)}.");
     }
 
@@ -1563,7 +1563,7 @@ public sealed class GameServer
             }
 
             var direction = session.MoveIntentDirection;
-            if (_zone.TryStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), _tuning.TurnDelayTicks, out var result))
+            if (_zone.TryStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), out var result))
             {
                 MarkDirtyDurableTile(entity);
             }

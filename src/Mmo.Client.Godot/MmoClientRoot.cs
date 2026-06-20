@@ -77,7 +77,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _toastLabel;
 
 	// ---- S60 / S65 admin live-tuning panels --------------------------------------------------------
-	// F4 toggles the SERVER tuning panel (move.stepCooldownMs, move.turnDelayMs, aoi.interestRadius — ride
+	// F4 toggles the SERVER tuning panel (move.stepCooldownMs, aoi.interestRadius — ride
 	// AdminSetTuning to the server, which admin-gates + clamps). F5 (S65) toggles the CLIENT-LOCAL VISUAL panel
 	// (camera zoom range, rock/tree/plant model scale, label pixel-size/height — applied instantly to local
 	// state/nodes, no server round-trip). Both are admin-only dev tools, not shipped UI — built once, shown only
@@ -86,7 +86,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _tuningPanelVisible;
 	private bool _tuningFieldsSeeded;
 	private LineEdit? _tuneStepCooldownMs;
-	private LineEdit? _tuneTurnDelayMs;
 	private LineEdit? _tuneInterestRadius;
 
 	// F5 visual panel (S65).
@@ -710,7 +709,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		serverHeader.Text = "— server (sent on Apply) —";
 		rows.AddChild(serverHeader);
 		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs", OnTuningApplyPressed);
-		_tuneTurnDelayMs = AddTuningField(rows, "move.turnDelayMs", OnTuningApplyPressed);
 		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius", OnTuningApplyPressed);
 
 		var apply = new Button { Name = "TuningApply", Text = "Apply" };
@@ -1353,10 +1351,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void SeedTuningFields()
 	{
 		var serverStep = _client?.Server?.StepCooldownMs ?? 140;
-		var serverTurnDelay = _client?.Server?.TurnDelayMs ?? 80;
 		var serverRadius = _client?.Server?.InterestRadiusTiles ?? 35f;
 		SetField(_tuneStepCooldownMs, serverStep);
-		SetField(_tuneTurnDelayMs, serverTurnDelay);
 		SetField(_tuneInterestRadius, serverRadius);
 	}
 
@@ -1400,15 +1396,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_tuneStepCooldownMs, out var stepMs))
 		{
 			_client.SendAdminSetTuning("move.stepCooldownMs", stepMs);
-		}
-
-		// S63 turn delay — send to the server (move.turnDelayMs) AND apply the same value to the LOCAL
-		// predictor so server and prediction stay in lockstep (a mismatch reintroduces the S56 snap). The
-		// client tick-quantises it the same way the server does.
-		if (TryReadField(_tuneTurnDelayMs, out var turnDelayMs))
-		{
-			_client.SendAdminSetTuning("move.turnDelayMs", turnDelayMs);
-			_client.SetLocalTurnDelayMs(turnDelayMs);
 		}
 
 		if (TryReadField(_tuneInterestRadius, out var radius))

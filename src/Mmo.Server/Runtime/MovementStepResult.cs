@@ -10,5 +10,4 @@ public readonly record struct MovementStepResult(
     bool TargetWalkable,
     bool Accepted,
     string Reason,
-    TileCoord Result,
-    bool Turned = false);
+    TileCoord Result);

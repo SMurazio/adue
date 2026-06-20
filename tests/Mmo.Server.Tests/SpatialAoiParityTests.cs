@@ -105,7 +105,6 @@ public sealed class SpatialAoiParityTests
         var state = new WorldState(gridCellSize: 8);
         var session = new ClientSession(null!);
 
-        // Spawn facing W so each westward step is a move (turn-then-move: a step in a new direction turns).
         var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(120, 100), Direction8.W);
         var grid = new TileGrid(256, 256, blockedTiles: []);
 
@@ -118,7 +117,7 @@ public sealed class SpatialAoiParityTests
         for (var tick = 1u; mover.Tile.X > 100; tick++)
         {
             var previous = mover.Tile;
-            Assert.True(mover.TryStep(Direction8.W, tick, stepCooldownTicks: 1, turnDelayTicks: 1, grid));
+            Assert.True(mover.TryStep(Direction8.W, tick, stepCooldownTicks: 1, grid));
             state.OnEntityMoved(mover, previous);
 
             var naive = NaiveInInterest(viewer, [mover], session, interestRadius: 5f);
@@ -137,12 +136,11 @@ public sealed class SpatialAoiParityTests
         var session = new ClientSession(null!);
         var grid = new TileGrid(256, 256, blockedTiles: []);
 
-        // Spawn facing E so the eastward step is a move (turn-then-move: a new direction turns first).
         var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(100, 100), Direction8.E);
         var viewer = MakeViewer(new TileCoord(105, 100));
 
         var previous = mover.Tile;
-        Assert.True(mover.TryStep(Direction8.E, serverTick: 1, stepCooldownTicks: 1, turnDelayTicks: 1, grid)); // -> (101,100), same cell
+        Assert.True(mover.TryStep(Direction8.E, serverTick: 1, stepCooldownTicks: 1, grid)); // -> (101,100), same cell
         state.OnEntityMoved(mover, previous);
 
         Assert.Contains(1u, GridInInterest(state, viewer, session, interestRadius: 10f));
