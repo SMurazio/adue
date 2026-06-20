@@ -561,6 +561,30 @@ public sealed class MmoClient : IDisposable
             }
         }
 
+        // S84: the local player must reconcile on EVERY snapshot, even when it is delta'd out of the entity
+        // list. The server delta-compresses (re-sends an entity only while its StateRevision changes), so an
+        // IDLE local player is absent from the payload — but the header still rides RecipientStepSeq + ServerTick
+        // (S76) for exactly this. Without re-running calibrate+reconcile here, any over-prediction left by a turn
+        // spam latches at rest and never closes (the "static, gap won't close" symptom). We re-apply the entity's
+        // CURRENT (last-known, unchanged) Tile/Facing — NOT a fabricated move; the confirmed position is genuinely
+        // unchanged (that's why it was delta'd out) — so CalibrateToServerTick keeps tracking the server clock and
+        // Reconcile re-anchors the prediction to truth while idle (converging down to the confirmed tile at rest).
+        // Only the delta'd-out case is affected; while moving the local player is in every snapshot and takes the
+        // in-snapshot path above unchanged.
+        if (LocalNetworkId is { } localId
+            && !_snapshotVisibleScratch.Contains(localId)
+            && _entities.TryGetValue(localId, out var localEntity))
+        {
+            localEntity.ApplySnapshot(
+                localEntity.Tile,
+                localEntity.Facing,
+                _currentTime,
+                sequence,
+                _lastRecipientStepSeq,
+                serverTick,
+                localEntity.Depleted);
+        }
+
         if (isComplete)
         {
             _staleEntityScratch.Clear();
