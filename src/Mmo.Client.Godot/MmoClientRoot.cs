@@ -116,11 +116,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// Debug control channel (T2). Null unless MMO_DEBUG_CONTROL_PORT is set; absent => zero behavior change.
 	private DebugControlChannel? _controlChannel;
 
-	// Injected movement: a direction held for a fixed duration, sent on the same cadence as real input.
-	// _injectedSingleStep latches a one-shot step (move with durationMs<=0) that clears once it fires.
+	// Injected movement: a direction held until _injectedUntilSeconds, sent on the same cadence as real input.
+	// A debug-channel move with durationMs<=0 holds indefinitely (_injectedUntilSeconds = double.MaxValue)
+	// until StopMovement; durationMs>0 holds for that window.
 	private Direction8? _injectedDirection;
 	private double _injectedUntilSeconds;
-	private bool _injectedSingleStep;
 
 	// Held-direction movement intent (protocol v15). We send a MoveIntent only when the intent changes
 	// (keydown / keyup / direction change) plus a low-rate keepalive resend, instead of streaming a step
@@ -398,7 +398,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_injectedDirection.HasValue || _autopilotPattern is not null)
 		{
 			_injectedDirection = null;
-			_injectedSingleStep = false;
 			StopAutopilot();
 		}
 
@@ -1291,14 +1290,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_lastSentDirection = resolvedDirection;
 			_nextMoveIntentKeepaliveAt = now.TotalSeconds + MoveIntentKeepaliveSeconds;
 		}
-
-		// A one-shot injected step: with held intent the "single step" is a brief moving intent that we
-		// clear right after it goes out, so the server takes exactly one cooldown step before stopping.
-		if (moving && injected.HasValue && _injectedSingleStep)
-		{
-			_injectedDirection = null;
-			_injectedSingleStep = false;
-		}
 	}
 
 	private void RequestMetrics(TimeSpan now)
@@ -1358,18 +1349,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	void IControlHost.BeginManualMove(Direction8 direction, double durationMs)
 	{
-		// durationMs <= 0 => a single step (a brief moving intent cleared after it fires); otherwise hold
-		// the intent for the window.
+		// durationMs <= 0 => hold the intent indefinitely (until StopMovement), matching the MCP client_move
+		// contract; durationMs > 0 => hold for that window. double.MaxValue is the "indefinite" sentinel so the
+		// expiry check in CurrentInjectedDirection never fires for a held move.
 		StopAutopilot();
 		_injectedDirection = direction;
-		_injectedSingleStep = durationMs <= 0;
-		_injectedUntilSeconds = durationMs > 0 ? _elapsedSeconds + (durationMs / 1000d) : 0;
+		_injectedUntilSeconds = durationMs > 0 ? _elapsedSeconds + (durationMs / 1000d) : double.MaxValue;
 	}
 
 	void IControlHost.StopMovement()
 	{
 		_injectedDirection = null;
-		_injectedSingleStep = false;
 		_injectedUntilSeconds = 0;
 		StopAutopilot();
 	}
@@ -1410,7 +1400,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var duration = durationMs > 0 ? durationMs : 30000d;
 		_autopilotPattern = legs;
 		_autopilotLegIndex = 0;
-		_injectedSingleStep = false;
 		_autopilotEndsAtSeconds = _elapsedSeconds + (duration / 1000d);
 		// Each leg lasts long enough to walk a few tiles before turning; scales with the step cadence.
 		var cadenceSeconds = (_client?.Server?.EffectiveStepCadenceMs ?? 150d) / 1000d;
@@ -1475,8 +1464,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// A held injected move expires at its window end (autopilot keeps refreshing _injectedUntilSeconds).
-		// A single-step move has no window and is cleared by SendHeldMovement once it fires.
-		if (!_injectedSingleStep && _elapsedSeconds > _injectedUntilSeconds)
+		// An indefinite hold uses the double.MaxValue sentinel, so this expiry never fires until StopMovement.
+		if (_elapsedSeconds > _injectedUntilSeconds)
 		{
 			_injectedDirection = null;
 			return null;
