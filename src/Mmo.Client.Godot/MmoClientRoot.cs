@@ -155,10 +155,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private int _frameCsvGc0;
 	private int _frameCsvGc1;
 	private int _frameCsvGc2;
+	// S69: rows written since the last flush. The writer is AutoFlush=false (one flush/row would syscall every
+	// frame); instead we flush every ~FrameCsvFlushEvery rows (≈0.25 s @60fps) so a live read of the CSV while
+	// logging stays current to within a fraction of a second instead of freezing until CloseFrameCsv.
+	private int _frameCsvRowsSinceFlush;
+	private const int FrameCsvFlushEvery = 15;
 
 	// S67 motion-quality instrumentation (diagnostics only; computed in SampleMotionMetrics each frame).
-	// Snap = divergence jumping more than this between consecutive frames (a reconcile teleport, not a glide).
-	private const double MotionSnapThresholdTiles = 0.75;
+	// S69: a "snap" is now a RENDER teleport — the continuous render position jumping in ONE frame by far
+	// more than the normal per-frame glide (a visible position jump), NOT a divergence sawtooth or
+	// prediction-lead change. Max normal glide is run-diagonal ≈ 0.16 tile/frame at 60 fps; this absolute
+	// single-frame-jump threshold sits well above it so smooth glide (incl. diagonals + direction changes)
+	// reads snapCount ≈ 0 and only genuine teleports trip it. It is also frame-time-aware: a legitimately
+	// long frame can glide further, so we also require the jump to exceed what the current speed could have
+	// covered in that frame by a multiple (the "catch-up" factor) before counting it.
+	private const double MotionSnapJumpTiles = 0.5;
+	private const double MotionSnapCatchUpFactor = 4.0;
 	private bool _hasLocalRender;
 	private float _localRenderX;
 	private float _localRenderY;
@@ -169,12 +181,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private double _maxRenderDivergence;
 	private int _renderSnapCount;
 	private double _renderFrameDelta;
+	private double _prevRenderFrameDelta;
 	private double _currentSpeedTilesPerSec;
 	private bool _hasPrevRenderPos;
 	private float _prevRenderX;
 	private float _prevRenderY;
-	private bool _hasPrevDivergence;
-	private double _prevDivergence;
 
 	// Per-_Process-section timing (ms), surfaced in the F3 HUD and read by the telemetry channel (T2).
 	internal double LastPollMs => _lastPollMs;
@@ -869,20 +880,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			var ddy = _localRenderY - _confirmedY;
 			_renderDivergence = Math.Sqrt((ddx * ddx) + (ddy * ddy));
 			_maxRenderDivergence = Math.Max(_maxRenderDivergence, _renderDivergence);
-
-			// A reconcile snap: divergence jumping more than the threshold between consecutive frames.
-			if (_hasPrevDivergence && Math.Abs(_renderDivergence - _prevDivergence) > MotionSnapThresholdTiles)
-			{
-				_renderSnapCount++;
-			}
-
-			_prevDivergence = _renderDivergence;
-			_hasPrevDivergence = true;
 		}
 		else
 		{
 			_renderDivergence = 0d;
-			_hasPrevDivergence = false;
 		}
 
 		// Per-frame motion delta: how far the continuous render position moved since last frame (~speed).
@@ -900,6 +901,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Instantaneous speed (tiles/s) from the per-frame delta and the frame duration.
 		_currentSpeedTilesPerSec = _lastFrameMs > 0d ? _renderFrameDelta / (_lastFrameMs / 1000d) : 0d;
 
+		// S69 render snap = a visible teleport: the render position jumped THIS frame by far more than a
+		// normal glide. Frame-time-aware so a legitimately long frame isn't miscounted: the jump must clear
+		// both the absolute floor (well above run-diagonal ≈ 0.16 tile/frame @60fps) AND a multiple of the
+		// previous frame's glide (a sudden catch-up vs. the prior steady-state step). Comparing against the
+		// PREVIOUS frame's delta — not this frame's own (which would be self-referential) — is what makes a
+		// reconcile teleport stand out against an otherwise smooth glide. Needs a real previous render
+		// position so the very first sample after (re)spawn can't register a false jump.
+		if (_hasLocalRender && _hasPrevRenderPos && _renderFrameDelta > MotionSnapJumpTiles
+			&& _renderFrameDelta > _prevRenderFrameDelta * MotionSnapCatchUpFactor)
+		{
+			_renderSnapCount++;
+		}
+
+		_prevRenderFrameDelta = _renderFrameDelta;
 		_prevRenderX = _localRenderX;
 		_prevRenderY = _localRenderY;
 		_hasPrevRenderPos = _hasLocalRender;
@@ -1663,9 +1678,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 	}
 
+	// S69: clear the session-cumulative motion counters so each fresh capture's max-divergence + snap-count
+	// reflect THAT capture, not the whole session. Called from OpenFrameCsv (i.e. on each frame-log toggle-on).
+	private void ResetMotionMetrics()
+	{
+		_maxRenderDivergence = 0d;
+		_renderSnapCount = 0;
+		_renderDivergence = 0d;
+		_renderFrameDelta = 0d;
+		_prevRenderFrameDelta = 0d;
+		_hasPrevRenderPos = false;
+	}
+
 	private void OpenFrameCsv()
 	{
 		CloseFrameCsv();
+		ResetMotionMetrics();
 		try
 		{
 			// res:// is src/Mmo.Client.Godot; the gitignored .run/ lives at the repo root (two levels up).
@@ -1679,6 +1707,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				AutoFlush = false
 			};
 			_frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2,localRenderX,localRenderY,confirmedX,confirmedY,divergence,frameDelta");
+			_frameCsv.Flush();
+			_frameCsvRowsSinceFlush = 0;
 			_frameCsvGc0 = GC.CollectionCount(0);
 			_frameCsvGc1 = GC.CollectionCount(1);
 			_frameCsvGc2 = GC.CollectionCount(2);
@@ -1721,6 +1751,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		try
 		{
 			_frameCsv.WriteLine(row);
+			// Live flush a few times/sec so reads while logging stay current (writer is AutoFlush=false).
+			if (++_frameCsvRowsSinceFlush >= FrameCsvFlushEvery)
+			{
+				_frameCsv.Flush();
+				_frameCsvRowsSinceFlush = 0;
+			}
 		}
 		catch (IOException)
 		{
