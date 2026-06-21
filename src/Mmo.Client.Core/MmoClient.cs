@@ -4,35 +4,35 @@ using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
 
-// S89/S92: which local-player render model drives the avatar (live F5). Predicted is model A
-// (LocalPlayerPredictor); CosmeticLead is model B (LocalPlayerCosmetic with the forward lead ON) and is now the
-// DEFAULT (S92); AcceptDeny is the same cosmetic driver with the forward lead OFF — the avatar moves ONLY on a
-// confirmed step (no early glide, no release snap). Both CosmeticLead and AcceptDeny are driven by the cosmetic
-// driver (LeadEnabled distinguishes them); only Predicted uses the predictor. See MmoClient.RenderMode and
-// docs/movement-input-model.md.
+// RENDER1: which local-player render model drives the avatar (live F6). Trimmed to the two keepers:
+// UoClientDriven is model A (LocalPlayerPredictor) declared client-driven — instant prediction with the server
+// FOLLOWING the client's per-step commits — and is the DEFAULT. CosmeticLead is model B (LocalPlayerCosmetic with
+// the forward lead ON): a smooth glide with no banked tile, best at low latency. The earlier standalone Predicted
+// (predictor, server-paced) and AcceptDeny (cosmetic driver, lead off) modes were dropped — Predicted was a worse
+// UO (snaps at latency) and AcceptDeny was the rejected no-prediction mode. The predictor + cosmetic drivers are
+// kept; only those two modes + their UI/routing went away. See MmoClient.RenderMode and docs/movement-input-model.md.
 public enum MovementRenderMode
 {
-    Predicted = 0,
-    CosmeticLead = 1,
-    AcceptDeny = 2,
-    // UO1: client-driven (Ultima-Online-style). Routes the local player through the SAME LocalPlayerPredictor as
-    // Predicted (instant prediction + tick-grid stepping + step-seq reconcile), but ALSO declares the session
+    // CosmeticLead is model B (LocalPlayerCosmetic, forward lead ON): smooth glide, no banked tile.
+    CosmeticLead = 0,
+    // UoClientDriven (DEFAULT): client-driven (Ultima-Online-style). Routes the local player through the
+    // LocalPlayerPredictor (instant prediction + tick-grid stepping + step-seq reconcile), AND declares the session
     // client-driven to the server (MovementModeMessage) so the server stops auto-pacing, and emits one
     // StepCommitRequest per predicted accepted step so the server FOLLOWS the client's per-step requests
     // (accept/reject). The reject path is the predictor's existing RecipientStepSeq reconcile (snap on divergence).
-    UoClientDriven = 3,
+    UoClientDriven = 1,
 }
 
 public sealed class MmoClient : IDisposable
 {
-    // UO1: which render modes drive the local player through the LocalPlayerPredictor (model A). Predicted and
-    // UoClientDriven both do; CosmeticLead (model B) and AcceptDeny ride the cosmetic driver. The four predictor
-    // routing sites (Poll Tick, SendMoveIntent SetIntent, EnsurePredictor/ReanchorLocalDriver, and the
-    // ApplySnapshot/ToRenderState render-source selection) all gate on this so adding UoClientDriven needed no new
-    // routing branch — only a wider predicate. UoClientDriven layers the per-step commit emission + the mode-signal
+    // RENDER1: which render modes drive the local player through the LocalPlayerPredictor (model A). Only
+    // UoClientDriven does now; CosmeticLead (model B) rides the cosmetic driver. The four predictor routing sites
+    // (Poll Tick, SendMoveIntent SetIntent, EnsurePredictor/ReanchorLocalDriver, and the ApplySnapshot/ToRenderState
+    // render-source selection) all gate on this predicate, so the trim to two modes needed no routing-branch
+    // rewiring — only narrowing the predicate. UoClientDriven layers the per-step commit emission + the mode-signal
     // on TOP of the predictor path.
     internal static bool UsesPredictor(MovementRenderMode mode)
-        => mode is MovementRenderMode.Predicted or MovementRenderMode.UoClientDriven;
+        => mode is MovementRenderMode.UoClientDriven;
 
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
 
@@ -119,10 +119,10 @@ public sealed class MmoClient : IDisposable
     // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
     private bool _predictionEnabled = true;
-    // S89/S92: the active local-player render model. CosmeticLead (model B) is now the DEFAULT (S92). Predicted
-    // (model A) stays reachable in code but is no longer the default / no longer on the F5 toggle; AcceptDeny is
-    // the F5 opt-in (cosmetic driver with the forward lead off). See RenderMode / SetMovementRenderMode.
-    private MovementRenderMode _renderMode = MovementRenderMode.CosmeticLead;
+    // RENDER1: the active local-player render model. UoClientDriven (model A, declared client-driven) is now the
+    // DEFAULT — the client boots into UO mode; CosmeticLead (model B) is the F6 alternative. See RenderMode /
+    // SetMovementRenderMode.
+    private MovementRenderMode _renderMode = MovementRenderMode.UoClientDriven;
 
     // S94: the live-tunable cosmetic lead distance (tiles) for model B, [0.0, 1.0], default 1.0 (= current model B
     // byte-for-byte). Held at the client level so a value set before the local entity attaches — or after a
@@ -301,19 +301,20 @@ public sealed class MmoClient : IDisposable
         // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
         if (!UsesPredictor(_renderMode))
         {
-            // S89/S92: tick the cosmetic driver. With LeadEnabled (model B) it glides the render early toward the
-            // held direction; in AcceptDeny it only samples the in-flight tween forward (no early lead).
+            // RENDER1: CosmeticLead (model B) — tick the cosmetic driver. With the forward lead it glides the render
+            // early toward the held direction.
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
                 local.TickCosmetic(now);
             }
         }
-        else if (_renderMode == MovementRenderMode.UoClientDriven)
+        else
         {
-            // UO1: tick the predictor AND emit the accepted steps this call (the multi-step catch-up loop can
-            // resolve up to MaxTicksPerCall=8 steps on a laggy frame). The server FOLLOWS these: it advances the
-            // entity only on accepted commits (the held-intent pacer is disabled for this session by the
-            // MovementModeMessage). NET2: each accepted step mints a FRESH ++_moveSequence on the SHARED move
+            // RENDER1: UoClientDriven is the only predictor mode now — tick the predictor AND emit the accepted
+            // steps this call (the multi-step catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy
+            // frame). The server FOLLOWS these: it advances the entity only on accepted commits (the held-intent
+            // pacer is disabled for this session by the MovementModeMessage). NET2: each accepted step mints a FRESH
+            // ++_moveSequence on the SHARED move
             // cursor (the same cursor MoveIntent/MoveInput use) and is recorded in the commit ring; then ONE
             // redundant-unreliable StepCommitBatch ships the newest step plus a window of prior committed steps,
             // so a dropped commit recovers from a later packet's window instead of a reliable retransmit batch.
@@ -333,10 +334,6 @@ public sealed class MmoClient : IDisposable
                 }
             }
         }
-        else
-        {
-            _predictor?.Tick(now);
-        }
     }
 
     // Whether local-player movement prediction is active (S53). Disabling it (e.g. for an A/B feel check)
@@ -347,10 +344,10 @@ public sealed class MmoClient : IDisposable
         set => _predictionEnabled = value;
     }
 
-    // S89: which local-player render model drives the avatar. Predicted (model A, the shipped default) =
-    // LocalPlayerPredictor (PredictedTile ahead + Reconcile). CosmeticLead (model B, F5 opt-in) =
-    // LocalPlayerCosmetic (no banked tile; the render glides early on input and cuts to the confirmed tile on a
-    // disagreeing ack). The mode routes the local-player driver at SendMoveIntent, the per-Poll Tick,
+    // RENDER1: which local-player render model drives the avatar. UoClientDriven (model A, the default) =
+    // LocalPlayerPredictor (PredictedTile ahead + Reconcile) declared client-driven. CosmeticLead (model B, F6
+    // alternative) = LocalPlayerCosmetic (no banked tile; the render glides early on input and cuts to the confirmed
+    // tile on a disagreeing ack). The mode routes the local-player driver at SendMoveIntent, the per-Poll Tick,
     // ApplySnapshot, and the ToRenderState render-source selection. See docs/movement-input-model.md.
     public MovementRenderMode RenderMode
     {
@@ -358,11 +355,11 @@ public sealed class MmoClient : IDisposable
         set => SetMovementRenderMode(value);
     }
 
-    // S89: flips the local-player render model LIVE (F5 — no restart). Re-anchors the newly-active driver from
+    // RENDER1: flips the local-player render model LIVE (F6 — no restart). Re-anchors the newly-active driver from
     // the local entity's current confirmed tile + current render position so the avatar does NOT pop on the
-    // switch, then routes all four touch points to the new mode. A->B seeds the cosmetic driver where the
-    // predictor was showing; B->A re-anchors the predictor (its PredictedTile re-seeds onto the confirmed tile,
-    // its render tween onto the current render position) so there is no jump either way.
+    // switch, then routes all four touch points to the new mode. UO->Cosmetic seeds the cosmetic driver where the
+    // predictor was showing; Cosmetic->UO re-anchors the predictor (its PredictedTile re-seeds onto the confirmed
+    // tile, its render tween onto the current render position) so there is no jump either way.
     public void SetMovementRenderMode(MovementRenderMode mode)
     {
         if (mode == _renderMode)
@@ -405,7 +402,7 @@ public sealed class MmoClient : IDisposable
 
     // S94: the live cosmetic lead distance (tiles) — how far model B glides ahead of the confirmed tile before
     // holding. [0.0, 1.0]; default 1.0 = current model B. Reflects the value last set (seeded into the F5 field
-    // on panel open). Only model B's render reads it; the value is inert in Predicted/AcceptDeny.
+    // on panel open). Only model B's render reads it; the value is inert in UoClientDriven.
     public double CosmeticLeadTiles => _cosmeticLeadTiles;
 
     // S94: live-tunes the cosmetic lead distance (F5 "Cosmetic lead (tiles)"). Clamped to [0.0, 1.0] (0 ≈ no
@@ -422,7 +419,7 @@ public sealed class MmoClient : IDisposable
     }
 
     // S102: whether model B snaps the render to the confirmed tile on release (S91). Reflects the value last set
-    // (seeded into the F6 toggle on panel open). Inert in Predicted/AcceptDeny.
+    // (seeded into the F6 toggle on panel open). Inert in UoClientDriven.
     public bool SnapOnRelease => _snapOnRelease;
 
     // S102: live-toggles model B's release snap (F6 "Snap on release"). Routed to the active cosmetic driver
@@ -438,7 +435,7 @@ public sealed class MmoClient : IDisposable
     }
 
     // S103: whether model B commits a near-done step on release (vs snapping back). Reflects the value last set
-    // (seeded into the F6 toggle on panel open). Inert in Predicted/AcceptDeny.
+    // (seeded into the F6 toggle on panel open). Inert in UoClientDriven.
     public bool CommitStepOnRelease => _commitStepOnRelease;
 
     // S103: live-toggles model B's commit-step-on-release (F6). Routed to the active cosmetic driver immediately
@@ -469,8 +466,8 @@ public sealed class MmoClient : IDisposable
     }
 
     // UO4: whether the predictor settles-then-goes on a ~180° reversal (F6 "Stop on reversal"). Reflects the value
-    // last set (seeded into the F6 toggle on panel open). Only the predictor modes (Predicted / UoClientDriven)
-    // read it; inert in the cosmetic modes.
+    // last set (seeded into the F6 toggle on panel open). Only the predictor mode (UoClientDriven) reads it; inert
+    // in the cosmetic mode.
     public bool StopOnReversal => _stopOnReversal;
 
     // UO4: live-toggles the predictor's stop-on-reversal (settle-then-go) behaviour. Routed to the active predictor
@@ -534,9 +531,8 @@ public sealed class MmoClient : IDisposable
         EnsurePredictor();
         if (!UsesPredictor(_renderMode))
         {
-            // S89/S92: feed the held intent to the cosmetic driver (no tile is banked; it only records the held
-            // direction). With LeadEnabled (model B) Tick glides the render early; in AcceptDeny the intent only
-            // sets the cosmetic facing and the release branch (no early lead).
+            // RENDER1: CosmeticLead (model B) — feed the held intent to the cosmetic driver (no tile is banked; it
+            // only records the held direction). Tick glides the render early toward the held direction.
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
                 // S103: a fresh keydown supersedes any in-flight commit reconciliation — the player resumed moving,
@@ -716,9 +712,8 @@ public sealed class MmoClient : IDisposable
         // UO4: re-seed the stop-on-reversal lever onto the freshly-attached (or respawn-recreated) predictor so a
         // value set before attach / after a respawn is honoured (mirrors the cosmetic-lever seeding above).
         _predictor.SetStopOnReversal(_stopOnReversal);
-        // S89/S92: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
-        // DRIVES the render whenever RenderMode != Predicted (CosmeticLead, the default, or AcceptDeny); only in
-        // the explicit Predicted mode is it dormant and the predictor owns the render.
+        // RENDER1: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
+        // DRIVES the render in CosmeticLead; in UoClientDriven it is dormant and the predictor owns the render.
         local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
         // S94: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current lead-distance
         // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence is
@@ -730,9 +725,9 @@ public sealed class MmoClient : IDisposable
         // S103: seed the commit-step-on-release enable + threshold the same way.
         local.SetCommitStepOnRelease(_commitStepOnRelease);
         local.SetCommitStepThreshold(_commitStepThreshold);
-        // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
-        // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
-        // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
+        // If the active mode uses the cosmetic driver (CosmeticLead) and the local entity only just attached (or
+        // respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is honoured without
+        // needing an F6 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
         if (!UsesPredictor(_renderMode))
         {
             local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
@@ -1559,8 +1554,8 @@ public sealed class MmoClient : IDisposable
         {
             if (!UsesPredictor(mode))
             {
-                // CosmeticLead (model B) and AcceptDeny both ride the cosmetic driver; LeadEnabled is the only
-                // difference (B leads + snaps on release, AcceptDeny does neither).
+                // RENDER1: CosmeticLead (model B) is the only cosmetic-driver mode now; LeadEnabled is always ON
+                // here (B leads + snaps on release).
                 var renderSource = _cosmetic is not null && _cosmeticActive
                     ? _cosmetic.RenderPosition
                     : _predictor is not null ? _predictor.RenderPosition : _interpolator.RenderPosition;

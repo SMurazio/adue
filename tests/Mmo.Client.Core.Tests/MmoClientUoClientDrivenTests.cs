@@ -125,20 +125,22 @@ public sealed class MmoClientUoClientDrivenTests
     }
 
     [Fact]
-    public void NonUoModes_EmitNoCommitsFromPolling_AndNoModeMessage()
+    public void NonUoMode_EmitsNoCommitsFromPolling_AndNoModeMessage()
     {
         var spawn = new TileCoord(20, 20);
         var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
-        // Default is CosmeticLead; Predicted also must not stream commits from Poll, nor send a mode message.
-        client.SetMovementRenderMode(MovementRenderMode.Predicted);
-
-        Assert.Empty(outbound.OfType<MovementModeMessage>());
+        // RENDER1: CosmeticLead is the only non-UO mode now (Predicted was dropped). It must not stream commits
+        // from Poll, nor send a movement-mode message. (Default boot is UoClientDriven, so pin CosmeticLead first.)
+        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
+        outbound.Clear(); // drop the UO->Cosmetic transition's MovementModeMessage(clientDriven:false).
 
         client.SendMoveIntent(true, Direction8.E);
         client.Poll(TimeSpan.FromMilliseconds(0));
         client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));
 
+        Assert.Empty(outbound.OfType<MovementModeMessage>());
         Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
+        Assert.Empty(outbound.OfType<StepCommitBatchMessage>());
     }
 
     [Fact]
@@ -194,6 +196,13 @@ public sealed class MmoClientUoClientDrivenTests
 
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
+
+        // RENDER1: the client now BOOTS into UoClientDriven (the new default). These tests assert the UO ENTER
+        // transition (MovementModeMessage(true) + commit stream), so start each from the non-UO baseline
+        // (CosmeticLead) and clear the transition's outbound so a later SetMovementRenderMode(UoClientDriven) is a
+        // real enter (not a no-op). Mirrors the pre-RENDER1 default and keeps every UO-transition assertion intact.
+        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
+        outbound.Clear();
         return client;
     }
 }

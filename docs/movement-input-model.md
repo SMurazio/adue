@@ -1,5 +1,10 @@
 # Movement Input Model — held-direction intent (replaces MoveStep streaming)
 
+> **Update (RENDER1, 2026-06-21):** the F6 render-mode cycle is now just **CosmeticLead + UoClientDriven**;
+> `Predicted` and `AcceptDeny` were removed and the client boots into UO. The four-model (A/B/C/D) discussion
+> below is retained as the design record but is superseded — the netcode redesign milestone
+> (`movement-netcode-redesign-plan.md`) collapses to a single model at its Stage 5.
+
 Design + decision record. Decided 2026-06-19 (user-directed, from the "wrong-model" audit).
 
 ## The problem (why the current model is wrong for this game)

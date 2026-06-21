@@ -154,7 +154,9 @@ public sealed class MmoClientCommitStepTests
 
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
-        // Model B (CosmeticLead) is the default; this is the mode commit-step lives in. Be explicit.
+        // Commit-step lives in model B (CosmeticLead). RENDER1 made UoClientDriven the boot default, so pin
+        // CosmeticLead explicitly (the UO->Cosmetic transition's MovementModeMessage is irrelevant — these tests
+        // assert only on the StepCommit* message types).
         client.RenderMode = MovementRenderMode.CosmeticLead;
         return client;
     }

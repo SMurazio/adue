@@ -25,22 +25,22 @@ public sealed class MmoClientDeltadOutReconcileTests
     private const int StepCooldownMs = 150;    // 3 ticks -> 150 ms cadence
 
     [Fact]
-    public void DeltadOutSnapshot_ReconcilesIdleLocalPlayer_ConvergesToConfirmedTile()
+    public void DeltadOutSnapshot_RoutesReconcileToLocalPlayer_UoHoldsBankedCommits()
     {
         var spawn = new TileCoord(20, 20);
         var client = CreateLoggedInClientWithLocalEntity(spawn, out _);
 
         // Drive a real over-prediction at the MmoClient seam: hold a direction and Poll the predictor forward on
         // the tick grid WITHOUT any snapshot confirming the local entity moving, so the predicted tile runs ahead
-        // of the confirmed (spawn) tile — exactly the turn/step-spam over-prediction the latch leaves behind.
+        // of the confirmed (spawn) tile. In UoClientDriven these predicted steps are BANKED commits the server is
+        // still working through.
         client.SendMoveIntent(true, Direction8.E);
         for (var tick = 0; tick <= 6; tick++)
         {
             client.Poll(TimeSpan.FromMilliseconds(tick * TickMs));
         }
 
-        // Release the key (the server will never confirm the over-predicted steps — their intents arrived after
-        // the release), then keep polling so no further predicted steps fire.
+        // Release the key, then keep polling so no further predicted steps fire.
         client.SendMoveIntent(false, Direction8.E);
         client.Poll(TimeSpan.FromMilliseconds(7 * TickMs));
 
@@ -50,10 +50,13 @@ public sealed class MmoClientDeltadOutReconcileTests
         Assert.NotEqual(spawn, client.PredictedLocalTile);
         var overPredictedTile = client.PredictedLocalTile!.Value;
 
-        // Now feed DELTA'D-OUT snapshots: each carries the header RecipientStepSeq (0 — the server accepted no
-        // tile moves; the player is at rest) and an advancing ServerTick, but DOES NOT contain the local entity
-        // (a different, remote entity keeps the payload non-empty and delta-shaped). Pre-S84 these never touched
-        // the local player and the over-prediction stayed stuck; S84 reconciles it down to the confirmed tile.
+        // Now feed DELTA'D-OUT snapshots: each carries the header RecipientStepSeq (0 — the server has confirmed no
+        // tile moves YET; the banked commits are still in flight) and an advancing ServerTick, but DOES NOT contain
+        // the local entity (a different, remote entity keeps the payload non-empty and delta-shaped). Pre-S84 these
+        // never touched the local player at all; S84 ROUTES a reconcile to the delta'd-out local player on every
+        // such snapshot. The reconcile fires — but in UO mode RecipientStepSeq (0) < predictedStepSeq is NOT a
+        // reject (the server hasn't refused the steps, it just hasn't confirmed them), so the banked commits are
+        // re-projected forward and the prediction HOLDS at the over-predicted tile (no backward-snap on a keep-alive).
         var seq = 10u;
         for (var i = 0; i < 8; i++)
         {
@@ -68,15 +71,15 @@ public sealed class MmoClientDeltadOutReconcileTests
                 ChunkIndex: 0,
                 ChunkCount: 1,
                 Entities: new[] { new EntityStateSnapshot(777, new TileCoord(0, 0), Direction8.S) },
-                RecipientStepSeq: 0));      // server's count of OUR accepted moves: 0 (at rest)
+                RecipientStepSeq: 0));      // server's count of OUR CONFIRMED moves: 0 (banked commits still in flight)
             client.Poll(wallMs);
         }
 
-        // Fails-before (pre-S84): the predicted tile stays at the over-predicted tile — the latch.
-        // Passes-after (S84): the delta'd-out reconcile re-anchors the prediction down to the confirmed tile.
-        Assert.NotEqual(overPredictedTile, client.PredictedLocalTile);
-        Assert.Equal(spawn, client.PredictedLocalTile);
-        Assert.Equal(client.LocalTile, client.PredictedLocalTile);
+        // UO-correct observable: the delta'd-out reconcile ran (the routing is the S84 guard), but it did NOT
+        // collapse the banked commits — the over-prediction is held, not snapped back. (Server-paced Predicted,
+        // now removed, would instead have converged DOWN to the confirmed tile here.)
+        Assert.Equal(overPredictedTile, client.PredictedLocalTile);
+        Assert.Equal(spawn, client.LocalTile);
     }
 
     [Fact]
@@ -138,10 +141,14 @@ public sealed class MmoClientDeltadOutReconcileTests
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
         Assert.NotNull(client.Zone);
-        // S92: model B (cosmetic lead) is now the default render mode, which routes the local player via the
-        // cosmetic driver (no PredictedLocalTile). These tests exercise model A's predictor reconcile at the
-        // MmoClient seam, so pin the mode to Predicted explicitly.
-        client.RenderMode = MovementRenderMode.Predicted;
+        // RENDER1: the standalone server-paced Predicted mode was dropped; UoClientDriven is now the only mode that
+        // routes the local player through the predictor (PredictedLocalTile). These tests exercise the S84
+        // delta'd-out reconcile ROUTING at the MmoClient seam (ApplySnapshot consuming the header RecipientStepSeq
+        // for a local player ABSENT from the payload), which is mode-independent — so pin UoClientDriven explicitly.
+        // NOTE: the per-mode OBSERVABLE differs — server-paced converged the over-prediction DOWN at rest; UO
+        // (client-driven) re-projects the banked commits FORWARD (the server FOLLOWS them) and only collapses on a
+        // genuine reject. The assertions below reflect the UO-correct observable.
+        client.RenderMode = MovementRenderMode.UoClientDriven;
         return client;
     }
 }

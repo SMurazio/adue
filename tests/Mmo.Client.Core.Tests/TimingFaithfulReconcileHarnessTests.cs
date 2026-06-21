@@ -282,8 +282,9 @@ public sealed class TimingFaithfulReconcileHarnessTests
 
     // ---- INVARIANT 1: steady normal walking does NOT cap/snap (the UO5-catching guard) -----------------
     //
-    // Hold a direction for a sustained run at BOTH 50 ms and 100 ms latency, in BOTH UoClientDriven and Predicted,
-    // over all 8 directions. Assert: zero Corrected, zero Snapped over the whole run; the render glides
+    // Hold a direction for a sustained run at BOTH 50 ms and 100 ms latency, in BOTH the client-driven (UO) and
+    // server-paced predictor configs (the clientDriven bool — RENDER1 dropped the standalone Predicted MODE, but
+    // the server-paced predictor PRIMITIVE this rig drives directly is kept), over all 8 directions. Assert: zero Corrected, zero Snapped over the whole run; the render glides
     // monotonically forward (no backward tile jump); and the predicted/server leads stay bounded & stable. This
     // is the regression guard: under the snapshot-vs-cadence mismatch (serverStepSeq flat 2-of-3 snapshots) the
     // UO5 stall counter misfired Corrected/Snapped here; on the current reverted code it stays Matched.

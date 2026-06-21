@@ -1,5 +1,9 @@
 # Plan: UO-style client-driven movement as a new render mode
 
+> **Update (RENDER1, 2026-06-21):** shipped (UO1–UO5). The F6 cycle is now trimmed to **CosmeticLead +
+> UoClientDriven** (Predicted/AcceptDeny removed) and UO is the default boot mode. UO loss/latency hardening
+> continues in the netcode redesign milestone (`movement-netcode-redesign-plan.md`).
+
 Status: **design, ready to implement** on `review/tile-step-todo` (production, NOT the spike branch). Default
 render mode stays `CosmeticLead`; UO mode is a parallel, opt-in, fully revertable addition.
 

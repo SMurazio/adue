@@ -120,8 +120,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _moveCameraSmoothing;
 	// New (S102): camera teleport-snap distance (tiles) — exposes the former CameraTeleportSnapTiles const live.
 	private LineEdit? _moveCameraTeleportSnapTiles;
-	// New (S102): 3-way render-mode selector (Predicted / CosmeticLead / AcceptDeny) — a cycling button that calls
-	// MmoClient.SetMovementRenderMode. Replaces the F5 "Accept/deny only" checkbox and re-exposes model A.
+	// RENDER1: 2-way render-mode selector (CosmeticLead / UoClientDriven) — a cycling button that calls
+	// MmoClient.SetMovementRenderMode.
 	private Button? _renderModeButton;
 	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
 	private CheckBox? _snapOnReleaseCheck;
@@ -133,13 +133,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _renderModeCaption;
 	// UO2: the rows that are MODEL-B (CosmeticLead) ONLY — cosmetic lead distance, snap-on-release, commit-step +
 	// its threshold. These are documented "inert otherwise" in MmoClient, so the F6 panel HIDES them in
-	// Predicted / AcceptDeny / UoClientDriven. Captured as their owning row containers so visibility toggles the
+	// UoClientDriven. Captured as their owning row containers so visibility toggles the
 	// whole label+control row (not just the input). Re-evaluated on render-mode change and on panel open.
 	private readonly List<Control> _modelBOnlyRows = new();
-	// UO4: the "Stop on reversal" (settle-then-go) toggle, and the rows that are PREDICTOR-modes only (Predicted /
-	// UoClientDriven) — the stop-on-reversal lever lives in the predictor, so the F6 panel SHOWS it only in those
-	// modes and hides it in CosmeticLead / AcceptDeny (where it is inert). Re-evaluated on render-mode change and
-	// on panel open, alongside the model-B-only rows.
+	// UO4: the "Stop on reversal" (settle-then-go) toggle, and the rows that are PREDICTOR-mode only (UoClientDriven)
+	// — the stop-on-reversal lever lives in the predictor, so the F6 panel SHOWS it only in that mode and hides it
+	// in CosmeticLead (where it is inert). Re-evaluated on render-mode change and on panel open, alongside the
+	// model-B-only rows.
 	private CheckBox? _stopOnReversalCheck;
 	private readonly List<Control> _predictorOnlyRows = new();
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
@@ -851,8 +851,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// S102: the LOCAL player's render-model control (was the F5 "Accept/deny only" checkbox) is now the 3-way
-		// render-mode button on the F6 movement panel (Predicted / CosmeticLead / AcceptDeny).
+		// RENDER1: the LOCAL player's render-model control is the 2-way render-mode button on the F6 movement panel
+		// (CosmeticLead / UoClientDriven).
 
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -884,9 +884,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		note.Text = "— client-local (instant) · speed lives in F4 —";
 		rows.AddChild(note);
 
-		// 3-way render-mode cycling button (S102, replaces the F5 "Accept/deny only" checkbox). Cycles
-		// Predicted -> CosmeticLead -> AcceptDeny on each press, calling MmoClient.SetMovementRenderMode. The label
-		// always shows the ACTIVE mode. Re-exposes model A (Predicted), which S92 dropped from the F5 toggle.
+		// RENDER1: 2-way render-mode cycling button. Cycles CosmeticLead <-> UoClientDriven on each press, calling
+		// MmoClient.SetMovementRenderMode. The label always shows the ACTIVE mode (client boots into UoClientDriven).
 		var renderModeRow = new HBoxContainer { Name = "Row_RenderMode" };
 		renderModeRow.AddThemeConstantOverride("separation", 8);
 		var renderModeCaption = CreateOverlayLabel("Cap_RenderMode", 13);
@@ -961,8 +960,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		// UO4 new live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
 		// flip while moving settles to a clean tile stop, then resumes the new direction (kills the left-right
-		// bounce). OFF (default) = the current immediate reverse. Only the PREDICTOR modes (Predicted /
-		// UoClientDriven) read it; hidden in CosmeticLead / AcceptDeny where it is inert.
+		// bounce). OFF (default) = the current immediate reverse. Only the PREDICTOR mode (UoClientDriven) reads it;
+		// hidden in CosmeticLead where it is inert.
 		var stopOnReversal = new CheckBox
 		{
 			Name = "StopOnReversal",
@@ -985,10 +984,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(panel);
 	}
 
-	// S102/UO1: the render modes in cycle order, with the label shown on the F6 button for each. UO1 adds
-	// UoClientDriven (Ultima-Online-style: instant prediction + the server FOLLOWS per-step commits).
+	// RENDER1: the render modes in cycle order, with the label shown on the F6 button for each. Trimmed to the two
+	// keepers: CosmeticLead (smooth glide) and UoClientDriven (Ultima-Online-style: instant prediction + the server
+	// FOLLOWS per-step commits — the default boot mode).
 	private static readonly MovementRenderMode[] RenderModeCycle =
-		[MovementRenderMode.Predicted, MovementRenderMode.CosmeticLead, MovementRenderMode.AcceptDeny, MovementRenderMode.UoClientDriven];
+		[MovementRenderMode.CosmeticLead, MovementRenderMode.UoClientDriven];
 
 	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
 	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
@@ -1016,23 +1016,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		var mode = _client?.RenderMode ?? MovementRenderMode.CosmeticLead;
+		var mode = _client?.RenderMode ?? MovementRenderMode.UoClientDriven;
 		_renderModeButton.Text = mode switch
 		{
-			MovementRenderMode.Predicted => "Predicted (A)",
-			MovementRenderMode.AcceptDeny => "AcceptDeny",
-			MovementRenderMode.UoClientDriven => "UoClientDriven",
-			_ => "CosmeticLead (B)",
+			MovementRenderMode.CosmeticLead => "Cosmetic (smooth glide)",
+			_ => "UO (client-driven)",
 		};
 
 		ApplyRenderModeContext(mode);
 	}
 
-	// UO2: make the F6 panel CONTEXTUAL to the active render mode. The cosmetic-lead distance, snap-on-release,
-	// commit-step toggle, and commit-threshold rows are model-B (CosmeticLead) ONLY — documented "inert otherwise"
-	// in MmoClient — so we HIDE them in Predicted / AcceptDeny / UoClientDriven (hide, not grey, for cleanliness;
-	// the VBox just reflows so there are no dead rows). The render-mode button and the shared rows (net latency,
-	// camera feel) stay visible in every mode. Also writes the one-line "what this mode does" caption. UI-only.
+	// UO2/RENDER1: make the F6 panel CONTEXTUAL to the active render mode. The cosmetic-lead distance,
+	// snap-on-release, commit-step toggle, and commit-threshold rows are model-B (CosmeticLead) ONLY — documented
+	// "inert otherwise" in MmoClient — so we HIDE them in UoClientDriven (hide, not grey, for cleanliness; the VBox
+	// just reflows so there are no dead rows). The render-mode button and the shared rows (net latency, camera feel)
+	// stay visible in every mode. Also writes the one-line "what this mode does" caption. UI-only.
 	private void ApplyRenderModeContext(MovementRenderMode mode)
 	{
 		var isModelB = mode == MovementRenderMode.CosmeticLead;
@@ -1041,9 +1039,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			row.Visible = isModelB;
 		}
 
-		// UO4: the stop-on-reversal lever is predictor-only (Predicted / UoClientDriven). Show it there, hide it in
-		// the cosmetic modes where the predictor isn't driving.
-		var isPredictorMode = mode is MovementRenderMode.Predicted or MovementRenderMode.UoClientDriven;
+		// UO4/RENDER1: the stop-on-reversal lever is predictor-only (UoClientDriven). Show it there, hide it in
+		// CosmeticLead where the predictor isn't driving.
+		var isPredictorMode = mode is MovementRenderMode.UoClientDriven;
 		foreach (var row in _predictorOnlyRows)
 		{
 			row.Visible = isPredictorMode;
@@ -1053,14 +1051,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			_renderModeCaption.Text = mode switch
 			{
-				MovementRenderMode.Predicted =>
-					"Predicted (A): instant client prediction; server reconciles (snap on divergence).",
-				MovementRenderMode.AcceptDeny =>
-					"AcceptDeny: avatar moves ONLY on a server-confirmed step (no early glide).",
-				MovementRenderMode.UoClientDriven =>
-					"UoClientDriven: instant prediction; server FOLLOWS per-step commits (UO-style).",
+				MovementRenderMode.CosmeticLead =>
+					"Cosmetic (smooth glide, no banking — best at low latency): confirmed steps drive sim; render glides ahead by the cosmetic lead.",
 				_ =>
-					"CosmeticLead (B): confirmed steps drive sim; render glides ahead by the cosmetic lead.",
+					"UO (client-driven — instant, server follows your steps): instant prediction; the server FOLLOWS your per-step commits.",
 			};
 		}
 	}
@@ -1628,7 +1622,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 			// UO2: re-evaluate the contextual panel (caption + model-B row visibility) on EVERY open, so it always
 			// matches the live render mode even on re-opens (seeding only runs once). UI-only; no state change.
-			ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.CosmeticLead);
+			ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.UoClientDriven);
 		}
 
 		_movementPanel.Visible = _movementPanelVisible;
