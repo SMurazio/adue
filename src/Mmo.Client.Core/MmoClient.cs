@@ -15,10 +15,25 @@ public enum MovementRenderMode
     Predicted = 0,
     CosmeticLead = 1,
     AcceptDeny = 2,
+    // UO1: client-driven (Ultima-Online-style). Routes the local player through the SAME LocalPlayerPredictor as
+    // Predicted (instant prediction + tick-grid stepping + step-seq reconcile), but ALSO declares the session
+    // client-driven to the server (MovementModeMessage) so the server stops auto-pacing, and emits one
+    // StepCommitRequest per predicted accepted step so the server FOLLOWS the client's per-step requests
+    // (accept/reject). The reject path is the predictor's existing RecipientStepSeq reconcile (snap on divergence).
+    UoClientDriven = 3,
 }
 
 public sealed class MmoClient : IDisposable
 {
+    // UO1: which render modes drive the local player through the LocalPlayerPredictor (model A). Predicted and
+    // UoClientDriven both do; CosmeticLead (model B) and AcceptDeny ride the cosmetic driver. The four predictor
+    // routing sites (Poll Tick, SendMoveIntent SetIntent, EnsurePredictor/ReanchorLocalDriver, and the
+    // ApplySnapshot/ToRenderState render-source selection) all gate on this so adding UoClientDriven needed no new
+    // routing branch — only a wider predicate. UoClientDriven layers the per-step commit emission + the mode-signal
+    // on TOP of the predictor path.
+    internal static bool UsesPredictor(MovementRenderMode mode)
+        => mode is MovementRenderMode.Predicted or MovementRenderMode.UoClientDriven;
+
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
 
     // Local playout buffer so the local player's tween isn't starved by snapshot tick-boundary jitter
@@ -36,6 +51,11 @@ public sealed class MmoClient : IDisposable
     // bound only covers the do-nothing reject. ~8 snapshots ≈ a few hundred ms at 20 Hz — long enough that a
     // legitimate accept (which advances the tile + RecipientStepSeq) is never misread as a reject under LAN jitter.
     private const int CommitRejectGraceSnapshots = 8;
+
+    // UO1: the max accepted steps a single predictor Tick can resolve (mirrors LocalPlayerPredictor.MaxTicksPerCall
+    // — the per-call action cap). The per-step commit buffer is sized to this so a laggy multi-step catch-up never
+    // overflows it and never drops a commit.
+    private const int UoCommitBurstCap = 8;
 
     private readonly ClientConnectionOptions _options;
     private readonly EventBasedNetListener _listener = new();
@@ -254,13 +274,31 @@ public sealed class MmoClient : IDisposable
 
         // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
         // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
-        if (_renderMode != MovementRenderMode.Predicted)
+        if (!UsesPredictor(_renderMode))
         {
             // S89/S92: tick the cosmetic driver. With LeadEnabled (model B) it glides the render early toward the
             // held direction; in AcceptDeny it only samples the in-flight tween forward (no early lead).
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
                 local.TickCosmetic(now);
+            }
+        }
+        else if (_renderMode == MovementRenderMode.UoClientDriven)
+        {
+            // UO1: tick the predictor AND emit one StepCommitRequest per accepted step this call (the multi-step
+            // catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy frame). The server FOLLOWS these:
+            // it advances the entity only on accepted commits (the held-intent pacer is disabled for this session
+            // by the MovementModeMessage). Each commit rides a FRESH ++_moveSequence on the SHARED move cursor (the
+            // same cursor MoveIntent uses) and ReliableOrdered — the server validates + dedupes by that sequence.
+            if (_predictor is { } predictor)
+            {
+                Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
+                predictor.Tick(now, accepted, out var acceptedCount);
+                var emit = Math.Min(acceptedCount, accepted.Length);
+                for (var i = 0; i < emit; i++)
+                {
+                    Send(new StepCommitRequestMessage(++_moveSequence, accepted[i]), DeliveryMethod.ReliableOrdered);
+                }
             }
         }
         else
@@ -300,11 +338,33 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
+        // UO1: entering or leaving UoClientDriven flips the server-side client-driven flag. Send the one-bit signal
+        // BEFORE re-anchoring so the server stops/starts auto-pacing in step with the client owning/releasing the
+        // per-step commit stream. Only emitted on an actual transition into/out of the mode (no-op for B<->A etc.).
+        var wasUo = _renderMode == MovementRenderMode.UoClientDriven;
+        var nowUo = mode == MovementRenderMode.UoClientDriven;
         _renderMode = mode;
+        if (nowUo && !wasUo)
+        {
+            SendMovementModeSignal(clientDriven: true);
+        }
+        else if (wasUo && !nowUo)
+        {
+            SendMovementModeSignal(clientDriven: false);
+        }
+
         if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
         {
             local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
         }
+    }
+
+    // UO1: declares this session's movement model to the server (true = client-driven UO mode, false = server-paced).
+    // ReliableOrdered — a lost flag would desync the server's pacing decision (double-step or stall). No-op safe
+    // before connect (Send routes to the test sink / queues). Re-sent on (re)login/respawn via EnsurePredictor.
+    private void SendMovementModeSignal(bool clientDriven)
+    {
+        Send(new MovementModeMessage(clientDriven), DeliveryMethod.ReliableOrdered);
     }
 
     // S94: the live cosmetic lead distance (tiles) — how far model B glides ahead of the confirmed tile before
@@ -417,7 +477,7 @@ public sealed class MmoClient : IDisposable
         // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
         // step. Created lazily here once the zone + local entity + cadence are all available.
         EnsurePredictor();
-        if (_renderMode != MovementRenderMode.Predicted)
+        if (!UsesPredictor(_renderMode))
         {
             // S89/S92: feed the held intent to the cosmetic driver (no tile is banked; it only records the held
             // direction). With LeadEnabled (model B) Tick glides the render early; in AcceptDeny the intent only
@@ -490,9 +550,16 @@ public sealed class MmoClient : IDisposable
         // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
         // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
         // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
-        if (_renderMode != MovementRenderMode.Predicted)
+        if (!UsesPredictor(_renderMode))
         {
             local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
+        }
+        else if (_renderMode == MovementRenderMode.UoClientDriven)
+        {
+            // UO1: the local entity just (re)attached — a fresh login / respawn / AOI re-entry. Re-declare the
+            // client-driven mode to the server so a flag lost across that lifecycle event can't leave the server
+            // auto-pacing AND the client committing (double-stepping). ReliableOrdered; harmless if redundant.
+            SendMovementModeSignal(clientDriven: true);
         }
     }
 
@@ -1307,7 +1374,7 @@ public sealed class MmoClient : IDisposable
         // onto the current render position). The freshly-attached drivers are created if missing.
         public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double tickMs)
         {
-            if (mode != MovementRenderMode.Predicted)
+            if (!UsesPredictor(mode))
             {
                 // CosmeticLead (model B) and AcceptDeny both ride the cosmetic driver; LeadEnabled is the only
                 // difference (B leads + snaps on release, AcceptDeny does neither).

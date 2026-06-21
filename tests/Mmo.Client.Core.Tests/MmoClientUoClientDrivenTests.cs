@@ -1,0 +1,125 @@
+using Mmo.Shared.Domain;
+using Mmo.Shared.Protocol;
+using Xunit;
+
+namespace Mmo.Client.Core.Tests;
+
+// UO1 client-driven render mode at the MmoClient seam. Selecting UoClientDriven routes the local player through the
+// predictor (model A) AND (a) sends a MovementModeMessage(true) on enter / (false) on leave, and (b) emits one
+// StepCommitRequest per predicted accepted step (the server FOLLOWS the client). These tests drive real prediction
+// (held intent + Poll) over an open field and assert the emitted message stream.
+public sealed class MmoClientUoClientDrivenTests
+{
+    private const uint LocalNetworkId = 9;
+    private const int TickRate = 20;            // 50 ms/tick
+    private const double TickMs = 1000d / TickRate;
+    private const int StepCooldownMs = 150;     // 150 ms cadence = 3 ticks
+
+    [Fact]
+    public void EnteringUoMode_SendsClientDrivenTrue_LeavingSendsFalse()
+    {
+        var client = CreateLoggedInClientWithLocalEntity(new TileCoord(20, 20), out var outbound);
+
+        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
+        var enter = Assert.Single(outbound.OfType<MovementModeMessage>());
+        Assert.True(enter.ClientDriven);
+
+        outbound.Clear();
+        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
+        var leave = Assert.Single(outbound.OfType<MovementModeMessage>());
+        Assert.False(leave.ClientDriven);
+    }
+
+    [Fact]
+    public void UoMode_EmitsOneStepCommitPerPredictedStep()
+    {
+        var spawn = new TileCoord(20, 20);
+        var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
+        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
+        outbound.Clear(); // drop the mode-enter message; we only count commits below.
+
+        // Hold east and poll across exactly 3 cadence boundaries (t=0, 150, 300 ms) -> 3 accepted predicted steps.
+        client.SendMoveIntent(true, Direction8.E);
+        client.Poll(TimeSpan.FromMilliseconds(0));
+        client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));
+        client.Poll(TimeSpan.FromMilliseconds(2 * StepCooldownMs));
+
+        var commits = outbound.OfType<StepCommitRequestMessage>().ToList();
+        Assert.Equal(3, commits.Count);
+        Assert.All(commits, c => Assert.Equal(Direction8.E, c.Direction));
+
+        // The predicted tile advanced three tiles east (the commits mirror the prediction one-for-one).
+        Assert.Equal(new TileCoord(23, 20), client.PredictedLocalTile);
+    }
+
+    [Fact]
+    public void UoMode_CommitSequencesAreStrictlyIncreasing_SharedWithMoveIntent()
+    {
+        var spawn = new TileCoord(20, 20);
+        var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
+        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
+        outbound.Clear();
+
+        client.SendMoveIntent(true, Direction8.E);    // MoveIntent seq N
+        client.Poll(TimeSpan.FromMilliseconds(0));     // commit seq N+1
+        client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs)); // commit seq N+2
+
+        // Collect every sequenced outbound (MoveIntent + commits) and assert the shared cursor is strictly
+        // increasing with no collision between a MoveIntent and a commit on the same number.
+        var seqs = outbound
+            .Select(m => m switch
+            {
+                MoveIntentMessage mi => (uint?)mi.Sequence,
+                StepCommitRequestMessage sc => sc.Sequence,
+                _ => null,
+            })
+            .Where(s => s.HasValue)
+            .Select(s => s!.Value)
+            .ToList();
+
+        Assert.True(seqs.Count >= 3);
+        for (var i = 1; i < seqs.Count; i++)
+        {
+            Assert.True(seqs[i] > seqs[i - 1], $"sequence must strictly increase; {seqs[i]} <= {seqs[i - 1]}");
+        }
+    }
+
+    [Fact]
+    public void NonUoModes_EmitNoCommitsFromPolling_AndNoModeMessage()
+    {
+        var spawn = new TileCoord(20, 20);
+        var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
+        // Default is CosmeticLead; Predicted also must not stream commits from Poll, nor send a mode message.
+        client.SetMovementRenderMode(MovementRenderMode.Predicted);
+
+        Assert.Empty(outbound.OfType<MovementModeMessage>());
+
+        client.SendMoveIntent(true, Direction8.E);
+        client.Poll(TimeSpan.FromMilliseconds(0));
+        client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));
+
+        Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
+    }
+
+    private static MmoClient CreateLoggedInClientWithLocalEntity(TileCoord spawn, out List<IProtocolMessage> outbound)
+    {
+        outbound = [];
+        var captured = outbound;
+        var client = new MmoClient(
+            new ClientConnectionOptions("127.0.0.1", 1, "test", "account", "display"),
+            new ClientMovementTrace(false, null));
+        client.OutboundSinkForTests = (message, _) => captured.Add(message);
+
+        var characterId = Guid.NewGuid();
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, TickRate, StepCooldownMs, 30));
+        var zone = new ZoneModel("zone", 64, 64, 0, 1);
+        client.HandleMessageForTests(new ZoneInfoMessage("zone", 64, 64, 0, 1, zone.ContentHash));
+        client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, spawn, ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(
+            LocalNetworkId, characterId, EntityKind.Player, "Local", spawn, Direction8.E, StepCooldownMs: StepCooldownMs));
+
+        Assert.Equal(LocalNetworkId, client.LocalNetworkId);
+        Assert.Equal(spawn, client.LocalTile);
+        return client;
+    }
+}
