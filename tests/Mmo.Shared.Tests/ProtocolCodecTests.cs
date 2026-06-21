@@ -211,11 +211,11 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyOne()
+    public void ProtocolVersionIsTwentyTwo()
     {
-        // S103 protocol bump: adding the client->server StepCommitRequest message is a breaking wire change (server
+        // UO1 protocol bump: adding the client->server MovementMode message is a breaking wire change (server
         // + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(21, ProtocolCodec.Version);
+        Assert.Equal(22, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -227,6 +227,19 @@ public sealed class ProtocolCodecTests
 
         Assert.Equal(4242u, decoded.Sequence);
         Assert.Equal(Direction8.SW, decoded.Direction);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MovementModeRoundTrips(bool clientDriven)
+    {
+        // UO1: the one-bit client-driven movement signal round-trips both ways.
+        var original = new MovementModeMessage(clientDriven);
+
+        var decoded = Assert.IsType<MovementModeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(clientDriven, decoded.ClientDriven);
     }
 
     [Fact]

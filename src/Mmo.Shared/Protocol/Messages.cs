@@ -40,6 +40,19 @@ public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Directio
     public MessageType Type => MessageType.StepCommitRequest;
 }
 
+// UO1 client-driven movement mode signal (protocol v22). A one-bit declaration from the client that THIS session
+// drives its own movement UO-style: the client predicts + banks tiles locally and sends one StepCommitRequest per
+// accepted step, and the server must STOP auto-pacing the entity from the held MoveIntent (otherwise the held-
+// intent pacer AND the per-step commits would both step the entity — double-stepping / 2x speed). ClientDriven=true
+// enters the mode, false leaves it (reverts to server-paced held-intent stepping). The client keeps sending
+// MoveIntent for stop/keepalive/facing regardless; the server simply ignores it for PACING while the flag is set.
+// Sent reliable-ordered, and re-sent on (re)login / respawn so a lost flag can't silently double-step. See
+// docs/uo-client-driven-mode-plan.md.
+public sealed record MovementModeMessage(bool ClientDriven) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MovementMode;
+}
+
 public sealed record ChatSendMessage(string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatSend;

@@ -10,6 +10,7 @@ public enum MessageType : ushort
     InteractRequest = 6,
     AdminSetTuning = 7,
     StepCommitRequest = 8,
+    MovementMode = 9,
 
     ServerHello = 100,
     LoginResult = 101,
