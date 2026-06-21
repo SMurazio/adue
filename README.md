@@ -84,6 +84,19 @@ The default DB is `data/mmo.db`; delete it to reset local game data.
 
 The default database is `data/mmo.db`. Delete that file to reset local game data.
 
+## Working on the repo (no branch protection yet)
+
+`main` is **not branch-protected** right now — anyone with access can push to it, and **CI runs _after_ a push, so
+it will not block a broken commit from landing.** Until protection is enabled, please be mindful:
+
+- **Run `run-checks` (build + all tests) locally before pushing to `main`** — don't push red.
+- **Build and run the Godot client locally** for any client change — CI does **not** compile or run the Godot side
+  (`Mmo.sln` excludes it), so your local run is the only gate there.
+- **`git pull` before you push** to avoid clobbering each other.
+- For anything non-trivial, prefer a **feature branch + PR** so CI runs on it before it reaches `main`.
+
+We'll likely turn on branch protection (require the CI check + a PR) once more than one person is committing regularly.
+
 ## Dev Admin Commands
 
 This repo has local-development roles for debugging. By default, logging in with the name `Admin` grants the `Admin` role. Override the comma-separated allowlist with `MMO_ADMIN_NAMES`.
