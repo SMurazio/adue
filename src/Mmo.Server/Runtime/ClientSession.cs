@@ -84,6 +84,20 @@ public sealed class ClientSession
     public uint LastMoveIntentTick => _lastMoveIntentTick;
     public uint LastMoveSeq => _lastMoveSeq;
 
+    // UO1: when true this session drives its own movement UO-style — it predicts + banks tiles locally and sends
+    // one StepCommitRequest per accepted step, so the tick loop must NOT auto-pace its entity from the held
+    // MoveIntent (StepHeldMovementIntents skips it). Set false (the default) the session is server-paced exactly
+    // as before. Toggled by the client's MovementModeMessage. The held MoveIntent is still recorded (for
+    // stop/keepalive/facing) — it is just ignored for PACING while this is set. Default false keeps the
+    // server-paced model byte-for-byte until a client opts in.
+    public bool ClientDrivenMovement { get; private set; }
+
+    // UO1: applies a MovementMode declaration from the client (true = client-driven, false = server-paced).
+    public void SetClientDrivenMovement(bool clientDriven)
+    {
+        ClientDrivenMovement = clientDriven;
+    }
+
     public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId)
     {
         NetworkId = networkId;

@@ -333,6 +333,15 @@ public sealed class GameServer
                     HandleStepCommit(session, commit.Sequence, commit.Direction);
                 }
                 break;
+            case MovementModeMessage mode:
+                if (session.IsAuthenticated)
+                {
+                    // UO1: record whether this session drives its own movement (client-driven) so the tick loop
+                    // stops auto-pacing its held MoveIntent (StepHeldMovementIntents skips client-driven sessions).
+                    // No stepping happens here; the entity advances ONLY via the per-step StepCommitRequest stream.
+                    session.SetClientDrivenMovement(mode.ClientDriven);
+                }
+                break;
             case ChatSendMessage chat:
                 if (session.IsAuthenticated)
                 {
@@ -1563,6 +1572,15 @@ public sealed class GameServer
         foreach (var session in _sessions.Values)
         {
             if (!session.IsAuthenticated || !session.MoveIntentMoving)
+            {
+                continue;
+            }
+
+            // UO1: a client-driven session paces its OWN movement via the per-step StepCommitRequest stream. The
+            // server must NOT also step it from the held MoveIntent here, or the held-intent pacer and the commits
+            // would both advance the entity (double-stepping / 2x speed). The MoveIntent is still recorded (for
+            // facing/keepalive) — it is just not paced. Default sessions are unaffected.
+            if (session.ClientDrivenMovement)
             {
                 continue;
             }
