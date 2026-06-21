@@ -436,6 +436,184 @@ public sealed class TimingFaithfulReconcileHarnessTests
         Assert.True(result.FinalServerStepSeq >= 30, $"long run barely stepped: {result.FinalServerStepSeq}");
     }
 
+    // ---- INVARIANT 4 (NET2): a dropped UO COMMIT recovers from the redundant batch window — no speed-up ----
+    //
+    // The GodotB symptom NET2 fixes: under loss the per-step commits used to retransmit RELIABLE in a BATCH that
+    // the server's cooldown gate rejected together → the local avatar sped up + desynced. NET2 ships commits
+    // redundant-UNRELIABLE (each batch repeats a window of recent commits), so a dropped commit recovers from a
+    // LATER batch — applied ONCE at the server (cursor dedup), at cadence (cooldown gate). This test drives the
+    // UoClientDriven predictor, emits each accepted step as a redundant StepCommitBatch (the real client path),
+    // DROPS a run of those batches on the uplink, and asserts the server still steps to the SAME tile/StepSeq as
+    // a no-loss run — recovered from the window, never double-applied (no speed-up).
+    [Fact]
+    public void UoCommitDrop_RecoversFromRedundantBatchWindow_NoSpeedUp()
+    {
+        // Hold east for 2.4 s (banking ~16 steps a cadence apart), then RELEASE so the commit tail fully
+        // delivers + applies through the normal tick loop by run-end (no artificial drain). Drop a SINGLE
+        // commit batch mid-run (frame 600 ≈ 2.6 s in is past intent-end, so pick mid-stream frame 300): the
+        // dropped commit's sequence is re-carried by the NEXT batch's window (a cadence-spaced packet), so the
+        // server picks it up deduped and at cadence — the speed-up/desync the old reliable retransmit caused
+        // does not happen. Drop ~30% of the batches in a mid-run window to model typical loss.
+        var droppedResult = RunUoCommitStream(
+            start: new TileCoord(200, 200), held: Direction8.E, runMs: 4000d, holdUntilMs: 2400d,
+            dropBatchOnFrame: f => f % 3 == 0 && f >= 200 && f < 320);
+
+        // A clean (no-loss) run of the identical stream is the oracle: the lossy run must land EXACTLY there.
+        var cleanResult = RunUoCommitStream(
+            start: new TileCoord(200, 200), held: Direction8.E, runMs: 4000d, holdUntilMs: 2400d,
+            dropBatchOnFrame: _ => false);
+
+        // Recovery: despite the lost commit packets, the server reached the SAME confirmed tile + step count as
+        // the no-loss run — every dropped commit was recovered from a later packet's redundancy window.
+        Assert.Equal(cleanResult.ServerTile, droppedResult.ServerTile);
+        Assert.Equal(cleanResult.ServerStepSeq, droppedResult.ServerStepSeq);
+
+        // No speed-up: the server applied EXACTLY as many steps as the predictor banked — not one more. The old
+        // reliable retransmit re-delivered the lost commits BUNCHED, which the cooldown gate then mis-paced;
+        // redundant-unreliable + cursor dedup applies each commit once, spread out, so server == predictor.
+        Assert.Equal(droppedResult.PredictedStepSeq, droppedResult.ServerStepSeq);
+        Assert.Equal(droppedResult.PredictedTile, droppedResult.ServerTile);
+    }
+
+    private readonly record struct UoCommitRunResult(
+        TileCoord ServerTile, uint ServerStepSeq, TileCoord PredictedTile, uint PredictedStepSeq);
+
+    // Drives the UoClientDriven commit path with NET2's redundant-unreliable batch delivery and optional uplink
+    // batch loss. The predictor steps each frame (holding `held` until holdUntilMs, then released so the tail
+    // drains through the normal loop); every accepted step mints a fresh sequence on a shared cursor and is
+    // recorded in an 8-deep ring; each frame that produced commits ships ONE redundant StepCommitBatch (head +
+    // window of prior ring commits as deltas) onto the uplink unless dropBatchOnFrame says to drop it. The
+    // server reconstructs fresh commits via the REAL GameServer.ExtractFreshStepCommits (cursor dedup) and
+    // applies each through the REAL WorldEntity.TryCommitStep at the tick it arrives, ONE per tick (the cooldown
+    // gate paces it). Mirrors the production client (RecordStepCommit/SendStepCommitBatch) + server
+    // (HandleStepCommitBatch) exactly.
+    private static UoCommitRunResult RunUoCommitStream(
+        TileCoord start, Direction8 held, double runMs, double holdUntilMs, Func<int, bool> dropBatchOnFrame)
+    {
+        var grid = new TileGrid(512, 512, Array.Empty<TileCoord>());
+        var server = new WorldEntity(1, 1, EntityKind.Player, start, held, "Local",
+            Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var predictor = new LocalPlayerPredictor(start, held, CadenceMs, t => grid.IsWalkable(t), TickMs);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, held, TimeSpan.Zero);
+        var released = false;
+
+        const double latencyMs = 100d;
+        const int ringCap = 8;
+        var ring = new List<(uint Seq, Direction8 Dir)>();
+        uint moveSeq = 0;
+        uint serverCursor = 0;
+
+        // A delivered batch is the wire payload (head + window) plus the wall time it reaches the server.
+        var pendingBatches = new List<(double DeliverAtMs, Mmo.Shared.Protocol.StepCommitBatchMessage Batch)>();
+        var acceptedBuffer = new Direction8[8];
+        uint nextServerTick = 0;
+
+        for (var frame = 0; ; frame++)
+        {
+            var nowMs = frame * FrameMs;
+            if (nowMs > runMs)
+            {
+                break;
+            }
+
+            if (!released && nowMs >= holdUntilMs)
+            {
+                predictor.SetIntent(false, held, TimeSpan.FromMilliseconds(nowMs));
+                released = true;
+            }
+
+            // --- server: at each elapsed tick, apply AT MOST ONE arrived+fresh commit (the cooldown gate paces
+            // the rest), exactly as the live tick loop processes the commit stream one accepted step per cadence.
+            while (nextServerTick * TickMs <= nowMs)
+            {
+                var tick = nextServerTick;
+                var serverWallMs = tick * TickMs;
+
+                // Gather the fresh commits that have ARRIVED by this tick, deduped + ascending across all
+                // delivered batches (the real ExtractFreshStepCommits + cursor dedup, fed every arrived batch).
+                var arrivedThisTick = new SortedSet<uint>();
+                var dirBySeq = new Dictionary<uint, Direction8>();
+                foreach (var (deliverAt, batch) in pendingBatches)
+                {
+                    if (deliverAt > serverWallMs)
+                    {
+                        continue;
+                    }
+
+                    foreach (var (seq, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
+                    {
+                        arrivedThisTick.Add(seq);
+                        dirBySeq[seq] = dir;
+                    }
+                }
+
+                // Apply the oldest fresh arrived commit, gated by the REAL cooldown floor (so the rate can never
+                // exceed cadence). The next one applies on a later tick once its cooldown elapses — this is the
+                // anti-speedhack pacing that, under reliable retransmit, the bunched batch fought; under the
+                // redundant window each commit is already cadence-spaced, so it lands cleanly.
+                if (arrivedThisTick.Count > 0)
+                {
+                    var seq = arrivedThisTick.Min;
+                    if (server.TryCommitStep(dirBySeq[seq], tick, StepCooldownTicks, 0.5, grid, out _))
+                    {
+                        serverCursor = seq;
+                    }
+                }
+
+                nextServerTick++;
+            }
+
+            // --- client: tick the predictor; emit the accepted steps as ONE redundant batch (unless dropped) ---
+            predictor.Tick(TimeSpan.FromMilliseconds(nowMs), acceptedBuffer, out var acceptedCount);
+            var emit = Math.Min(acceptedCount, acceptedBuffer.Length);
+            for (var i = 0; i < emit; i++)
+            {
+                ring.Add((++moveSeq, acceptedBuffer[i]));
+                if (ring.Count > ringCap)
+                {
+                    ring.RemoveAt(0);
+                }
+            }
+
+            if (emit > 0 && !dropBatchOnFrame(frame))
+            {
+                var head = ring[^1];
+                var window = new List<Mmo.Shared.Protocol.StepCommitWindowEntry>();
+                for (var i = ring.Count - 2; i >= 0; i--)
+                {
+                    var delta = head.Seq - ring[i].Seq;
+                    if (delta is > 0 and <= byte.MaxValue)
+                    {
+                        window.Add(new Mmo.Shared.Protocol.StepCommitWindowEntry((byte)delta, ring[i].Dir));
+                    }
+                }
+
+                var batch = new Mmo.Shared.Protocol.StepCommitBatchMessage(head.Seq, head.Dir, window);
+                pendingBatches.Add((nowMs + latencyMs, batch));
+            }
+        }
+
+        // Drain any in-flight batches the run-end cut off (so the comparison is on the fully-delivered stream).
+        var drainTick = nextServerTick;
+        foreach (var (_, batch) in pendingBatches)
+        {
+            foreach (var (seq, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
+            {
+                if (seq > serverCursor)
+                {
+                    serverCursor = seq;
+                    server.TryCommitStep(dir, drainTick, StepCooldownTicks, 0.5, grid, out _);
+                }
+
+                drainTick += StepCooldownTicks; // space the drained commits a cadence apart so each clears the floor
+            }
+        }
+
+        return new UoCommitRunResult(
+            server.Tile, server.StepSequence, predictor.PredictedTile, predictor.PredictedStepSeq);
+    }
+
     // ====================================================================================================
     // UO5 RE-ATTEMPT SLOT (out of scope for TEST1 — left red on purpose):
     //

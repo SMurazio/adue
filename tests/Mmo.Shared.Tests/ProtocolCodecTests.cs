@@ -225,6 +225,44 @@ public sealed class ProtocolCodecTests
         Assert.Empty(decoded.Window);
     }
 
+    // NET2: the redundant StepCommitBatch round-trips its newest committed step (head) plus the window of prior
+    // committed steps (deltas off HeadSeq). Window entries carry their own Direction (no Moving flag — a commit
+    // is always a step).
+    [Fact]
+    public void StepCommitBatchRoundTripsHeadAndWindow()
+    {
+        var original = new StepCommitBatchMessage(
+            HeadSeq: 200,
+            Direction: Direction8.E,
+            Window:
+            [
+                new StepCommitWindowEntry(SeqDelta: 1, Direction: Direction8.NE),
+                new StepCommitWindowEntry(SeqDelta: 2, Direction: Direction8.S),
+                new StepCommitWindowEntry(SeqDelta: 5, Direction: Direction8.W),
+            ]);
+
+        var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(200u, decoded.HeadSeq);
+        Assert.Equal(Direction8.E, decoded.Direction);
+        Assert.Equal(3, decoded.Window.Count);
+        Assert.Equal(new StepCommitWindowEntry(1, Direction8.NE), decoded.Window[0]);
+        Assert.Equal(new StepCommitWindowEntry(2, Direction8.S), decoded.Window[1]);
+        Assert.Equal(new StepCommitWindowEntry(5, Direction8.W), decoded.Window[2]);
+    }
+
+    [Fact]
+    public void StepCommitBatchRoundTripsEmptyWindow()
+    {
+        var original = new StepCommitBatchMessage(7, Direction8.SW, Window: []);
+
+        var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(7u, decoded.HeadSeq);
+        Assert.Equal(Direction8.SW, decoded.Direction);
+        Assert.Empty(decoded.Window);
+    }
+
     [Fact]
     public void SnapshotAckRoundTrips()
     {
@@ -251,11 +289,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyThree()
+    public void ProtocolVersionIsTwentyFour()
     {
-        // NET1 Stage 1 protocol bump: adding the redundant-unreliable MoveInput message is a breaking wire
-        // change (server + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(23, ProtocolCodec.Version);
+        // NET2 protocol bump: adding the redundant-unreliable StepCommitBatch message (loss-robust UO commit
+        // delivery) is a breaking wire change (server + client ship together). v23 was NET1's MoveInput. Pin
+        // the version so an accidental change is caught.
+        Assert.Equal(24, ProtocolCodec.Version);
     }
 
     [Fact]

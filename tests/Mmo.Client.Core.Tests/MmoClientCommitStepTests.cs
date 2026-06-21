@@ -5,7 +5,8 @@ using Xunit;
 namespace Mmo.Client.Core.Tests;
 
 // S103 commit-step on release at the MmoClient seam (model B / CosmeticLead, the default). Drive a real lead glide,
-// release past the threshold, and assert: a StepCommitRequest is emitted (and the render does NOT snap back); an
+// release past the threshold, and assert: a commit is emitted (NET2: as a redundant StepCommitBatch, not a per-
+// step StepCommitRequest) and the render does NOT snap back; an
 // ACCEPTED confirm (the local entity reaches the committed tile) leaves the render there; a REJECTED confirm (the
 // server steps without honouring the commit — RecipientStepSeq advances, tile unchanged) snaps the render back.
 public sealed class MmoClientCommitStepTests
@@ -27,7 +28,10 @@ public sealed class MmoClientCommitStepTests
         // snap back to spawn.
         client.SendMoveIntent(false, Direction8.E);
 
-        var commit = Assert.Single(outbound.OfType<StepCommitRequestMessage>());
+        // NET2: the release commit rides the redundant-unreliable StepCommitBatch (head = the committed step),
+        // not the old reliable per-step StepCommitRequest.
+        Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
+        var commit = Assert.Single(outbound.OfType<StepCommitBatchMessage>());
         Assert.Equal(Direction8.E, commit.Direction);
 
         // Render is still gliding toward (21,20), not snapped back to (20,20).
@@ -114,6 +118,7 @@ public sealed class MmoClientCommitStepTests
         client.SendMoveIntent(false, Direction8.E);
 
         Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
+        Assert.Empty(outbound.OfType<StepCommitBatchMessage>());
     }
 
     // Arms the lead and polls until the render has glided past the 0.7 commit threshold onto the next tile.

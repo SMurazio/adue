@@ -12,6 +12,7 @@ public enum MessageType : ushort
     StepCommitRequest = 8,
     MovementMode = 9,
     MoveInput = 10,
+    StepCommitBatch = 11,
 
     ServerHello = 100,
     LoginResult = 101,

@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 23;
+    public const byte Version = 24;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -16,6 +16,9 @@ public static class ProtocolCodec
     // of prior inputs (deltas). Bound the decoded window so a malformed/hostile packet can't allocate
     // unboundedly; the client only ever fills ~4–8.
     private const int MaxMoveInputWindow = 32;
+
+    // NET2: same bound for the unreliable StepCommitBatch redundancy window (the client only ever fills ~7).
+    private const int MaxStepCommitWindow = 32;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -51,6 +54,9 @@ public static class ProtocolCodec
                 break;
             case MoveInputMessage value:
                 WriteMoveInput(writer, value);
+                break;
+            case StepCommitBatchMessage value:
+                WriteStepCommitBatch(writer, value);
                 break;
             case MovementModeMessage value:
                 writer.Write(value.ClientDriven);
@@ -201,6 +207,7 @@ public static class ProtocolCodec
             MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadBoolean(), ReadDirection(reader)),
             MessageType.StepCommitRequest => new StepCommitRequestMessage(reader.ReadUInt32(), ReadDirection(reader)),
             MessageType.MoveInput => ReadMoveInput(reader),
+            MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
@@ -338,6 +345,50 @@ public static class ProtocolCodec
         }
 
         return new MoveInputMessage(headSeq, moving, direction, window);
+    }
+
+    // NET2: wire layout is HeadSeq, Direction (newest committed step), then Count + that many
+    // {SeqDelta, Direction} window entries (prior committed steps as deltas off HeadSeq). Mirrored in
+    // ReadStepCommitBatch. A commit has no Moving flag — it is always a step.
+    private static void WriteStepCommitBatch(BinaryWriter writer, StepCommitBatchMessage value)
+    {
+        if (value.Window.Count > MaxStepCommitWindow)
+        {
+            throw new ProtocolException($"StepCommitBatch window too large: {value.Window.Count}.");
+        }
+
+        writer.Write(value.HeadSeq);
+        writer.Write((byte)value.Direction);
+        writer.Write((byte)value.Window.Count);
+        for (var i = 0; i < value.Window.Count; i++)
+        {
+            var entry = value.Window[i];
+            writer.Write(entry.SeqDelta);
+            writer.Write((byte)entry.Direction);
+        }
+    }
+
+    private static StepCommitBatchMessage ReadStepCommitBatch(BinaryReader reader)
+    {
+        var headSeq = reader.ReadUInt32();
+        var direction = ReadDirection(reader);
+        var count = reader.ReadByte();
+        if (count > MaxStepCommitWindow)
+        {
+            throw new ProtocolException($"StepCommitBatch window too large: {count}.");
+        }
+
+        var window = count == 0
+            ? (IReadOnlyList<StepCommitWindowEntry>)Array.Empty<StepCommitWindowEntry>()
+            : new List<StepCommitWindowEntry>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var seqDelta = reader.ReadByte();
+            var entryDirection = ReadDirection(reader);
+            ((List<StepCommitWindowEntry>)window).Add(new StepCommitWindowEntry(seqDelta, entryDirection));
+        }
+
+        return new StepCommitBatchMessage(headSeq, direction, window);
     }
 
     private static void WriteWorldSnapshotPayload(

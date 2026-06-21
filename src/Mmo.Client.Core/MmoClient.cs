@@ -95,6 +95,15 @@ public sealed class MmoClient : IDisposable
         = new (uint, bool, Direction8)[MoveInputRingCapacity];
     private int _moveInputRingCount;
     private int _moveInputRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
+    // NET2: ring of the last N committed steps (newest last). Each StepCommitBatch repeats the newest commit
+    // (head) PLUS a window of these prior committed steps (as deltas) so a dropped commit packet is recovered
+    // from a later, still-redundant packet's window instead of a reliable retransmit batch (which the server's
+    // cooldown gate would reject all at once → the GodotB speed-up/desync). Sized to ~the loss-recovery depth.
+    private const int StepCommitRingCapacity = 8;
+    private readonly (uint Seq, Direction8 Direction)[] _stepCommitRing
+        = new (uint, Direction8)[StepCommitRingCapacity];
+    private int _stepCommitRingCount;
+    private int _stepCommitRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -301,11 +310,13 @@ public sealed class MmoClient : IDisposable
         }
         else if (_renderMode == MovementRenderMode.UoClientDriven)
         {
-            // UO1: tick the predictor AND emit one StepCommitRequest per accepted step this call (the multi-step
-            // catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy frame). The server FOLLOWS these:
-            // it advances the entity only on accepted commits (the held-intent pacer is disabled for this session
-            // by the MovementModeMessage). Each commit rides a FRESH ++_moveSequence on the SHARED move cursor (the
-            // same cursor MoveIntent uses) and ReliableOrdered — the server validates + dedupes by that sequence.
+            // UO1: tick the predictor AND emit the accepted steps this call (the multi-step catch-up loop can
+            // resolve up to MaxTicksPerCall=8 steps on a laggy frame). The server FOLLOWS these: it advances the
+            // entity only on accepted commits (the held-intent pacer is disabled for this session by the
+            // MovementModeMessage). NET2: each accepted step mints a FRESH ++_moveSequence on the SHARED move
+            // cursor (the same cursor MoveIntent/MoveInput use) and is recorded in the commit ring; then ONE
+            // redundant-unreliable StepCommitBatch ships the newest step plus a window of prior committed steps,
+            // so a dropped commit recovers from a later packet's window instead of a reliable retransmit batch.
             if (_predictor is { } predictor)
             {
                 Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
@@ -313,7 +324,12 @@ public sealed class MmoClient : IDisposable
                 var emit = Math.Min(acceptedCount, accepted.Length);
                 for (var i = 0; i < emit; i++)
                 {
-                    Send(new StepCommitRequestMessage(++_moveSequence, accepted[i]), DeliveryMethod.ReliableOrdered);
+                    RecordStepCommit(++_moveSequence, accepted[i]);
+                }
+
+                if (emit > 0)
+                {
+                    SendStepCommitBatch();
                 }
             }
         }
@@ -537,11 +553,13 @@ public sealed class MmoClient : IDisposable
                 // the committed tile (no snap). Send the server-validated commit and start tracking it so the
                 // accept (confirmed tile reaches the target) or reject (tile never advances) reconciles. The commit
                 // rides a FRESH sequence strictly greater than the stop intent's, so the server's shared move-seq
-                // cursor accepts it after the keyup (and a re-ordered duplicate can't fire twice).
+                // cursor accepts it after the keyup (and a re-ordered duplicate can't fire twice). NET2: it rides
+                // the same redundant-unreliable StepCommitBatch channel as the UO stream (recorded in the ring,
+                // shipped as a batch) so a dropped release-commit is recovered from a later packet's window.
                 if (release.ShouldCommit)
                 {
-                    var commitSeq = ++_moveSequence;
-                    Send(new StepCommitRequestMessage(commitSeq, release.Direction), DeliveryMethod.ReliableOrdered);
+                    RecordStepCommit(++_moveSequence, release.Direction);
+                    SendStepCommitBatch();
                     _pendingCommit = new PendingCommit
                     {
                         Target = release.CommitTarget,
@@ -604,6 +622,75 @@ public sealed class MmoClient : IDisposable
             }
 
             window.Add(new MoveInputWindowEntry((byte)delta, entry.Moving, entry.Direction));
+        }
+
+        return window;
+    }
+
+    // NET2: push a just-committed step into the redundancy ring (newest last, dropping the oldest once full).
+    // The ring feeds the window of every subsequent StepCommitBatch.
+    private void RecordStepCommit(uint sequence, Direction8 direction)
+    {
+        if (_stepCommitRingCount < StepCommitRingCapacity)
+        {
+            var slot = (_stepCommitRingHead + _stepCommitRingCount) % StepCommitRingCapacity;
+            _stepCommitRing[slot] = (sequence, direction);
+            _stepCommitRingCount++;
+        }
+        else
+        {
+            _stepCommitRing[_stepCommitRingHead] = (sequence, direction);
+            _stepCommitRingHead = (_stepCommitRingHead + 1) % StepCommitRingCapacity;
+        }
+    }
+
+    // NET2: ship the current commit ring as ONE redundant-unreliable StepCommitBatch. The head is the NEWEST
+    // committed step in the ring; the window carries the prior committed steps as deltas (headSeq - entrySeq),
+    // newest-first. The server dedupes by sequence and applies each fresh commit through the EXISTING
+    // TryCommitStep. A dropped batch is recovered from the next batch's window (no reliable retransmit batch
+    // that the cooldown gate would reject all at once). No-op if nothing has been committed yet.
+    private void SendStepCommitBatch()
+    {
+        if (_stepCommitRingCount == 0)
+        {
+            return;
+        }
+
+        var headSlot = (_stepCommitRingHead + _stepCommitRingCount - 1) % StepCommitRingCapacity;
+        var head = _stepCommitRing[headSlot];
+        Send(
+            new StepCommitBatchMessage(head.Seq, head.Direction, BuildStepCommitWindow(head.Seq)),
+            DeliveryMethod.Unreliable);
+    }
+
+    // NET2: build the redundancy window for a batch whose head is headSeq — the prior committed steps still in
+    // the ring (every entry except the head), encoded as deltas (headSeq - entrySeq). Newest-first so a
+    // truncated read still recovers the most recent commits. Returns empty when the ring holds only the head.
+    private IReadOnlyList<StepCommitWindowEntry> BuildStepCommitWindow(uint headSeq)
+    {
+        if (_stepCommitRingCount <= 1)
+        {
+            return Array.Empty<StepCommitWindowEntry>();
+        }
+
+        var window = new List<StepCommitWindowEntry>(_stepCommitRingCount - 1);
+        // Walk newest-to-oldest, skipping the head entry.
+        for (var i = _stepCommitRingCount - 1; i >= 0; i--)
+        {
+            var slot = (_stepCommitRingHead + i) % StepCommitRingCapacity;
+            var entry = _stepCommitRing[slot];
+            if (entry.Seq == headSeq)
+            {
+                continue;
+            }
+
+            var delta = headSeq - entry.Seq;
+            if (delta == 0 || delta > byte.MaxValue)
+            {
+                continue;
+            }
+
+            window.Add(new StepCommitWindowEntry((byte)delta, entry.Direction));
         }
 
         return window;

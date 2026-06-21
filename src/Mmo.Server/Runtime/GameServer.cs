@@ -339,6 +339,12 @@ public sealed class GameServer
                     HandleStepCommit(session, commit.Sequence, commit.Direction);
                 }
                 break;
+            case StepCommitBatchMessage batch:
+                if (session.IsAuthenticated)
+                {
+                    HandleStepCommitBatch(session, batch);
+                }
+                break;
             case MovementModeMessage mode:
                 if (session.IsAuthenticated)
                 {
@@ -1675,6 +1681,61 @@ public sealed class GameServer
 
         // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
         // are distinct off a single head), so a stable insertion sort suffices.
+        fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
+        return fresh;
+    }
+
+    // NET2: ingest a redundant-unreliable StepCommitBatch. The packet carries the newest committed step
+    // (HeadSeq/Direction) plus a window of prior committed steps as deltas off HeadSeq. We reconstruct each
+    // commit's sequence, then apply them in ASCENDING seq order through the EXISTING HandleStepCommit path
+    // (TryConsumeCommitSequence dedups seq <= LastMoveSeq; TryCommitStep applies at the CURRENT server tick
+    // through the cooldown gate). Because every batch repeats the window, a dropped batch's commit is
+    // recovered from any later batch that still carries it — no reliable retransmit bunching, so the cooldown
+    // gate no longer rejects a batch in one go (the GodotB speed-up/desync). The stepping model is untouched:
+    // commits still apply at the current tick (authored-tick replay is Stage 4).
+    private void HandleStepCommitBatch(ClientSession session, StepCommitBatchMessage batch)
+    {
+        foreach (var (seq, direction) in ExtractFreshStepCommits(batch, session.LastMoveSeq))
+        {
+            // HandleStepCommit re-checks the cursor (TryConsumeCommitSequence) and applies via TryCommitStep;
+            // we pre-filtered + ordered so each fresh seq applies exactly once, oldest-first.
+            HandleStepCommit(session, seq, direction);
+        }
+    }
+
+    // NET2 (pure, unit-testable): given a redundant StepCommitBatch and the last seq already accepted on the
+    // shared move cursor, returns the fresh commits (seq > lastSeq) in ASCENDING seq order — head plus window
+    // entries reconstructed from their deltas (entrySeq = HeadSeq - SeqDelta). Already-seen and malformed
+    // (delta 0 / underflowing) entries are dropped. Applying the result oldest-first feeds the commit path each
+    // new step once; a "dropped head" batch's commit is recovered from a later batch's window.
+    internal static IReadOnlyList<(uint Seq, Direction8 Direction)> ExtractFreshStepCommits(
+        StepCommitBatchMessage batch,
+        uint lastSeq)
+    {
+        var fresh = new List<(uint Seq, Direction8 Direction)>(batch.Window.Count + 1);
+        if (batch.HeadSeq > lastSeq)
+        {
+            fresh.Add((batch.HeadSeq, batch.Direction));
+        }
+
+        for (var i = 0; i < batch.Window.Count; i++)
+        {
+            var entry = batch.Window[i];
+            if (entry.SeqDelta == 0 || entry.SeqDelta > batch.HeadSeq)
+            {
+                // 0 would alias the head; a delta past HeadSeq underflows — drop the malformed entry.
+                continue;
+            }
+
+            var entrySeq = batch.HeadSeq - entry.SeqDelta;
+            if (entrySeq > lastSeq)
+            {
+                fresh.Add((entrySeq, entry.Direction));
+            }
+        }
+
+        // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
+        // are distinct off a single head), so a stable sort suffices.
         fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
         return fresh;
     }

@@ -61,6 +61,26 @@ public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Directio
     public MessageType Type => MessageType.StepCommitRequest;
 }
 
+// NET2 (protocol v24): loss-robust UO commit delivery — the SAME redundancy-not-retransmission trick NET1
+// applied to held intent, now for the UoClientDriven per-step commit stream. Replaces the per-step reliable-
+// ordered StepCommitRequest send. Sent UNRELIABLE: each packet carries the NEWEST committed step (HeadSeq +
+// Direction) PLUS a sliding Window of the last few prior committed steps as deltas, so a dropped commit is
+// recovered from a LATER packet's window (~one send interval late, spread out) instead of a reliable
+// retransmit BATCH that the server's cooldown gate would reject all at once (the GodotB speed-up/desync). The
+// server dedupes by sequence and applies each fresh commit through the EXISTING TryCommitStep (current server
+// tick, cooldown gate) — authored-tick replay is deferred to Stage 4. Window entries are deltas off HeadSeq:
+// SeqDelta = (HeadSeq - entry.Seq), so entry seq = HeadSeq - SeqDelta. A commit has no Moving flag (it is
+// always a step), so an entry is just {SeqDelta, Direction}. Sequence shares the MoveIntent/MoveInput cursor.
+public readonly record struct StepCommitWindowEntry(byte SeqDelta, Direction8 Direction);
+
+public sealed record StepCommitBatchMessage(
+    uint HeadSeq,
+    Direction8 Direction,
+    IReadOnlyList<StepCommitWindowEntry> Window) : IProtocolMessage
+{
+    public MessageType Type => MessageType.StepCommitBatch;
+}
+
 // UO1 client-driven movement mode signal (protocol v22). A one-bit declaration from the client that THIS session
 // drives its own movement UO-style: the client predicts + banks tiles locally and sends one StepCommitRequest per
 // accepted step, and the server must STOP auto-pacing the entity from the held MoveIntent (otherwise the held-
