@@ -41,10 +41,10 @@ public sealed class VisualTuning
 
     // S96: when true, every Player-kind entity (local + remote) renders as the "Cato" AnimatedSprite3D billboard
     // (idle/walk PNG frames, side-view directional flip) instead of the character model. Flipped live by the F5
-    // "Cato sprite (player)" checkbox; default off = zero render change. The factory reads this when choosing a
-    // player's archetype (precedence: DebugFacingBox > CatoSprite > Player); the EntityRenderer rebuilds existing
-    // player visuals on toggle so the swap is immediate.
-    public bool DebugCatoSprite { get; set; }
+    // "Cato sprite (player)" checkbox; S104 default ON (the player renders as Cato — uncheck for the GLB rig). The
+    // factory reads this when choosing a player's archetype (precedence: DebugFacingBox > CatoSprite > Player);
+    // the EntityRenderer rebuilds existing player visuals on toggle so the swap is immediate.
+    public bool DebugCatoSprite { get; set; } = true;
 
     // S99: live-tunable placement for the Cato AnimatedSprite3D billboard, mirroring the per-archetype model
     // scales above. The art is a 512px frame with the cat low-center and a wand extending up-right (so the frame
@@ -67,9 +67,9 @@ public sealed class VisualTuning
     // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
     // frame. They overlap when prediction and server agree and separate visibly under lag, so the human can
     // SEE the residual movement divergence in real time. Flipped live by the F5 "Prediction tiles" checkbox;
-    // default off = zero render change (the markers are hidden and not repositioned). MmoClientRoot owns the
-    // two marker nodes and reads this flag each _Process frame; nothing in the visual hierarchy reads it.
-    public bool DebugPredictionTiles { get; set; }
+    // S104 default ON (a movement-tuning aid while we dial in feel — uncheck to hide the markers). MmoClientRoot
+    // owns the two marker nodes and reads this flag each _Process frame; nothing in the visual hierarchy reads it.
+    public bool DebugPredictionTiles { get; set; } = true;
 
     // Shared label font/outline styling (constant; not panel-tunable). Kept here so every visual builds an
     // identical Label3D without duplicating the magic numbers.

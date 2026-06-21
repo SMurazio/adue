@@ -108,7 +108,7 @@ public sealed class LocalPlayerCosmetic
         set => _commitThreshold = Math.Clamp(value, 0.0d, 1.0d);
     }
 
-    private double _commitThreshold = 0.7d;
+    private double _commitThreshold = 0.55d;
 
     // S103: a pending commit-step is in flight — release-past-threshold kept the render gliding toward _leadTarget
     // (now _pendingCommitTarget) and the client sent a commit request. While true, Tick must NOT re-arm a fresh

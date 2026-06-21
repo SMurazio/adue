@@ -46,7 +46,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// blends the confirmed tile and cosmetic position and frame-rate-independently smooths a persistent focus
 	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
 	private float _cameraFollowBlend = 1.0f;
-	private float _cameraSmoothing = 0f;
+	private float _cameraSmoothing = 15f;
 	// S95 default 4 tiles. S102: now a live F6 field (was a const) feeding CameraFocusTracker.Advance's
 	// teleport-snap threshold — beyond this jump the camera hard-snaps (respawn/zone change) instead of gliding.
 	private float _cameraTeleportSnapTiles = 4f;

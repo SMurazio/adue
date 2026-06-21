@@ -103,7 +103,7 @@ public sealed class MmoClient : IDisposable
     // other lead settings): whether a release past the threshold commits the near-done step (default ON) and the
     // progress threshold (default 0.7).
     private bool _commitStepOnRelease = true;
-    private double _commitStepThreshold = 0.7d;
+    private double _commitStepThreshold = 0.55d;
 
     // S103: the in-flight commit's reconciliation state, or null when none is pending. Tracks the committed target
     // tile, the RecipientStepSeq at send time (the server's accepted-step count then), and a bounded snapshot grace

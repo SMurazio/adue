@@ -104,6 +104,7 @@ public sealed class LocalPlayerCosmeticTests
         // The render must settle onto the confirmed tile within one cadence, with NO overshoot persisting (the
         // exact symptom model A can latch on — B must converge exactly to truth).
         var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitStepEnabled = false; // isolate the disagreeing-confirm cut from the S103 commit-step path
 
         cosmetic.SetIntent(true, Direction8.E, Ms(0));
         cosmetic.Tick(Ms(0));
@@ -149,6 +150,7 @@ public sealed class LocalPlayerCosmeticTests
         // center IMMEDIATELY at release time — not a cadence later. (Before S91 the release tweened back over a
         // full cadence, so Sample(now) would still be mid-glide east of center; after S91 it snaps.)
         var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
+        cosmetic.CommitStepEnabled = false; // isolate the S91 snap from the S103 commit-step path
 
         cosmetic.SetIntent(true, Direction8.E, Ms(0));
         cosmetic.Tick(Ms(0));
@@ -174,6 +176,7 @@ public sealed class LocalPlayerCosmeticTests
         // so immediately at release the render is still east of center, and a cadence later it has settled exactly.
         var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
         cosmetic.SnapOnRelease = false;
+        cosmetic.CommitStepEnabled = false; // isolate the S102 soft-settle from the S103 commit-step path
 
         cosmetic.SetIntent(true, Direction8.E, Ms(0));
         cosmetic.Tick(Ms(0));
@@ -199,6 +202,7 @@ public sealed class LocalPlayerCosmeticTests
         // The default (SnapOnRelease == true) must keep the S91 hard snap byte-for-byte: render is EXACTLY the
         // confirmed center at the release instant. Guards the new flag's default against a regression.
         var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
+        cosmetic.CommitStepEnabled = false; // isolate the S91 hard snap from the S103 commit-step path
         Assert.True(cosmetic.SnapOnRelease); // default
 
         cosmetic.SetIntent(true, Direction8.E, Ms(0));
@@ -591,10 +595,10 @@ public sealed class LocalPlayerCosmeticTests
     }
 
     [Fact]
-    public void CommitThreshold_DefaultIsSevenTenths_AndSetterClampsToUnitRange()
+    public void CommitThreshold_DefaultIsPointFiveFive_AndSetterClampsToUnitRange()
     {
         var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
-        Assert.Equal(0.7d, cosmetic.CommitThreshold, 6);
+        Assert.Equal(0.55d, cosmetic.CommitThreshold, 6);
 
         cosmetic.CommitThreshold = 5.0d;
         Assert.Equal(1.0d, cosmetic.CommitThreshold, 6);

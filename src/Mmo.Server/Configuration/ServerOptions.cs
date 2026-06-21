@@ -60,7 +60,7 @@ public sealed record ServerOptions(
             ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
             ReadInt("MMO_STEP_COOLDOWN_MS", 140),
             ReadInt("MMO_PERSISTENCE_CHECKPOINT_SECONDS", 15),
-            ReadFloat("MMO_INTEREST_RADIUS", 35f),
+            ReadFloat("MMO_INTEREST_RADIUS", 30f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
             ReadSet("MMO_ADMIN_NAMES", "Admin"))
