@@ -125,6 +125,14 @@ public sealed class MmoClient : IDisposable
     private bool _commitStepOnRelease = true;
     private double _commitStepThreshold = 0.55d;
 
+    // UO4: "stop on reversal" (settle-then-go) lever for the predictor modes. When ON, a ~180° flip of the held
+    // direction while moving inserts one clean settle beat before resuming the new direction (kills the left-right
+    // bounce) instead of reversing mid-step. Held at the client level (like the other movement levers) so a value
+    // set before the predictor attaches — or after a respawn re-creates it — is honoured: EnsurePredictor re-seeds
+    // it onto the freshly-attached predictor. SetStopOnReversal routes it live (no restart). Default OFF so the
+    // current behaviour is unchanged until opted in.
+    private bool _stopOnReversal;
+
     // S103: the in-flight commit's reconciliation state, or null when none is pending. Tracks the committed target
     // tile, the RecipientStepSeq at send time (the server's accepted-step count then), and a bounded snapshot grace
     // counter. The cosmetic driver handles the accept render (confirmed tile reaches target) and a diverging confirm
@@ -353,6 +361,10 @@ public sealed class MmoClient : IDisposable
             SendMovementModeSignal(clientDriven: false);
         }
 
+        // UO3: tell the predictor whether it is now in the client-driven (per-step-commit) mode BEFORE re-anchoring,
+        // so its release/at-rest reconcile holds for banked commits in UO mode and converges-down in the others.
+        _predictor?.SetClientDriven(nowUo);
+
         if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
         {
             local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
@@ -430,6 +442,20 @@ public sealed class MmoClient : IDisposable
         {
             local.SetCommitStepThreshold(_commitStepThreshold);
         }
+    }
+
+    // UO4: whether the predictor settles-then-goes on a ~180° reversal (F6 "Stop on reversal"). Reflects the value
+    // last set (seeded into the F6 toggle on panel open). Only the predictor modes (Predicted / UoClientDriven)
+    // read it; inert in the cosmetic modes.
+    public bool StopOnReversal => _stopOnReversal;
+
+    // UO4: live-toggles the predictor's stop-on-reversal (settle-then-go) behaviour. Routed to the active predictor
+    // immediately (no restart); stored at the client level so a value set before attach / after a respawn is
+    // re-applied by EnsurePredictor. No-op safe when no predictor yet.
+    public void SetStopOnReversal(bool enabled)
+    {
+        _stopOnReversal = enabled;
+        _predictor?.SetStopOnReversal(enabled);
     }
 
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
@@ -533,6 +559,13 @@ public sealed class MmoClient : IDisposable
         }
 
         _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTickMs());
+        // UO3: a freshly-attached predictor defaults to server-paced; if the active mode is UoClientDriven (e.g. a
+        // respawn / AOI re-entry while already in UO mode) re-declare the client-driven flag so its release/at-rest
+        // reconcile holds for banked commits, in step with the MovementModeMessage re-sent below.
+        _predictor.SetClientDriven(_renderMode == MovementRenderMode.UoClientDriven);
+        // UO4: re-seed the stop-on-reversal lever onto the freshly-attached (or respawn-recreated) predictor so a
+        // value set before attach / after a respawn is honoured (mirrors the cosmetic-lever seeding above).
+        _predictor.SetStopOnReversal(_stopOnReversal);
         // S89/S92: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
         // DRIVES the render whenever RenderMode != Predicted (CosmeticLead, the default, or AcceptDeny); only in
         // the explicit Predicted mode is it dormant and the predictor owns the render.

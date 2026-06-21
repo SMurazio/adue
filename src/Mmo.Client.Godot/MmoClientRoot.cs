@@ -136,6 +136,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// Predicted / AcceptDeny / UoClientDriven. Captured as their owning row containers so visibility toggles the
 	// whole label+control row (not just the input). Re-evaluated on render-mode change and on panel open.
 	private readonly List<Control> _modelBOnlyRows = new();
+	// UO4: the "Stop on reversal" (settle-then-go) toggle, and the rows that are PREDICTOR-modes only (Predicted /
+	// UoClientDriven) — the stop-on-reversal lever lives in the predictor, so the F6 panel SHOWS it only in those
+	// modes and hides it in CosmeticLead / AcceptDeny (where it is inert). Re-evaluated on render-mode change and
+	// on panel open, alongside the model-B-only rows.
+	private CheckBox? _stopOnReversalCheck;
+	private readonly List<Control> _predictorOnlyRows = new();
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -948,6 +954,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_moveCommitThreshold = AddTuningField(rows, "Commit threshold (0..1)", OnMovementApplyPressed);
 		RegisterModelBOnlyRow(_moveCommitThreshold);
 
+		// UO4 new live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
+		// flip while moving settles to a clean tile stop, then resumes the new direction (kills the left-right
+		// bounce). OFF (default) = the current immediate reverse. Only the PREDICTOR modes (Predicted /
+		// UoClientDriven) read it; hidden in CosmeticLead / AcceptDeny where it is inert.
+		var stopOnReversal = new CheckBox
+		{
+			Name = "StopOnReversal",
+			Text = "Stop on reversal",
+			ButtonPressed = _client?.StopOnReversal ?? false
+		};
+		stopOnReversal.AddThemeFontSizeOverride("font_size", 13);
+		stopOnReversal.Toggled += ApplyStopOnReversal;
+		rows.AddChild(stopOnReversal);
+		_stopOnReversalCheck = stopOnReversal;
+		_predictorOnlyRows.Add(stopOnReversal); // UO4: predictor-modes only.
+
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnMovementApplyPressed;
@@ -1014,6 +1036,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			row.Visible = isModelB;
 		}
 
+		// UO4: the stop-on-reversal lever is predictor-only (Predicted / UoClientDriven). Show it there, hide it in
+		// the cosmetic modes where the predictor isn't driving.
+		var isPredictorMode = mode is MovementRenderMode.Predicted or MovementRenderMode.UoClientDriven;
+		foreach (var row in _predictorOnlyRows)
+		{
+			row.Visible = isPredictorMode;
+		}
+
 		if (_renderModeCaption is not null)
 		{
 			_renderModeCaption.Text = mode switch
@@ -1052,6 +1082,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplyCommitStepOnRelease(bool enabled)
 	{
 		_client?.SetCommitStepOnRelease(enabled);
+	}
+
+	// UO4 F6 live toggle ("Stop on reversal"). Route the flag to the client (and the active predictor) immediately
+	// — no restart. ON = settle-then-go on a ~180° reversal; OFF = the current immediate reverse.
+	private void ApplyStopOnReversal(bool enabled)
+	{
+		_client?.SetStopOnReversal(enabled);
 	}
 
 	// Live vsync / fps toggle, shared by the F5 checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
@@ -1637,6 +1674,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S103: seed the commit-step toggle + threshold field from the live client values.
 		_commitStepCheck?.SetPressedNoSignal(_client?.CommitStepOnRelease ?? true);
 		SetField(_moveCommitThreshold, _client?.CommitStepThreshold ?? 0.7d);
+		// UO4: seed the stop-on-reversal toggle from the live client value (default OFF).
+		_stopOnReversalCheck?.SetPressedNoSignal(_client?.StopOnReversal ?? false);
 	}
 
 	private static void SetField(LineEdit? field, double value)

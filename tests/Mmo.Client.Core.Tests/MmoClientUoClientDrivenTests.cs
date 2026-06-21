@@ -101,6 +101,40 @@ public sealed class MmoClientUoClientDrivenTests
         Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
     }
 
+    [Fact]
+    public void UoMode_StopOnReversalOn_180Flip_SuppressesTheReverseCommitForOneBeat()
+    {
+        // UO4 at the client seam: in UoClientDriven with "Stop on reversal" ON, a 180° flip while moving must NOT
+        // emit a reversed commit on the very next beat (the settle) — the server, which follows commits, then does
+        // not step the reverse either. The beat after resumes and emits the new (W) commit.
+        var spawn = new TileCoord(20, 20);
+        var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
+        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
+        client.SetStopOnReversal(true);
+        outbound.Clear();
+
+        // Travel E for two steps, then flip to W (180°).
+        client.SendMoveIntent(true, Direction8.E);
+        client.Poll(TimeSpan.FromMilliseconds(0));                 // E commit (step to 21,20)
+        client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));    // E commit (step to 22,20)
+        Assert.Equal(new TileCoord(22, 20), client.PredictedLocalTile);
+
+        outbound.Clear();
+        client.SendMoveIntent(true, Direction8.W);                 // 180° reversal -> arm a settle
+
+        // The next beat is the SETTLE: no commit emitted, no tile move.
+        client.Poll(TimeSpan.FromMilliseconds(2 * StepCooldownMs));
+        Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
+        Assert.Equal(new TileCoord(22, 20), client.PredictedLocalTile);
+
+        // The following beat resumes W: one commit, stepping to (21,20).
+        client.Poll(TimeSpan.FromMilliseconds(3 * StepCooldownMs));
+        var commits = outbound.OfType<StepCommitRequestMessage>().ToList();
+        Assert.Single(commits);
+        Assert.Equal(Direction8.W, commits[0].Direction);
+        Assert.Equal(new TileCoord(21, 20), client.PredictedLocalTile);
+    }
+
     private static MmoClient CreateLoggedInClientWithLocalEntity(TileCoord spawn, out List<IProtocolMessage> outbound)
     {
         outbound = [];

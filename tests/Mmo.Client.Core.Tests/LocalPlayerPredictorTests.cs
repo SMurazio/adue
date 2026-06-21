@@ -1159,4 +1159,227 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(0, count);
         Assert.Equal(new TileCoord(0, 0), predictor.PredictedTile);
     }
+
+    // ---- UO3: client-driven release holds for banked (committed) steps instead of snapping back -------
+
+    [Fact]
+    public void ClientDriven_ReleaseWithPendingCommits_HoldsForwardOntoBankedTile_NoBackwardSnap()
+    {
+        // THE UO3 BUG, pinned. In UoClientDriven every predicted step is an emitted StepCommitRequest the server
+        // FOLLOWS, so the predicted-but-unconfirmed steps are GENUINE banked commits in flight. Predict 3 E steps
+        // to (3,0) at seq 3, then RELEASE. A snapshot lands confirming only seq 1 at (1,0) — the server is RTT
+        // behind, still working through the banked commits. The render must HOLD forward at the banked head (3,0),
+        // NOT collapse back onto the confirmed (1,0). The pre-UO3 reconcile forced rawInFlight=0 on !_moving and
+        // re-anchored to (1,0) — the backward snap. With SetClientDriven(true) the 2 pending commits re-project
+        // forward, keeping the present tile at (3,0).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
+
+        // Server confirms seq 1 @ (1,0) — two banked E commits still unconfirmed. Re-project them forward from the
+        // anchor => present tile stays (3,0). No backward yank (Matched: the re-projected present equals the head).
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(320));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);       // held forward, NOT collapsed to (1,0)
+    }
+
+    [Fact]
+    public void ClientDriven_ReleaseThenServerConfirmsBankedSteps_SettlesForwardOntoDestination()
+    {
+        // The banked commits drain forward: after release, each snapshot confirms one more of the in-flight
+        // commits, and the predicted tile stays pinned at the banked head (3,0) the whole way — settling forward,
+        // never snapping back — until the final confirm matches exactly.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
+
+        // Confirms arrive in order: seq 1, 2, then 3. The head stays (3,0) at every step (no backward move).
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched,
+            predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(360)));
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched,
+            predictor.Reconcile(new TileCoord(2, 0), 2u, TimeSpan.FromMilliseconds(410)));
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+
+        // Final confirm at the banked destination: clean match, no movement.
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched,
+            predictor.Reconcile(new TileCoord(3, 0), 3u, TimeSpan.FromMilliseconds(460)));
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+    }
+
+    [Fact]
+    public void ClientDriven_GenuineReject_StillCorrectsToServerTruth()
+    {
+        // Only a GENUINE reject snaps. The client committed 3 E steps to (3,0), but the server REFUSED the step at
+        // seq 2 (a race / blocked / commit_too_early) and settled at (1,1) — off the predicted E line — confirming
+        // seq 2 @ (1,1). Re-anchor on the truth and re-project the remaining banked seq-3 E commit forward => (2,1),
+        // NOT the stale (3,0): a real divergence corrects even in client-driven mode.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
+
+        var outcome = predictor.Reconcile(new TileCoord(1, 1), 2u, TimeSpan.FromMilliseconds(320));
+
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        // Re-anchored to the seq-2 truth (1,1), then the recorded seq-3 E commit re-projected => (2,1).
+        Assert.Equal(new TileCoord(2, 1), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);                     // seq head preserved across the replay
+    }
+
+    [Fact]
+    public void ClientDriven_DeepBankedLead_HoldsFullCount_NotCappedAtMaxInFlightLead()
+    {
+        // The banked commits are GENUINE (the server follows every one), so the lead is NOT the input-skew cap
+        // (MaxInFlightLead=2): under RTT it is several real tiles. Predict 4 E steps to (4,0), release, confirm
+        // seq 1 @ (1,0) — three banked commits still in flight. They re-project forward to (4,0) (not clamped to a
+        // 2-tile (3,0) snap, which is exactly the multi-tile backward snap UO3 fixes).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        for (var step = 0; step < 4; step++)
+        {
+            predictor.Tick(TimeSpan.FromMilliseconds(step * 150));
+        }
+
+        Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);
+        Assert.Equal(4u, predictor.PredictedStepSeq);
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(610));
+
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(620));
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+        Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);       // full banked lead held, not capped to 2
+    }
+
+    // ---- UO4: stop-on-reversal (settle-then-go) toggle --------------------------------------------------
+
+    [Fact]
+    public void StopOnReversal_On_180Flip_SettlesOneBeat_ThenResumesNewDirection()
+    {
+        // Travel E to (2,0), then flip the held direction to W (the exact 180° opposite) while moving, with the
+        // toggle ON. The next eligible boundary must be a clean SETTLE (no tile move — the avatar holds at (2,0)
+        // and faces W) instead of an immediate reverse step to (1,0). The boundary AFTER that resumes stepping W.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetStopOnReversal(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1, travelling E
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+
+        // Flip to W mid-cadence (t=160). Detected as a 180° reversal vs the E travel direction -> arm a settle.
+        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(160));
+
+        // The next boundary (t=300) is the settle: NO move (still (2,0)), but facing turns W. No reversed step.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(300)));
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.W, predictor.Facing);
+
+        // The following boundary (t=450) resumes stepping W from the settled tile -> (1,0).
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(450)));
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.W, predictor.Facing);
+    }
+
+    [Fact]
+    public void StopOnReversal_On_180Flip_EmitsNoCommitOnTheSettleBeat()
+    {
+        // The settle beat must NOT emit a commit (so a UoClientDriven server, which follows commits, also doesn't
+        // step the reverse — staying in lockstep). On the settle boundary the reported accepted-step count is 0.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetStopOnReversal(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        var buffer = new Direction8[8];
+        predictor.Tick(TimeSpan.Zero, buffer, out _);                     // (1,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(150), buffer, out _);    // (2,0)
+
+        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(160));
+
+        // Settle boundary: zero accepted steps reported (no commit), no tile move.
+        var moved = predictor.Tick(TimeSpan.FromMilliseconds(300), buffer, out var count);
+        Assert.False(moved);
+        Assert.Equal(0, count);
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+
+        // Next boundary: one W step reported (the resume).
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(450), buffer, out count));
+        Assert.Equal(1, count);
+        Assert.Equal(Direction8.W, buffer[0]);
+    }
+
+    [Fact]
+    public void StopOnReversal_Off_180Flip_ReversesImmediately_Unchanged()
+    {
+        // With the toggle OFF (default), a 180° flip is unchanged: the next boundary steps the reversed direction
+        // immediately (S98), stepping back W to (1,0) — the existing behaviour, no settle beat.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        // (no SetStopOnReversal — default off)
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
+
+        predictor.SetIntent(true, Direction8.W, TimeSpan.FromMilliseconds(160));
+
+        // No settle: the next boundary steps W immediately back to (1,0).
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));
+        Assert.Equal(new TileCoord(1, 0), predictor.PredictedTile);
+        Assert.Equal(Direction8.W, predictor.Facing);
+    }
+
+    [Fact]
+    public void StopOnReversal_On_NonOppositeTurn_StepsImmediately_NoSettle()
+    {
+        // A non-180° change (E -> N, a 90° turn) is unaffected even with the toggle ON: it steps immediately at the
+        // next boundary per S98 — only the exact opposite triggers the settle.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetStopOnReversal(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0)
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0)
+
+        predictor.SetIntent(true, Direction8.N, TimeSpan.FromMilliseconds(160));
+
+        // 90° turn: steps N immediately at the next boundary (no settle) -> (2,-1).
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300)));
+        Assert.Equal(new TileCoord(2, -1), predictor.PredictedTile);
+        Assert.Equal(Direction8.N, predictor.Facing);
+    }
+
+    [Fact]
+    public void ServerPaced_ReleaseWithOverPrediction_StillConvergesDown_Unchanged()
+    {
+        // The model-A contract is UNCHANGED when not client-driven: an over-prediction past a release is overshoot
+        // the stopped server never confirms, so it converges DOWN to the stop tile. This is the same scenario as
+        // ClientDriven_ReleaseWithPendingCommits but with SetClientDriven NOT set — it must still pull back to the
+        // server's settled tile (the default the UO3 flag opts out of). Guards against a regression of model A.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        // (no SetClientDriven — default server-paced)
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(310));
+
+        // Server settled at (2,0) @ seq 2 — one step short. Model A converges DOWN (no banked commits to honour).
+        var outcome = predictor.Reconcile(new TileCoord(2, 0), 2u, TimeSpan.FromMilliseconds(360));
+        Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Corrected, outcome);
+        Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
+    }
 }

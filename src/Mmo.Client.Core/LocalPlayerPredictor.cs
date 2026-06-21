@@ -106,6 +106,28 @@ public sealed class LocalPlayerPredictor
     private bool _moving;
     private Direction8 _direction;
 
+    // UO3: client-driven (UoClientDriven) mode flag. In this mode EVERY accepted predicted step is emitted as an
+    // explicit StepCommitRequest the server FOLLOWS (the held-intent pacer is off for the session), so each
+    // predicted-but-unconfirmed step is a GENUINE banked, in-flight commit — not a guess the predictor made that
+    // the server might never take. That changes Reconcile's at-rest behaviour: on release (!_moving) the
+    // predicted-past-the-confirm steps are the RTT-worth of commits the server is still working through, so the
+    // render must HOLD at the banked head and settle FORWARD as the confirms arrive, NOT collapse DOWN onto the
+    // (RTT-behind) confirmed tile — the backward-snap-on-release bug. Default false keeps model A / the parity
+    // tests / the cosmetic modes byte-for-byte (those have no banked commit stream; their over-prediction past a
+    // release IS overshoot the stopped server will never confirm, so they still converge down).
+    private bool _clientDriven;
+
+    // UO4 — stop-on-reversal (settle-then-go). When on, a ~180° flip of the held direction while moving inserts one
+    // clean settle beat before the avatar resumes the new way, instead of reversing mid-step (the left-right
+    // bounce). _stopOnReversal is the live toggle (default OFF = today's immediate reverse). _lastAcceptedDir is the
+    // direction of the most recent ACCEPTED step (the avatar's current travel direction; only valid once
+    // _hasAcceptedStep is set). _settleReversalArmed is set by SetIntent when a 180° flip is detected while moving,
+    // and consumed by Tick at the next eligible boundary as a no-step/no-commit settle beat.
+    private bool _stopOnReversal;
+    private Direction8 _lastAcceptedDir;
+    private bool _hasAcceptedStep;
+    private bool _settleReversalArmed;
+
     // ---- Tick grid (S81) -------------------------------------------------------------------------------
     // The server's tick interval in ms; the unit of the whole gate. cadence/turn-delay are expressed as an
     // INTEGER number of these ticks so the predictor steps exactly where WorldEntity.TryStep does.
@@ -209,6 +231,33 @@ public sealed class LocalPlayerPredictor
         RecomputeTickCounts();
     }
 
+    // UO3: declares whether this predictor is driving the UoClientDriven mode (per-step commits the server
+    // follows). The client flips it when entering/leaving UoClientDriven (SetMovementRenderMode / EnsurePredictor),
+    // before/in step with the MovementModeMessage that flips the server's pacing. Only Reconcile reads it (its
+    // at-rest hold-for-banked-commits behaviour); stepping, calibration, and the cosmetic/Predicted paths are
+    // untouched. Default false (server-paced) keeps every existing mode byte-for-byte.
+    public void SetClientDriven(bool clientDriven)
+    {
+        _clientDriven = clientDriven;
+    }
+
+    // UO3: read-only view of the client-driven flag (for the F6 panel / tests).
+    public bool ClientDriven => _clientDriven;
+
+    // UO4: live-toggles the "stop on reversal" (settle-then-go) behaviour. When a held direction flips ~180° to the
+    // OPPOSITE of the direction the avatar is currently travelling, the predictor inserts ONE clean settle beat
+    // (hold on the current tile, no step, no commit) instead of stepping the reversal mid-tween — then resumes
+    // stepping in the new direction from that settled tile. Latency-free: it only suppresses the reverse step; it
+    // adds no input delay to any non-180° change. Default OFF (the existing immediate-reverse behaviour) so it can
+    // be A/B'd. See SetIntent (detection) and Tick (the settle beat).
+    public void SetStopOnReversal(bool enabled)
+    {
+        _stopOnReversal = enabled;
+    }
+
+    // UO4: read-only view of the stop-on-reversal flag (for the F6 panel / tests).
+    public bool StopOnReversal => _stopOnReversal;
+
     // S81: re-anchors the wall-clock → serverTick calibration on a snapshot whose authoritative tick is known.
     // serverTick is the tick the snapshot was produced at; receivedAt is when it arrived (wall clock). We want
     // serverTick(receivedAt) to read serverTick. A RAW re-base (set ref = serverTick @ receivedAt) would jump on
@@ -275,6 +324,18 @@ public sealed class LocalPlayerPredictor
     {
         if (moving)
         {
+            // UO4 stop-on-reversal: detect a ~180° flip of the held direction AGAINST the avatar's current travel
+            // direction (the last accepted step), while already moving, BEFORE we overwrite _direction. Arm a one-
+            // beat settle so Tick holds on the current tile for one cooldown and then resumes the new way, instead
+            // of stepping the reverse mid-tween. Only when the toggle is on, we're already moving, at least one step
+            // has been taken, and the flip is the exact opposite (a non-180° change is unaffected — it steps
+            // immediately per S98). Re-arm is idempotent: a repeated opposite intent inside the same beat keeps a
+            // single settle armed.
+            if (_stopOnReversal && _moving && _hasAcceptedStep && IsOpposite(direction, _lastAcceptedDir))
+            {
+                _settleReversalArmed = true;
+            }
+
             // Arm the first action only on a true idle->moving transition. Quantise the press to the next tick
             // boundary with ceil; if a surviving _nextEligibleTick from a prior action is LATER (a quick
             // stop->start), keep it so the cooldown/turn-delay already consumed is respected.
@@ -295,7 +356,20 @@ public sealed class LocalPlayerPredictor
         else
         {
             _moving = false;
+            // UO4: a release cancels any pending reversal settle — the avatar is stopping anyway, so there is no
+            // reverse step to suppress.
+            _settleReversalArmed = false;
         }
+    }
+
+    // UO4: two directions are ~180° opposite iff their tile deltas are exact negations (E<->W, N<->S, NE<->SW,
+    // NW<->SE). Equivalent to (a - b) mod 8 == 4 on the Direction8 ring; the delta-negation form is used so it
+    // stays correct if the enum order ever changes.
+    private static bool IsOpposite(Direction8 a, Direction8 b)
+    {
+        var da = a.Delta();
+        var db = b.Delta();
+        return da.X == -db.X && da.Y == -db.Y;
     }
 
     // Advances the prediction to wall-clock time now: processes each elapsed tick boundary once, in order,
@@ -331,6 +405,20 @@ public sealed class LocalPlayerPredictor
             for (var processed = 0; processed < MaxTicksPerCall && _nextEligibleTick.Value <= currentTick; processed++)
             {
                 var actionTick = _nextEligibleTick.Value;
+
+                // UO4 settle-then-go: a ~180° reversal was detected while moving (SetIntent armed it). Spend THIS
+                // eligible boundary as a clean settle instead of stepping the reverse: do NOT move the tile and do
+                // NOT emit a commit (so the server, which follows commits in UO mode, stays in lockstep), just turn
+                // to face the new direction and consume one full cooldown. The avatar's in-flight tween finishes
+                // onto its current tile (a clean stop), then the NEXT boundary steps the new direction normally —
+                // one clean settle instead of a mid-step bounce. Only ever fires when the toggle is on.
+                if (_settleReversalArmed)
+                {
+                    _settleReversalArmed = false;
+                    _facing = _direction;
+                    _nextEligibleTick = actionTick + _stepCooldownTicks;
+                    continue;
+                }
 
                 // S98: a direction change steps IMMEDIATELY in the new direction — there is no separate turn
                 // beat. The step itself faces you (AdvanceOneStep / the blocked-hold branch below set _facing =
@@ -396,6 +484,11 @@ public sealed class LocalPlayerPredictor
         if (startTween)
         {
             _inFlightDir[_predictedStepSeq % InFlightDirCapacity] = direction;
+            // UO4: remember the avatar's current travel direction (the most recent LIVE accepted step) so SetIntent
+            // can detect a ~180° reversal against it. Re-projection replays (startTween == false) must NOT touch it
+            // — they replay historical directions, not a new live heading.
+            _lastAcceptedDir = direction;
+            _hasAcceptedStep = true;
             StartTween(tweenFrom, RenderPosition.FromTile(_predictedTile), stepStartedAt, _cadenceMs);
         }
     }
@@ -462,24 +555,49 @@ public sealed class LocalPlayerPredictor
         _highestReconciledStepSeq = serverStepSeq;
 
         // The in-flight steps are the ones we predicted past the server's confirmed point — the ones genuinely
-        // sent-but-not-yet-acked. ONLY while the intent is still held: if the server has confirmed at/beyond our
-        // head (serverStepSeq >= predictedStepSeq) nothing is in flight, and once the player has STOPPED there is
-        // no held intent to re-project (the steps we predicted past the confirm are OVERSHOOT the now-stopped
-        // server will never confirm — their intents arrived after release), so we converge DOWN to the confirmed
-        // tile rather than re-project them forward (which would strand the avatar ahead forever).
+        // sent-but-not-yet-acked (count = predictedStepSeq - serverStepSeq, when positive).
         //
-        // CAP the re-projected count at MaxInFlightLead. The genuine un-acked lead on a sane uplink is ~1 step;
-        // a larger predictedStepSeq - serverStepSeq means the predictor's instantaneous-input step decisions
-        // out-ran the server's delayed-input ones (the input-arrival skew predicting phantom steps the server
-        // never took). Those excess steps are a misprediction, not real in-flight, so we DON'T re-project them —
-        // we converge their excess toward the server. This bounds divergence DURING movement (the head can lead
-        // by at most the cap) and still converges exactly at rest. It is a reconcile-layer correction AFTER the
-        // fact (prediction still runs fully forward in Tick — snappy on input), NOT the reverted S82 forward
-        // step-withholding (which added input lag by holding requested steps back).
-        var rawInFlight = (!_moving || serverStepSeq >= _predictedStepSeq)
-            ? 0
-            : (int)(_predictedStepSeq - serverStepSeq);
-        var inFlight = Math.Min(rawInFlight, MaxInFlightLead);
+        // The model differs by mode (UO3):
+        //
+        //  * SERVER-PACED (Predicted / cosmetic, _clientDriven == false): in-flight is honoured ONLY while the
+        //    intent is still held. Once the player has STOPPED there is no held intent to re-project — the steps
+        //    predicted past the confirm are OVERSHOOT the now-stopped server will never confirm (their intents
+        //    arrived after release) — so we converge DOWN to the confirmed tile. The count is CAPPED at
+        //    MaxInFlightLead: a larger lead is the input-arrival skew (the predictor's instantaneous-input step
+        //    decisions out-ran the server's delayed-input ones — phantom steps the server never took), a
+        //    misprediction we converge toward the server rather than re-project.
+        //
+        //  * CLIENT-DRIVEN (UoClientDriven, _clientDriven == true): every accepted predicted step was emitted as an
+        //    explicit StepCommitRequest the server FOLLOWS, so a predicted-but-unconfirmed step is a GENUINE banked
+        //    commit the server is still working through — NOT a guess. Therefore on RELEASE (!_moving) the in-flight
+        //    commits are STILL in flight (the server keeps finishing them), so we re-project them FORWARD and the
+        //    render settles onto the banked destination as the confirms arrive — instead of collapsing onto the
+        //    RTT-behind confirmed tile (the backward-snap-on-release bug). And the lead is NOT the input-skew cap:
+        //    it is the real RTT-worth of banked commits, so we re-project the full count (bounded only by the
+        //    recorded-direction ring so it can't read stale slots). A genuine reject still corrects: a step the
+        //    server actually refused leaves serverStepSeq/confirmedTile off the re-projected path, so the recomputed
+        //    present tile diverges and we Correct/Snap as usual — only a real reject moves the render.
+        int rawInFlight;
+        int cap;
+        if (serverStepSeq >= _predictedStepSeq)
+        {
+            rawInFlight = 0;
+            cap = 0;
+        }
+        else if (_clientDriven)
+        {
+            // Banked commits are in flight whether the key is held or released — the server follows them either way.
+            rawInFlight = (int)(_predictedStepSeq - serverStepSeq);
+            cap = InFlightDirCapacity;
+        }
+        else
+        {
+            // Server-paced: only while moving, and capped to the genuine un-acked window.
+            rawInFlight = _moving ? (int)(_predictedStepSeq - serverStepSeq) : 0;
+            cap = MaxInFlightLead;
+        }
+
+        var inFlight = Math.Min(rawInFlight, cap);
 
         var oldPredictedTile = _predictedTile;
         var oldRenderSource = SampleInternal(now);
