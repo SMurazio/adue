@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 24;
+    public const byte Version = 25;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -347,9 +347,9 @@ public static class ProtocolCodec
         return new MoveInputMessage(headSeq, moving, direction, window);
     }
 
-    // NET2: wire layout is HeadSeq, Direction (newest committed step), then Count + that many
-    // {SeqDelta, Direction} window entries (prior committed steps as deltas off HeadSeq). Mirrored in
-    // ReadStepCommitBatch. A commit has no Moving flag — it is always a step.
+    // NET2/NET3: wire layout is HeadSeq, HeadTick, Direction (newest committed step + its authored tick), then
+    // Count + that many {SeqDelta, TickDelta, Direction} window entries (prior committed steps as seq/tick deltas
+    // off the head). Mirrored in ReadStepCommitBatch. A commit has no Moving flag — it is always a step.
     private static void WriteStepCommitBatch(BinaryWriter writer, StepCommitBatchMessage value)
     {
         if (value.Window.Count > MaxStepCommitWindow)
@@ -358,12 +358,14 @@ public static class ProtocolCodec
         }
 
         writer.Write(value.HeadSeq);
+        writer.Write(value.HeadTick);
         writer.Write((byte)value.Direction);
         writer.Write((byte)value.Window.Count);
         for (var i = 0; i < value.Window.Count; i++)
         {
             var entry = value.Window[i];
             writer.Write(entry.SeqDelta);
+            writer.Write(entry.TickDelta);
             writer.Write((byte)entry.Direction);
         }
     }
@@ -371,6 +373,7 @@ public static class ProtocolCodec
     private static StepCommitBatchMessage ReadStepCommitBatch(BinaryReader reader)
     {
         var headSeq = reader.ReadUInt32();
+        var headTick = reader.ReadUInt32();
         var direction = ReadDirection(reader);
         var count = reader.ReadByte();
         if (count > MaxStepCommitWindow)
@@ -384,11 +387,12 @@ public static class ProtocolCodec
         for (var i = 0; i < count; i++)
         {
             var seqDelta = reader.ReadByte();
+            var tickDelta = reader.ReadUInt32();
             var entryDirection = ReadDirection(reader);
-            ((List<StepCommitWindowEntry>)window).Add(new StepCommitWindowEntry(seqDelta, entryDirection));
+            ((List<StepCommitWindowEntry>)window).Add(new StepCommitWindowEntry(seqDelta, tickDelta, entryDirection));
         }
 
-        return new StepCommitBatchMessage(headSeq, direction, window);
+        return new StepCommitBatchMessage(headSeq, headTick, direction, window);
     }
 
     private static void WriteWorldSnapshotPayload(

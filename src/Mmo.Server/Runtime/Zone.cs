@@ -155,6 +155,31 @@ public sealed class Zone
         return stepped;
     }
 
+    // NET3 authored-tick commit: a UoClientDriven commit applied at its AUTHORED tick (see
+    // WorldEntity.TryCommitStepAuthored). Mirrors TryCommitStep's spatial-index migration so an accepted commit
+    // moves the entity's grid bucket. previousTile must be read before the call (TryCommitStepAuthored mutates Tile
+    // in place).
+    public bool TryCommitStepAuthored(
+        WorldEntity entity,
+        Direction8 direction,
+        uint authoredTick,
+        uint serverTick,
+        uint stepCooldownTicks,
+        uint pastWindowTicks,
+        uint futureLeadTicks,
+        out MovementStepResult result)
+    {
+        var previousTile = entity.Tile;
+        var stepped = entity.TryCommitStepAuthored(
+            direction, authoredTick, serverTick, stepCooldownTicks, pastWindowTicks, futureLeadTicks, _tileGrid, out result);
+        if (stepped)
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+
+        return stepped;
+    }
+
     public WorldEntity SpawnPlayer(
         uint networkId,
         Guid characterId,

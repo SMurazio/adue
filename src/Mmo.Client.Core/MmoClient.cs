@@ -100,8 +100,11 @@ public sealed class MmoClient : IDisposable
     // from a later, still-redundant packet's window instead of a reliable retransmit batch (which the server's
     // cooldown gate would reject all at once → the GodotB speed-up/desync). Sized to ~the loss-recovery depth.
     private const int StepCommitRingCapacity = 8;
-    private readonly (uint Seq, Direction8 Direction)[] _stepCommitRing
-        = new (uint, Direction8)[StepCommitRingCapacity];
+    // NET3: each ring entry also carries the commit's AUTHORED server tick (the predictor gate tick the step was
+    // banked on, or — for a model-B release commit — the present estimated server tick). Every batch repeats it as
+    // a tick delta off the head so the server applies each commit at its authored time, not the receive tick.
+    private readonly (uint Seq, uint Tick, Direction8 Direction)[] _stepCommitRing
+        = new (uint, uint, Direction8)[StepCommitRingCapacity];
     private int _stepCommitRingCount;
     private int _stepCommitRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
     private Guid _localCharacterId;
@@ -321,11 +324,15 @@ public sealed class MmoClient : IDisposable
             if (_predictor is { } predictor)
             {
                 Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
-                predictor.Tick(now, accepted, out var acceptedCount);
+                Span<long> acceptedTicks = stackalloc long[UoCommitBurstCap];
+                predictor.Tick(now, accepted, acceptedTicks, out var acceptedCount);
                 var emit = Math.Min(acceptedCount, accepted.Length);
                 for (var i = 0; i < emit; i++)
                 {
-                    RecordStepCommit(++_moveSequence, accepted[i]);
+                    // NET3: stamp the commit with the SAME gate tick the predictor banked the step on (acceptedTicks)
+                    // so the server replays it at its authored time. The tick is a non-negative server tick here (the
+                    // gate never fires before the calibrated frame); clamp at 0 defensively before the uint cast.
+                    RecordStepCommit(++_moveSequence, (uint)Math.Max(0, acceptedTicks[i]), accepted[i]);
                 }
 
                 if (emit > 0)
@@ -554,7 +561,12 @@ public sealed class MmoClient : IDisposable
                 // shipped as a batch) so a dropped release-commit is recovered from a later packet's window.
                 if (release.ShouldCommit)
                 {
-                    RecordStepCommit(++_moveSequence, release.Direction);
+                    // NET3: a model-B release commit is a "finish this step NOW" request — it is not banked on a
+                    // predictor gate boundary, so its authored tick is the PRESENT estimated server tick (the
+                    // predictor's calibrated clock). The server applies it at that authored tick like any other
+                    // commit. _predictor is created by EnsurePredictor above in every mode, so it is available here.
+                    var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
+                    RecordStepCommit(++_moveSequence, authoredTick, release.Direction);
                     SendStepCommitBatch();
                     _pendingCommit = new PendingCommit
                     {
@@ -623,19 +635,19 @@ public sealed class MmoClient : IDisposable
         return window;
     }
 
-    // NET2: push a just-committed step into the redundancy ring (newest last, dropping the oldest once full).
-    // The ring feeds the window of every subsequent StepCommitBatch.
-    private void RecordStepCommit(uint sequence, Direction8 direction)
+    // NET2/NET3: push a just-committed step (seq + AUTHORED tick + direction) into the redundancy ring (newest
+    // last, dropping the oldest once full). The ring feeds the window of every subsequent StepCommitBatch.
+    private void RecordStepCommit(uint sequence, uint authoredTick, Direction8 direction)
     {
         if (_stepCommitRingCount < StepCommitRingCapacity)
         {
             var slot = (_stepCommitRingHead + _stepCommitRingCount) % StepCommitRingCapacity;
-            _stepCommitRing[slot] = (sequence, direction);
+            _stepCommitRing[slot] = (sequence, authoredTick, direction);
             _stepCommitRingCount++;
         }
         else
         {
-            _stepCommitRing[_stepCommitRingHead] = (sequence, direction);
+            _stepCommitRing[_stepCommitRingHead] = (sequence, authoredTick, direction);
             _stepCommitRingHead = (_stepCommitRingHead + 1) % StepCommitRingCapacity;
         }
     }
@@ -655,14 +667,17 @@ public sealed class MmoClient : IDisposable
         var headSlot = (_stepCommitRingHead + _stepCommitRingCount - 1) % StepCommitRingCapacity;
         var head = _stepCommitRing[headSlot];
         Send(
-            new StepCommitBatchMessage(head.Seq, head.Direction, BuildStepCommitWindow(head.Seq)),
+            new StepCommitBatchMessage(head.Seq, head.Tick, head.Direction, BuildStepCommitWindow(head.Seq, head.Tick)),
             DeliveryMethod.Unreliable);
     }
 
-    // NET2: build the redundancy window for a batch whose head is headSeq — the prior committed steps still in
-    // the ring (every entry except the head), encoded as deltas (headSeq - entrySeq). Newest-first so a
-    // truncated read still recovers the most recent commits. Returns empty when the ring holds only the head.
-    private IReadOnlyList<StepCommitWindowEntry> BuildStepCommitWindow(uint headSeq)
+    // NET2/NET3: build the redundancy window for a batch whose head is (headSeq, headTick) — the prior committed
+    // steps still in the ring (every entry except the head), encoded as a seq delta (headSeq - entrySeq) AND a tick
+    // delta (headTick - entryTick) off the head. Newest-first so a truncated read still recovers the most recent
+    // commits. An entry whose authored tick is NOT strictly older than the head's (tickDelta <= 0 — should never
+    // happen since seq and authored tick both increase monotonically, but a clock nudge could tie them) is dropped
+    // so the server never reads a non-positive tick delta. Returns empty when the ring holds only the head.
+    private IReadOnlyList<StepCommitWindowEntry> BuildStepCommitWindow(uint headSeq, uint headTick)
     {
         if (_stepCommitRingCount <= 1)
         {
@@ -686,7 +701,15 @@ public sealed class MmoClient : IDisposable
                 continue;
             }
 
-            window.Add(new StepCommitWindowEntry((byte)delta, entry.Direction));
+            // The authored tick must be strictly older than the head's (the head is the newest step). A tie or an
+            // inversion (a calibration nudge could in theory equalise two ticks) would make a 0/underflowing tick
+            // delta — drop that entry rather than ship an ambiguous authored tick.
+            if (entry.Tick >= headTick)
+            {
+                continue;
+            }
+
+            window.Add(new StepCommitWindowEntry((byte)delta, headTick - entry.Tick, entry.Direction));
         }
 
         return window;

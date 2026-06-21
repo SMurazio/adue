@@ -44,6 +44,13 @@ public sealed class TimingFaithfulReconcileHarnessTests
     private const uint StepCooldownTicks = 3;           // 150 ms cadence => server steps every 3rd tick
     private const double FrameMs = 1000d / 144d;        // client renders/polls at ~144 Hz (frame << tick)
 
+    // NET3 authored-tick clamp window — mirrors GameServer.AuthoredTickPastWindow / AuthoredTickFutureLead (those
+    // are private server consts; this rig drives WorldEntity.TryCommitStepAuthored directly, so it passes the same
+    // values the server would). Generous past window for deep loss recovery; tiny future lead (the predictor leads
+    // by ~1-2 in-flight steps).
+    private const uint AuthoredTickPastWindow = 64;
+    private const uint AuthoredTickFutureLead = 4;
+
     private static double CadenceMs => MovementCadence.EffectiveStepCadenceMs(150, TickRate); // 150 ms
 
     // ---- the rig --------------------------------------------------------------------------------------
@@ -116,16 +123,17 @@ public sealed class TimingFaithfulReconcileHarnessTests
         var pending = new List<(double DeliverAtMs, PendingSnapshot Snap)>();
 
         // Heap-allocated once (NOT stackalloc in the frame loop, which would grow the stack per iteration over
-        // thousands of frames). Holds the accepted-step directions Tick reports in UoClientDriven mode.
+        // thousands of frames). Holds the accepted-step directions + authored ticks Tick reports in UoClientDriven.
         var acceptedBuffer = new Direction8[8];
+        var acceptedTickBuffer = new long[8];
 
         // CLIENT-DRIVEN commit stream: in UoClientDriven the server's held-intent pacer is OFF — it only advances
         // on the per-step commits the CLIENT emits (one per accepted predicted step). So we don't auto-step the
-        // server; instead each accepted predicted step queues a commit (its direction + the tick it stepped on)
-        // that the server applies via TryCommitStep when that tick elapses. This is the faithful architecture:
-        // the PREDICTOR drives, the server follows the commits. (Server-paced mode ignores this and steps in the
-        // tick loop below.)
-        var pendingCommits = new Queue<(double DeliverAtMs, Direction8 Dir)>();
+        // server; instead each accepted predicted step queues a commit (its direction + its AUTHORED tick — the
+        // gate tick the predictor banked it on) that the server applies via TryCommitStepAuthored at that authored
+        // tick when it arrives (NET3). This is the faithful architecture: the PREDICTOR drives, the server follows
+        // the commits at their authored time. (Server-paced mode ignores this and steps in the tick loop below.)
+        var pendingCommits = new Queue<(double DeliverAtMs, uint AuthoredTick, Direction8 Dir)>();
 
         uint nextServerTick = 0;
         var endMs = runMs;
@@ -148,14 +156,16 @@ public sealed class TimingFaithfulReconcileHarnessTests
                 if (clientDriven)
                 {
                     // Apply every queued commit that has arrived at the server (uplink latency elapsed) by this
-                    // tick's wall time, stamping the server's CURRENT tick — exactly as the real server processes
-                    // a StepCommitRequest at the tick it dequeues it. TryCommitStep runs the identical walkability
-                    // + anti-cheat-floor gate; commits emitted at the predictor's accepted-step cadence (a cooldown
-                    // apart) clear the floor and land, keeping the server in lockstep with the predicted commits.
+                    // tick's wall time, at its AUTHORED tick (NET3) — exactly as the real server processes a
+                    // StepCommitBatch via TryCommitStepAuthored. The authored-tick spacing gate paces the rate; a
+                    // commit a cadence apart from the prior accepted one lands, keeping the server in lockstep with
+                    // the predicted commits regardless of the receive tick.
                     while (pendingCommits.Count > 0 && pendingCommits.Peek().DeliverAtMs <= serverWallMs)
                     {
-                        var (_, commitDir) = pendingCommits.Dequeue();
-                        rig.Server.TryCommitStep(commitDir, tick, StepCooldownTicks, 0.5, rig.Grid, out _);
+                        var (_, authoredTick, commitDir) = pendingCommits.Dequeue();
+                        rig.Server.TryCommitStepAuthored(
+                            commitDir, authoredTick, tick, StepCooldownTicks,
+                            AuthoredTickPastWindow, AuthoredTickFutureLead, rig.Grid, out _);
                     }
                 }
                 else
@@ -214,14 +224,14 @@ public sealed class TimingFaithfulReconcileHarnessTests
             var movedNow = TimeSpan.FromMilliseconds(nowMs);
             if (clientDriven)
             {
-                // Mirror the UoClientDriven poll: Tick reports the directions of the steps ACCEPTED this frame;
-                // the client emits one StepCommitRequest per accepted step. We queue each as a commit that reaches
-                // the server after uplink latency (modelled as the same one-way LatencyMs), where it is applied.
-                rig.Predictor.Tick(movedNow, acceptedBuffer, out var acceptedCount);
+                // Mirror the UoClientDriven poll: Tick reports the direction AND authored tick of each step ACCEPTED
+                // this frame; the client emits one commit per accepted step. We queue each (with its authored tick)
+                // as a commit that reaches the server after uplink latency (modelled as the same one-way LatencyMs).
+                rig.Predictor.Tick(movedNow, acceptedBuffer, acceptedTickBuffer, out var acceptedCount);
                 var emit = Math.Min(acceptedCount, acceptedBuffer.Length);
                 for (var i = 0; i < emit; i++)
                 {
-                    pendingCommits.Enqueue((nowMs + rig.LatencyMs, acceptedBuffer[i]));
+                    pendingCommits.Enqueue((nowMs + rig.LatencyMs, (uint)Math.Max(0, acceptedTickBuffer[i]), acceptedBuffer[i]));
                 }
             }
             else
@@ -476,18 +486,128 @@ public sealed class TimingFaithfulReconcileHarnessTests
         Assert.Equal(droppedResult.PredictedTile, droppedResult.ServerTile);
     }
 
+    // ---- INVARIANT 5 (NET3): the LOSS-INVARIANT — a recovered commit BUNDLED with the next is ACCEPTED at its ----
+    // ---- authored tick (not rejected "too early"), so the server reaches the predicted step-seq. NO speed-up. ----
+    //
+    // This is the precise bug NET3 fixes and the two prior attempts (UO5, NET2-delivery) missed. The redundant
+    // window recovers a dropped commit C2, but it arrives BUNDLED with C3 in ONE packet at ONE receive tick. The OLD
+    // receive-time gate (TryCommitStep) applied both at that tick: C2 accepted (arming the cooldown to receive+cd),
+    // then C3 rejected "commit_too_early" → never confirmed → the server's StepSeq stays one behind the prediction
+    // → permanent desync. The FIRST assertion below pins that buggy behaviour on the OLD path (regression contrast).
+    // The SECOND drives the SAME bundle through the NET3 authored-tick path (TryCommitStepAuthored) and asserts C3
+    // is ACCEPTED — because its authored tick is a cadence after C2's authored tick, the spacing gate clears — so
+    // the server reaches the predicted tile/step-seq with exactly the banked number of steps (no speed-up, no lead).
+    [Fact]
+    public void Net3LossInvariant_BundledRecoveredCommit_AcceptedAtAuthoredTick_ServerReachesPrediction()
+    {
+        var grid = new TileGrid(64, 64, Array.Empty<TileCoord>());
+        var start = new TileCoord(20, 20);
+
+        // Three commits the predictor banked a cadence (3 ticks) apart: C1@tick0, C2@tick3, C3@tick6, all east.
+        const uint cd = StepCooldownTicks; // 3
+        var c1 = (Tick: 0u, Dir: Direction8.E);
+        var c2 = (Tick: cd, Dir: Direction8.E);
+        var c3 = (Tick: 2 * cd, Dir: Direction8.E);
+
+        // The loss scenario: C1 lands on time (receive tick 0). C2's packet is DROPPED; it is recovered BUNDLED with
+        // C3 in the next packet, both arriving at the SAME receive tick. The receive tick is the authored tick of the
+        // head (C3) plus the one-way uplink delay (here 2 ticks): C3 authored 6, so the bundle arrives at tick 8 —
+        // C3's authored tick is at the present (within futureLead), the recovered C2 is in the recent past.
+        const uint bundledReceiveTick = 8;
+
+        // --- (A) the BUG on the OLD receive-time path (TryCommitStep): the bundle collides at one receive tick. ---
+        var buggy = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
+            Guid.NewGuid().ToString(), Guid.NewGuid(), ownerSession: null, isDurable: true);
+        Assert.True(buggy.TryCommitStep(c1.Dir, 0, cd, 0.5, grid, out _));                     // C1 on time
+        Assert.True(buggy.TryCommitStep(c2.Dir, bundledReceiveTick, cd, 0.5, grid, out _));    // C2 of the bundle: ok
+        var buggyC3 = buggy.TryCommitStep(c3.Dir, bundledReceiveTick, cd, 0.5, grid, out var buggyC3Result);
+        Assert.False(buggyC3);                                  // C3 REJECTED — the desync
+        Assert.Equal("commit_too_early", buggyC3Result.Reason);
+        Assert.Equal(2u, buggy.StepSequence);                   // server stuck one behind the 3 banked steps
+
+        // --- (B) the FIX on the NET3 authored-tick path (TryCommitStepAuthored): C3 lands at its authored tick. ---
+        var fixedEntity = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
+            Guid.NewGuid().ToString(), Guid.NewGuid(), ownerSession: null, isDurable: true);
+        Assert.True(fixedEntity.TryCommitStepAuthored(
+            c1.Dir, c1.Tick, 0, cd, AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out _));
+        // The bundle arrives together at one receive tick — but each is SCHEDULED at its OWN authored tick (a cadence
+        // apart), so both land instead of the second colliding at the receive tick.
+        Assert.True(fixedEntity.TryCommitStepAuthored(
+            c2.Dir, c2.Tick, bundledReceiveTick, cd, AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out _));
+        var fixedC3 = fixedEntity.TryCommitStepAuthored(
+            c3.Dir, c3.Tick, bundledReceiveTick, cd, AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out var fixedC3Result);
+        Assert.True(fixedC3);                                   // C3 ACCEPTED at authored tick 6 (a cadence after C2's 3)
+        Assert.Equal("committed", fixedC3Result.Reason);
+        Assert.Equal(3u, fixedEntity.StepSequence);             // server reached all 3 banked steps — no desync
+        Assert.Equal(new TileCoord(23, 20), fixedEntity.Tile);  // three tiles east, exactly the prediction
+
+        // Anti-speedhack preserved: a same-tick SPAM BURST cannot teleport. Drive 5 commits all authored at tick 0
+        // at a LOW server tick (1) so the real-time cap (serverTick + futureLead) bites: paced to ticks 0, then
+        // (prior+cd) 3, 6, 9, 12 — only the slots <= serverTick(1) + futureLead(4) = 5 land (ticks 0 and 3); the
+        // rest are rejected "too early" and must wait for real time. A burst can claim AT MOST futureLead-worth of
+        // steps ahead, never the whole burst at once.
+        var spam = new WorldEntity(1, 1, EntityKind.Player, start, Direction8.E,
+            Guid.NewGuid().ToString(), Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var accepted = 0;
+        for (var i = 0; i < 5; i++)
+        {
+            if (spam.TryCommitStepAuthored(
+                    Direction8.E, authoredTick: 0, serverTick: 1, cd,
+                    AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out _))
+            {
+                accepted++;
+            }
+        }
+
+        Assert.Equal(2u, spam.StepSequence);   // only the in-real-time-reachable slots landed (ticks 0 and 3 <= 5)
+        Assert.Equal(2, accepted);             // the burst was capped by real time, not applied wholesale
+    }
+
+    // The end-to-end loss-invariant: drive the REAL predictor + REAL authored-tick server through a stream with a
+    // dropped-then-recovered commit (RunUoCommitStream applies the recovered bundle at authored ticks) and assert
+    // the server reaches the predicted tile/step-seq with no speed-up — the same convergence INVARIANT 4 asserts,
+    // but now on the AUTHORED-TICK server path that does not reject the bundled recovery. (INVARIANT 4 above already
+    // exercises this end-to-end via the shared RunUoCommitStream; this names the loss-invariant explicitly and adds
+    // a heavier drop pattern so the recovery is a genuine MULTI-commit bundle, not a single late commit.)
+    [Fact]
+    public void Net3LossInvariant_EndToEnd_HeavyDrop_ServerReachesPrediction_NoSpeedUp()
+    {
+        // Drop a SUSTAINED burst of batches mid-run so several consecutive commits are lost and recovered together
+        // in one later packet's window (the multi-commit bundle). Hold east 2.4 s then release so the tail drains.
+        var dropped = RunUoCommitStream(
+            start: new TileCoord(200, 200), held: Direction8.E, runMs: 4000d, holdUntilMs: 2400d,
+            dropBatchOnFrame: f => f >= 200 && f < 280);   // ~0.55 s solid uplink blackout mid-stream
+
+        var clean = RunUoCommitStream(
+            start: new TileCoord(200, 200), held: Direction8.E, runMs: 4000d, holdUntilMs: 2400d,
+            dropBatchOnFrame: _ => false);
+
+        // The lossy run lands EXACTLY where the clean run does — every dropped commit recovered + applied at its
+        // authored tick, none rejected, none double-applied.
+        Assert.Equal(clean.ServerTile, dropped.ServerTile);
+        Assert.Equal(clean.ServerStepSeq, dropped.ServerStepSeq);
+
+        // The server reached the PREDICTED step-seq/tile (no permanent lead) with no speed-up (server == predictor).
+        Assert.Equal(dropped.PredictedStepSeq, dropped.ServerStepSeq);
+        Assert.Equal(dropped.PredictedTile, dropped.ServerTile);
+    }
+
     private readonly record struct UoCommitRunResult(
         TileCoord ServerTile, uint ServerStepSeq, TileCoord PredictedTile, uint PredictedStepSeq);
 
-    // Drives the UoClientDriven commit path with NET2's redundant-unreliable batch delivery and optional uplink
-    // batch loss. The predictor steps each frame (holding `held` until holdUntilMs, then released so the tail
-    // drains through the normal loop); every accepted step mints a fresh sequence on a shared cursor and is
-    // recorded in an 8-deep ring; each frame that produced commits ships ONE redundant StepCommitBatch (head +
-    // window of prior ring commits as deltas) onto the uplink unless dropBatchOnFrame says to drop it. The
-    // server reconstructs fresh commits via the REAL GameServer.ExtractFreshStepCommits (cursor dedup) and
-    // applies each through the REAL WorldEntity.TryCommitStep at the tick it arrives, ONE per tick (the cooldown
-    // gate paces it). Mirrors the production client (RecordStepCommit/SendStepCommitBatch) + server
-    // (HandleStepCommitBatch) exactly.
+    // Drives the UoClientDriven commit path with NET2's redundant-unreliable batch delivery, NET3's authored-tick
+    // application, and optional uplink batch loss. The predictor steps each frame (holding `held` until holdUntilMs,
+    // then released so the tail drains); every accepted step mints a fresh sequence on a shared cursor AND carries
+    // its AUTHORED tick (the predictor gate tick), recorded in an 8-deep ring; each frame that produced commits
+    // ships ONE redundant StepCommitBatch (head + window of prior ring commits as seq/tick deltas) onto the uplink
+    // unless dropBatchOnFrame says to drop it.
+    //
+    // THE NET3 SERVER (the fix under test): each tick it reconstructs ALL arrived fresh commits via the REAL
+    // GameServer.ExtractFreshStepCommits (cursor dedup + authored ticks) and applies EACH through the REAL
+    // WorldEntity.TryCommitStepAuthored at its AUTHORED tick — including a BUNDLE that arrived in the same packet
+    // ([C2,C3] after a recovered drop). The authored-tick spacing gate (not the receive tick) paces them, so a
+    // bundle a cadence apart is fully accepted instead of the second being rejected "too early" — the loss desync.
+    // Mirrors the production client (RecordStepCommit/SendStepCommitBatch) + server (HandleStepCommitBatch) exactly.
     private static UoCommitRunResult RunUoCommitStream(
         TileCoord start, Direction8 held, double runMs, double holdUntilMs, Func<int, bool> dropBatchOnFrame)
     {
@@ -501,13 +621,14 @@ public sealed class TimingFaithfulReconcileHarnessTests
 
         const double latencyMs = 100d;
         const int ringCap = 8;
-        var ring = new List<(uint Seq, Direction8 Dir)>();
+        var ring = new List<(uint Seq, uint Tick, Direction8 Dir)>();
         uint moveSeq = 0;
         uint serverCursor = 0;
 
         // A delivered batch is the wire payload (head + window) plus the wall time it reaches the server.
         var pendingBatches = new List<(double DeliverAtMs, Mmo.Shared.Protocol.StepCommitBatchMessage Batch)>();
         var acceptedBuffer = new Direction8[8];
+        var acceptedTickBuffer = new long[8];
         uint nextServerTick = 0;
 
         for (var frame = 0; ; frame++)
@@ -524,17 +645,17 @@ public sealed class TimingFaithfulReconcileHarnessTests
                 released = true;
             }
 
-            // --- server: at each elapsed tick, apply AT MOST ONE arrived+fresh commit (the cooldown gate paces
-            // the rest), exactly as the live tick loop processes the commit stream one accepted step per cadence.
+            // --- server: at each elapsed tick, apply EVERY arrived+fresh commit at its AUTHORED tick (NET3). A
+            // bundle that arrived together (a recovered drop) is applied in one tick — the authored-tick spacing
+            // gate, not the receive tick, paces it, so the second commit of a cadence-apart bundle is ACCEPTED.
             while (nextServerTick * TickMs <= nowMs)
             {
                 var tick = nextServerTick;
                 var serverWallMs = tick * TickMs;
 
-                // Gather the fresh commits that have ARRIVED by this tick, deduped + ascending across all
-                // delivered batches (the real ExtractFreshStepCommits + cursor dedup, fed every arrived batch).
-                var arrivedThisTick = new SortedSet<uint>();
-                var dirBySeq = new Dictionary<uint, Direction8>();
+                // Gather the fresh commits that have ARRIVED by this tick, deduped + ascending across all delivered
+                // batches (the real ExtractFreshStepCommits + cursor dedup), each with its authored tick.
+                var arrived = new SortedDictionary<uint, (uint AuthoredTick, Direction8 Dir)>();
                 foreach (var (deliverAt, batch) in pendingBatches)
                 {
                     if (deliverAt > serverWallMs)
@@ -542,21 +663,21 @@ public sealed class TimingFaithfulReconcileHarnessTests
                         continue;
                     }
 
-                    foreach (var (seq, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
+                    foreach (var (seq, authoredTick, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
                     {
-                        arrivedThisTick.Add(seq);
-                        dirBySeq[seq] = dir;
+                        arrived[seq] = (authoredTick, dir);
                     }
                 }
 
-                // Apply the oldest fresh arrived commit, gated by the REAL cooldown floor (so the rate can never
-                // exceed cadence). The next one applies on a later tick once its cooldown elapses — this is the
-                // anti-speedhack pacing that, under reliable retransmit, the bunched batch fought; under the
-                // redundant window each commit is already cadence-spaced, so it lands cleanly.
-                if (arrivedThisTick.Count > 0)
+                // Apply each fresh arrived commit, ascending by seq, at its authored tick. The authored-tick gate
+                // accepts a commit whose authored tick is >= the prior accepted authored tick + cooldown, so a
+                // cadence-apart bundle lands fully; the cursor advances on accept so a later batch re-carrying these
+                // dedups. This is the bundled-arrival path the receive-time gate rejected.
+                foreach (var (seq, info) in arrived)
                 {
-                    var seq = arrivedThisTick.Min;
-                    if (server.TryCommitStep(dirBySeq[seq], tick, StepCooldownTicks, 0.5, grid, out _))
+                    if (server.TryCommitStepAuthored(
+                            info.Dir, info.AuthoredTick, tick, StepCooldownTicks,
+                            AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out _))
                     {
                         serverCursor = seq;
                     }
@@ -565,12 +686,12 @@ public sealed class TimingFaithfulReconcileHarnessTests
                 nextServerTick++;
             }
 
-            // --- client: tick the predictor; emit the accepted steps as ONE redundant batch (unless dropped) ---
-            predictor.Tick(TimeSpan.FromMilliseconds(nowMs), acceptedBuffer, out var acceptedCount);
+            // --- client: tick the predictor; emit the accepted steps (dir + authored tick) as ONE redundant batch ---
+            predictor.Tick(TimeSpan.FromMilliseconds(nowMs), acceptedBuffer, acceptedTickBuffer, out var acceptedCount);
             var emit = Math.Min(acceptedCount, acceptedBuffer.Length);
             for (var i = 0; i < emit; i++)
             {
-                ring.Add((++moveSeq, acceptedBuffer[i]));
+                ring.Add((++moveSeq, (uint)Math.Max(0, acceptedTickBuffer[i]), acceptedBuffer[i]));
                 if (ring.Count > ringCap)
                 {
                     ring.RemoveAt(0);
@@ -584,30 +705,39 @@ public sealed class TimingFaithfulReconcileHarnessTests
                 for (var i = ring.Count - 2; i >= 0; i--)
                 {
                     var delta = head.Seq - ring[i].Seq;
-                    if (delta is > 0 and <= byte.MaxValue)
+                    if (delta is > 0 and <= byte.MaxValue && ring[i].Tick < head.Tick)
                     {
-                        window.Add(new Mmo.Shared.Protocol.StepCommitWindowEntry((byte)delta, ring[i].Dir));
+                        window.Add(new Mmo.Shared.Protocol.StepCommitWindowEntry(
+                            (byte)delta, head.Tick - ring[i].Tick, ring[i].Dir));
                     }
                 }
 
-                var batch = new Mmo.Shared.Protocol.StepCommitBatchMessage(head.Seq, head.Dir, window);
+                var batch = new Mmo.Shared.Protocol.StepCommitBatchMessage(head.Seq, head.Tick, head.Dir, window);
                 pendingBatches.Add((nowMs + latencyMs, batch));
             }
         }
 
-        // Drain any in-flight batches the run-end cut off (so the comparison is on the fully-delivered stream).
+        // Drain any in-flight batches the run-end cut off (so the comparison is on the fully-delivered stream). Each
+        // is applied at its AUTHORED tick — no artificial spacing needed, since the authored-tick gate already paces
+        // by authored time. The receive tick is the natural run-end tick so the authored-tick clamp window
+        // [drainTick - past, drainTick + lead] still covers the recent authored ticks (the in-flight tail is small).
         var drainTick = nextServerTick;
+        var drained = new SortedDictionary<uint, (uint AuthoredTick, Direction8 Dir)>();
         foreach (var (_, batch) in pendingBatches)
         {
-            foreach (var (seq, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
+            foreach (var (seq, authoredTick, dir) in GameServer.ExtractFreshStepCommits(batch, serverCursor))
             {
-                if (seq > serverCursor)
-                {
-                    serverCursor = seq;
-                    server.TryCommitStep(dir, drainTick, StepCooldownTicks, 0.5, grid, out _);
-                }
+                drained[seq] = (authoredTick, dir);
+            }
+        }
 
-                drainTick += StepCooldownTicks; // space the drained commits a cadence apart so each clears the floor
+        foreach (var (seq, info) in drained)
+        {
+            if (seq > serverCursor && server.TryCommitStepAuthored(
+                    info.Dir, info.AuthoredTick, drainTick, StepCooldownTicks,
+                    AuthoredTickPastWindow, AuthoredTickFutureLead, grid, out _))
+            {
+                serverCursor = seq;
             }
         }
 

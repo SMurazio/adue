@@ -225,40 +225,43 @@ public sealed class ProtocolCodecTests
         Assert.Empty(decoded.Window);
     }
 
-    // NET2: the redundant StepCommitBatch round-trips its newest committed step (head) plus the window of prior
-    // committed steps (deltas off HeadSeq). Window entries carry their own Direction (no Moving flag — a commit
-    // is always a step).
+    // NET2/NET3: the redundant StepCommitBatch round-trips its newest committed step (head seq + AUTHORED tick +
+    // direction) plus the window of prior committed steps (seq/tick deltas off the head). Window entries carry their
+    // own Direction (no Moving flag — a commit is always a step) and a per-entry tick delta.
     [Fact]
     public void StepCommitBatchRoundTripsHeadAndWindow()
     {
         var original = new StepCommitBatchMessage(
             HeadSeq: 200,
+            HeadTick: 1000,
             Direction: Direction8.E,
             Window:
             [
-                new StepCommitWindowEntry(SeqDelta: 1, Direction: Direction8.NE),
-                new StepCommitWindowEntry(SeqDelta: 2, Direction: Direction8.S),
-                new StepCommitWindowEntry(SeqDelta: 5, Direction: Direction8.W),
+                new StepCommitWindowEntry(SeqDelta: 1, TickDelta: 3, Direction: Direction8.NE),
+                new StepCommitWindowEntry(SeqDelta: 2, TickDelta: 6, Direction: Direction8.S),
+                new StepCommitWindowEntry(SeqDelta: 5, TickDelta: 15, Direction: Direction8.W),
             ]);
 
         var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(200u, decoded.HeadSeq);
+        Assert.Equal(1000u, decoded.HeadTick);
         Assert.Equal(Direction8.E, decoded.Direction);
         Assert.Equal(3, decoded.Window.Count);
-        Assert.Equal(new StepCommitWindowEntry(1, Direction8.NE), decoded.Window[0]);
-        Assert.Equal(new StepCommitWindowEntry(2, Direction8.S), decoded.Window[1]);
-        Assert.Equal(new StepCommitWindowEntry(5, Direction8.W), decoded.Window[2]);
+        Assert.Equal(new StepCommitWindowEntry(1, 3, Direction8.NE), decoded.Window[0]);
+        Assert.Equal(new StepCommitWindowEntry(2, 6, Direction8.S), decoded.Window[1]);
+        Assert.Equal(new StepCommitWindowEntry(5, 15, Direction8.W), decoded.Window[2]);
     }
 
     [Fact]
     public void StepCommitBatchRoundTripsEmptyWindow()
     {
-        var original = new StepCommitBatchMessage(7, Direction8.SW, Window: []);
+        var original = new StepCommitBatchMessage(7, 42, Direction8.SW, Window: []);
 
         var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(7u, decoded.HeadSeq);
+        Assert.Equal(42u, decoded.HeadTick);
         Assert.Equal(Direction8.SW, decoded.Direction);
         Assert.Empty(decoded.Window);
     }
@@ -289,12 +292,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyFour()
+    public void ProtocolVersionIsTwentyFive()
     {
-        // NET2 protocol bump: adding the redundant-unreliable StepCommitBatch message (loss-robust UO commit
-        // delivery) is a breaking wire change (server + client ship together). v23 was NET1's MoveInput. Pin
-        // the version so an accidental change is caught.
-        Assert.Equal(24, ProtocolCodec.Version);
+        // NET3 protocol bump: extending StepCommitBatch with a per-commit authored tick (HeadTick + per-window-entry
+        // TickDelta) so the server applies each commit at its authored time is a breaking wire change (server +
+        // client ship together). v24 was NET2's StepCommitBatch; v23 was NET1's MoveInput. Pin the version so an
+        // accidental change is caught.
+        Assert.Equal(25, ProtocolCodec.Version);
     }
 
     [Fact]

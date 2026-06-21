@@ -205,6 +205,12 @@ public sealed class LocalPlayerPredictor
 
     public bool IsMoving => _moving;
 
+    // NET3: the predictor's best estimate of the CURRENT integer server tick at wall-clock `now` (the same
+    // monotonic-clamped mapping the step gate uses). Used to stamp an authored tick on a commit that does NOT come
+    // from the step loop — model B's release "finish this step now" commit, which is authored at the present tick
+    // rather than a banked gate boundary. The UoClientDriven per-step stream uses the gate tick from Tick instead.
+    public long EstimateServerTick(TimeSpan now) => EstimateTick(now.TotalMilliseconds);
+
     public double CadenceMs => _cadenceMs;
 
     public double TickMs => _tickMs;
@@ -392,6 +398,20 @@ public sealed class LocalPlayerPredictor
     // report (what the parameterless Tick does). Returns true iff the predicted tile changed this call.
     public bool Tick(TimeSpan now, Span<Direction8> acceptedSteps, out int acceptedCount)
     {
+        return Tick(now, acceptedSteps, default, out acceptedCount);
+    }
+
+    // NET3 overload: same as Tick(now, acceptedSteps, ...) but ALSO reports the AUTHORED tick of each accepted step
+    // — the exact integer server tick the predictor's gate fired the step on (actionTick = _nextEligibleTick at the
+    // boundary it resolved). This is the SAME tick the prediction advanced on, so a commit stamped with it lets the
+    // server replay the step at its authored time (NET3 authored-tick application) rather than the receive tick —
+    // killing the bundled-recovered-commit cooldown rejection (the loss desync). CRITICAL: it MUST be this gate tick,
+    // not a separately-sampled clock, or the server's authored-tick application won't match the prediction (the
+    // clock-mismatch snapping lesson). acceptedTicks is filled in lockstep with acceptedSteps (same index, same
+    // under-report-never-corrupt rule); pass an empty span to ignore the tick report. The render/stepping behaviour
+    // is byte-for-byte identical to the dir-only overload.
+    public bool Tick(TimeSpan now, Span<Direction8> acceptedSteps, Span<long> acceptedTicks, out int acceptedCount)
+    {
         acceptedCount = 0;
         var changed = false;
         if (_moving && _nextEligibleTick.HasValue)
@@ -447,6 +467,14 @@ public sealed class LocalPlayerPredictor
                 if (acceptedCount < acceptedSteps.Length)
                 {
                     acceptedSteps[acceptedCount] = acceptedDirection;
+                }
+
+                // NET3: report the AUTHORED tick (the gate boundary this step fired on) in lockstep with the
+                // direction, so the client can stamp the commit with it and the server replays it at its authored
+                // time. Same under-report-never-corrupt rule: a too-small buffer drops the report, never the step.
+                if (acceptedCount < acceptedTicks.Length)
+                {
+                    acceptedTicks[acceptedCount] = actionTick;
                 }
 
                 // Count every accepted step even if the buffer was too small to record it (under-report rather

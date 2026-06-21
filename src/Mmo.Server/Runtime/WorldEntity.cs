@@ -21,6 +21,15 @@ public sealed class WorldEntity
     // the elapsed measurement.
     private uint? _lastStepTick;
 
+    // NET3 authored-tick commit scheduling: the AUTHORED tick of this entity's last ACCEPTED UoClientDriven commit
+    // (TryCommitStepAuthored). Null = no authored commit accepted yet. The anti-speedhack SPACING gate is keyed on
+    // authored ticks: a new commit's authored tick must be >= this prior accepted authored tick + the step cooldown,
+    // so a client cannot claim steps closer together than cadence regardless of when the packets arrive (the bundled
+    // [C2,C3] recovery is in-order and a cadence apart, so it passes; a spam burst at the same authored tick does
+    // not). Distinct from _lastStepTick (which is a RECEIVE-time field the S103 floor uses) so the two paths don't
+    // skew each other.
+    private uint? _lastAuthoredCommitTick;
+
     public WorldEntity(
         ulong id,
         uint networkId,
@@ -334,6 +343,121 @@ public sealed class WorldEntity
         var scheduleBase = nominalEnd > serverTick ? nominalEnd : serverTick;
         _lastStepTick = scheduleBase;
         _nextEligibleTick = scheduleBase + stepCooldownTicks;
+        StateRevision++;
+        StepSequence++;
+        result = new MovementStepResult(
+            direction,
+            from,
+            target,
+            CooldownElapsed: true,
+            TargetWalkable: true,
+            Accepted: true,
+            "committed",
+            Tile);
+        return true;
+    }
+
+    // NET3 — apply a UoClientDriven commit at its AUTHORED tick (the references' "process the command at its own
+    // timing", not at receive time). This is the loss-desync fix: NET2's redundant window recovers a dropped commit,
+    // but it arrives BUNDLED with the next ([C2,C3] in one packet). The old TryCommitStep gated the cooldown on the
+    // RECEIVE tick, so both landed at the same tick → C2 accepted, C3 rejected "too early" → never confirmed →
+    // prediction stays ahead → desync. Here the cooldown SCHEDULE is keyed on the AUTHORED tick instead:
+    //
+    //   * authoredTick is the integer server tick the CLIENT's predictor banked the step on (carried on the wire,
+    //     NET3). It is clamped UP to a recent window floor [serverTick - pastWindow] so a far-past tick (a very stale
+    //     recovered commit, or tamper) can't rewind the schedule arbitrarily into the past.
+    //   * PACING (anti-speedhack): the commit is scheduled at scheduled = max(clampedAuthored, prior + cooldown) —
+    //     never closer than a full cooldown after the prior accepted commit. So a same-tick spam BURST is SERIALISED
+    //     to cadence (each clamped up to the prior's nominal end) rather than all landing at once; a client cannot
+    //     claim steps closer than cadence. The in-order redundant window delivers recovered commits a cadence apart,
+    //     so a bundle is already spaced and each lands at its own authored tick — exactly the [C2,C3] the receive-
+    //     time gate rejected. A reorder/dup (authored < prior) is paced up to the next slot too — no rollback (full
+    //     reorder rollback is Stage 4); the window normally prevents reorders anyway.
+    //   * REAL-TIME CAP: the scheduled tick must not exceed serverTick + futureLead — the schedule can NEVER run
+    //     ahead of real time by more than the small in-flight lead the predictor legitimately has. A serialised spam
+    //     burst whose paced slot would land in the future is REJECTED ("too early") and re-tries on a later tick once
+    //     real time catches up. This is what bounds the rate to cadence in real time (a 100-deep same-tick burst
+    //     cannot teleport the entity 100 tiles in one tick — only futureLead-worth land, the rest wait).
+    //   * On accept the schedule anchor advances to the scheduled tick; tile/StepSequence advance through the SAME
+    //     body as a normal step.
+    //
+    // Walkability is the identical S75 corner-cut gate as TryStep/TryCommitStep. A blocked authored commit holds in
+    // place WITHOUT consuming the authored schedule (mirroring TryStep's wall-hold) so a later commit re-tests.
+    public bool TryCommitStepAuthored(
+        Direction8 direction,
+        uint authoredTick,
+        uint serverTick,
+        uint stepCooldownTicks,
+        uint pastWindowTicks,
+        uint futureLeadTicks,
+        TileGrid grid,
+        out MovementStepResult result)
+    {
+        // Clamp the authored tick up to a recent window floor so a far-past (stale / tamper) tick can't rewind the
+        // schedule arbitrarily. A far-future tick needs no separate clamp here — the real-time cap below rejects a
+        // scheduled tick beyond serverTick + futureLead.
+        var windowFloor = serverTick > pastWindowTicks ? serverTick - pastWindowTicks : 0u;
+        var clampedAuthored = authoredTick < windowFloor ? windowFloor : authoredTick;
+
+        // PACE: never schedule closer than a full cooldown after the prior accepted commit. A bundle that is already
+        // a cadence apart keeps its own authored ticks; a too-close / same-tick / reorder commit is paced up to the
+        // prior's nominal next slot (serialising a spam burst to cadence rather than dropping it).
+        var scheduledTick = clampedAuthored;
+        if (_lastAuthoredCommitTick.HasValue)
+        {
+            var nominalNext = _lastAuthoredCommitTick.Value + stepCooldownTicks;
+            if (scheduledTick < nominalNext)
+            {
+                scheduledTick = nominalNext;
+            }
+        }
+
+        // REAL-TIME CAP: the schedule can never run ahead of real time by more than the small in-flight lead. If the
+        // paced slot is beyond serverTick + futureLead, reject "too early" — the client is trying to claim steps
+        // faster than real time allows (a serialised spam burst, or a far-future authored tick). It re-tries on a
+        // later tick once real time advances, so the long-run rate is bounded to cadence and a burst can't teleport.
+        if (scheduledTick > serverTick + futureLeadTicks)
+        {
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                Tile,
+                CooldownElapsed: false,
+                TargetWalkable: true,
+                Accepted: false,
+                "commit_too_early",
+                Tile);
+            return false;
+        }
+
+        var delta = direction.Delta();
+        var target = Tile.Offset(delta.X, delta.Y);
+
+        // Walkability gate (same S75 corner-cut rule as TryStep). A commit into a wall / out of bounds changes
+        // nothing and does NOT advance the authored schedule, so a later commit in an open direction still applies.
+        if (!IsStepWalkable(delta, target, grid))
+        {
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                target,
+                CooldownElapsed: true,
+                TargetWalkable: false,
+                Accepted: false,
+                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
+                Tile);
+            return false;
+        }
+
+        var from = Tile;
+        Tile = target;
+        Facing = direction;
+        // Advance the authored-schedule anchor to the scheduled (paced) tick. The next commit must be scheduled at
+        // least a cooldown later. _lastStepTick / _nextEligibleTick are kept coherent off the SAME anchor so a later
+        // S103-style receive-time commit or a switch back to server-paced reads a sane base rather than a stale one.
+        _lastAuthoredCommitTick = scheduledTick;
+        _lastStepTick = scheduledTick;
+        _nextEligibleTick = scheduledTick + stepCooldownTicks;
         StateRevision++;
         StepSequence++;
         result = new MovementStepResult(

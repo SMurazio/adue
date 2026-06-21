@@ -157,6 +157,99 @@ public sealed class WorldEntityCommitStepTests
         Assert.True(accepted >= (int)(window / cooldown) - 1, $"expected ~{window / cooldown} moves, got {accepted}");
     }
 
+    // ---- NET3 authored-tick commit application (TryCommitStepAuthored) ---------------------------------
+    // The loss-desync fix: a UoClientDriven commit applies at its AUTHORED tick (the predictor gate tick the client
+    // banked it on), with the cooldown SCHEDULE keyed on authored time, not the receive tick. The clamp window for
+    // these tests mirrors the server consts (GameServer.AuthoredTickPastWindow / AuthoredTickFutureLead).
+    private const uint PastWindow = 64;
+    private const uint FutureLead = 4;
+
+    [Fact]
+    public void Authored_BundledRecoveredCommit_AtOneReceiveTick_BothAccepted_AtAuthoredTicks()
+    {
+        // C2(authored 3) was dropped and recovered BUNDLED with C3(authored 6) at ONE receive tick (8). The OLD
+        // receive-time gate rejected the second; the authored-tick path schedules each at its own authored tick a
+        // cadence apart, so BOTH land — the server reaches all 3 banked steps.
+        const uint cd = 3;
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(64, 64, []);
+
+        Assert.True(entity.TryCommitStepAuthored(Direction8.E, 0, 0, cd, PastWindow, FutureLead, grid, out _)); // C1
+        Assert.True(entity.TryCommitStepAuthored(Direction8.E, 3, 8, cd, PastWindow, FutureLead, grid, out _)); // C2 (bundle)
+        var c3 = entity.TryCommitStepAuthored(Direction8.E, 6, 8, cd, PastWindow, FutureLead, grid, out var r3);
+
+        Assert.True(c3);                                   // the recovered bundle's 2nd commit is ACCEPTED
+        Assert.Equal("committed", r3.Reason);
+        Assert.Equal(3u, entity.StepSequence);             // all 3 banked steps landed — no desync
+        Assert.Equal(new TileCoord(11, 8), entity.Tile);
+    }
+
+    [Fact]
+    public void Authored_SameTickSpamBurst_IsCappedByRealTime_NoTeleport()
+    {
+        // A burst of commits all authored at the same tick cannot teleport: each is paced to >= prior + cooldown,
+        // and the real-time cap (serverTick + futureLead) rejects any slot beyond it. At serverTick 1 (cap 5) only
+        // the slots 0 and 3 land; 6, 9, 12 are rejected and must wait for real time.
+        const uint cd = 3;
+        var entity = CreateEntity(tile: new TileCoord(0, 8), facing: Direction8.E);
+        var grid = new TileGrid(64, 16, []);
+
+        var accepted = 0;
+        for (var i = 0; i < 5; i++)
+        {
+            if (entity.TryCommitStepAuthored(Direction8.E, 0, 1, cd, PastWindow, FutureLead, grid, out _))
+            {
+                accepted++;
+            }
+        }
+
+        Assert.Equal(2, accepted);
+        Assert.Equal(2u, entity.StepSequence);
+    }
+
+    [Fact]
+    public void Authored_SustainedBurst_OverLongWindow_CannotExceedCadence()
+    {
+        // The long-run anti-speedhack guarantee: spam a commit authored at the CURRENT server tick every tick for a
+        // long window. The pace (>= prior + cooldown) + real-time cap (<= serverTick + futureLead) means the rate
+        // can never exceed one step per cooldown on average (plus the small futureLead head-start + boundary slack).
+        const uint cd = 3;
+        const uint window = 600;
+        var entity = CreateEntity(tile: new TileCoord(0, 8), facing: Direction8.E);
+        var grid = new TileGrid(4096, 16, []);
+
+        var accepted = 0;
+        for (uint tick = 0; tick <= window; tick++)
+        {
+            // A scripted client claims its step is authored RIGHT NOW (the most aggressive legal authored tick).
+            if (entity.TryCommitStepAuthored(Direction8.E, tick, tick, cd, PastWindow, FutureLead, grid, out _))
+            {
+                accepted++;
+            }
+        }
+
+        // ceil(600/3) = 200; allow the futureLead head-start + a boundary step of slack.
+        var maxByCadence = (int)((window / cd) + FutureLead + 2);
+        Assert.True(accepted <= maxByCadence, $"accepted {accepted} in {window} ticks at cd {cd}; cap ~{maxByCadence}");
+        Assert.True(accepted >= (int)(window / cd) - 1, $"expected ~{window / cd} moves, got {accepted}");
+    }
+
+    [Fact]
+    public void Authored_FarPastTick_IsClampedToWindowFloor_NotRewindingSchedule()
+    {
+        // A far-past authored tick (stale recovery / tamper) is clamped UP to the window floor (serverTick - past),
+        // so it cannot rewind the schedule arbitrarily; it still applies once (paced).
+        const uint cd = 3;
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(64, 64, []);
+
+        // serverTick 100, authored tick 0 is far below the floor (100 - 64 = 36): clamped to 36, applied.
+        var ok = entity.TryCommitStepAuthored(Direction8.E, 0, 100, cd, PastWindow, FutureLead, grid, out var r);
+        Assert.True(ok);
+        Assert.Equal("committed", r.Reason);
+        Assert.Equal(1u, entity.StepSequence);
+    }
+
     private static WorldEntity CreateEntity(
         uint networkId = 1,
         TileCoord? tile = null,

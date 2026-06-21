@@ -39,6 +39,18 @@ public sealed class GameServer
     // regardless — this fraction only sets how early within a step a commit may legitimately fire.
     private const double CommitAcceptFraction = 0.5d;
 
+    // NET3 authored-tick commit window. A UoClientDriven commit is applied at its AUTHORED tick (the tick the
+    // client's predictor banked the step on), but the authored tick is clamped to [serverTick - AuthoredTickPastWindow,
+    // serverTick + AuthoredTickFutureLead] before it gates/schedules anything, so a far-past (very stale recovered
+    // commit / tamper) or far-future (clock skew) authored tick can't poison the schedule. The past window covers a
+    // generous loss-recovery depth (the redundant window is ~8 commits ≈ 8 cadences ≈ 24 ticks at 150 ms cadence;
+    // 64 ticks ≈ 3.2 s gives ample slack for a deep recovery without letting an ancient tick through). The future
+    // lead is tiny: the predictor leads the server by ~1-2 in-flight steps, so a few ticks of lead is legitimate
+    // (uplink jitter / a frame that banked slightly ahead), but a commit authored far in the future is clamped down
+    // so the schedule can never run ahead of real time by more than this — the rate stays capped at cadence.
+    private const uint AuthoredTickPastWindow = 64;
+    private const uint AuthoredTickFutureLead = 4;
+
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
     // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
@@ -1685,37 +1697,38 @@ public sealed class GameServer
         return fresh;
     }
 
-    // NET2: ingest a redundant-unreliable StepCommitBatch. The packet carries the newest committed step
-    // (HeadSeq/Direction) plus a window of prior committed steps as deltas off HeadSeq. We reconstruct each
-    // commit's sequence, then apply them in ASCENDING seq order through the EXISTING HandleStepCommit path
-    // (TryConsumeCommitSequence dedups seq <= LastMoveSeq; TryCommitStep applies at the CURRENT server tick
-    // through the cooldown gate). Because every batch repeats the window, a dropped batch's commit is
-    // recovered from any later batch that still carries it — no reliable retransmit bunching, so the cooldown
-    // gate no longer rejects a batch in one go (the GodotB speed-up/desync). The stepping model is untouched:
-    // commits still apply at the current tick (authored-tick replay is Stage 4).
+    // NET2/NET3: ingest a redundant-unreliable StepCommitBatch. The packet carries the newest committed step
+    // (HeadSeq/HeadTick/Direction) plus a window of prior committed steps as seq/tick deltas off the head. We
+    // reconstruct each commit's (sequence, authored tick), then apply them in ASCENDING seq order — the cursor
+    // dedups (TryConsumeCommitSequence drops seq <= LastMoveSeq) and each fresh commit is applied at its AUTHORED
+    // tick (NET3: TryCommitStepAuthored gates/schedules the cooldown on authored time, not the receive tick). This
+    // is the loss-desync fix: a dropped commit recovered BUNDLED with the next ([C2,C3] in one packet) used to land
+    // at the same receive tick — C2 accepted, C3 rejected "too early". Keying the schedule on authored ticks lets
+    // C2(authored T+3) advance the schedule to T+6 so C3(authored T+6) is then accepted. Forward replay only (the
+    // window delivers recovered commits in order); a genuine reorder is dropped gracefully (Stage 4 owns rollback).
     private void HandleStepCommitBatch(ClientSession session, StepCommitBatchMessage batch)
     {
-        foreach (var (seq, direction) in ExtractFreshStepCommits(batch, session.LastMoveSeq))
+        foreach (var (seq, authoredTick, direction) in ExtractFreshStepCommits(batch, session.LastMoveSeq))
         {
-            // HandleStepCommit re-checks the cursor (TryConsumeCommitSequence) and applies via TryCommitStep;
-            // we pre-filtered + ordered so each fresh seq applies exactly once, oldest-first.
-            HandleStepCommit(session, seq, direction);
+            HandleAuthoredStepCommit(session, seq, authoredTick, direction);
         }
     }
 
-    // NET2 (pure, unit-testable): given a redundant StepCommitBatch and the last seq already accepted on the
+    // NET2/NET3 (pure, unit-testable): given a redundant StepCommitBatch and the last seq already accepted on the
     // shared move cursor, returns the fresh commits (seq > lastSeq) in ASCENDING seq order — head plus window
-    // entries reconstructed from their deltas (entrySeq = HeadSeq - SeqDelta). Already-seen and malformed
-    // (delta 0 / underflowing) entries are dropped. Applying the result oldest-first feeds the commit path each
-    // new step once; a "dropped head" batch's commit is recovered from a later batch's window.
-    internal static IReadOnlyList<(uint Seq, Direction8 Direction)> ExtractFreshStepCommits(
+    // entries reconstructed from their deltas (entrySeq = HeadSeq - SeqDelta; entryTick = HeadTick - TickDelta).
+    // Already-seen and malformed (seq delta 0 / underflowing, or a tick delta that underflows the head tick) entries
+    // are dropped. Applying the result oldest-first feeds the commit path each new step once, each carrying the
+    // AUTHORED tick the client banked it on; a "dropped head" batch's commit is recovered from a later batch's
+    // window with its authored tick intact.
+    internal static IReadOnlyList<(uint Seq, uint AuthoredTick, Direction8 Direction)> ExtractFreshStepCommits(
         StepCommitBatchMessage batch,
         uint lastSeq)
     {
-        var fresh = new List<(uint Seq, Direction8 Direction)>(batch.Window.Count + 1);
+        var fresh = new List<(uint Seq, uint AuthoredTick, Direction8 Direction)>(batch.Window.Count + 1);
         if (batch.HeadSeq > lastSeq)
         {
-            fresh.Add((batch.HeadSeq, batch.Direction));
+            fresh.Add((batch.HeadSeq, batch.HeadTick, batch.Direction));
         }
 
         for (var i = 0; i < batch.Window.Count; i++)
@@ -1727,19 +1740,65 @@ public sealed class GameServer
                 continue;
             }
 
+            if (entry.TickDelta > batch.HeadTick)
+            {
+                // A tick delta past HeadTick underflows the authored tick — drop the malformed entry. (TickDelta 0
+                // would tie the head's tick, which the client never emits since authored ticks increase, but it is
+                // harmless if it slips through — the authored-tick spacing gate handles a too-close tick.)
+                continue;
+            }
+
             var entrySeq = batch.HeadSeq - entry.SeqDelta;
             if (entrySeq > lastSeq)
             {
-                fresh.Add((entrySeq, entry.Direction));
+                fresh.Add((entrySeq, batch.HeadTick - entry.TickDelta, entry.Direction));
             }
         }
 
         // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
-        // are distinct off a single head), so a stable sort suffices.
+        // are distinct off a single head), so a stable sort suffices. Seq order == authored-tick order (both
+        // increase monotonically per accepted step), so this also yields ascending authored ticks.
         fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
         return fresh;
     }
 
+    // NET3: apply ONE fresh commit at its authored tick. The cursor (TryConsumeCommitSequence) dedups; on accept the
+    // entity steps via the authored-tick path (TryCommitStepAuthored), which clamps the authored tick to a recent
+    // window and enforces cooldown SPACING on authored ticks (anti-speedhack) before scheduling on it.
+    private void HandleAuthoredStepCommit(ClientSession session, uint sequence, uint authoredTick, Direction8 direction)
+    {
+        if (!session.TryConsumeCommitSequence(sequence, _serverTick))
+        {
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var entity))
+        {
+            return;
+        }
+
+        if (_zone.TryCommitStepAuthored(
+                entity,
+                direction,
+                authoredTick,
+                _serverTick,
+                EffectiveStepCooldownTicks(entity),
+                AuthoredTickPastWindow,
+                AuthoredTickFutureLead,
+                out var result))
+        {
+            MarkDirtyDurableTile(entity);
+        }
+
+        if (result.CooldownElapsed)
+        {
+            _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
+        }
+    }
+
+    // S103: the reliable per-step StepCommitRequest path (still defined; the wire send is now StepCommitBatch). Keeps
+    // the receive-time S103 commit-step floor (TryCommitStep) for any client still using the legacy single-commit
+    // message. The redundant StepCommitBatch path uses HandleAuthoredStepCommit (NET3) instead.
     private void HandleStepCommit(ClientSession session, uint sequence, Direction8 direction)
     {
         if (!session.TryConsumeCommitSequence(sequence, _serverTick))

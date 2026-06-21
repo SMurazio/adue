@@ -61,20 +61,26 @@ public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Directio
     public MessageType Type => MessageType.StepCommitRequest;
 }
 
-// NET2 (protocol v24): loss-robust UO commit delivery — the SAME redundancy-not-retransmission trick NET1
-// applied to held intent, now for the UoClientDriven per-step commit stream. Replaces the per-step reliable-
-// ordered StepCommitRequest send. Sent UNRELIABLE: each packet carries the NEWEST committed step (HeadSeq +
-// Direction) PLUS a sliding Window of the last few prior committed steps as deltas, so a dropped commit is
-// recovered from a LATER packet's window (~one send interval late, spread out) instead of a reliable
-// retransmit BATCH that the server's cooldown gate would reject all at once (the GodotB speed-up/desync). The
-// server dedupes by sequence and applies each fresh commit through the EXISTING TryCommitStep (current server
-// tick, cooldown gate) — authored-tick replay is deferred to Stage 4. Window entries are deltas off HeadSeq:
-// SeqDelta = (HeadSeq - entry.Seq), so entry seq = HeadSeq - SeqDelta. A commit has no Moving flag (it is
-// always a step), so an entry is just {SeqDelta, Direction}. Sequence shares the MoveIntent/MoveInput cursor.
-public readonly record struct StepCommitWindowEntry(byte SeqDelta, Direction8 Direction);
+// NET2 (protocol v24) / NET3 (protocol v25): loss-robust UO commit delivery — the SAME redundancy-not-
+// retransmission trick NET1 applied to held intent, now for the UoClientDriven per-step commit stream. Replaces
+// the per-step reliable-ordered StepCommitRequest send. Sent UNRELIABLE: each packet carries the NEWEST committed
+// step (HeadSeq + Direction) PLUS a sliding Window of the last few prior committed steps as deltas, so a dropped
+// commit is recovered from a LATER packet's window (~one send interval late, spread out) instead of a reliable
+// retransmit BATCH that the server's cooldown gate would reject all at once (the GodotB speed-up/desync).
+//
+// NET3 adds the AUTHORED TICK per commit: HeadTick is the integer server tick the predictor's gate banked the
+// HEAD step on (the SAME tick the prediction advanced on — not a separately-sampled clock, which would reintroduce
+// snapping). The server APPLIES each commit at its authored tick (gating/scheduling the cooldown on authored time,
+// not receive time), so a bundled-recovered [C2,C3] no longer collides at one receive tick: C2 advances the
+// eligible schedule to its authored end, and C3 (authored a cadence later) is then ACCEPTED instead of rejected as
+// "too early". Window entries carry BOTH a SeqDelta (HeadSeq - entry.Seq) and a TickDelta (HeadTick - entry.Tick)
+// off the head, so entry seq = HeadSeq - SeqDelta and entry authored tick = HeadTick - TickDelta. A commit has no
+// Moving flag (it is always a step). Sequence shares the MoveIntent/MoveInput cursor.
+public readonly record struct StepCommitWindowEntry(byte SeqDelta, uint TickDelta, Direction8 Direction);
 
 public sealed record StepCommitBatchMessage(
     uint HeadSeq,
+    uint HeadTick,
     Direction8 Direction,
     IReadOnlyList<StepCommitWindowEntry> Window) : IProtocolMessage
 {
