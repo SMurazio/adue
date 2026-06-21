@@ -125,6 +125,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Button? _renderModeButton;
 	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
 	private CheckBox? _snapOnReleaseCheck;
+	// New (S103): model B's commit-step-on-release toggle (MmoClient.SetCommitStepOnRelease) + threshold field
+	// (MmoClient.SetCommitStepThreshold, applied on Apply/Enter).
+	private CheckBox? _commitStepCheck;
+	private LineEdit? _moveCommitThreshold;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -906,6 +910,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(snapOnRelease);
 		_snapOnReleaseCheck = snapOnRelease;
 
+		// S103 new live toggle — flips on click, no Apply needed: commit a near-done step on release instead of
+		// snapping back. ON (default) = release past the threshold finishes the step + sends a server-validated
+		// commit (accept stays, reject snaps back). OFF = the S102 release behaviour (snap or soft-settle) always.
+		// Only affects model B (CosmeticLead); inert otherwise.
+		var commitStep = new CheckBox
+		{
+			Name = "CommitStepOnRelease",
+			Text = "Commit step on release (model B)",
+			ButtonPressed = _client?.CommitStepOnRelease ?? true
+		};
+		commitStep.AddThemeFontSizeOverride("font_size", 13);
+		commitStep.Toggled += ApplyCommitStepOnRelease;
+		rows.AddChild(commitStep);
+		_commitStepCheck = commitStep;
+
+		// S103 commit threshold (0..1) — how far the cosmetic lead must have glided onto the next tile at release for
+		// a commit to fire. Default 0.7 ≈ "almost entirely on the next tile". Applied on Apply/Enter; clamped [0,1].
+		_moveCommitThreshold = AddTuningField(rows, "Commit threshold (0..1)", OnMovementApplyPressed);
+
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnMovementApplyPressed;
@@ -958,6 +981,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplySnapOnRelease(bool enabled)
 	{
 		_client?.SetSnapOnRelease(enabled);
+	}
+
+	// S103 F6 live toggle ("Commit step on release (model B)"). Route the flag to the client (and the active
+	// cosmetic driver) immediately — no restart. ON = commit a near-done step on release; OFF = the S102 release.
+	private void ApplyCommitStepOnRelease(bool enabled)
+	{
+		_client?.SetCommitStepOnRelease(enabled);
 	}
 
 	// Live vsync / fps toggle, shared by the F5 checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
@@ -1533,6 +1563,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
 		UpdateRenderModeButtonText();
 		_snapOnReleaseCheck?.SetPressedNoSignal(_client?.SnapOnRelease ?? true);
+		// S103: seed the commit-step toggle + threshold field from the live client values.
+		_commitStepCheck?.SetPressedNoSignal(_client?.CommitStepOnRelease ?? true);
+		SetField(_moveCommitThreshold, _client?.CommitStepThreshold ?? 0.7d);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1692,6 +1725,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveCameraTeleportSnapTiles, out var teleportSnap))
 		{
 			_cameraTeleportSnapTiles = Mathf.Clamp((float)teleportSnap, 0.5f, 100f);
+		}
+
+		// S103: commit threshold (0..1) for model B's commit-step-on-release. Clamped [0,1] (the client clamps
+		// again); routed to the active cosmetic driver. Default 0.7.
+		if (TryReadField(_moveCommitThreshold, out var commitThreshold))
+		{
+			_client.SetCommitStepThreshold(Mathf.Clamp((float)commitThreshold, 0f, 1f));
 		}
 
 		ShowInteractFeedback("Movement tuning applied.");

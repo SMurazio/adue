@@ -211,11 +211,22 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwenty()
+    public void ProtocolVersionIsTwentyOne()
     {
-        // S98 protocol bump: removing ServerHello.turnDelayMs is a breaking wire change (server + client ship
-        // together). Pin the version so an accidental change is caught.
-        Assert.Equal(20, ProtocolCodec.Version);
+        // S103 protocol bump: adding the client->server StepCommitRequest message is a breaking wire change (server
+        // + client ship together). Pin the version so an accidental change is caught.
+        Assert.Equal(21, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void StepCommitRequestRoundTrips()
+    {
+        var original = new StepCommitRequestMessage(4242, Direction8.SW);
+
+        var decoded = Assert.IsType<StepCommitRequestMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4242u, decoded.Sequence);
+        Assert.Equal(Direction8.SW, decoded.Direction);
     }
 
     [Fact]

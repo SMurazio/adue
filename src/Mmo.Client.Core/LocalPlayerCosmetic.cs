@@ -26,6 +26,11 @@ namespace Mmo.Client.Core;
 // Tick (wall clock) + Confirm and asserting the render position glides early, never banks a tile, and cuts to a
 // disagreeing confirm. It reuses LocalPlayerPredictor's RenderPosition tween idiom (FromTile / Lerp /
 // StartTween + SampleInternal) verbatim so a single server step looks identical between A and B.
+// S103: what a release (SetIntent moving=false) decided. When ShouldCommit is true the caller (MmoClient) must
+// send a StepCommitRequest for Direction (the render is already gliding to CommitTarget, no snap). When false the
+// release took the normal S102 path (snap or soft-settle) and the caller sends nothing extra.
+public readonly record struct CosmeticReleaseDecision(bool ShouldCommit, TileCoord CommitTarget, Direction8 Direction);
+
 public sealed class LocalPlayerCosmetic
 {
     // The bounded cosmetic lead, in tiles: the render may glide at most this far ahead of the confirmed tile
@@ -83,6 +88,38 @@ public sealed class LocalPlayerCosmetic
     // snapped anyway. Settable live via MmoClient.SetSnapOnRelease so an F6 toggle flips it without re-creating the
     // driver. Note this only changes the release feel; the forward lead and confirm-cut are untouched.
     public bool SnapOnRelease { get; set; } = true;
+
+    // S103 commit-step on release. When true (default), releasing the key while the cosmetic lead has glided PAST
+    // CommitThreshold onto the next (walkable) tile does NOT snap back: the render keeps tweening to that tile at
+    // normal cadence (a smooth completion of an already-~70%-done step) and the client sends a server-validated
+    // commit-step request. Accept (the confirmed tile reaches that tile) = seamless; reject (the server does not
+    // step) = the client snaps back. Below the threshold (or into a wall) the existing S102 release behaviour
+    // applies — the commit is an ADDITIONAL release path, not a replacement. Only consulted in the LeadEnabled
+    // (model B) release branch. Settable live (F6) without re-creating the driver.
+    public bool CommitStepEnabled { get; set; } = true;
+
+    // S103: the lead-progress threshold (0..1) at which a release triggers a commit-step instead of the normal
+    // release. Default 0.7 ≈ "almost entirely on the next tile". Clamped [0, 1] on set. The server's
+    // CommitAcceptFraction (0.5) sits below this in cooldown-elapsed terms so a genuine release past this
+    // threshold is always accepted server-side.
+    public double CommitThreshold
+    {
+        get => _commitThreshold;
+        set => _commitThreshold = Math.Clamp(value, 0.0d, 1.0d);
+    }
+
+    private double _commitThreshold = 0.7d;
+
+    // S103: a pending commit-step is in flight — release-past-threshold kept the render gliding toward _leadTarget
+    // (now _pendingCommitTarget) and the client sent a commit request. While true, Tick must NOT re-arm a fresh
+    // lead (the key is up). Cleared by ClearPendingCommit (accept = leave render; reject = the client snaps it).
+    public bool HasPendingCommit { get; private set; }
+    private TileCoord _pendingCommitTarget;
+
+    // S103: the lead progress (0..1) of the SAMPLED render from the confirmed tile toward _leadTarget, at the LAST
+    // sample. 0 = on the confirmed tile, 1 = fully on the lead/adjacent tile. Read by SetIntent (release) to decide
+    // whether the lead is far enough onto the next tile to commit instead of snap. 0 when not leading.
+    public double LeadProgress { get; private set; }
 
     // ---- Present-time render tween (reused from LocalPlayerPredictor; NOT a playout buffer) -----------------
     private RenderPosition _renderFrom;
@@ -144,17 +181,47 @@ public sealed class LocalPlayerCosmetic
     // this NEVER arms a tile step — it only records the held direction (cosmetic facing rotates immediately) so
     // Tick can extend the cosmetic lead glide. On keyup it stops extending the lead; the glide settles back onto
     // the confirmed tile.
-    public void SetIntent(bool moving, Direction8 direction, TimeSpan now)
+    public CosmeticReleaseDecision SetIntent(bool moving, Direction8 direction, TimeSpan now)
     {
         if (moving)
         {
             _moving = true;
             _direction = direction;
             _facing = direction; // cosmetic: rotate immediately on input.
+            // S103: a fresh keydown supersedes any in-flight commit — Tick re-arms a normal lead this frame, so the
+            // pending-commit state must not linger (it would skew LeadProgress toward the old committed tile).
+            HasPendingCommit = false;
+            return default;
         }
         else
         {
             _moving = false;
+
+            // S103 commit-step on release. BEFORE the normal release branches: if the lead has glided past the
+            // commit threshold onto the next (walkable) tile, do NOT snap or settle — keep the render tweening to
+            // that tile at the normal cadence (a smooth completion of the already-~70%-done step) and tell the
+            // caller to send a server-validated commit. Sample the progress at `now` first (so a release between
+            // ticks sees the up-to-date lead). Only in the LeadEnabled (model B) path; AcceptDeny has no lead.
+            if (LeadEnabled && CommitStepEnabled && _leadTarget is { } leadTile)
+            {
+                _renderPosition = ClampLead(SampleInternal(now));
+                LeadProgress = ComputeLeadProgress(_renderPosition, leadTile);
+                // Walkability was already gated when the lead was armed (Tick only arms a walkable lead), so a live
+                // _leadTarget is walkable. Commit only when the render is far enough onto the next tile.
+                if (LeadProgress >= _commitThreshold && IsLeadStillWalkable(leadTile))
+                {
+                    // Keep the existing tween running to the lead tile (do NOT re-StartTween — that would reset the
+                    // progress); just mark the commit pending so Tick stops re-arming a fresh lead while the key is
+                    // up. The render finishes the glide at normal speed; the confirm (accept) or the client's
+                    // snap-back (reject) resolves it.
+                    HasPendingCommit = true;
+                    _pendingCommitTarget = leadTile;
+                    var committedDirection = _direction;
+                    _leadTarget = leadTile; // unchanged — kept so an agreeing Confirm flows seamlessly.
+                    return new CosmeticReleaseDecision(true, leadTile, committedDirection);
+                }
+            }
+
             if (LeadEnabled && SnapOnRelease)
             {
                 // S91 (model B): on release, SNAP instantly to the confirmed-tile center instead of tweening back
@@ -180,6 +247,7 @@ public sealed class LocalPlayerCosmetic
             // in-progress tween is always toward a confirmed (truth) tile, so letting it finish is correct and
             // avoids a release discontinuity. _leadTarget is already null (Tick never armed it). The render keeps
             // moving only via Confirm.
+            return default;
         }
     }
 
@@ -226,6 +294,7 @@ public sealed class LocalPlayerCosmetic
         }
 
         _renderPosition = ClampLead(SampleInternal(now));
+        UpdateLeadProgress();
         return startedLead;
     }
 
@@ -234,7 +303,35 @@ public sealed class LocalPlayerCosmetic
     public RenderPosition Sample(TimeSpan now)
     {
         _renderPosition = ClampLead(SampleInternal(now));
+        UpdateLeadProgress();
         return _renderPosition;
+    }
+
+    // S103: clears a pending commit (used by MmoClient when the commit resolves). On ACCEPT the render is already
+    // gliding/settled on the committed tile, so we just drop the pending flag and leave the render. On REJECT the
+    // caller snaps back via SnapTo. Either way the lead is consumed (a new lead re-arms next Tick if moving).
+    public void ClearPendingCommit()
+    {
+        HasPendingCommit = false;
+        LeadProgress = 0d;
+    }
+
+    // S103: the pending commit's target tile (the tile the render is finishing the glide toward). Valid only while
+    // HasPendingCommit; used by MmoClient to detect "the confirmed tile reached the commit target" = accepted.
+    public TileCoord PendingCommitTarget => _pendingCommitTarget;
+
+    // S103: hard-snaps the render to a tile center immediately (the REJECT path — the server did not honour the
+    // commit, so cut back to the confirmed tile exactly like a normal disagreeing release). Mirrors the S91 snap:
+    // a degenerate same-from/to tween makes any later Sample(now) return the center. Clears any pending commit and
+    // the lead so nothing re-leads while the key is up.
+    public void SnapTo(TileCoord tile, TimeSpan now)
+    {
+        HasPendingCommit = false;
+        LeadProgress = 0d;
+        _leadTarget = null;
+        var center = RenderPosition.FromTile(tile);
+        StartTween(center, center, now, _cadenceMs);
+        _renderPosition = center;
     }
 
     // Applies an authoritative self-snapshot (the server ack) — the ONLY place the confirmed tile advances. This
@@ -249,12 +346,45 @@ public sealed class LocalPlayerCosmetic
     public void Confirm(TileCoord confirmedTile, Direction8 facing, TimeSpan now)
     {
         var agreedWithLead = _leadTarget is { } lead && lead == confirmedTile;
+        var previousConfirmedTile = _confirmedTile;
         _confirmedTile = confirmedTile;
 
         // Cosmetic facing: hold the held direction while moving, else adopt the confirmed facing.
         if (!_moving)
         {
             _facing = facing;
+        }
+
+        // S103: while a commit is pending the key is UP and the render is finishing the glide to the committed
+        // tile. A confirm that has NOT yet reached the committed tile must NOT cut the render back to the (still
+        // old) confirmed tile — that would misread a not-yet-arrived accept as a reject (the exact highest-risk
+        // race). So: if the confirm reaches the committed tile, the commit is ACCEPTED — clear pending and flow
+        // the glide seamlessly onto it (the normal retarget below). If the confirm is for some OTHER tile, the
+        // server moved us somewhere unexpected (e.g. a held intent that slipped through) — treat that as the
+        // resolution: retarget to it and clear pending. If the confirm is the UNCHANGED old tile (commit not yet
+        // processed), leave the in-flight glide to the committed tile untouched and return — MmoClient's grace
+        // (RecipientStepSeq advance) owns the eventual reject snap-back.
+        if (HasPendingCommit)
+        {
+            if (confirmedTile == _pendingCommitTarget)
+            {
+                HasPendingCommit = false;
+                LeadProgress = 0d;
+            }
+            else if (confirmedTile == previousConfirmedTile)
+            {
+                // An unchanged confirm at the OLD tile (the commit has not been processed yet): keep finishing the
+                // glide to the committed tile, do NOT cut back. MmoClient's grace owns the eventual reject.
+                _renderPosition = SampleInternal(now);
+                return;
+            }
+            else
+            {
+                // The server confirmed a different tile than we committed to: resolve the pending commit here and
+                // cut to it below (no separate snap-back needed).
+                HasPendingCommit = false;
+                LeadProgress = 0d;
+            }
         }
 
         // Retarget the glide from where we are showing NOW toward the new confirmed-tile center over one cadence.
@@ -277,6 +407,8 @@ public sealed class LocalPlayerCosmetic
         _confirmedTile = confirmedTile;
         _facing = facing;
         _leadTarget = null;
+        HasPendingCommit = false;
+        LeadProgress = 0d;
         StartTween(currentRender, currentRender, now, _cadenceMs);
         _renderPosition = currentRender;
     }
@@ -298,6 +430,47 @@ public sealed class LocalPlayerCosmetic
         }
 
         return true;
+    }
+
+    // S103: re-walkability-checks the committed/lead tile at release time (the map can't change, but this keeps the
+    // commit gate explicit and symmetric with Tick's arm-time check). Recomputes the step delta from the confirmed
+    // tile to the lead tile and applies the S75 corner-cut rule.
+    private bool IsLeadStillWalkable(TileCoord leadTile)
+    {
+        var delta = new TileCoord(leadTile.X - _confirmedTile.X, leadTile.Y - _confirmedTile.Y);
+        return IsLeadWalkable(delta, leadTile);
+    }
+
+    // S103: lead progress (0..1) of the VISIBLE render from the confirmed tile toward `leadTile`. 1 = fully on the
+    // lead tile. Computed along the step axis (the lead is exactly one tile away on each non-zero axis), so a
+    // diagonal lead measures progress on whichever axis it travels (both advance together). Clamped [0,1].
+    private double ComputeLeadProgress(RenderPosition render, TileCoord leadTile)
+    {
+        var dx = leadTile.X - _confirmedTile.X;
+        var dy = leadTile.Y - _confirmedTile.Y;
+        var progress = 0d;
+        var measured = false;
+        if (dx != 0)
+        {
+            progress = Math.Max(progress, (render.X - _confirmedTile.X) / dx);
+            measured = true;
+        }
+
+        if (dy != 0)
+        {
+            progress = Math.Max(progress, (render.Y - _confirmedTile.Y) / dy);
+            measured = true;
+        }
+
+        return measured ? Math.Clamp(progress, 0d, 1d) : 0d;
+    }
+
+    // S103: refreshes LeadProgress from the cached render position toward the live lead/pending-commit target. Kept
+    // current on every Tick/Sample so a release reads an up-to-date value without a re-sample.
+    private void UpdateLeadProgress()
+    {
+        var target = HasPendingCommit ? (TileCoord?)_pendingCommitTarget : _leadTarget;
+        LeadProgress = target is { } t ? ComputeLeadProgress(_renderPosition, t) : 0d;
     }
 
     // Clamps a sampled render position so it never glides more than MaxLeadTiles ahead of the confirmed tile

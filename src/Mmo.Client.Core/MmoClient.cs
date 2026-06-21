@@ -30,6 +30,13 @@ public sealed class MmoClient : IDisposable
     public const double LocalInterpolationCadenceMultiplier = 1.0d;
     private const uint PlaceholderSnapshotTtl = 60;
 
+    // S103: how many snapshots to wait after a commit send before declaring a reject when the server has shown NO
+    // step activity (RecipientStepSeq never advanced — a pure reject where the server changed nothing). The normal
+    // reject is detected the instant the server processes a step that isn't ours (RecipientStepSeq advances); this
+    // bound only covers the do-nothing reject. ~8 snapshots ≈ a few hundred ms at 20 Hz — long enough that a
+    // legitimate accept (which advances the tile + RecipientStepSeq) is never misread as a reject under LAN jitter.
+    private const int CommitRejectGraceSnapshots = 8;
+
     private readonly ClientConnectionOptions _options;
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _netManager;
@@ -91,6 +98,20 @@ public sealed class MmoClient : IDisposable
     // the cosmetic driver — is honoured (AttachCosmetic seeds the fresh driver from this). SetSnapOnRelease routes it
     // live to the active driver (no restart). Only model B's release reads it.
     private bool _snapOnRelease = true;
+
+    // S103 commit-step on release. Client-level levers (re-seeded onto the cosmetic driver on attach, like the
+    // other lead settings): whether a release past the threshold commits the near-done step (default ON) and the
+    // progress threshold (default 0.7).
+    private bool _commitStepOnRelease = true;
+    private double _commitStepThreshold = 0.7d;
+
+    // S103: the in-flight commit's reconciliation state, or null when none is pending. Tracks the committed target
+    // tile, the RecipientStepSeq at send time (the server's accepted-step count then), and a bounded snapshot grace
+    // counter. The cosmetic driver handles the accept render (confirmed tile reaches target) and a diverging confirm
+    // itself; THIS owns the reject-with-no-tile-change case: once the server demonstrably processed the commit
+    // (RecipientStepSeq advanced past the base, OR the grace elapsed) without the tile reaching the target, snap
+    // back. Getting this grace/ordering right is what stops a not-yet-arrived accept being misread as a reject.
+    private PendingCommit? _pendingCommit;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -320,6 +341,37 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // S103: whether model B commits a near-done step on release (vs snapping back). Reflects the value last set
+    // (seeded into the F6 toggle on panel open). Inert in Predicted/AcceptDeny.
+    public bool CommitStepOnRelease => _commitStepOnRelease;
+
+    // S103: live-toggles model B's commit-step-on-release (F6). Routed to the active cosmetic driver immediately
+    // (no restart); stored at the client level so a value set before attach / after a respawn is re-applied by
+    // AttachCosmetic. No-op safe when no cosmetic driver yet.
+    public void SetCommitStepOnRelease(bool enabled)
+    {
+        _commitStepOnRelease = enabled;
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.SetCommitStepOnRelease(enabled);
+        }
+    }
+
+    // S103: the commit threshold (0..1) — how far the cosmetic lead must have glided onto the next tile at release
+    // for a commit to fire. Reflects the value last set (seeded into the F6 field on panel open). Clamped [0,1].
+    public double CommitStepThreshold => _commitStepThreshold;
+
+    // S103: live-tunes the commit threshold (F6 "Commit threshold (0..1)"). Clamped [0,1]; routed to the active
+    // cosmetic driver immediately (no restart); stored at the client level so it survives attach/respawn.
+    public void SetCommitStepThreshold(double threshold)
+    {
+        _commitStepThreshold = Math.Clamp(threshold, 0.0d, 1.0d);
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.SetCommitStepThreshold(_commitStepThreshold);
+        }
+    }
+
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
     // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
     // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
@@ -372,7 +424,32 @@ public sealed class MmoClient : IDisposable
             // sets the cosmetic facing and the release branch (no early lead).
             if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
             {
-                local.SetCosmeticIntent(moving, direction, _currentTime);
+                // S103: a fresh keydown supersedes any in-flight commit reconciliation — the player resumed moving,
+                // so the cosmetic re-arms a lead and the old pending tracker is moot. (SetCosmeticIntent on a
+                // moving intent leaves the cosmetic's own HasPendingCommit alone, but Tick re-arming the lead makes
+                // it irrelevant; clear our tracker so a later snapshot doesn't snap-back mid-walk.)
+                if (moving)
+                {
+                    _pendingCommit = null;
+                }
+
+                var release = local.SetCosmeticIntent(moving, direction, _currentTime);
+                // S103: a release past the commit threshold returns ShouldCommit — the render is already gliding to
+                // the committed tile (no snap). Send the server-validated commit and start tracking it so the
+                // accept (confirmed tile reaches the target) or reject (tile never advances) reconciles. The commit
+                // rides a FRESH sequence strictly greater than the stop intent's, so the server's shared move-seq
+                // cursor accepts it after the keyup (and a re-ordered duplicate can't fire twice).
+                if (release.ShouldCommit)
+                {
+                    var commitSeq = ++_moveSequence;
+                    Send(new StepCommitRequestMessage(commitSeq, release.Direction), DeliveryMethod.ReliableOrdered);
+                    _pendingCommit = new PendingCommit
+                    {
+                        Target = release.CommitTarget,
+                        BaseStepSeq = _lastRecipientStepSeq,
+                        SnapshotsWaited = 0,
+                    };
+                }
             }
         }
         else
@@ -407,6 +484,9 @@ public sealed class MmoClient : IDisposable
         // S102: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current snap-on-release
         // lever value, mirroring how the lead distance is threaded. Default true keeps model B byte-for-byte.
         local.SetSnapOnRelease(_snapOnRelease);
+        // S103: seed the commit-step-on-release enable + threshold the same way.
+        local.SetCommitStepOnRelease(_commitStepOnRelease);
+        local.SetCommitStepThreshold(_commitStepThreshold);
         // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
         // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
         // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
@@ -432,6 +512,8 @@ public sealed class MmoClient : IDisposable
     {
         LocalNetworkId = null;
         _predictor = null;
+        // S103: drop any in-flight commit tracking — the entity it belonged to is gone (despawn / AOI exit / logout).
+        _pendingCommit = null;
     }
 
     // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
@@ -755,7 +837,66 @@ public sealed class MmoClient : IDisposable
             PruneStalePlaceholders(sequence);
         }
 
+        // S103: resolve an in-flight commit-step against this snapshot. The cosmetic driver's Confirm already moved
+        // the render (accept = flowed onto the committed tile; a diverging confirm = cut to wherever the server put
+        // us), clearing ITS pending flag in those cases. The remaining case THIS owns is the reject-with-no-tile-
+        // change: the server rejected the commit, so the confirmed tile never reaches the target and the render
+        // would otherwise keep gliding there forever. Detect it via the grace below and snap back.
+        ReconcilePendingCommit(serverTick);
+
         _lastAppliedSnapshotSequence = sequence;
+    }
+
+    // S103: drive the commit-step reconciliation after a snapshot was applied. Ordering is the load-bearing part:
+    //   * If the cosmetic driver already cleared its pending flag, the commit RESOLVED this snapshot (accept: the
+    //     confirmed tile reached the target; or a diverging confirm cut to the server's tile). Clear our tracker.
+    //   * Otherwise the commit is still unresolved on the render side. We must NOT snap back just because the tile
+    //     hasn't advanced yet — a not-yet-arrived accept looks identical. So we only declare REJECT once the server
+    //     has demonstrably processed steps since the send (RecipientStepSeq advanced past the base) without the
+    //     tile reaching the target, OR a bounded snapshot grace has elapsed (covers a pure reject where the server
+    //     did nothing, so RecipientStepSeq never moves). On reject, snap the render back to the confirmed tile.
+    private void ReconcilePendingCommit(uint serverTick)
+    {
+        if (_pendingCommit is not { } pending)
+        {
+            return;
+        }
+
+        if (LocalNetworkId is not { } localId || !_entities.TryGetValue(localId, out var local))
+        {
+            _pendingCommit = null;
+            return;
+        }
+
+        var cosmetic = local.Cosmetic;
+        if (cosmetic is null || !cosmetic.HasPendingCommit)
+        {
+            // The cosmetic resolved it (accept, or a diverging confirm). Nothing to snap.
+            _pendingCommit = null;
+            return;
+        }
+
+        // Accept also when the confirmed tile reached the target but the cosmetic missed clearing (belt-and-braces;
+        // normally Confirm clears it). Treat tile==target as accepted regardless.
+        if (local.Tile == pending.Target)
+        {
+            cosmetic.ClearPendingCommit();
+            _pendingCommit = null;
+            return;
+        }
+
+        pending.SnapshotsWaited++;
+        var serverProcessedAStep = _lastRecipientStepSeq != pending.BaseStepSeq;
+        if (serverProcessedAStep || pending.SnapshotsWaited >= CommitRejectGraceSnapshots)
+        {
+            // Reject: the server stepped (or enough grace elapsed) without honouring the commit. Snap the render
+            // back to the confirmed tile (exactly the pre-S103 disagreeing-release behaviour).
+            cosmetic.SnapTo(local.Tile, _currentTime);
+            _pendingCommit = null;
+            return;
+        }
+
+        _pendingCommit = pending;
     }
 
     // A snapshot just applied. Record it as received and ack the highest contiguously-received sequence
@@ -1104,10 +1245,16 @@ public sealed class MmoClient : IDisposable
 
         // S89: feeds held intent to the cosmetic driver (no tile banked — records the held direction so
         // TickCosmetic glides the render early). No-op if the cosmetic driver isn't attached yet.
-        public void SetCosmeticIntent(bool moving, Direction8 direction, TimeSpan now)
+        // S103: returns the release decision (whether a commit-step should be sent + its target/direction); default
+        // (ShouldCommit=false) when no driver / on a moving intent / on a sub-threshold release.
+        public CosmeticReleaseDecision SetCosmeticIntent(bool moving, Direction8 direction, TimeSpan now)
         {
-            _cosmetic?.SetIntent(moving, direction, now);
+            return _cosmetic?.SetIntent(moving, direction, now) ?? default;
         }
+
+        // S103: the cosmetic driver, or null if not attached/active. Exposed so MmoClient can drive commit-step
+        // reconciliation (pending state, accept-clear, reject snap-back) against the active driver.
+        public LocalPlayerCosmetic? Cosmetic => _cosmeticActive ? _cosmetic : null;
 
         // S89: advances the cosmetic render to now (the early-lead glide). No-op if not attached.
         public void TickCosmetic(TimeSpan now)
@@ -1132,6 +1279,25 @@ public sealed class MmoClient : IDisposable
             if (_cosmetic is not null)
             {
                 _cosmetic.SnapOnRelease = snap;
+            }
+        }
+
+        // S103: live-sets model B's commit-step-on-release enable + threshold on the cosmetic driver. No-op if the
+        // driver isn't attached yet; MmoClient.EnsurePredictor re-seeds the current values when AttachCosmetic
+        // creates it.
+        public void SetCommitStepOnRelease(bool enabled)
+        {
+            if (_cosmetic is not null)
+            {
+                _cosmetic.CommitStepEnabled = enabled;
+            }
+        }
+
+        public void SetCommitStepThreshold(double threshold)
+        {
+            if (_cosmetic is not null)
+            {
+                _cosmetic.CommitThreshold = threshold;
             }
         }
 
@@ -1233,6 +1399,16 @@ public sealed class MmoClient : IDisposable
         int QueueDepth,
         double EffectiveCadenceMs,
         RenderPosition RenderPosition);
+
+    // S103: a commit-step in flight. Target = the committed tile; BaseStepSeq = RecipientStepSeq at send time;
+    // SnapshotsWaited = how many snapshots have been applied since the send (the bounded grace). Mutable struct held
+    // as a nullable field (single in-flight commit at a time — one keyup commits at most one step).
+    private struct PendingCommit
+    {
+        public TileCoord Target;
+        public uint BaseStepSeq;
+        public int SnapshotsWaited;
+    }
 
     private sealed class PendingSnapshot
     {

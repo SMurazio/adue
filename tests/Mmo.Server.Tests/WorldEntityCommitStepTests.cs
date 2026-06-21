@@ -1,0 +1,176 @@
+using Mmo.Server.Runtime;
+using Mmo.Shared.Domain;
+using Xunit;
+
+namespace Mmo.Server.Tests;
+
+// S103 commit-step on release. WorldEntity.TryCommitStep finishes a near-complete step early on key-release, but
+// MUST preserve the no-speedhack property: it accepts a walkable step only once the entity is at least
+// acceptFraction of its cooldown into the current step, and on accept borrows the next step's FULL cooldown so the
+// average step rate can never exceed the normal cadence. These tests pin: accept past the fraction (advances tile +
+// StepSequence, sets next-eligible a full cooldown out), reject below the fraction, reject into a wall, and the
+// cadence cap (spam commits cannot step faster than the cooldown allows).
+public sealed class WorldEntityCommitStepTests
+{
+    private const double AcceptFraction = 0.5d;
+
+    [Fact]
+    public void CommitPastFraction_OnWalkableTile_AdvancesTileAndStepSequence()
+    {
+        // cooldown = 10 ticks. Step at tick 0 (accepted), then commit at tick 6 (>= 0.5*10 = 5 into the step):
+        // accepted — the tile advances and StepSequence bumps once for the commit.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid)); // seq 1, lastStep=0
+        Assert.Equal(1u, entity.StepSequence);
+
+        var committed = entity.TryCommitStep(Direction8.E, 6, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
+
+        Assert.True(committed);
+        Assert.True(result.Accepted);
+        Assert.Equal("committed", result.Reason);
+        Assert.Equal(new TileCoord(10, 8), entity.Tile); // advanced one tile east of (9,8)
+        Assert.Equal(2u, entity.StepSequence);           // bumped once for the commit
+    }
+
+    [Fact]
+    public void CommitAccept_SchedulesNextStepFromNominalEnd_NoSpeedhack()
+    {
+        // After an accepted EARLY commit at tick 6 (cooldown 10, step started at 0), the next step is scheduled from
+        // the NOMINAL step end (tick 10), so the next eligible is tick 20 — the commit gained NO time. A normal step
+        // at tick 16 (< 20) is dropped on cooldown; tick 20 moves. (This is the no-speedhack borrow: finishing early
+        // on screen does not advance the schedule.)
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid));            // lastStep=0, next=10
+        Assert.True(entity.TryCommitStep(Direction8.E, 6, 10, AcceptFraction, grid, out _));  // commit -> next=20 (nominal end 10 + cooldown)
+
+        Assert.False(entity.TryStep(Direction8.E, 16, stepCooldownTicks: 10, grid, out var early));
+        Assert.Equal("cooldown", early.Reason);
+
+        Assert.True(entity.TryStep(Direction8.E, 20, stepCooldownTicks: 10, grid)); // nominal cooldown elapsed
+        Assert.Equal(3u, entity.StepSequence);
+    }
+
+    [Fact]
+    public void CommitBelowFraction_IsRejected_NoStateChange()
+    {
+        // Commit at tick 3 (< 0.5*10 = 5 into the step): rejected — the tile and StepSequence are unchanged.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid)); // lastStep=0, tile (9,8)
+        var before = entity.Tile;
+        var beforeSeq = entity.StepSequence;
+
+        var committed = entity.TryCommitStep(Direction8.E, 3, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
+
+        Assert.False(committed);
+        Assert.False(result.Accepted);
+        Assert.Equal("commit_too_early", result.Reason);
+        Assert.Equal(before, entity.Tile);
+        Assert.Equal(beforeSeq, entity.StepSequence);
+    }
+
+    [Fact]
+    public void CommitIntoWall_IsRejected_NoStateChange()
+    {
+        // A commit toward a blocked tile is rejected on the walkability gate even past the fraction.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, [new TileCoord(10, 8)]); // wall E of (9,8)
+
+        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid)); // -> (9,8)
+        var committed = entity.TryCommitStep(Direction8.E, 6, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
+
+        Assert.False(committed);
+        Assert.False(result.TargetWalkable);
+        Assert.Equal("blocked", result.Reason);
+        Assert.Equal(new TileCoord(9, 8), entity.Tile); // held at the wall
+    }
+
+    [Fact]
+    public void CommitDiagonalThroughCorner_IsRejected()
+    {
+        // S75 corner-cut rule applies to commits too: a diagonal commit whose side tile is blocked is rejected.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, [new TileCoord(10, 8)]); // after the first step we're at (9,8); block (10,8)
+
+        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid)); // -> (9,8)
+        // Commit NE from (9,8) -> (10,7): destination open, but side tile (10,8) is blocked -> corner-cut reject.
+        var committed = entity.TryCommitStep(Direction8.NE, 6, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
+
+        Assert.False(committed);
+        Assert.Equal("blocked", result.Reason);
+        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+    }
+
+    [Fact]
+    public void FirstEverCommit_OnNeverSteppedEntity_IsAccepted()
+    {
+        // A never-stepped entity has no last step, so its first commit is always eligible (elapsed treated as
+        // infinite) — same as the first normal step being unconditionally eligible.
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
+        var grid = new TileGrid(16, 16, []);
+
+        var committed = entity.TryCommitStep(Direction8.E, 5, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
+
+        Assert.True(committed);
+        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(1u, entity.StepSequence);
+        Assert.Equal("committed", result.Reason);
+    }
+
+    [Fact]
+    public void SpammedCommits_CannotExceedAverageCadence()
+    {
+        // The load-bearing anti-cheat assertion: step once, then SPAM commits every tick. Because each accepted
+        // commit borrows a full cooldown (nextEligible = commitTick + cooldown) and the floor rejects sub-fraction
+        // commits, the tile can advance no faster than the cooldown allows on average. Over a long window the
+        // accepted-move count must not exceed ceil(window / cooldown) + 1.
+        const uint cooldown = 10;
+        var entity = CreateEntity(tile: new TileCoord(0, 8), facing: Direction8.E);
+        var grid = new TileGrid(2048, 16, []);
+
+        var accepted = 0;
+        const uint window = 500;
+        for (uint tick = 0; tick <= window; tick++)
+        {
+            // Spam BOTH a normal step and a commit every tick (a scripted client would try both paths).
+            if (entity.TryStep(Direction8.E, tick, cooldown, grid))
+            {
+                accepted++;
+            }
+
+            if (entity.TryCommitStep(Direction8.E, tick, cooldown, AcceptFraction, grid, out _))
+            {
+                accepted++;
+            }
+        }
+
+        // Cadence cap: at most one move per cooldown, plus a small constant for the unconditional first move and
+        // boundary rounding. ceil(500/10) = 50; allow +2 slack.
+        var maxByCadence = (int)((window / cooldown) + 2);
+        Assert.True(accepted <= maxByCadence, $"accepted {accepted} moves in {window} ticks at cooldown {cooldown}; cap ~{maxByCadence}");
+        // And it really did move at roughly the cadence (not zero) — sanity that commits/steps fired.
+        Assert.True(accepted >= (int)(window / cooldown) - 1, $"expected ~{window / cooldown} moves, got {accepted}");
+    }
+
+    private static WorldEntity CreateEntity(
+        uint networkId = 1,
+        TileCoord? tile = null,
+        Direction8 facing = Direction8.S)
+    {
+        return new WorldEntity(
+            id: networkId,
+            networkId: networkId,
+            EntityKind.Player,
+            tile ?? TileGrid.DefaultSpawnTile,
+            facing,
+            $"Player{networkId}",
+            Guid.NewGuid(),
+            ownerSession: null,
+            isDurable: true);
+    }
+}

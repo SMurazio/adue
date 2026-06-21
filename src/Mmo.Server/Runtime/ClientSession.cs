@@ -137,6 +137,23 @@ public sealed class ClientSession
         return true;
     }
 
+    // S103 commit-step: advances the SHARED move-sequence cursor for a StepCommitRequest without touching the
+    // held Moving/Direction intent (a commit is a one-shot "finish this step" request, not a new held intent —
+    // it must not, for example, set the session back to Moving after a keyup). Rejects stale sequences (seq <=
+    // lastSeq) like TryUpdateMoveIntent so a re-ordered/duplicate commit can't fire twice, and refreshes the
+    // keepalive tick. Returns true iff the sequence was fresh (the caller may then attempt the commit).
+    public bool TryConsumeCommitSequence(uint sequence, uint serverTick)
+    {
+        if (sequence <= _lastMoveSeq)
+        {
+            return false;
+        }
+
+        _lastMoveSeq = sequence;
+        _lastMoveIntentTick = serverTick;
+        return true;
+    }
+
     // Clears the held intent to stopped (keepalive safety timeout, or any server-side halt). Does not
     // touch the sequence cursor, so a later genuine intent still has to advance past the last accepted
     // seq.

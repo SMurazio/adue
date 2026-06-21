@@ -9,6 +9,7 @@ public enum MessageType : ushort
     SnapshotAck = 5,
     InteractRequest = 6,
     AdminSetTuning = 7,
+    StepCommitRequest = 8,
 
     ServerHello = 100,
     LoginResult = 101,

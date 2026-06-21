@@ -27,6 +27,19 @@ public sealed record MoveIntentMessage(uint Sequence, bool Moving, Direction8 Di
     public MessageType Type => MessageType.MoveIntent;
 }
 
+// S103 commit-step on release (protocol v21). A client→server request to finish a near-complete cosmetic step:
+// when model B's render has glided past the commit threshold onto the NEXT tile at key-release, the client asks
+// the server to step there for real (one tile in Direction) instead of snapping back. The server validates it
+// like a normal step PLUS an anti-cheat floor (the entity must be at least CommitAcceptFraction of its cooldown
+// into the current step) and, on accept, borrows the next step's cooldown so the average step rate can never
+// exceed the normal cadence (no speedhack). There is no dedicated reply: the RESULT is observed via the normal
+// snapshot stream — the confirmed tile advancing to the requested tile = accepted; staying = rejected. Sent
+// reliable-ordered. Sequence rejects stale requests (seq <= lastMoveSeq), shared with the MoveIntent cursor.
+public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Direction) : IProtocolMessage
+{
+    public MessageType Type => MessageType.StepCommitRequest;
+}
+
 public sealed record ChatSendMessage(string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatSend;

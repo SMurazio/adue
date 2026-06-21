@@ -29,6 +29,16 @@ public sealed class GameServer
     private const int MinEffectiveStepCooldownMs = 50;
     private const int MaxEffectiveStepCooldownMs = 5000;
 
+    // S103 commit-step anti-cheat floor. A StepCommitRequest is accepted only if the entity is at least this
+    // fraction of its step cooldown into the current step (elapsed >= CommitAcceptFraction * cooldown). The
+    // legit client only commits once its cosmetic render has glided past its ~0.7 threshold (the F6 default),
+    // which is BELOW this fraction in elapsed terms only after enough cooldown has passed — set to 0.5 so a
+    // genuine release-commit (render ~70% onto the next tile, i.e. well past half the cooldown) is always
+    // accepted, while a scripted commit fired below half the cooldown is rejected. On accept the server borrows
+    // the next step's full cooldown (WorldEntity.TryCommitStep), so the average step rate stays capped at cadence
+    // regardless — this fraction only sets how early within a step a commit may legitimately fire.
+    private const double CommitAcceptFraction = 0.5d;
+
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
     // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
@@ -315,6 +325,12 @@ public sealed class GameServer
                     // let TickCore step the entity at the server's own cooldown cadence. No stepping
                     // happens on the receive path anymore. See docs/movement-input-model.md.
                     session.TryUpdateMoveIntent(intent.Sequence, intent.Moving, intent.Direction, _serverTick);
+                }
+                break;
+            case StepCommitRequestMessage commit:
+                if (session.IsAuthenticated)
+                {
+                    HandleStepCommit(session, commit.Sequence, commit.Direction);
                 }
                 break;
             case ChatSendMessage chat:
@@ -1574,6 +1590,36 @@ public sealed class GameServer
             {
                 _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
             }
+        }
+    }
+
+    // S103 commit-step on release. A client whose model-B cosmetic render glided past its commit threshold onto the
+    // next tile at key-release asks the server to finish that one step early (instead of snapping back). Validate
+    // the sequence (shared with the move-intent cursor, so a stale/duplicate commit can't fire twice and a commit
+    // never resurrects a stopped intent), resolve the entity, then attempt a single server-validated commit step
+    // with the anti-cheat floor. On accept the tile advances + StepSequence bumps, so the next snapshot's confirmed
+    // tile + RecipientStepSeq carry the result to the client (no dedicated reply). On reject nothing changes and the
+    // snapshot still shows the old tile (the client reads that as "snap back"). Tracing mirrors the held-step path.
+    private void HandleStepCommit(ClientSession session, uint sequence, Direction8 direction)
+    {
+        if (!session.TryConsumeCommitSequence(sequence, _serverTick))
+        {
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var entity))
+        {
+            return;
+        }
+
+        if (_zone.TryCommitStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), CommitAcceptFraction, out var result))
+        {
+            MarkDirtyDurableTile(entity);
+        }
+
+        if (result.CooldownElapsed)
+        {
+            _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
         }
     }
 

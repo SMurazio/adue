@@ -466,6 +466,146 @@ public sealed class LocalPlayerCosmeticTests
         Assert.Equal(new TileCoord(3, 3), cosmetic.ConfirmedTile);
     }
 
+    // ---- S103: commit-step on release ------------------------------------------------------------------
+    //
+    // When the cosmetic lead has glided PAST CommitThreshold onto the next (walkable) tile at release, SetIntent
+    // must NOT snap back: it returns ShouldCommit (so MmoClient sends a server-validated commit) and keeps the
+    // render tweening to that tile. Accept (a Confirm to the committed tile) flows seamlessly; reject (SnapTo the
+    // confirmed tile) cuts back. Below the threshold the existing S102 behaviour applies (no commit).
+
+    [Fact]
+    public void ReleasePastThreshold_DoesNotSnap_ReturnsCommitDecision_AndKeepsGliding()
+    {
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitThreshold = 0.7d;
+
+        // Glide most of the way onto (1,0): sample near the end of the cadence so progress >= 0.7.
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        var lead = cosmetic.Sample(Ms(Cadence * 0.9)); // ~0.9 of the way -> past 0.7
+        Assert.True(lead.X >= 0.7, $"precondition: render glided past threshold; was {lead.X}");
+
+        // Release: past threshold -> commit decision, NO snap.
+        var decision = cosmetic.SetIntent(false, Direction8.E, Ms(Cadence * 0.9));
+        Assert.True(decision.ShouldCommit);
+        Assert.Equal(new TileCoord(1, 0), decision.CommitTarget);
+        Assert.Equal(Direction8.E, decision.Direction);
+        Assert.True(cosmetic.HasPendingCommit);
+
+        // The render did NOT snap back to (0,0): it is still east of center and finishing the glide to (1,0).
+        var atRelease = cosmetic.Sample(Ms(Cadence * 0.9));
+        Assert.True(atRelease.X >= 0.7, $"render must keep gliding to the committed tile, not snap back; was {atRelease.X}");
+
+        // It reaches the committed tile shortly after (the in-flight tween continues to (1,0)).
+        var done = cosmetic.Sample(Ms(Cadence + 1));
+        Assert.Equal(1.0, done.X, 6);
+    }
+
+    [Fact]
+    public void CommitAccept_ConfirmToTarget_ClearsPending_RenderStays()
+    {
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitThreshold = 0.7d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        cosmetic.Sample(Ms(Cadence * 0.9));
+        var decision = cosmetic.SetIntent(false, Direction8.E, Ms(Cadence * 0.9));
+        Assert.True(decision.ShouldCommit);
+
+        // Server ACCEPTS: confirms the committed tile (1,0). Pending clears and the render flows onto it.
+        cosmetic.Confirm(new TileCoord(1, 0), Direction8.E, Ms(Cadence));
+        Assert.False(cosmetic.HasPendingCommit);
+        Assert.Equal(new TileCoord(1, 0), cosmetic.ConfirmedTile);
+
+        var settled = cosmetic.Sample(Ms(Cadence * 2 + 1));
+        Assert.Equal(1.0, settled.X, 6);
+        Assert.Equal(0.0, settled.Y, 6);
+    }
+
+    [Fact]
+    public void CommitReject_UnchangedConfirm_DoesNotPrematurelyCutBack()
+    {
+        // The highest-risk timing: a confirm at the OLD (unchanged) tile while the commit is pending must NOT cut the
+        // render back — that would misread a not-yet-arrived accept as a reject. The render keeps gliding to the
+        // committed tile, and the commit stays pending (MmoClient's grace owns the eventual reject snap).
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitThreshold = 0.7d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        cosmetic.Sample(Ms(Cadence * 0.9));
+        cosmetic.SetIntent(false, Direction8.E, Ms(Cadence * 0.9));
+
+        // Unchanged confirm at (0,0) (commit not yet processed): pending stays, render keeps heading to (1,0).
+        cosmetic.Confirm(new TileCoord(0, 0), Direction8.E, Ms(Cadence * 0.95));
+        Assert.True(cosmetic.HasPendingCommit);
+        var stillGliding = cosmetic.Sample(Ms(Cadence + 1));
+        Assert.Equal(1.0, stillGliding.X, 6); // reached the committed tile, NOT snapped back to (0,0)
+
+        // Now the explicit reject: MmoClient snaps the render back to the confirmed tile.
+        cosmetic.SnapTo(new TileCoord(0, 0), Ms(Cadence + 1));
+        Assert.False(cosmetic.HasPendingCommit);
+        var snapped = cosmetic.Sample(Ms(Cadence + 1));
+        Assert.Equal(0.0, snapped.X, 6);
+        Assert.Equal(0.0, snapped.Y, 6);
+    }
+
+    [Fact]
+    public void ReleaseBelowThreshold_DoesNotCommit_TakesS102ReleaseBranch()
+    {
+        // Below the threshold the commit is NOT triggered — the S102 release applies (here SnapOnRelease default
+        // true -> hard snap to confirmed). With a HIGH threshold (0.95) an early release (small progress) must not
+        // commit.
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitThreshold = 0.95d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        var lead = cosmetic.Sample(Ms(Cadence * 0.3)); // only ~0.3 onto the next tile
+        Assert.True(lead.X > 0.0 && lead.X < 0.95, "precondition: below the threshold");
+
+        var decision = cosmetic.SetIntent(false, Direction8.E, Ms(Cadence * 0.3));
+        Assert.False(decision.ShouldCommit);
+        Assert.False(cosmetic.HasPendingCommit);
+        // S102 default (SnapOnRelease true): hard snap to the confirmed tile.
+        var atRelease = cosmetic.Sample(Ms(Cadence * 0.3));
+        Assert.Equal(0.0, atRelease.X, 6);
+    }
+
+    [Fact]
+    public void CommitDisabled_NeverCommits_EvenPastThreshold()
+    {
+        // With CommitStepEnabled off, a release past the threshold takes the normal S102 path (no commit).
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        cosmetic.CommitStepEnabled = false;
+        cosmetic.CommitThreshold = 0.7d;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        cosmetic.Sample(Ms(Cadence * 0.9));
+
+        var decision = cosmetic.SetIntent(false, Direction8.E, Ms(Cadence * 0.9));
+        Assert.False(decision.ShouldCommit);
+        Assert.False(cosmetic.HasPendingCommit);
+    }
+
+    [Fact]
+    public void CommitThreshold_DefaultIsSevenTenths_AndSetterClampsToUnitRange()
+    {
+        var cosmetic = NewCosmetic(new TileCoord(0, 0), Direction8.E);
+        Assert.Equal(0.7d, cosmetic.CommitThreshold, 6);
+
+        cosmetic.CommitThreshold = 5.0d;
+        Assert.Equal(1.0d, cosmetic.CommitThreshold, 6);
+
+        cosmetic.CommitThreshold = -1.0d;
+        Assert.Equal(0.0d, cosmetic.CommitThreshold, 6);
+
+        cosmetic.CommitThreshold = 0.5d;
+        Assert.Equal(0.5d, cosmetic.CommitThreshold, 6);
+    }
+
     [Fact]
     public void MaxLeadTiles_DefaultIsOne_AndSetterClampsToUnitRange()
     {

@@ -134,6 +134,27 @@ public sealed class Zone
         return stepped;
     }
 
+    // S103 commit-step: a server-validated single step in `direction` with the commit anti-cheat floor (see
+    // WorldEntity.TryCommitStep). Mirrors TryStep's spatial-index migration so an accepted commit moves the
+    // entity's grid bucket. previousTile must be read before the call (TryCommitStep mutates Tile in place).
+    public bool TryCommitStep(
+        WorldEntity entity,
+        Direction8 direction,
+        uint serverTick,
+        uint stepCooldownTicks,
+        double acceptFraction,
+        out MovementStepResult result)
+    {
+        var previousTile = entity.Tile;
+        var stepped = entity.TryCommitStep(direction, serverTick, stepCooldownTicks, acceptFraction, _tileGrid, out result);
+        if (stepped)
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+
+        return stepped;
+    }
+
     public WorldEntity SpawnPlayer(
         uint networkId,
         Guid characterId,

@@ -13,6 +13,14 @@ public sealed class WorldEntity
     // facing set on the step; there is no separate turn beat or turn delay.)
     private uint? _nextEligibleTick;
 
+    // S103 commit-step: the server tick of this entity's last ACCEPTED tile move (set in TryStep/TryCommitStep on
+    // accept). Null = never stepped. The commit-step anti-cheat floor measures "elapsed into the current step" as
+    // serverTick - _lastStepTick and accepts a commit only once that elapsed is at least CommitAcceptFraction of
+    // the cooldown — so a scripted client cannot use early commits to step faster than the normal cadence. Stored
+    // directly (rather than re-derived from _nextEligibleTick - cooldown) so a mid-step cadence change can't skew
+    // the elapsed measurement.
+    private uint? _lastStepTick;
+
     public WorldEntity(
         ulong id,
         uint networkId,
@@ -212,6 +220,7 @@ public sealed class WorldEntity
 
         var from = Tile;
         Tile = target;
+        _lastStepTick = serverTick;
         _nextEligibleTick = serverTick + stepCooldownTicks;
         StateRevision++;
         // S76: count this accepted tile move. ONLY here — blocked/cooldown steps above return early without
@@ -225,6 +234,116 @@ public sealed class WorldEntity
             TargetWalkable: true,
             Accepted: true,
             "accepted",
+            Tile);
+        return true;
+    }
+
+    // S103 commit-step on release. A client whose model-B cosmetic render has glided past its commit threshold onto
+    // the next tile at key-release asks the server to finish that ONE step early instead of snapping back. This is a
+    // server-validated single step in `direction` with the SAME walkability gate as TryStep PLUS an anti-cheat
+    // floor, and it is the ONLY way an entity can step before its cooldown fully elapses:
+    //
+    //   * Walkable-gate identically to TryStep (S75 corner-cut rule) — a commit into a wall / out of bounds is
+    //     rejected and changes nothing.
+    //   * Anti-cheat floor: accept ONLY IF the entity is at least `acceptFraction` of its cooldown into the current
+    //     step, i.e. elapsed = serverTick - _lastStepTick >= acceptFraction * stepCooldownTicks. A never-stepped
+    //     entity (no _lastStepTick) is treated as fully elapsed (first move is always eligible, like TryStep).
+    //   * No-speedhack borrow: on accept the early finish CONSUMES the current step's remaining cooldown — it does
+    //     NOT gain time. The committed step is scheduled as if it had landed at its NOMINAL end (the tick the
+    //     current step's cooldown would have elapsed = _lastStepTick + cooldown), so the next step's clock starts
+    //     from there: _lastStepTick = nominalEnd and _nextEligibleTick = nominalEnd + cooldown. Thus the average
+    //     step rate can NEVER exceed the normal cadence (you finished one step a little early on screen, but the
+    //     NEXT step is no earlier than it would have been). A commit that arrives at/after the nominal end is just a
+    //     normal on-time step (scheduled from serverTick). This is what makes the held-intent model anti-speedhack:
+    //     spamming release-commits cannot raise the long-run step rate above one per cooldown.
+    //
+    // NOTE (deviation from the literal task text): the task wrote `_nextEligibleTick = commitTick + cooldown`, but
+    // that formula does NOT cap the rate — chaining commits at the acceptFraction floor would yield ~1/(fraction)×
+    // cadence (e.g. 2× at 0.5). The task's STATED guarantee ("average step rate can never exceed the normal
+    // cadence") and its required cadence-cap test win, so the borrow is scheduled from the nominal step end (above)
+    // which honours that guarantee exactly. Flagged in the S103 review request.
+    //
+    // Accept advances the tile + StepSequence + StateRevision exactly like a normal accepted step (so it replicates
+    // and the recipient-scoped RecipientStepSeq bumps, which the client reconciles against). There is no dedicated
+    // reply — the next snapshot showing the advanced tile is the accept signal; staying put is the reject signal.
+    public bool TryCommitStep(
+        Direction8 direction,
+        uint serverTick,
+        uint stepCooldownTicks,
+        double acceptFraction,
+        TileGrid grid,
+        out MovementStepResult result)
+    {
+        var delta = direction.Delta();
+        var target = Tile.Offset(delta.X, delta.Y);
+
+        // Walkability gate first (same rule as TryStep). A commit into a wall / out of bounds changes nothing —
+        // not even facing (a commit is a render-completion request, not a fresh direction input; the held-intent
+        // path already owns facing). The reject leaves the entity on its current tile, which the snapshot shows.
+        if (!IsStepWalkable(delta, target, grid))
+        {
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                target,
+                CooldownElapsed: true,
+                TargetWalkable: false,
+                Accepted: false,
+                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
+                Tile);
+            return false;
+        }
+
+        // Anti-cheat floor: the entity must be at least acceptFraction of its cooldown into the current step. A
+        // never-stepped entity has no last step, so its first commit is always eligible (elapsed treated as
+        // infinite). A commit that arrives too early — a scripted spam below the floor — is rejected so commits
+        // can't raise the step rate above cadence.
+        if (_lastStepTick.HasValue)
+        {
+            // _lastStepTick can be a FUTURE tick after a borrowed commit (it is scheduled from the nominal step
+            // end). A commit arriving at or before that base has zero/negative elapsed — reject (and avoid the
+            // uint underflow that serverTick - _lastStepTick would otherwise produce). Otherwise compare the
+            // elapsed-since-base against the accept fraction.
+            var floor = acceptFraction * stepCooldownTicks;
+            var elapsedEnough = serverTick > _lastStepTick.Value
+                && (serverTick - _lastStepTick.Value) >= floor;
+            if (!elapsedEnough)
+            {
+                result = new MovementStepResult(
+                    direction,
+                    Tile,
+                    target,
+                    CooldownElapsed: false,
+                    TargetWalkable: true,
+                    Accepted: false,
+                    "commit_too_early",
+                    Tile);
+                return false;
+            }
+        }
+
+        var from = Tile;
+        Tile = target;
+        Facing = direction;
+        // Schedule the committed step from its NOMINAL end so the early finish consumes the current step's remaining
+        // cooldown rather than gaining time (the no-speedhack cap). nominalEnd = the tick the current step's cooldown
+        // would have elapsed = _lastStepTick + cooldown (which is exactly the old _nextEligibleTick). If the commit
+        // arrives at/after that nominal end (or the entity never stepped), it is just an on-time step scheduled from
+        // serverTick.
+        var nominalEnd = _lastStepTick.HasValue ? _lastStepTick.Value + stepCooldownTicks : serverTick;
+        var scheduleBase = nominalEnd > serverTick ? nominalEnd : serverTick;
+        _lastStepTick = scheduleBase;
+        _nextEligibleTick = scheduleBase + stepCooldownTicks;
+        StateRevision++;
+        StepSequence++;
+        result = new MovementStepResult(
+            direction,
+            from,
+            target,
+            CooldownElapsed: true,
+            TargetWalkable: true,
+            Accepted: true,
+            "committed",
             Tile);
         return true;
     }
