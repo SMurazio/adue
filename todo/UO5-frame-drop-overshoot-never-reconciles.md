@@ -17,6 +17,21 @@ User: a lag spike / frame drop made the avatar "teleport way forward and never r
    advance for them). So the uncapped in-flight (the overshoot) NEVER drains → the prediction is stuck far ahead
    forever. That's the "never reconciles."
 
+## FIRST ATTEMPT REVERTED (commit 9cf3abf → reverted 1bb3ad6) — it made everything WORSE
+The first fix added a per-snapshot "stall counter": after `OverPredictStallLimit=2` consecutive snapshots where
+`serverStepSeq` did NOT advance while a lead persisted, fall back to the bounded `MaxInFlightLead=2`. **This
+mis-fired during NORMAL play → constant snapping, much worse than the original bug.** Suspected cause: snapshots
+arrive ~20Hz (50ms) but a step CONFIRMS only every cadence (~3 ticks / 150ms), so during ordinary walking
+`serverStepSeq` naturally does not advance on ~2 of every 3 snapshots — tripping the stall counter and
+capping/snapping a perfectly legit RTT lead. **A per-snapshot stall count fundamentally cannot tell "normal
+between-confirm snapshots" from "rejected overshoot" — do NOT reuse it** (this kills candidate #2 below).
+
+The next attempt must use a discriminator that respects the confirm cadence and leaves normal 50–100ms walking
+COMPLETELY untouched (no caps/snaps), acting only on a true runaway: e.g. bound the lead by a CADENCE/LATENCY-
+derived tile count directly (`~ceil(RTT/cadence) + margin`, independent of per-snapshot advance), or stall over
+real TIME ∝ cadence (not snapshot count), or key off the server actually signalling `commit_too_early` rather
+than inferring rejection from seq non-advance. Verify against a live 50ms walk that nothing snaps.
+
 ## Fix (investigate + choose; do NOT break the UO3 release fix)
 The tension: UO3 must HOLD for genuinely-banked-and-will-confirm commits (the release case: a small, ~RTT-worth
 in-flight that the server WILL accept) but must NOT hold an overshoot the server is REJECTING (the frame-drop
