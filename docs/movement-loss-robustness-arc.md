@@ -56,12 +56,17 @@ range (≤3%) recovers seamlessly.
   below.
 
 ## Open levers / caveats
-- **Speed-untested (highest open risk).** Validated only at one cadence (~150ms / cooldown 140ms). At faster
-  speeds the step-lead grows and the **future-cap** (`futureLead=4 ticks`) could start rejecting — the fix
-  there is to make it (and NET5's K/T) **cadence-relative**. S106 (speed brackets) is the feature + the test
-  vehicle for this.
-- **NET5b** — headless test for the SHIPPED `DriveAckDrivenResend` (current tests validate a re-impl).
-- **UO5** — re-verify whether a *frame-drop* burst still strands now that NET5/NET6 landed; deprecate or fix.
+- **Speed-untested (open risk, but bounded).** Validated only at one cadence (~150ms / cooldown 140ms). At
+  faster speeds the step-lead grows and the **future-cap** (`futureLead=4 ticks`) rejects more. BUT the UO5
+  re-verify (2026-06-21) showed those rejections are **transient** — NET5's re-send re-delivers a too-far-ahead
+  commit once `serverTick` advances past its authored tick — so a fast bracket should at worst **converge
+  slower, not permanently strand**. Still worth validating live, and making the future-cap (and NET5's K/T)
+  **cadence-relative** if a fast bracket feels laggy. S106 (speed brackets) is the feature + the test vehicle.
+- **NET5b** — headless test for the SHIPPED `DriveAckDrivenResend` (current tests validate a re-impl). In flight.
+- **UO5 — RESOLVED.** Re-verified 2026-06-21: a frame-drop burst no longer strands. The catch-up burst's later
+  commits are future-cap-rejected, but NET5's re-send re-delivers them as `serverTick` advances (transient
+  rejection, same mechanism the 10% loss run validated) → converges with no snap. NET6 is orthogonal. Todo
+  deprecated. (A frame-drop-burst-drains regression test would be nice — fold into NET5b or a follow-up.)
 - **Reliable despawn** — would remove the high-loss visual blip (and ghosts) at no per-frame server cost;
   preferable to raising AOI radius (which taxes every snapshot).
 - **NET4** — tier-3 watchdog + reconnect/resync for a genuinely dead link.
