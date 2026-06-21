@@ -35,16 +35,22 @@ so "which tiles + who's on them" is a cheap, deterministic, cheat-proof server q
   server confirms hits/damage.
 
 ## Staged plan (small, solid steps — high-risk, so repro/test each)
-1. **Character properties** — HP / mana / stamina (current + max) on the entity, server-authoritative,
-   replicated to the client, shown in the (just-added) HUD. No damage yet. *This is the foundation + lights up
-   the HUD; do it first.*
-2. **Attack action + tile-pattern resolution** — a reliable attack message (own cursor), server computes the
-   hit tile set (pattern × facing) + occupancy, applies damage to HP. The melee cone first (simplest pattern).
-3. **Telegraph timing** — wind-up → resolve; client renders the danger tiles; a target can step off to dodge.
-4. **The travelling arrow** — a projectile entity that steps along a line and hits the first target/wall.
-5. **Death + respawn** — HP<=0 handling, the respawn flow.
+1. **Character properties** *(DONE — combat-s1)* — HP / mana / stamina (current + max), server-authoritative,
+   replicated to the owner, 3 HUD bars + F7 dev-set. No damage yet. The foundation.
+2. **Target dummy + visible enemy HP (Stage 2a)** — a server-spawned stationary "Dummy" enemy with HP;
+   replicate **nearby entities' HP (current+max)** so the client shows a small **red overhead HP bar** above
+   them (extends Stage 1's owner-only stats to other entities). Testable on its own via the dev-set (the dummy's
+   bar moves) — gives Stage 2b a target to hit.
+3. **Attack action + melee cone (Stage 2b)** — a reliable attack message on its **own dedup cursor** (the NET6
+   lesson); the server computes the cone hit tiles (pattern × facing) + occupancy and applies damage to HP —
+   attacking the dummy drops its red bar. Server-authoritative; predict the swing animation.
+4. **Telegraph timing** — wind-up → resolve; client renders the danger tiles; a target can step off to dodge.
+5. **The travelling arrow** — a projectile entity that steps along a line and hits the first target/wall.
+6. **Death + respawn** — HP<=0 handling, the respawn flow.
 
 ## Open questions to resolve as we go
 - Diagonal pattern rotation (decide in stage 2/3 by feel).
 - Mana/stamina costs + regen rates (tuning, once abilities exist).
 - LoS / walls stopping the arrow + the cone (tile-based, so clean — confirm in stage 2/4).
+- Other-entity HP replication channel (a snapshot field vs a small dedicated message) + the overhead-bar
+  rendering (a 3D billboard above the entity vs a screen-space overlay) — decide in Stage 2a.
