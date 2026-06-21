@@ -23,3 +23,6 @@ postgres-data/
 .godot/
 .mono/
 *.translation
+
+# Local Godot engine install (large binary; keep out of the repo)
+tools/Godot/
