@@ -1794,6 +1794,11 @@ public sealed class GameServer
         {
             _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
         }
+
+        // DIAG1: surface the server-side recovery-chain counters on EVERY commit (accept AND reject). The
+        // future-cap reject ("commit_too_early") carries CooldownElapsed=false, so MoveStep above skips it — this
+        // line ensures the rejects-climbing-while-srvSeq-stalls (link-2) signal is always traced. Measurement only.
+        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
     }
 
     // S103: the reliable per-step StepCommitRequest path (still defined; the wire send is now StepCommitBatch). Keeps
@@ -1820,6 +1825,9 @@ public sealed class GameServer
         {
             _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
         }
+
+        // DIAG1: surface the server-side recovery-chain counters on every legacy commit too (see the authored path).
+        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
     }
 
     private void MarkDirtyDurableTile(WorldEntity entity)

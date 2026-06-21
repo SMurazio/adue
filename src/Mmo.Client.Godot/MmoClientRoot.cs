@@ -421,6 +421,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// DIAG1: Alt+Shift+R zeroes the local predictor's reconcile-outcome tallies (rec[M/C/S] in the F3
+		// read-out) so the human can reset them just before a loss burst and read fresh counts. A live in-client
+		// control (no restart); ignored while typing in chat. Measurement only. (Alt+R is reserved for RESYNC1's
+		// Force Resync.)
+		if (key.Keycode == Key.R && key.AltPressed && key.ShiftPressed && _chatInput?.HasFocus() != true)
+		{
+			_client?.ResetReconcileCounters();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		if (key.Keycode == Key.F11)
 		{
 			var mode = DisplayServer.WindowGetMode();
@@ -1418,9 +1429,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				var server = _client.Server is null
 					? "server: pending"
 					: $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
-				var movementDebug = _client.DebugMovementEnabled
-					? "\n" + FormatMovementDebug(_client.MovementDebug)
-					: "";
+				var md = _client.MovementDebug;
+				// DIAG1: the recovery-chain read-out is ALWAYS shown under the F3 debug HUD (a live in-client
+				// toggle, no restart, no env var) so the human can read pred/conf/lead/recv/s + reconcile
+				// outcomes during a loss burst. The detailed MOVE trace line stays gated behind the (env)
+				// console-trace flag.
+				var movementDebug = "\n" + FormatRecoveryDiag(md);
+				if (_client.DebugMovementEnabled)
+				{
+					movementDebug += "\n" + FormatMovementDebug(md);
+				}
+
 				SetTextIfChanged(_statusLabel,
 					$"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
 					$"{server}\n" +
@@ -2641,6 +2660,24 @@ void fragment() {
 		var confirmedTile = debug.LastConfirmedTile?.ToString() ?? "-";
 		var render = $"{debug.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{debug.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}";
 		return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
+	}
+
+	// DIAG1: the 3-link recovery-chain read-out for the LOCAL player, refreshed every overlay tick (~10 Hz).
+	//   pred  = the predictor's accepted-step count (the snappy local head).
+	//   conf  = the last RecipientStepSeq the client has LEARNED the server accepted.
+	//   lead  = pred - conf, the in-flight steps that must DRAIN for the prediction to recover. A lead that never
+	//           returns toward 0 under loss is the permanent strand DIAG1 is hunting.
+	//   recv/s= snapshots applied per second (is the server->client confirm channel alive?).
+	//   rec   = reconcile outcomes since the last reset (Matched / Corrected / Snapped). Mostly-Matched = the lead
+	//           drained via benign confirms; climbing Corrected/Snapped = the server's confirm is diverging from
+	//           the prediction (forced re-base). Reset with Alt+Shift+R (ResetReconcileCounters).
+	// Pair this with the server-side trace (srvSeq / recvCommits / rejects, ServerMovementTrace mmo_trace
+	// event=commit_counters) to localise the stuck link per docs/movement-loss-degradation-tiers.md.
+	private static string FormatRecoveryDiag(MovementDebugSnapshot d)
+	{
+		return $"DIAG pred={d.PredictedStepSeq} conf={d.ConfirmedStepSeq} lead={d.LeadSteps} " +
+			$"recv/s={d.SnapshotsPerSecond:0.0} " +
+			$"rec[M/C/S]={d.ReconcileMatched}/{d.ReconcileCorrected}/{d.ReconcileSnapped}";
 	}
 
 	private void AppendSectionRow()

@@ -86,6 +86,15 @@ public sealed class MmoClient : IDisposable
     // own accepted tile moves). Stashed only — the predictor's reconcile is UNCHANGED this stage; S77 will
     // match this against the predicted step to fix the reconcile rubberband.
     private uint _lastRecipientStepSeq;
+
+    // DIAG1: snapshots-received-per-second rate (the `recv/s` confirm-channel-alive read-out). A sliding 1-second
+    // tally: _snapshotRecvWindowStart is the start of the current 1s window, _snapshotRecvWindowCount the count so
+    // far in it, and _snapshotsPerSecond the rate published from the just-completed window. Measurement only — fed
+    // by NoteSnapshotReceived on every accepted snapshot; never influences movement.
+    private TimeSpan _snapshotRecvWindowStart;
+    private int _snapshotRecvWindowCount;
+    private double _snapshotsPerSecond;
+
     private uint _moveSequence;
     // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
     // current state PLUS a window of these prior inputs (as deltas) so a dropped packet's state change is
@@ -220,7 +229,40 @@ public sealed class MmoClient : IDisposable
     // predictor this stage.
     public uint LastRecipientStepSeq => _lastRecipientStepSeq;
 
-    public MovementDebugSnapshot MovementDebug => _movementTrace.Snapshot;
+    // DIAG1: the live movement-debug read-out augmented with the local-player recovery-chain numbers. The base
+    // snapshot (sent/confirmed tile, queue depth, cadence, latency, render) comes from the trace; we overlay the
+    // predictor's live pred/conf/lead + reconcile-outcome counters and the snapshot `recv/s` rate so the F3 HUD
+    // can show which of the three recovery links is stuck under loss. All overlay fields are read-outs — reading
+    // them changes nothing. When no predictor is attached (pre-spawn / interpolation-only mode) the predictor
+    // fields stay 0 and only recv/s is meaningful.
+    public MovementDebugSnapshot MovementDebug
+    {
+        get
+        {
+            var snapshot = _movementTrace.Snapshot with { SnapshotsPerSecond = _snapshotsPerSecond };
+            if (_predictor is { } predictor)
+            {
+                var pred = predictor.PredictedStepSeq;
+                var conf = predictor.LastReconciledStepSeq;
+                snapshot = snapshot with
+                {
+                    PredictedStepSeq = pred,
+                    ConfirmedStepSeq = conf,
+                    LeadSteps = pred > conf ? pred - conf : 0u,
+                    ReconcileMatched = predictor.ReconcileMatched,
+                    ReconcileCorrected = predictor.ReconcileCorrected,
+                    ReconcileSnapped = predictor.ReconcileSnapped,
+                };
+            }
+
+            return snapshot;
+        }
+    }
+
+    // DIAG1: zeroes the local predictor's reconcile-outcome tallies (Matched / Corrected / Snapped) so the human
+    // can reset them just before a loss burst and read fresh counts in the F3 read-out. No-op (safe) when no
+    // predictor is attached. Measurement only — touches no prediction/reconcile state.
+    public void ResetReconcileCounters() => _predictor?.ResetReconcileCounters();
 
     // Client-side mirror of the owner's private inventory, updated by InventoryUpdate deltas. Read-only
     // view for the renderer; the server stays authoritative (each delta sets the new total).
@@ -982,6 +1024,29 @@ public sealed class MmoClient : IDisposable
         local?.SetPredictorTickMs(ResolveTickMs());
     }
 
+    // DIAG1: advances the sliding 1-second snapshot-rate tally (the `recv/s` read-out). When the current 1s window
+    // elapses, the window's count becomes the published rate and a fresh window opens at _currentTime. Uses the
+    // client wall clock (_currentTime, set each Poll) so the rate is in real seconds. Pure read-out — it counts
+    // confirms but never alters movement, prediction, or reconcile.
+    private void NoteSnapshotReceived()
+    {
+        if (_snapshotRecvWindowCount == 0 && _snapshotsPerSecond == 0d)
+        {
+            // First ever snapshot: open the window now so the rate isn't skewed by the pre-connect idle gap.
+            _snapshotRecvWindowStart = _currentTime;
+        }
+
+        if (_currentTime - _snapshotRecvWindowStart >= TimeSpan.FromSeconds(1))
+        {
+            var elapsed = (_currentTime - _snapshotRecvWindowStart).TotalSeconds;
+            _snapshotsPerSecond = elapsed > 0 ? _snapshotRecvWindowCount / elapsed : _snapshotRecvWindowCount;
+            _snapshotRecvWindowStart = _currentTime;
+            _snapshotRecvWindowCount = 0;
+        }
+
+        _snapshotRecvWindowCount++;
+    }
+
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
     {
         if (_lastAppliedSnapshotSequence.HasValue && snapshot.SnapshotSequence <= _lastAppliedSnapshotSequence.Value)
@@ -1027,6 +1092,10 @@ public sealed class MmoClient : IDisposable
 
     private void ApplySnapshot(uint serverTick, uint sequence, bool isComplete, IReadOnlyCollection<EntityStateSnapshot> entities)
     {
+        // DIAG1: tally this fully-applied snapshot for the `recv/s` confirm-channel-rate read-out (once per applied
+        // snapshot — a chunked snapshot is assembled before this is reached). Measurement only.
+        NoteSnapshotReceived();
+
         _snapshotVisibleScratch.Clear();
         foreach (var state in entities)
         {

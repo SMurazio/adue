@@ -1382,4 +1382,68 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
         Assert.Equal(2u, predictor.PredictedStepSeq);
     }
+
+    // ---- DIAG1: reconcile-outcome counters + conf/lead read-outs (measurement only) --------------------
+
+    [Fact]
+    public void Diag1_ReconcileCounters_TallyEachOutcome_AndExposeConfLead()
+    {
+        // The DIAG1 read-out counts each reconcile outcome since reset and exposes the server-confirmed step-seq
+        // (conf) + the in-flight lead. A benign trailing confirm is Matched; a genuine divergence is Corrected; a
+        // teleport-sized jump is Snapped. The counters must tally exactly one per Reconcile call, and conf/lead
+        // must track the last confirm. These are pure read-outs — they do not change any outcome above.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+
+        Assert.Equal(0u, predictor.ReconcileMatched);
+        Assert.Equal(0u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+
+        // Benign trailing confirm (seq 1 @ (1,0), still moving) — the prediction was valid and ahead: Matched.
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Matched,
+            predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(160)));
+        Assert.Equal(1u, predictor.ReconcileMatched);
+        // conf = the confirmed step-seq just reconciled; pred = 2, so lead = 1 (one in-flight step).
+        Assert.Equal(1u, predictor.LastReconciledStepSeq);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
+
+        // Release, then a genuine divergence at seq 2 (server settled at (1,0), not the predicted (2,0)): Corrected.
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(165));
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Corrected,
+            predictor.Reconcile(new TileCoord(1, 0), 2u, TimeSpan.FromMilliseconds(200)));
+        Assert.Equal(1u, predictor.ReconcileMatched);
+        Assert.Equal(1u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+        Assert.Equal(2u, predictor.LastReconciledStepSeq);
+    }
+
+    [Fact]
+    public void Diag1_TeleportConfirm_CountsSnapped_AndResetZeroesTallies()
+    {
+        // A teleport-sized confirm snaps and bumps the Snapped tally; ResetReconcileCounters zeroes all three so the
+        // human can reset just before a loss burst. The reset must NOT touch the prediction (pred/conf unchanged).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(10));
+
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Snapped,
+            predictor.Reconcile(new TileCoord(40, 40), 1u, TimeSpan.FromMilliseconds(20)));
+        Assert.Equal(1u, predictor.ReconcileSnapped);
+
+        var predBefore = predictor.PredictedStepSeq;
+        var confBefore = predictor.LastReconciledStepSeq;
+        predictor.ResetReconcileCounters();
+        Assert.Equal(0u, predictor.ReconcileMatched);
+        Assert.Equal(0u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+        // Reset is counters-only: the prediction state is untouched.
+        Assert.Equal(predBefore, predictor.PredictedStepSeq);
+        Assert.Equal(confBefore, predictor.LastReconciledStepSeq);
+    }
 }

@@ -102,6 +102,13 @@ public sealed class LocalPlayerPredictor
     // already processed.
     private uint _highestReconciledStepSeq;
     private bool _hasReconciled;
+
+    // DIAG1: reconcile-outcome tallies (see the public accessors). Bumped once per Reconcile call at each return
+    // point; reset by ResetReconcileCounters so the human can zero them before a loss burst. Measurement only.
+    private uint _reconcileMatched;
+    private uint _reconcileCorrected;
+    private uint _reconcileSnapped;
+
     private Direction8 _facing;
     private bool _moving;
     private Direction8 _direction;
@@ -200,6 +207,21 @@ public sealed class LocalPlayerPredictor
     // S77: the predictor's count of accepted tile moves, the exact mirror of the server's StepSequence (S76).
     // Exposed read-only so the parity test can assert it tracks the server tick-for-tick.
     public uint PredictedStepSeq => _predictedStepSeq;
+
+    // DIAG1: live reconcile-outcome counters since the last ResetReconcileCounters(). Pure read-outs — they are
+    // bumped at the single return points of Reconcile (one per call) and change NOTHING about the reconcile
+    // behaviour. They let the F3 readout show how the prediction is being corrected under loss: a healthy stream
+    // is mostly Matched (the prediction was valid and ahead, no render move); Corrected/Snapped climb when the
+    // server's confirm diverges from the prediction (a re-base pulled the head back). Used with pred/conf/lead to
+    // separate "the lead drains via benign Matched confirms" from "the lead is being forcibly Corrected/Snapped".
+    public uint ReconcileMatched => _reconcileMatched;
+    public uint ReconcileCorrected => _reconcileCorrected;
+    public uint ReconcileSnapped => _reconcileSnapped;
+
+    // DIAG1: the last serverStepSeq Reconcile re-anchored on — the server's count of OUR accepted tile moves that
+    // the client has LEARNED (the snapshot's RecipientStepSeq). Exposed so the readout can show `conf` directly
+    // from the predictor (the same value the re-base used), and `lead` = PredictedStepSeq - this.
+    public uint LastReconciledStepSeq => _hasReconciled ? _highestReconciledStepSeq : 0u;
 
     public Direction8 Facing => _facing;
 
@@ -666,6 +688,7 @@ public sealed class LocalPlayerPredictor
         // confirm).
         if (_predictedTile == oldPredictedTile)
         {
+            _reconcileMatched++;
             return ReconcileOutcome.Matched;
         }
 
@@ -679,6 +702,7 @@ public sealed class LocalPlayerPredictor
 
             StartTween(presentPos, presentPos, now, _cadenceMs);
             _renderPosition = presentPos;
+            _reconcileSnapped++;
             return ReconcileOutcome.Snapped;
         }
 
@@ -704,7 +728,17 @@ public sealed class LocalPlayerPredictor
         // boundary and keep tracking the server cadence, instead of freezing a full cadence.
         StartTween(oldRenderSource, presentPos, now, _cadenceMs);
         _renderPosition = SampleInternal(now);
+        _reconcileCorrected++;
         return ReconcileOutcome.Corrected;
+    }
+
+    // DIAG1: zeroes the reconcile-outcome tallies (Matched / Corrected / Snapped) so the human can reset them just
+    // before a loss burst and read fresh counts. Measurement only — touches no prediction/reconcile state.
+    public void ResetReconcileCounters()
+    {
+        _reconcileMatched = 0;
+        _reconcileCorrected = 0;
+        _reconcileSnapped = 0;
     }
 
     // Updates facing-only from a confirmed snapshot when the position matched (so a server-side turn with no

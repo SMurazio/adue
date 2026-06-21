@@ -130,6 +130,17 @@ public sealed class WorldEntity
     // this stage only puts it on the wire (no reconcile change).
     public uint StepSequence { get; private set; }
 
+    // DIAG1 (measurement only): per-entity commit-path counters so the server side of the 3-link recovery chain is
+    // observable. RecvCommits = commit attempts that reached this entity's gate (a RECOVERED lost commit counts —
+    // it was never consumed; a true duplicate already deduped upstream does NOT) — climbing while StepSequence
+    // (srvSeq) stalls means the server is REJECTING delivered commits (link 2), not failing to receive them (link 1). RejectsCommitTooEarly = commits refused by the authored-tick future-cap /
+    // receive-time cooldown floor ("commit_too_early") — the anti-speedhack gate the recovery hypothesis suspects.
+    // RejectsBlocked = commits refused because the target tile was a wall / out of bounds. Bumped inside the commit
+    // methods below; pure tallies that change NO movement decision. (StepSequence already exposes srvSeq.)
+    public uint RecvCommits { get; private set; }
+    public uint RejectsCommitTooEarly { get; private set; }
+    public uint RejectsBlocked { get; private set; }
+
     // Harvests the node: marks it depleted, schedules respawn, and bumps StateRevision so the change
     // re-replicates through the AOI snapshot delta path. Caller must have validated availability.
     public void DepleteResource(uint serverTick)
@@ -283,6 +294,9 @@ public sealed class WorldEntity
         TileGrid grid,
         out MovementStepResult result)
     {
+        // DIAG1: count every received commit attempt before any gate (see TryCommitStepAuthored). Measurement only.
+        RecvCommits++;
+
         var delta = direction.Delta();
         var target = Tile.Offset(delta.X, delta.Y);
 
@@ -291,6 +305,7 @@ public sealed class WorldEntity
         // path already owns facing). The reject leaves the entity on its current tile, which the snapshot shows.
         if (!IsStepWalkable(delta, target, grid))
         {
+            RejectsBlocked++; // DIAG1.
             result = new MovementStepResult(
                 direction,
                 Tile,
@@ -318,6 +333,7 @@ public sealed class WorldEntity
                 && (serverTick - _lastStepTick.Value) >= floor;
             if (!elapsedEnough)
             {
+                RejectsCommitTooEarly++; // DIAG1.
                 result = new MovementStepResult(
                     direction,
                     Tile,
@@ -393,6 +409,11 @@ public sealed class WorldEntity
         TileGrid grid,
         out MovementStepResult result)
     {
+        // DIAG1: count every received commit attempt (incl. redundant re-sends) before any gate, so a climbing
+        // RecvCommits with a stalled StepSequence cleanly separates link-2 (server rejecting) from link-1 (not
+        // receiving). Measurement only.
+        RecvCommits++;
+
         // Clamp the authored tick up to a recent window floor so a far-past (stale / tamper) tick can't rewind the
         // schedule arbitrarily. A far-future tick needs no separate clamp here — the real-time cap below rejects a
         // scheduled tick beyond serverTick + futureLead.
@@ -418,6 +439,9 @@ public sealed class WorldEntity
         // later tick once real time advances, so the long-run rate is bounded to cadence and a burst can't teleport.
         if (scheduledTick > serverTick + futureLeadTicks)
         {
+            // DIAG1: this is the link-2 reject the recovery hypothesis suspects (the future-cap refusing a
+            // delivered commit). Count it so the trace shows rejects climbing while StepSequence stalls.
+            RejectsCommitTooEarly++;
             result = new MovementStepResult(
                 direction,
                 Tile,
@@ -437,6 +461,7 @@ public sealed class WorldEntity
         // nothing and does NOT advance the authored schedule, so a later commit in an open direction still applies.
         if (!IsStepWalkable(delta, target, grid))
         {
+            RejectsBlocked++; // DIAG1.
             result = new MovementStepResult(
                 direction,
                 Tile,
