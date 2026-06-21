@@ -9,7 +9,9 @@ public sealed class GodotClientProjectTests
     {
         var project = File.ReadAllText(FindGodotProject());
 
-        Assert.Contains("config/features=PackedStringArray(\"4.6\", \"GL Compatibility\")", project);
+        // config/features must list the Compatibility renderer; don't pin the engine version — it changes on
+        // Godot upgrades (was "4.6"; after the 4.7 migration it is "4.7", "C#", "GL Compatibility").
+        Assert.Contains("\"GL Compatibility\")", project);
         Assert.Contains("renderer/rendering_method=\"gl_compatibility\"", project);
         Assert.Contains("renderer/rendering_method.mobile=\"gl_compatibility\"", project);
         Assert.DoesNotContain("Forward Plus", project);
