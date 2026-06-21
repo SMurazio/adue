@@ -69,7 +69,9 @@ public sealed class MmoClientUoClientDrivenTests
         var seqs = outbound
             .Select(m => m switch
             {
-                MoveIntentMessage mi => (uint?)mi.Sequence,
+                // NET1 Stage 1: the held-input channel is now the redundant MoveInputMessage (HeadSeq is the
+                // newest input's sequence on the shared move cursor), not the old MoveIntentMessage.
+                MoveInputMessage mi => (uint?)mi.HeadSeq,
                 StepCommitRequestMessage sc => sc.Sequence,
                 _ => null,
             })

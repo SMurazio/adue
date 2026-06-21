@@ -11,6 +11,7 @@ public enum MessageType : ushort
     AdminSetTuning = 7,
     StepCommitRequest = 8,
     MovementMode = 9,
+    MoveInput = 10,
 
     ServerHello = 100,
     LoginResult = 101,

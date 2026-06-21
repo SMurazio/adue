@@ -185,12 +185,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Direction8? _injectedDirection;
 	private double _injectedUntilSeconds;
 
-	// Held-direction movement intent (protocol v15). We send a MoveIntent only when the intent changes
-	// (keydown / keyup / direction change) plus a low-rate keepalive resend, instead of streaming a step
-	// every tick. The server steps the entity from the held intent at its own cooldown cadence.
-	// _lastSentMoving/_lastSentDirection track what the server currently believes; the server's keepalive
-	// timeout (~1 s) is the safety net if the keepalive itself is dropped.
-	private const double MoveIntentKeepaliveSeconds = 0.5;
+	// Held-direction movement intent. NET1 Stage 1: input now rides an UNRELIABLE, REDUNDANT MoveInput
+	// channel, so we drive it at a FIXED rate (~20 Hz) while moving instead of on-change + a 0.5 s keepalive.
+	// Each send mints a fresh sequence and repeats the full current state plus a window of prior inputs, so a
+	// dropped packet is superseded within one interval (no head-of-line freeze-then-jump). After a STOP we keep
+	// sending the Moving=false state for a short tail (MoveInputStopTailCount packets) so a dropped STOP is
+	// recovered by redundancy. A direction change still sends immediately (a fresh sequence next tick anyway).
+	// _lastSentMoving/_lastSentDirection track the most recent intent; the server keepalive timeout (~1 s) is
+	// the safety net if every redundant packet in a tail is lost.
+	private const double MoveInputSendInterval = 1.0 / 20.0; // ~20 Hz
+	private const int MoveInputStopTailCount = 8; // packets of Moving=false re-sent after a stop
+	private double _nextMoveInputSendAt;
+	private int _stopTailRemaining;
 
 	// S64 mouse-heading feel constants. Dead-zone: ~0.6 tile (between the S64 0.5–0.75 guidance) — inside it the
 	// held octant is kept so the heading doesn't whip when the cursor sits on/near the player. Hysteresis: 6° of
@@ -199,7 +205,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private const double MouseHeadingHysteresisDegrees = 6.0;
 	private bool _lastSentMoving;
 	private Direction8 _lastSentDirection;
-	private double _nextMoveIntentKeepaliveAt;
 
 	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
 	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
@@ -1976,17 +1981,30 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var moving = direction.HasValue;
 		var resolvedDirection = direction ?? _lastSentDirection;
 
-		// Input is state, not events: send a MoveIntent only when the intent changes, plus a keepalive
-		// resend while moving (the server's ~1 s timeout stops a stuck avatar if a keepalive is dropped).
-		// The server paces tile steps on its own cooldown from this held intent — no per-step send.
+		// NET1 Stage 1: input rides an unreliable, redundant channel, so drive it at a FIXED ~20 Hz while
+		// moving plus a short Moving=false tail after stop. We send when ANY of:
+		//   - the intent changed (immediate edge — keydown / keyup / direction change), OR
+		//   - we're moving and the ~20 Hz fixed-rate interval is due, OR
+		//   - we're stopped but still owe stop-tail packets (recover a dropped STOP via redundancy).
+		// A change arms the stop tail on a transition to stopped; each tail packet repeats Moving=false.
 		var changed = moving != _lastSentMoving || (moving && resolvedDirection != _lastSentDirection);
-		var keepaliveDue = moving && now.TotalSeconds >= _nextMoveIntentKeepaliveAt;
-		if (changed || keepaliveDue)
+		if (changed && !moving)
+		{
+			_stopTailRemaining = MoveInputStopTailCount;
+		}
+
+		var rateDue = moving && now.TotalSeconds >= _nextMoveInputSendAt;
+		var tailDue = !moving && _stopTailRemaining > 0 && now.TotalSeconds >= _nextMoveInputSendAt;
+		if (changed || rateDue || tailDue)
 		{
 			_client.SendMoveIntent(moving, resolvedDirection);
 			_lastSentMoving = moving;
 			_lastSentDirection = resolvedDirection;
-			_nextMoveIntentKeepaliveAt = now.TotalSeconds + MoveIntentKeepaliveSeconds;
+			_nextMoveInputSendAt = now.TotalSeconds + MoveInputSendInterval;
+			if (!moving && _stopTailRemaining > 0)
+			{
+				_stopTailRemaining--;
+			}
 		}
 	}
 

@@ -6,11 +6,16 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 22;
+    public const byte Version = 23;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
     private const int MaxInventoryUpdateStacks = 1024;
+
+    // NET1 Stage 1: an unreliable MoveInput packet carries the head input plus a small redundancy window
+    // of prior inputs (deltas). Bound the decoded window so a malformed/hostile packet can't allocate
+    // unboundedly; the client only ever fills ~4–8.
+    private const int MaxMoveInputWindow = 32;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -43,6 +48,9 @@ public static class ProtocolCodec
             case StepCommitRequestMessage value:
                 writer.Write(value.Sequence);
                 writer.Write((byte)value.Direction);
+                break;
+            case MoveInputMessage value:
+                WriteMoveInput(writer, value);
                 break;
             case MovementModeMessage value:
                 writer.Write(value.ClientDriven);
@@ -192,6 +200,7 @@ public static class ProtocolCodec
             MessageType.LoginRequest => new LoginRequestMessage(ReadString(reader), ReadString(reader)),
             MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadBoolean(), ReadDirection(reader)),
             MessageType.StepCommitRequest => new StepCommitRequestMessage(reader.ReadUInt32(), ReadDirection(reader)),
+            MessageType.MoveInput => ReadMoveInput(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
@@ -282,6 +291,53 @@ public static class ProtocolCodec
         writer.Write(Magic);
         writer.Write(Version);
         writer.Write((ushort)type);
+    }
+
+    // NET1 Stage 1: wire layout is HeadSeq, Moving, Direction (full current state), then Count + that many
+    // {SeqDelta, Moving, Direction} window entries (prior inputs as deltas off HeadSeq). Mirrored in ReadMoveInput.
+    private static void WriteMoveInput(BinaryWriter writer, MoveInputMessage value)
+    {
+        if (value.Window.Count > MaxMoveInputWindow)
+        {
+            throw new ProtocolException($"MoveInput window too large: {value.Window.Count}.");
+        }
+
+        writer.Write(value.HeadSeq);
+        writer.Write(value.Moving);
+        writer.Write((byte)value.Direction);
+        writer.Write((byte)value.Window.Count);
+        for (var i = 0; i < value.Window.Count; i++)
+        {
+            var entry = value.Window[i];
+            writer.Write(entry.SeqDelta);
+            writer.Write(entry.Moving);
+            writer.Write((byte)entry.Direction);
+        }
+    }
+
+    private static MoveInputMessage ReadMoveInput(BinaryReader reader)
+    {
+        var headSeq = reader.ReadUInt32();
+        var moving = reader.ReadBoolean();
+        var direction = ReadDirection(reader);
+        var count = reader.ReadByte();
+        if (count > MaxMoveInputWindow)
+        {
+            throw new ProtocolException($"MoveInput window too large: {count}.");
+        }
+
+        var window = count == 0
+            ? (IReadOnlyList<MoveInputWindowEntry>)Array.Empty<MoveInputWindowEntry>()
+            : new List<MoveInputWindowEntry>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var seqDelta = reader.ReadByte();
+            var entryMoving = reader.ReadBoolean();
+            var entryDirection = ReadDirection(reader);
+            ((List<MoveInputWindowEntry>)window).Add(new MoveInputWindowEntry(seqDelta, entryMoving, entryDirection));
+        }
+
+        return new MoveInputMessage(headSeq, moving, direction, window);
     }
 
     private static void WriteWorldSnapshotPayload(

@@ -87,6 +87,14 @@ public sealed class MmoClient : IDisposable
     // match this against the predicted step to fix the reconcile rubberband.
     private uint _lastRecipientStepSeq;
     private uint _moveSequence;
+    // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
+    // current state PLUS a window of these prior inputs (as deltas) so a dropped packet's state change is
+    // recovered from a later, still-redundant packet. Sized to ~the loss-recovery depth we send (≈8).
+    private const int MoveInputRingCapacity = 8;
+    private readonly (uint Seq, bool Moving, Direction8 Direction)[] _moveInputRing
+        = new (uint, bool, Direction8)[MoveInputRingCapacity];
+    private int _moveInputRingCount;
+    private int _moveInputRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -489,14 +497,19 @@ public sealed class MmoClient : IDisposable
         _serverPeer = null;
     }
 
-    // Sends a held-direction movement intent (protocol v15). The server steps the entity at its own
-    // cooldown cadence from this intent, so the client sends it on change (keydown / keyup / direction
-    // change) plus a low-rate keepalive — NOT once per step. Reliable-ordered: a dropped "stop" must not
-    // be lost. Direction is ignored by the server when moving is false. See docs/movement-input-model.md.
+    // Sends a held-direction movement intent. NET1 Stage 1: the wire delivery is now an UNRELIABLE,
+    // REDUNDANT MoveInputMessage instead of a reliable-ordered MoveIntentMessage — the caller drives it at a
+    // fixed ~20 Hz while moving plus a short Moving=false tail after stop (see MmoClientRoot.SendHeldMovement).
+    // Each call mints a fresh sequence, records it in the ring, and ships the FULL current state plus a window
+    // of the last few prior inputs (deltas) so a dropped packet is superseded by the next and a dropped state
+    // change is recovered from a later packet's window. The server dedupes by sequence; reliability comes from
+    // redundancy, not retransmission, so a lost packet no longer head-of-line-stalls (freeze-then-jump gone).
+    // Direction is ignored by the server when moving is false. See docs/movement-input-model.md.
     public uint SendMoveIntent(bool moving, Direction8 direction)
     {
         var sequence = ++_moveSequence;
-        Send(new MoveIntentMessage(sequence, moving, direction), DeliveryMethod.ReliableOrdered);
+        RecordMoveInput(sequence, moving, direction);
+        Send(new MoveInputMessage(sequence, moving, direction, BuildMoveInputWindow(sequence)), DeliveryMethod.Unreliable);
         _movementTrace.MoveSent(sequence, moving, direction);
         // S53: the held intent we just sent the server is exactly what the local predictor mirrors. Feed it
         // so the first step on keydown / the stop on keyup is predicted with no round-trip wait. The
@@ -544,6 +557,56 @@ public sealed class MmoClient : IDisposable
         }
 
         return sequence;
+    }
+
+    // NET1 Stage 1: push the just-sent input into the redundancy ring (newest last, dropping the oldest once
+    // full). The ring feeds the window of every subsequent MoveInputMessage.
+    private void RecordMoveInput(uint sequence, bool moving, Direction8 direction)
+    {
+        if (_moveInputRingCount < MoveInputRingCapacity)
+        {
+            var slot = (_moveInputRingHead + _moveInputRingCount) % MoveInputRingCapacity;
+            _moveInputRing[slot] = (sequence, moving, direction);
+            _moveInputRingCount++;
+        }
+        else
+        {
+            _moveInputRing[_moveInputRingHead] = (sequence, moving, direction);
+            _moveInputRingHead = (_moveInputRingHead + 1) % MoveInputRingCapacity;
+        }
+    }
+
+    // NET1 Stage 1: build the redundancy window for a packet whose head is headSeq — the prior inputs still in
+    // the ring (every entry except the head itself), encoded as deltas (headSeq - entrySeq). Newest-first so a
+    // truncated read still recovers the most recent changes. Returns empty when the ring holds only the head.
+    private IReadOnlyList<MoveInputWindowEntry> BuildMoveInputWindow(uint headSeq)
+    {
+        if (_moveInputRingCount <= 1)
+        {
+            return Array.Empty<MoveInputWindowEntry>();
+        }
+
+        var window = new List<MoveInputWindowEntry>(_moveInputRingCount - 1);
+        // Walk newest-to-oldest, skipping the head entry.
+        for (var i = _moveInputRingCount - 1; i >= 0; i--)
+        {
+            var slot = (_moveInputRingHead + i) % MoveInputRingCapacity;
+            var entry = _moveInputRing[slot];
+            if (entry.Seq == headSeq)
+            {
+                continue;
+            }
+
+            var delta = headSeq - entry.Seq;
+            if (delta == 0 || delta > byte.MaxValue)
+            {
+                continue;
+            }
+
+            window.Add(new MoveInputWindowEntry((byte)delta, entry.Moving, entry.Direction));
+        }
+
+        return window;
     }
 
     // Creates the local-player predictor once everything it mirrors is known: prediction enabled, a zone

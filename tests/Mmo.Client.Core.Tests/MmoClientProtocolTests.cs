@@ -175,7 +175,9 @@ public sealed class MmoClientProtocolTests
         var sequence = client.SendMoveIntent(true, Direction8.E);
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
 
-        Assert.Contains(outbound.OfType<MoveIntentMessage>(), move => move.Sequence == sequence && move.Moving && move.Direction == Direction8.E);
+        // NET1 Stage 1: SendMoveIntent now ships the redundant-unreliable MoveInputMessage (full current state +
+        // window), not the old reliable MoveIntentMessage. The head seq matches the returned sequence.
+        Assert.Contains(outbound.OfType<MoveInputMessage>(), move => move.HeadSeq == sequence && move.Moving && move.Direction == Direction8.E);
         Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
         Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
         Assert.Equal(9u, client.MovementDebug.LastConfirmedNetworkId);

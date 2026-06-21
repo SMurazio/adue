@@ -185,6 +185,46 @@ public sealed class ProtocolCodecTests
         Assert.Equal(Direction8.N, decoded.Direction);
     }
 
+    // NET1 Stage 1: the redundant MoveInput packet round-trips its full head state plus the window of prior
+    // inputs (deltas off HeadSeq). Window entries carry their own Moving/Direction.
+    [Fact]
+    public void MoveInputRoundTripsHeadAndWindow()
+    {
+        var original = new MoveInputMessage(
+            HeadSeq: 100,
+            Moving: true,
+            Direction: Direction8.E,
+            Window:
+            [
+                new MoveInputWindowEntry(SeqDelta: 1, Moving: true, Direction: Direction8.NE),
+                new MoveInputWindowEntry(SeqDelta: 2, Moving: false, Direction: Direction8.S),
+                new MoveInputWindowEntry(SeqDelta: 3, Moving: true, Direction: Direction8.W),
+            ]);
+
+        var decoded = Assert.IsType<MoveInputMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(100u, decoded.HeadSeq);
+        Assert.True(decoded.Moving);
+        Assert.Equal(Direction8.E, decoded.Direction);
+        Assert.Equal(3, decoded.Window.Count);
+        Assert.Equal(new MoveInputWindowEntry(1, true, Direction8.NE), decoded.Window[0]);
+        Assert.Equal(new MoveInputWindowEntry(2, false, Direction8.S), decoded.Window[1]);
+        Assert.Equal(new MoveInputWindowEntry(3, true, Direction8.W), decoded.Window[2]);
+    }
+
+    [Fact]
+    public void MoveInputRoundTripsEmptyWindow()
+    {
+        var original = new MoveInputMessage(5, false, Direction8.N, Window: []);
+
+        var decoded = Assert.IsType<MoveInputMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(5u, decoded.HeadSeq);
+        Assert.False(decoded.Moving);
+        Assert.Equal(Direction8.N, decoded.Direction);
+        Assert.Empty(decoded.Window);
+    }
+
     [Fact]
     public void SnapshotAckRoundTrips()
     {
@@ -211,11 +251,11 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyTwo()
+    public void ProtocolVersionIsTwentyThree()
     {
-        // UO1 protocol bump: adding the client->server MovementMode message is a breaking wire change (server
-        // + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(22, ProtocolCodec.Version);
+        // NET1 Stage 1 protocol bump: adding the redundant-unreliable MoveInput message is a breaking wire
+        // change (server + client ship together). Pin the version so an accidental change is caught.
+        Assert.Equal(23, ProtocolCodec.Version);
     }
 
     [Fact]

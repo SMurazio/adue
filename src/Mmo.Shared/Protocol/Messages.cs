@@ -27,6 +27,27 @@ public sealed record MoveIntentMessage(uint Sequence, bool Moving, Direction8 Di
     public MessageType Type => MessageType.MoveIntent;
 }
 
+// NET1 Stage 1 (protocol v23): loss-robust held-intent delivery — reliability via REDUNDANCY, not
+// retransmission. Replaces the reliable-ordered MoveIntent send. Sent UNRELIABLE at a fixed rate
+// (~20 Hz while moving, plus a short tail of Moving=false after stop). Every packet carries the FULL
+// current intent (HeadSeq/Moving/Direction) so a lost packet is simply superseded by the next, PLUS a
+// sliding Window of the last few prior inputs as deltas so an intermediate state change dropped on the
+// wire is recovered from a later packet. The server dedupes by sequence (walk head+window, apply each
+// seq > LastMoveSeq via the EXISTING held-intent path) — no head-of-line stall, no retransmit bunching.
+// No authored ticks yet: this stage stays seq-based and server held-paced (those arrive in Stage 2+).
+// Window entries are deltas off HeadSeq: SeqDelta is (HeadSeq - entry.Seq), so entry seq = HeadSeq -
+// SeqDelta. The newest input is the head; Window holds strictly-older inputs in any order.
+public readonly record struct MoveInputWindowEntry(byte SeqDelta, bool Moving, Direction8 Direction);
+
+public sealed record MoveInputMessage(
+    uint HeadSeq,
+    bool Moving,
+    Direction8 Direction,
+    IReadOnlyList<MoveInputWindowEntry> Window) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MoveInput;
+}
+
 // S103 commit-step on release (protocol v21). A client→server request to finish a near-complete cosmetic step:
 // when model B's render has glided past the commit threshold onto the NEXT tile at key-release, the client asks
 // the server to step there for real (one tile in Direction) instead of snapping back. The server validates it

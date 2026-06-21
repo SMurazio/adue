@@ -327,6 +327,12 @@ public sealed class GameServer
                     session.TryUpdateMoveIntent(intent.Sequence, intent.Moving, intent.Direction, _serverTick);
                 }
                 break;
+            case MoveInputMessage input:
+                if (session.IsAuthenticated)
+                {
+                    HandleMoveInput(session, input);
+                }
+                break;
             case StepCommitRequestMessage commit:
                 if (session.IsAuthenticated)
                 {
@@ -1618,6 +1624,61 @@ public sealed class GameServer
     // with the anti-cheat floor. On accept the tile advances + StepSequence bumps, so the next snapshot's confirmed
     // tile + RecipientStepSeq carry the result to the client (no dedicated reply). On reject nothing changes and the
     // snapshot still shows the old tile (the client reads that as "snap back"). Tracing mirrors the held-step path.
+    // NET1 Stage 1: ingest a redundant-unreliable MoveInput packet. The packet carries the newest input
+    // (HeadSeq/Moving/Direction) plus a window of prior inputs as deltas off HeadSeq. We reconstruct each
+    // input's sequence, then apply them in ASCENDING seq order through the EXISTING TryUpdateMoveIntent,
+    // which dedups (seq <= LastMoveSeq dropped) and advances the held intent. Because every packet repeats
+    // the full window, a dropped packet's intermediate state change is recovered from any later packet that
+    // still carries it — no head-of-line stall, no retransmit bunching. The stepping model is untouched:
+    // StepHeldMovementIntents still paces the entity off the held intent this fed.
+    private void HandleMoveInput(ClientSession session, MoveInputMessage input)
+    {
+        foreach (var (seq, moving, direction) in ExtractFreshMoveInputs(input, session.LastMoveSeq))
+        {
+            // The EXISTING held-intent path dedups (seq <= LastMoveSeq dropped) and advances the cursor; we
+            // pre-filtered + ordered so each fresh seq applies exactly once, oldest-first, landing on the head.
+            session.TryUpdateMoveIntent(seq, moving, direction, _serverTick);
+        }
+    }
+
+    // NET1 Stage 1 (pure, unit-testable): given a redundant MoveInput packet and the last seq already accepted,
+    // returns the fresh inputs (seq > lastSeq) in ASCENDING seq order — head plus window entries reconstructed
+    // from their deltas (entrySeq = HeadSeq - SeqDelta). Already-seen and malformed (delta 0 / underflowing)
+    // entries are dropped. Applying the result oldest-first feeds the held-intent path each new input once and
+    // ends on the newest (head) state; a "dropped head" packet's state change is recovered from a later
+    // packet's window because that window still carries it.
+    internal static IReadOnlyList<(uint Seq, bool Moving, Direction8 Direction)> ExtractFreshMoveInputs(
+        MoveInputMessage input,
+        uint lastSeq)
+    {
+        var fresh = new List<(uint Seq, bool Moving, Direction8 Direction)>(input.Window.Count + 1);
+        if (input.HeadSeq > lastSeq)
+        {
+            fresh.Add((input.HeadSeq, input.Moving, input.Direction));
+        }
+
+        for (var i = 0; i < input.Window.Count; i++)
+        {
+            var entry = input.Window[i];
+            if (entry.SeqDelta == 0 || entry.SeqDelta > input.HeadSeq)
+            {
+                // 0 would alias the head; a delta past HeadSeq underflows — drop the malformed entry.
+                continue;
+            }
+
+            var entrySeq = input.HeadSeq - entry.SeqDelta;
+            if (entrySeq > lastSeq)
+            {
+                fresh.Add((entrySeq, entry.Moving, entry.Direction));
+            }
+        }
+
+        // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
+        // are distinct off a single head), so a stable insertion sort suffices.
+        fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
+        return fresh;
+    }
+
     private void HandleStepCommit(ClientSession session, uint sequence, Direction8 direction)
     {
         if (!session.TryConsumeCommitSequence(sequence, _serverTick))
