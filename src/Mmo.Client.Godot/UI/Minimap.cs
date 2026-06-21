@@ -47,10 +47,14 @@ public partial class Minimap : Control
     private const int ZoomStep = 2;
     private int _mapScale = DefaultMapScale;
 
-    // Background + wall colours for the simplified raster (contrasting, readable — not a 1:1 terrain texture).
-    private static readonly Color MapBackground = new(0.10f, 0.13f, 0.16f, 0.92f);
+    // Wall + border colours for the simplified raster (contrasting, readable — not a 1:1 terrain texture).
     private static readonly Color MapWall = new(0.62f, 0.66f, 0.72f, 1f);
     private static readonly Color MapBorder = new(0.30f, 0.34f, 0.40f, 1f);
+
+    // Terrain overview colours from the design bitmap (TerrainPainter.LoadTerrainGrid): tan for terrain, green for
+    // grass — a simplified read of the painted floor so the minimap conveys the terrain layout.
+    private static readonly Color MapTerrain = new(0.80f, 0.73f, 0.55f, 0.92f);
+    private static readonly Color MapGrass = new(0.42f, 0.55f, 0.32f, 0.92f);
 
     // S110: object square colours. Available resource = warm amber (reads against the cool grey walls); depleted
     // = dim grey-green so a harvested node is still visible but clearly spent. The depleted/available bit is
@@ -244,7 +248,31 @@ public partial class Minimap : Control
         var w = Mathf.Max(1, map.Width) * _mapScale;
         var h = Mathf.Max(1, map.Height) * _mapScale;
         var image = Image.CreateEmpty(w, h, false, Image.Format.Rgba8);
-        image.Fill(MapBackground);
+
+        // Base layer = the terrain design (tan terrain over green grass) so the minimap conveys the terrain layout.
+        // Grass dominates, so fill grass then stamp the (sparser) terrain cells. Same axes as the world/walls below.
+        image.Fill(MapGrass);
+        var terrain = Mmo.Client.Godot.Visuals.TerrainPainter.LoadTerrainGrid(map.Width, map.Height);
+        for (var ty = 0; ty < map.Height; ty++)
+        {
+            for (var tx = 0; tx < map.Width; tx++)
+            {
+                if (!terrain[tx, ty])
+                {
+                    continue;
+                }
+
+                var bx = tx * _mapScale;
+                var by = ty * _mapScale;
+                for (var dy = 0; dy < _mapScale; dy++)
+                {
+                    for (var dx = 0; dx < _mapScale; dx++)
+                    {
+                        image.SetPixel(bx + dx, by + dy, MapTerrain);
+                    }
+                }
+            }
+        }
 
         // World bounds: a 1px inner border so the edge of the world reads on the minimap.
         for (var x = 0; x < w; x++)

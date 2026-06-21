@@ -272,7 +272,7 @@ public partial class InventoryWindow : Control
             if (i < bucket.Count)
             {
                 var row = bucket[i];
-                _slots[i].ShowItem(row.DisplayName, row.Quantity);
+                _slots[i].ShowItem(row.TemplateKey, row.DisplayName, row.Quantity);
             }
             else
             {
@@ -300,8 +300,34 @@ public partial class InventoryWindow : Control
 internal sealed partial class InventorySlot : Control
 {
     private Panel? _frame;
+    private TextureRect? _icon;
     private Label? _name;
     private Label? _count;
+
+    // Item-key -> icon texture, resolved from res://content/ui/icons/gatherables/<Capitalized key>.png
+    // (wood -> Wood.png, stone -> Stone.png, fiber -> Fiber.png). Cached so repeated grid repaints don't reload.
+    // A null entry means "no art for this key" -> the slot falls back to the text label. Adding art for a new
+    // gatherable is just dropping a PNG named after the capitalized item key; no code change needed.
+    private static readonly Dictionary<string, Texture2D?> IconCache = new(StringComparer.Ordinal);
+
+    private static Texture2D? ResolveIcon(string templateKey)
+    {
+        if (string.IsNullOrEmpty(templateKey))
+        {
+            return null;
+        }
+
+        if (IconCache.TryGetValue(templateKey, out var cached))
+        {
+            return cached;
+        }
+
+        var capitalized = char.ToUpperInvariant(templateKey[0]) + templateKey[1..];
+        var path = $"res://content/ui/icons/gatherables/{capitalized}.png";
+        var texture = ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
+        IconCache[templateKey] = texture;
+        return texture;
+    }
 
     private static readonly StyleBoxFlat EmptyStyle = MakeStyle(
         new Color(0.10f, 0.11f, 0.14f, 0.55f), new Color(0.32f, 0.34f, 0.42f, 0.8f));
@@ -319,7 +345,23 @@ internal sealed partial class InventorySlot : Control
         _frame.AddThemeStyleboxOverride("panel", EmptyStyle);
         AddChild(_frame);
 
-        // TODO(art): per-item icons — once item art exists, drop a TextureRect here and hide/replace this label.
+        // Per-item icon. Shown when art exists for the item key (gatherables); otherwise the text label below is
+        // the fallback. Inset a few px so the icon sits inside the frame border, aspect-preserved.
+        _icon = new TextureRect
+        {
+            Name = "Icon",
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            MouseFilter = MouseFilterEnum.Ignore,
+        };
+        _icon.SetAnchorsPreset(LayoutPreset.FullRect);
+        _icon.OffsetLeft = 5f;
+        _icon.OffsetTop = 5f;
+        _icon.OffsetRight = -5f;
+        _icon.OffsetBottom = -5f;
+        AddChild(_icon);
+
+        // Text fallback for items without icon art.
         _name = new Label
         {
             Name = "ItemName",
@@ -352,13 +394,22 @@ internal sealed partial class InventorySlot : Control
         ShowEmpty();
     }
 
-    public void ShowItem(string displayName, int quantity)
+    public void ShowItem(string templateKey, string displayName, int quantity)
     {
         _frame?.AddThemeStyleboxOverride("panel", FilledStyle);
+
+        var icon = ResolveIcon(templateKey);
+        if (_icon is not null)
+        {
+            _icon.Texture = icon;
+            _icon.Visible = icon is not null;
+        }
+
+        // Icon when art exists; otherwise fall back to the text label so the item is still identifiable.
         if (_name is not null)
         {
             _name.Text = ShortName(displayName);
-            _name.Visible = true;
+            _name.Visible = icon is null;
         }
 
         if (_count is not null)
@@ -371,6 +422,12 @@ internal sealed partial class InventorySlot : Control
     public void ShowEmpty()
     {
         _frame?.AddThemeStyleboxOverride("panel", EmptyStyle);
+        if (_icon is not null)
+        {
+            _icon.Texture = null;
+            _icon.Visible = false;
+        }
+
         if (_name is not null)
         {
             _name.Text = string.Empty;

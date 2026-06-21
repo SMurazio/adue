@@ -37,7 +37,7 @@ public partial class Hud : CanvasLayer
     private Minimap? _minimap;
 
     // S111: the toggleable centered Inventory window (replaces the old top-right text panel). The HUD owns it as
-    // a child; MmoClientRoot toggles it ("I") and feeds it the (Version-guarded) inventory rows. Hidden by default.
+    // a child; MmoClientRoot toggles it (Tab) and feeds it the (Version-guarded) inventory rows. Hidden by default.
     private InventoryWindow? _inventory;
 
     // The portrait's base (white) modulate so we can toggle the low-health red tint without losing the texture.

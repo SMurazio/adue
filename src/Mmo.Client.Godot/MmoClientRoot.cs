@@ -418,6 +418,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_maxOverlayMs = Math.Max(_maxOverlayMs, _lastOverlayMs);
 	}
 
+	// Tab = toggle the Inventory window. Handled in _Input (which runs BEFORE Godot's GUI focus navigation,
+	// where Tab is bound to ui_focus_next) so Tab reliably opens/closes the inventory instead of cycling
+	// control focus. Ignored while typing in chat so Tab behaves normally in the chat box.
+	public override void _Input(InputEvent @event)
+	{
+		if (@event is InputEventKey { Pressed: true, Echo: false } key
+			&& key.Keycode == Key.Tab
+			&& _chatInput?.HasFocus() != true)
+		{
+			_hud?.ToggleInventory();
+			GetViewport().SetInputAsHandled();
+		}
+	}
+
 	public override void _UnhandledInput(InputEvent @event)
 	{
 		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
@@ -536,7 +550,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// COMBAT-S2B: Space = melee attack. A clear, free key (no collision with WASD movement, F3-F7/F11 panels,
-		// E harvest, I inventory, Alt+R resync, or Enter/T chat). Not while typing in chat (so Space types a space
+		// E harvest, Tab inventory, Alt+R resync, or Enter/T chat). Not while typing in chat (so Space types a space
 		// in a message instead of swinging). Sends the attack on its own cursor (MmoClient.SendAttack) and shows an
 		// immediate cosmetic swing cue; the server authoritatively resolves the cone + damage (the target's overhead
 		// HP bar drops via the snapshot — no client-side damage prediction).
@@ -546,16 +560,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			GetViewport().SetInputAsHandled();
 			return;
 		}
-
-		// S111: I = toggle the Inventory window. Not while typing in chat (so 'i' types normally). Free key —
-		// no collision with F3/F4/F5/F6/F11, E (harvest), WASD (movement, polled separately), or Enter/T (chat).
-		if (key.Keycode == Key.I && _chatInput?.HasFocus() != true)
-		{
-			_hud?.ToggleInventory();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
 		if ((key.Keycode == Key.Enter || key.Keycode == Key.KpEnter || key.Keycode == Key.T)
 			&& _chatInput?.HasFocus() != true)
 		{
@@ -1463,6 +1467,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			MaterialOverride = CreateGridMaterial()
 		};
 		_worldRoot.AddChild(grid);
+
+		// S112: paint the textured tile floor from the design bitmap (one MultiMesh, one draw call). Visual-only
+		// — additive over the solid ground box (which picking still needs). When it builds, the painted tiles are
+		// the new look so the procedural grid plane is hidden; if textures can't load, BuildFloor returns null and
+		// we keep the grid visible as a graceful fallback.
+		var paintedFloor = Mmo.Client.Godot.Visuals.TerrainPainter.BuildFloor(_worldRoot, zone.Width, zone.Height);
+		if (paintedFloor is not null)
+		{
+			grid.Visible = false;
+		}
 
 		var wallTiles = new List<TileCoord>();
 		foreach (var tile in zone.BlockedTiles)
