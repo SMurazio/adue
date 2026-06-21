@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3 uid="uid://b7huds111inv00"]
+
+[ext_resource type="Script" path="res://UI/InventoryWindow.cs" id="1_inv01"]
+
+[node name="InventoryWindow" type="Control"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("1_inv01")

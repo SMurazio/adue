@@ -71,7 +71,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _perfPanel;
 	private Label? _perfLabel;
 	private FrameTimeGraph? _perfGraph;
-	private Label? _inventoryLabel;
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
@@ -105,6 +104,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tuneCatoYOffset;
 	private LineEdit? _tuneCatoXOffset;
 	private LineEdit? _tuneCatoDepth;
+
+	// ---- S107 HUD scaffold (ui/hud) ---------------------------------------------------------------
+	// The HUD is a SEPARATE CanvasLayer (Hud.tscn) from Overlay, instantiated additively in _Ready. It renders
+	// ONLY from _hudState, which we refresh each frame from already-available read-only client state (local
+	// position/facing — real) plus stubbed vitals/cooldowns/portrait (TODO(server)). The F5 "HUD: cycle stub
+	// states" checkbox/buttons vary the stubs live so HUD states can be exercised without a server. This block is
+	// the only additive HUD hook in MmoClientRoot; it touches no movement/snapshot/prediction code.
+	private Mmo.Client.Godot.UI.Hud? _hud;
+	private readonly Mmo.Client.Godot.UI.HudState _hudState = new();
+	// Cycles the stub vitals/portrait through demo presets so a visual check can see each HUD state. Advanced by
+	// the F5 "HUD: cycle stub states" button; flips values live (no restart).
+	private int _hudStubPreset;
+	// S109: bumped each time the static map is handed to the HUD minimap so it knows to re-bake its raster. Only
+	// the wall/bounds raster keys off this; the per-frame player marker does not re-bake.
+	private int _minimapGeneration;
 
 	// ---- S102 F6 movement / feel panel ------------------------------------------------------------
 	// A dedicated admin-gated panel (F6) for the movement/camera-FEEL levers, moved off the F5 visual panel so the
@@ -300,6 +314,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
 
 		_controlChannel = DebugControlChannel.TryCreate(this);
+
+		// S107: mount the HUD as a separate CanvasLayer (additive — see the HUD scaffold field block). Failing to
+		// load the scene must not break the client, so log + continue if the .tscn is missing/unimported.
+		MountHud();
+	}
+
+	// S107: instantiate Hud.tscn and add it as a child. Additive only — no movement/snapshot wiring. The HUD then
+	// renders from _hudState, refreshed each frame in RefreshHud (called from _Process AFTER SampleMotionMetrics).
+	private void MountHud()
+	{
+		var hudScene = GD.Load<PackedScene>("res://UI/Hud.tscn");
+		if (hudScene?.Instantiate() is not Mmo.Client.Godot.UI.Hud hud)
+		{
+			GD.PushWarning("S107 HUD: res://UI/Hud.tscn failed to load/instantiate; HUD not mounted.");
+			return;
+		}
+
+		_hud = hud;
+		AddChild(_hud);
 	}
 
 	public override void _Process(double delta)
@@ -344,6 +377,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		RecordSectionTiming(pollUsec, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
 		SampleMotionMetrics();
+		// S109 read-order fix (carried-forward S107 note): feed the HUD AFTER SampleMotionMetrics so the minimap
+		// consumes THIS frame's fresh local render position/facing instead of last frame's. Only the additive HUD
+		// feed call moved here from UpdateOverlay's tail — no movement/snapshot computation changed.
+		RefreshHud();
 		AppendFrameCsvRow();
 	}
 
@@ -443,6 +480,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.E && _chatInput?.HasFocus() != true)
 		{
 			TryHarvest();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// S111: I = toggle the Inventory window. Not while typing in chat (so 'i' types normally). Free key —
+		// no collision with F3/F4/F5/F6/F11, E (harvest), WASD (movement, polled separately), or Enter/T (chat).
+		if (key.Keycode == Key.I && _chatInput?.HasFocus() != true)
+		{
+			_hud?.ToggleInventory();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -673,17 +719,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		perfRows.AddChild(_perfLabel);
 		perfRows.AddChild(_perfGraph);
 
-		// Inventory HUD: top-right, below the metrics panel. Driven by the owner-only InventoryUpdate.
-		var inventoryPanel = CreateOverlayPanel("InventoryPanel", Vector2.Zero, new Vector2(260, 150));
-		inventoryPanel.AnchorLeft = 1f;
-		inventoryPanel.AnchorRight = 1f;
-		inventoryPanel.OffsetLeft = -272f;
-		inventoryPanel.OffsetRight = -12f;
-		inventoryPanel.OffsetTop = 350f;
-		inventoryPanel.OffsetBottom = 500f;
-		var inventoryRows = CreatePanelVBox(inventoryPanel);
-		_inventoryLabel = CreateOverlayLabel("Inventory", 14);
-		inventoryRows.AddChild(_inventoryLabel);
+		// S111: the old top-right text inventory panel (S39) was REPLACED by the toggleable Inventory window
+		// (UI/InventoryWindow, mounted on the Hud CanvasLayer). The same owner-only InventoryUpdate data now
+		// flows through UpdateInventory() -> _hud.SetInventory() — see UpdateInventory below. No panel here.
 
 		// Interact feedback toast: bottom-center, above the chat panel. Brief, auto-hiding.
 		var toastPanel = CreateOverlayPanel("ToastPanel", Vector2.Zero, new Vector2(420, 36));
@@ -735,7 +773,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(metricsPanel);
 		layer.AddChild(chatPanel);
 		layer.AddChild(_perfPanel);
-		layer.AddChild(inventoryPanel);
 		layer.AddChild(toastPanel);
 		layer.AddChild(inputPanel);
 	}
@@ -853,6 +890,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		// RENDER1: the LOCAL player's render-model control is the 2-way render-mode button on the F6 movement panel
 		// (CosmeticLead / UoClientDriven).
+
+		// S107 HUD scaffold — live debug control (no Apply, no restart, no launch flag, per the live-toggle rule).
+		// Each press cycles the STUBBED HudState (health/resource/portrait/cooldowns) through demo presets so the
+		// HUD states can be exercised without a server. Mutates only stub fields; never touches movement state.
+		var hudCycle = new Button { Name = "HudCycleStub", Text = "HUD: cycle stub states" };
+		hudCycle.AddThemeFontSizeOverride("font_size", 13);
+		hudCycle.Pressed += CycleHudStubState;
+		rows.AddChild(hudCycle);
 
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -1243,6 +1288,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			};
 			_wallRoot.AddChild(walls);
 		}
+
+		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its
+		// simplified top-down raster ONCE. This is the same seed-regenerated ZoneModel the 3D world is built from
+		// (read-only — no movement/world state is mutated). The Generation bumps per zone so the minimap re-bakes.
+		_minimapGeneration++;
+		_hudState.Map = new Mmo.Client.Godot.UI.HudState.MinimapMap(
+			zone.Width, zone.Height, zone.BlockedTiles, _minimapGeneration);
 	}
 
 	private void SampleRenderStates(TimeSpan now)
@@ -1448,11 +1500,132 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		UpdateInventory();
 		UpdateInteractFeedback(now);
+		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
+		// reads the freshest local position/facing. Do not re-add it here — that reintroduces the one-frame-stale feed.
 	}
 
+	// S107: feed _hudState from already-available READ-ONLY client state, then push it to the HUD. Local
+	// position/facing are real (the same render sample the camera/minimap use); vitals/cooldowns/portrait stay
+	// stubbed (TODO(server)) and are varied only by the F5 debug control. Additive — reads nothing it mutates,
+	// touches no movement/snapshot/prediction path. S109: now called from _Process AFTER SampleMotionMetrics
+	// (every frame) so the minimap consumes the freshest local position/facing, not last frame's stale sample.
+	private void RefreshHud()
+	{
+		if (_hud is null)
+		{
+			return;
+		}
+
+		// Local player position/facing — REAL, read-only (see HudState minimap fields). _hasLocalRender + the
+		// cached _localRenderX/Y are computed in SampleMotionMetrics each frame; we only read them here.
+		_hudState.HasLocalPosition = _hasLocalRender;
+		_hudState.LocalX = _localRenderX;
+		_hudState.LocalY = _localRenderY;
+		_hudState.LocalFacing = _lastSentDirection;
+
+		// S110: feed the minimap world objects (trees/rocks/resource nodes) from the SAME per-frame render-state
+		// list the 3D world renders from — read-only, AOI-scoped ("current environment"). Rebuilt in place each
+		// refresh (AOI-bounded count) so no new server feed is needed and no allocation churns per frame.
+		RefreshMinimapObjects();
+
+		_hud.SetState(_hudState);
+	}
+
+	// S110: project the client's known resource nodes onto HudState.MinimapObjects. Resources are point entities
+	// (one tile position) in the protocol — there is no replicated collision footprint — so the on-map square side
+	// is derived per-kind from a presentation constant (tree reads larger than rock; neutral default). The minimap
+	// scales these by its live zoom. Read-only: touches no movement/snapshot/AOI state.
+	private void RefreshMinimapObjects()
+	{
+		_hudState.MinimapObjects.Clear();
+		for (var i = 0; i < _renderStates.Count; i++)
+		{
+			var state = _renderStates[i];
+			if (state.Kind != EntityKind.Resource)
+			{
+				continue;
+			}
+
+			var footprint = MinimapFootprintTiles(state.DisplayName);
+			_hudState.MinimapObjects.Add(new Mmo.Client.Godot.UI.HudState.MinimapObject(
+				(float)state.Position.X, (float)state.Position.Y, footprint, state.Depleted));
+		}
+	}
+
+	// Per-kind minimap footprint in world tiles. No footprint is replicated, so these mirror the relative on-screen
+	// bulk of each resource model (a tree is a bigger landmark than a rock); a 2-tile object reads twice the side of
+	// a 1-tile one. Presentation-only constant — tune freely without touching the protocol.
+	private static float MinimapFootprintTiles(string displayName)
+	{
+		return displayName switch
+		{
+			"Tree" => 1.5f,
+			"Rock" => 1.0f,
+			_ => 1.0f,
+		};
+	}
+
+	// S107 debug control (F5 "HUD: cycle stub states"): step the stubbed vitals/portrait through demo presets so a
+	// visual check can see each HUD state live (no restart, no launch flag). Cooldown stubs are added too so the
+	// action-bar slice has data to render later. Only mutates the STUB fields of _hudState — never the real
+	// local-position fields, never any movement state.
+	private void CycleHudStubState()
+	{
+		_hudStubPreset = (_hudStubPreset + 1) % 4;
+		_hudState.MaxHealth = 100f;
+		_hudState.MaxResource = 100f;
+		_hudState.Cooldowns.Clear();
+
+		// S108: also seed the action-bar stub fields so the F5 cycler visibly drives the new bar. Consumable stack
+		// counts (keys "1","2") and the selected spell slot are stubbed here; the SlotButtons own the per-frame
+		// cooldown countdown locally, so the seeded Cooldowns values are just the START times. TODO(server): real
+		// counts come from the client item registry and selection/cooldowns from a future ability system.
+		_hudState.Counts["1"] = 12;
+		_hudState.Counts["2"] = 4;
+		switch (_hudStubPreset)
+		{
+			case 0: // healthy, full resource, no cooldowns
+				_hudState.Health = 100f;
+				_hudState.Resource = 100f;
+				_hudState.Mounted = false;
+				_hudState.SelectedSlot = "R";
+				break;
+			case 1: // mid health/resource, several cooldowns running across slot types
+				_hudState.Health = 60f;
+				_hudState.Resource = 35f;
+				_hudState.Mounted = false;
+				_hudState.SelectedSlot = "Q";
+				_hudState.Cooldowns["Q"] = 4.5f;
+				_hudState.Cooldowns["R"] = 12f;
+				_hudState.Cooldowns["RMB"] = 3f;
+				break;
+			case 2: // low health -> portrait should flip to LowHealth (red tint)
+				_hudState.Health = 15f;
+				_hudState.Resource = 10f;
+				_hudState.Mounted = false;
+				_hudState.SelectedSlot = "E";
+				_hudState.Cooldowns["E"] = 6f;
+				_hudState.Cooldowns["1"] = 8f;
+				break;
+			default: // mounted -> portrait should flip to Mount (mount badge)
+				_hudState.Health = 80f;
+				_hudState.Resource = 70f;
+				_hudState.Mounted = true;
+				_hudState.SelectedSlot = "F";
+				_hudState.Cooldowns["F"] = 10f;
+				break;
+		}
+
+		RefreshHud();
+	}
+
+	// S111: route the SAME owner-only inventory data into the new toggleable Inventory window (UI/InventoryWindow)
+	// instead of the retired top-right text panel. The Version guard is unchanged — we only rebuild the window's
+	// rows when the client inventory actually changed (gather/consume). This reads _client.Inventory and the
+	// registry READ-ONLY (ToOrderedRows) and re-presents the result; it does NOT touch the inventory data path.
 	private void UpdateInventory()
 	{
-		if (_inventoryLabel is null || _client is null)
+		if (_hud is null || _client is null)
 		{
 			return;
 		}
@@ -1465,19 +1638,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		_renderedInventoryVersion = inventory.Version;
 		var rows = inventory.ToOrderedRows(_itemRegistry);
-		if (rows.Count == 0)
-		{
-			SetTextIfChanged(_inventoryLabel, "INVENTORY\n(empty)");
-			return;
-		}
-
-		var builder = new StringBuilder("INVENTORY");
-		foreach (var row in rows)
-		{
-			builder.Append('\n').Append(row.DisplayName).Append(" x").Append(row.Quantity.ToString(CultureInfo.InvariantCulture));
-		}
-
-		SetTextIfChanged(_inventoryLabel, builder.ToString());
+		_hud.SetInventory(rows, _itemRegistry);
 	}
 
 	private void UpdateInteractFeedback(TimeSpan now)
