@@ -38,6 +38,18 @@ the bug.
    (normal 50–100ms walk, no loss) MUST stay green — **no caps, no snaps** on a legit RTT lead. Verify a live
    100ms+10% run converges AND a live 100ms no-loss walk never snaps.
 
+### ⚠️ RE-SCOPED + DEFERRED — this is TIER 2 ONLY, not the tier-1 recovery fix
+The bounded hold is a client-side **mask** (snap the prediction back when it strands) — it is the **tier-2
+forced-resync safety for 4–6% loss**, NOT smooth tier-1 recovery. Tier-1 recovery (0–3%, no visible snap)
+requires the lost step to actually get **confirmed** (recovery-chain links 2+3 — server pace-not-reject +
+client re-base), which is a SEPARATE fix. See `docs/movement-loss-degradation-tiers.md`.
+- **DO NOT pick this up yet.** Order: **RESYNC1 → DIAG1 (measure the stuck link) → tier-1 recovery fix →
+  THEN this (tier 2).** DIAG1 may also change what the bounded hold needs to do.
+- When it IS done: use the RESYNC1 `ForceResync()` primitive for the tier-2 snap (don't reinvent it); validate
+  TEST1 at **4–6% drop → forced resyncs occur, bounded, connection maintained, recovers**; the steady-walk +
+  low-loss (≤3%) invariants MUST stay green (no forced snap there — that's tier 1's job).
+- Tier 3 (6%+, reconnect/resync) is NET4.
+
 ---
 
 ## Original frame-drop write-up (root mechanism — still accurate)
