@@ -708,11 +708,15 @@ public sealed class LocalPlayerPredictorTests
         }
 
         Assert.Equal(0, notConvergedAtRest);
-        // The while-moving lead stays bounded through the spam — it must NOT ratchet away. The genuine in-flight
-        // lead on a one-tick skew is a couple of steps; a generous bound still pins it.
+        // The while-moving lead stays bounded through the spam — it must NOT ratchet away.
         Assert.True(maxDivergence <= 3, $"prediction lead ratcheted to {maxDivergence} tiles during spam");
-        // And the spam genuinely exercised a real (bounded) divergence, so the bound proves something.
-        Assert.True(maxDivergence >= 1, "the skewed-input spam should have produced a real (bounded) divergence");
+        // S98: turn-then-move was the PRIMARY source of the input-arrival-skew divergence — the predictor turned
+        // instantly while the server saw the turn a tick later, so predictor-tick-N and server-tick-N made
+        // different turn-vs-step decisions. With turn-then-move removed, a direction change steps immediately in
+        // the new direction on BOTH sides, so the one-tick input skew no longer creates a turn-vs-step mismatch
+        // and the per-tick reconcile keeps the predicted tile on the server's: maxDivergence is now ~0. The old
+        // `maxDivergence >= 1` lower bound (which asserted the skew DID diverge) is therefore obsolete and removed;
+        // convergence-at-rest + the upper bound are what this test now guards.
     }
 
     [Fact]

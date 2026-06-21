@@ -183,7 +183,7 @@ public sealed class SnapshotGapConvergenceTests
         var tick = entity.StateRevision; // any monotonic tick value works for the cooldown gate
         while (entity.StateRevision == before)
         {
-            entity.TryStep(direction, tick, 0, 0, grid);
+            entity.TryStep(direction, tick, 0, grid);
             direction = direction == Direction8.S ? Direction8.N : Direction8.S;
             tick++;
         }
