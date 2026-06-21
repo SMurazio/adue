@@ -21,7 +21,7 @@ input + authored-tick server processing) — see `docs/movement-netcode-redesign
 
 > **For agents:** this is a step-by-step setup you can walk a user through. After each step, run the **Verify**
 > line and confirm the expected output before continuing. The project is two halves: a **.NET 8** server +
-> console/web clients (the `Mmo.sln` solution) and a **Godot 4.6 (C#)** client (`src/Mmo.Client.Godot`, a
+> console/web clients (the `Mmo.sln` solution) and a **Godot 4.7 (C#)** client (`src/Mmo.Client.Godot`, a
 > separate solution that Godot generates on first open).
 
 ### 1. Install the tools
@@ -30,9 +30,9 @@ input + authored-tick server processing) — see `docs/movement-netcode-redesign
 |---|---|---|
 | **Git + Git LFS** | [git-scm.com](https://git-scm.com); run `git lfs install` once | `git --version`; `git lfs version` |
 | **.NET 8 SDK** | [dotnet.microsoft.com/download](https://dotnet.microsoft.com/download) (the **8.0** SDK, not just the runtime) | `dotnet --version` → `8.0.x` |
-| **Godot 4.6 — .NET build** | [godotengine.org/download](https://godotengine.org/download) → **Godot 4.6**, the **".NET" / C#** download. The plain build will NOT work — the client is C#. | Launch it; *Editor → Help → About* shows `4.6` with `.NET/Mono` |
+| **Godot 4.7 — .NET build** | [godotengine.org/download](https://godotengine.org/download) → **Godot 4.7**, the **".NET" / C#** download. The plain build will NOT work — the client is C#. | Launch it; *Editor → Help → About* shows `4.7` with `.NET/Mono` |
 
-Match Godot **4.6** exactly (the project pins it; a different 4.x may force a project upgrade). Docker is optional
+Match Godot **4.7** exactly (the project pins it; a different 4.x may force a project upgrade). Docker is optional
 (only for the later Postgres path).
 
 ### 2. Clone
@@ -58,7 +58,7 @@ exactly what CI runs.
 
 ### 4. Open the Godot client once (generates per-machine build files)
 
-- Launch the **Godot 4.6 .NET** editor → **Import** → select `src/Mmo.Client.Godot/project.godot` → *Import & Edit*.
+- Launch the **Godot 4.7 .NET** editor → **Import** → select `src/Mmo.Client.Godot/project.godot` → *Import & Edit*.
 - Let it import assets (first time takes a moment). This also generates the C# build files and the gitignored
   `.godot/` cache.
 - Build the C# (the editor builds on Play, or press the **Build** / hammer button).
