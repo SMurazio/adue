@@ -57,3 +57,22 @@ every delivered commit eventually confirms → tier-1 recovers smoothly with no 
 3. **Tier-1 fix** (likely server pace-not-reject + client re-base) — speced AFTER DIAG1 says which link.
 4. **UO5** — bounded hold = the tier-2 forced-resync safety for 4–6% only (not tier 1).
 5. **NET4** — tier-3 watchdog + reconnect/resync loop.
+
+## Appendix — external threshold suggestion (another agent, 2026-06-21; for LATER reconciliation)
+Not adopted yet — captured so it isn't lost. Reconcile against our tiers when we revisit thresholds.
+
+- **Target (0%)** — baseline optimization goal (server architecture + serialization).
+- **Acceptable (<1%)** — completely seamless via prediction + interpolation.
+- **Degraded (1–3%)** — minor visual artifacts (slight jitter) acceptable; must stay playable + fair.
+- **Failure (>5%)** — show **network-instability UI indicators**, **aggressively roll back crucial actions**,
+  prepare to **disconnect** if loss persists.
+
+Deltas vs our tiers above (worth folding in later):
+- **Network-instability UI indicator** — we don't have one; good addition to tier 3 / failure state.
+- **Action-rollback framing** — "roll back crucial actions" is our forced-resync (`ForceResync`) primitive,
+  framed around important actions rather than just position.
+- **Tighter thresholds** — "seamless" target is <1% here (vs our 0–3% tier 1); a 3–5% middle band is left
+  implicit (our tier-2 rubberband).
+- **No conflict with "must recover at 3%":** "slight jitter acceptable at 1–3%" means transient corrections
+  are fine, NOT that a permanent desync is fine. The DIAG1 → tier-1-recovery work (kill the permanent strand)
+  still stands; this only says we don't need pixel-perfect smoothness at 1–3%, just playable + recovering.
