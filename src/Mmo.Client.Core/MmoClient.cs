@@ -87,13 +87,19 @@ public sealed class MmoClient : IDisposable
     // match this against the predicted step to fix the reconcile rubberband.
     private uint _lastRecipientStepSeq;
 
-    // DIAG1: snapshots-received-per-second rate (the `recv/s` confirm-channel-alive read-out). A sliding 1-second
-    // tally: _snapshotRecvWindowStart is the start of the current 1s window, _snapshotRecvWindowCount the count so
-    // far in it, and _snapshotsPerSecond the rate published from the just-completed window. Measurement only — fed
-    // by NoteSnapshotReceived on every accepted snapshot; never influences movement.
-    private TimeSpan _snapshotRecvWindowStart;
-    private int _snapshotRecvWindowCount;
-    private double _snapshotsPerSecond;
+    // DIAG1/NET5: snapshots-received-per-second rate (the `recv/s` confirm-channel-alive read-out). The original
+    // DIAG1 metric used a tumbling 1-second window that ONLY republished on the next arrival after the window
+    // elapsed: when arrivals slowed or stopped (idle, or a loss burst) the window never closed and the read-out
+    // froze at a STALE value — misreading the same number (~1.0) at both 1% and 10% loss because what it actually
+    // reported was the last full window, not the current rate. NET5 replaces it with a true TRAILING-WINDOW rate:
+    // a ring of the last N arrival timestamps, and the rate is COMPUTED AT READ TIME (MovementDebug) as the count
+    // of arrivals within the trailing one second up to the current clock — so it falls toward 0 the instant
+    // arrivals stop and reads the real ~20/s under healthy delivery, regardless of when the last one landed.
+    // Measurement only — fed by NoteSnapshotReceived on every applied snapshot; never influences movement.
+    private const int SnapshotRecvTimestampCapacity = 64; // > one second of 20 Hz arrivals, with headroom
+    private readonly TimeSpan[] _snapshotRecvTimestamps = new TimeSpan[SnapshotRecvTimestampCapacity];
+    private int _snapshotRecvTimestampCount;
+    private int _snapshotRecvTimestampHead; // index of the oldest entry
 
     private uint _moveSequence;
     // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
@@ -116,6 +122,31 @@ public sealed class MmoClient : IDisposable
         = new (uint, uint, Direction8)[StepCommitRingCapacity];
     private int _stepCommitRingCount;
     private int _stepCommitRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
+
+    // NET5: ack-driven re-send of unacked commits (tail-loss recovery). The redundant StepCommitBatch window rides
+    // SUBSEQUENT packets, so a mid-stream loss recovers within ~1 packet — but the LAST commit of a movement burst
+    // has no following packet to re-carry it. If it drops (and input has stopped) the server's accepted step-seq
+    // (`conf`) stays permanently behind the prediction (`pred`): a stuck `lead = pred - conf`. The fix: while
+    // lead > 0 AND the ack is OVERDUE (conf has not advanced for a grace > ~RTT + one cadence), re-ship the current
+    // ring (the same SendStepCommitBatch — deduped + applied at the authored tick by the server) at ~1 batch /
+    // cadence, INCLUDING after movement stops, until conf catches pred and lead drains to 0 with NO snap. In clean
+    // play conf advances every RTT, so the grace never elapses and NOT ONE extra packet is sent — the re-send is
+    // "the ack is overdue", never "there is something in flight". The bound (one batch per cadence, only while the
+    // ack is stalled) keeps it cheap and false-trip-proof.
+    //
+    // The fallback (RESYNC1): if the re-send has fired ResendFallbackCount times and conf STILL has not advanced
+    // (the commit is genuinely undeliverable — heavy/black loss), ForceResync converges the prediction onto the
+    // server. The K/T are chosen so a clean <=3% tail drop heals via re-send long before this trips.
+    private const double ResendStallGraceMs = 350d;        // ack overdue: > RTT(~200) + one cadence(~150)
+    private const int ResendFallbackCount = 6;             // K: re-sent this many times, conf still stuck
+    private const double ResendFallbackStuckMs = 1500d;    // T: conf stuck at least this long => ForceResync
+    private uint _resendLastConf;                          // last conf seen (detect ack progress)
+    private bool _hasResendLastConf;
+    private TimeSpan _resendConfStalledSince;              // when conf last advanced (the stall clock)
+    private TimeSpan _resendLastSentAt;                    // last re-send wall time (the cadence bound)
+    private bool _hasResendLastSentAt;
+    private int _resendsSinceConfAdvance;                  // re-sends since conf last moved (K counter)
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -239,7 +270,7 @@ public sealed class MmoClient : IDisposable
     {
         get
         {
-            var snapshot = _movementTrace.Snapshot with { SnapshotsPerSecond = _snapshotsPerSecond };
+            var snapshot = _movementTrace.Snapshot with { SnapshotsPerSecond = SnapshotsPerSecond };
             if (_predictor is { } predictor)
             {
                 var pred = predictor.PredictedStepSeq;
@@ -388,8 +419,84 @@ public sealed class MmoClient : IDisposable
                 if (emit > 0)
                 {
                     SendStepCommitBatch();
+                    // NET5: a fresh batch just covered this cadence — restart the re-send timer so the tail-recovery
+                    // re-send doesn't pile a second packet on top of it.
+                    _resendLastSentAt = now;
+                    _hasResendLastSentAt = true;
                 }
+
+                // NET5: drive the ack-driven tail-recovery re-send (no-op unless a commit is genuinely stranded).
+                DriveAckDrivenResend(predictor, now, emittedFreshThisPoll: emit > 0);
             }
+        }
+    }
+
+    // NET5: ack-driven re-send of unacked commits (tail-loss recovery) + the bounded ForceResync fallback. Called
+    // every Poll in UoClientDriven mode AFTER the fresh-commit emission. While the prediction LEADS the server's
+    // learned ack (lead = pred - conf > 0) AND that ack is OVERDUE (conf has not advanced for ResendStallGraceMs,
+    // i.e. longer than a normal RTT round-trip), re-ship the current commit ring at most once per cadence — the
+    // existing redundant-unreliable SendStepCommitBatch, which the server dedups (cursor) and applies at the
+    // authored tick, so a re-delivered tail commit just lands and `conf` catches `pred` with NO snap. The re-send
+    // continues INCLUDING after movement stops (the stranded tail's defining case) until lead == 0.
+    //
+    // Clean play sends NOTHING extra: conf advances every RTT, so the stall grace never elapses and the re-send
+    // never fires — it triggers only when an expected ack is genuinely overdue. The fallback: after
+    // ResendFallbackCount re-sends with conf STILL stalled (>= ResendFallbackStuckMs), the commit is
+    // undeliverable; ForceResync (RESYNC1) converges. K/T are tuned so a clean <=3% tail drop heals via re-send
+    // first and never reaches the fallback.
+    private void DriveAckDrivenResend(LocalPlayerPredictor predictor, TimeSpan now, bool emittedFreshThisPoll)
+    {
+        var pred = predictor.PredictedStepSeq;
+        var conf = predictor.LastReconciledStepSeq;
+        var lead = pred > conf ? pred - conf : 0u;
+
+        // Reset the stall clock + fallback counter whenever the ack makes ANY progress (or on the first observation).
+        if (!_hasResendLastConf || conf != _resendLastConf)
+        {
+            _resendLastConf = conf;
+            _hasResendLastConf = true;
+            _resendConfStalledSince = now;
+            _resendsSinceConfAdvance = 0;
+        }
+
+        if (lead == 0)
+        {
+            return; // fully acked — nothing to recover.
+        }
+
+        // A fresh batch this poll already covered the cadence; the re-send only adds the no-new-step recovery
+        // packet, so skip when a fresh one just went out.
+        if (emittedFreshThisPoll)
+        {
+            return;
+        }
+
+        // Only re-send when the ack is genuinely OVERDUE (conf stalled past the grace) — in clean play conf keeps
+        // up within an RTT and this never trips, so no extra packet is sent.
+        if (now - _resendConfStalledSince < TimeSpan.FromMilliseconds(ResendStallGraceMs))
+        {
+            return;
+        }
+
+        // Bound to ~1 batch / cadence.
+        if (_hasResendLastSentAt && now - _resendLastSentAt < TimeSpan.FromMilliseconds(predictor.CadenceMs))
+        {
+            return;
+        }
+
+        SendStepCommitBatch();
+        _resendLastSentAt = now;
+        _hasResendLastSentAt = true;
+        _resendsSinceConfAdvance++;
+
+        // Bounded ForceResync fallback: re-sent K times AND conf stuck >= T ms => the commit is genuinely
+        // undeliverable (heavy/black loss); converge the prediction onto the server via the RESYNC1 primitive.
+        if (_resendsSinceConfAdvance >= ResendFallbackCount
+            && now - _resendConfStalledSince >= TimeSpan.FromMilliseconds(ResendFallbackStuckMs))
+        {
+            predictor.ForceResync();
+            _resendsSinceConfAdvance = 0;
+            _resendConfStalledSince = now;
         }
     }
 
@@ -1032,27 +1139,51 @@ public sealed class MmoClient : IDisposable
         local?.SetPredictorTickMs(ResolveTickMs());
     }
 
-    // DIAG1: advances the sliding 1-second snapshot-rate tally (the `recv/s` read-out). When the current 1s window
-    // elapses, the window's count becomes the published rate and a fresh window opens at _currentTime. Uses the
-    // client wall clock (_currentTime, set each Poll) so the rate is in real seconds. Pure read-out — it counts
-    // confirms but never alters movement, prediction, or reconcile.
+    // DIAG1/NET5: records one applied-snapshot arrival timestamp into the trailing-window ring (the `recv/s`
+    // read-out source). The rate itself is computed AT READ TIME by SnapshotsPerSecond so it reflects the CURRENT
+    // arrival rate (and decays toward 0 the moment arrivals stop) rather than freezing on a stale tumbling window.
+    // Uses the client wall clock (_currentTime, set each Poll). Pure read-out — it counts confirms but never alters
+    // movement, prediction, or reconcile.
     private void NoteSnapshotReceived()
     {
-        if (_snapshotRecvWindowCount == 0 && _snapshotsPerSecond == 0d)
+        if (_snapshotRecvTimestampCount < SnapshotRecvTimestampCapacity)
         {
-            // First ever snapshot: open the window now so the rate isn't skewed by the pre-connect idle gap.
-            _snapshotRecvWindowStart = _currentTime;
+            var slot = (_snapshotRecvTimestampHead + _snapshotRecvTimestampCount) % SnapshotRecvTimestampCapacity;
+            _snapshotRecvTimestamps[slot] = _currentTime;
+            _snapshotRecvTimestampCount++;
         }
-
-        if (_currentTime - _snapshotRecvWindowStart >= TimeSpan.FromSeconds(1))
+        else
         {
-            var elapsed = (_currentTime - _snapshotRecvWindowStart).TotalSeconds;
-            _snapshotsPerSecond = elapsed > 0 ? _snapshotRecvWindowCount / elapsed : _snapshotRecvWindowCount;
-            _snapshotRecvWindowStart = _currentTime;
-            _snapshotRecvWindowCount = 0;
+            _snapshotRecvTimestamps[_snapshotRecvTimestampHead] = _currentTime;
+            _snapshotRecvTimestampHead = (_snapshotRecvTimestampHead + 1) % SnapshotRecvTimestampCapacity;
         }
+    }
 
-        _snapshotRecvWindowCount++;
+    // DIAG1/NET5: the true snapshot arrival rate — the count of applied-snapshot arrivals within the trailing one
+    // second up to the current clock (_currentTime). Computed at read time so it reads the real ~20/s under healthy
+    // delivery and falls toward 0 the instant arrivals stop (no stale tumbling-window freeze). Pure read-out.
+    private double SnapshotsPerSecond
+    {
+        get
+        {
+            if (_snapshotRecvTimestampCount == 0)
+            {
+                return 0d;
+            }
+
+            var windowStart = _currentTime - TimeSpan.FromSeconds(1);
+            var count = 0;
+            for (var i = 0; i < _snapshotRecvTimestampCount; i++)
+            {
+                var slot = (_snapshotRecvTimestampHead + i) % SnapshotRecvTimestampCapacity;
+                if (_snapshotRecvTimestamps[slot] > windowStart)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
     }
 
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
