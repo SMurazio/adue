@@ -123,6 +123,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// RENDER1: 2-way render-mode selector (CosmeticLead / UoClientDriven) — a cycling button that calls
 	// MmoClient.SetMovementRenderMode.
 	private Button? _renderModeButton;
+	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). ALWAYS shown
+	// (speed is mode-agnostic). Each item carries its multiplier; selecting one sends /speed <mult> live. Populated
+	// once on first open from ServerHello (base cadence + tick rate). _moveSpeedOptions is the parallel option list
+	// (item index -> SpeedOption) so the selection handler can read the multiplier without re-deriving it.
+	private OptionButton? _moveSpeedDropdown;
+	private IReadOnlyList<MovementSpeedOptions.SpeedOption> _moveSpeedOptions = Array.Empty<MovementSpeedOptions.SpeedOption>();
 	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
 	private CheckBox? _snapOnReleaseCheck;
 	// New (S103): model B's commit-step-on-release toggle (MmoClient.SetCommitStepOnRelease) + threshold field
@@ -927,6 +933,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		UpdateRenderModeButtonText();
 
+		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
+		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
+		// live via /speed <multiplier> (the existing per-entity path), NOT the F4 global move.stepCooldownMs. The
+		// items are populated on first panel open (SeedMovementFields) from ServerHello's base cadence + tick rate.
+		var speedRow = new HBoxContainer { Name = "Row_MoveSpeed" };
+		speedRow.AddThemeConstantOverride("separation", 8);
+		var speedCaption = CreateOverlayLabel("Cap_MoveSpeed", 13);
+		speedCaption.Text = "Move speed";
+		speedCaption.CustomMinimumSize = new Vector2(170, 0);
+		speedRow.AddChild(speedCaption);
+		_moveSpeedDropdown = new OptionButton { Name = "MoveSpeedDropdown", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		_moveSpeedDropdown.AddThemeFontSizeOverride("font_size", 13);
+		_moveSpeedDropdown.ItemSelected += OnMoveSpeedSelected;
+		speedRow.AddChild(_moveSpeedDropdown);
+		rows.AddChild(speedRow);
+
 		// Moved off F5 — applied on Apply/Enter:
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
@@ -1089,6 +1111,64 @@ public partial class MmoClientRoot : Node3D, IControlHost
 					"UO (client-driven — instant, server follows your steps): instant prediction; the server FOLLOWS your per-step commits.",
 			};
 		}
+	}
+
+	// S106: (re)populate the "Move speed" dropdown from ServerHello's base cadence + tick rate, and preselect the
+	// default walk (1.0x). Built lazily on first panel open (ServerHello has landed by login, so the base cadence is
+	// known). The item index maps 1:1 to _moveSpeedOptions so OnMoveSpeedSelected reads the multiplier directly.
+	// SetItemMetadata is avoided (the parallel list is simpler + test-mirrored by MovementSpeedOptions).
+	private void PopulateMoveSpeedDropdown()
+	{
+		if (_moveSpeedDropdown is null)
+		{
+			return;
+		}
+
+		var baseStepMs = _client?.Server?.StepCooldownMs ?? 140;
+		var tickRate = _client?.Server?.TickRate ?? 20;
+		_moveSpeedOptions = MovementSpeedOptions.Build(baseStepMs, tickRate);
+
+		_moveSpeedDropdown.Clear();
+		var selectIndex = 0;
+		for (var i = 0; i < _moveSpeedOptions.Count; i++)
+		{
+			var option = _moveSpeedOptions[i];
+			_moveSpeedDropdown.AddItem(option.Label, i);
+			if (option.IsDefaultWalk)
+			{
+				selectIndex = i;
+			}
+		}
+
+		if (_moveSpeedOptions.Count > 0)
+		{
+			// Preselect the default walk WITHOUT firing ItemSelected (we don't want to send a /speed on open — the
+			// player is already at walk; selecting reflects the live state, it doesn't change it).
+			_moveSpeedDropdown.Select(selectIndex);
+		}
+	}
+
+	// S106: a speed item was picked — set the LOCAL player's per-entity speed live by sending /speed <multiplier>
+	// (the existing chat-command path, like other dev commands). Admin-gated to match the rest of F6 (the server
+	// also admin-gates /speed, so a non-admin send is a server-side no-op; we gate client-side too for clarity). The
+	// server recomputes the effective cadence and replies with MovementSpeedChanged, which retunes BOTH local-player
+	// drivers (predictor + cosmetic) via EntityState.SetStepCooldownMs — so the avatar's glide tracks the new
+	// cadence in every render mode, including a mid-move switch.
+	private void OnMoveSpeedSelected(long index)
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		if (index < 0 || index >= _moveSpeedOptions.Count)
+		{
+			return;
+		}
+
+		var option = _moveSpeedOptions[(int)index];
+		_client.SendChat($"/speed {MovementSpeedOptions.FormatSpeedCommandArgument(option.Multiplier)}");
+		ShowInteractFeedback($"Move speed: {option.Label}");
 	}
 
 	// UO2: register a tuning-field ROW (the HBox built by AddTuningField, i.e. the LineEdit's parent) as model-B
@@ -1708,6 +1788,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
 		// New (S102).
 		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
+		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
+		// default walk. Done here (first open) since ServerHello has landed by login.
+		PopulateMoveSpeedDropdown();
 		UpdateRenderModeButtonText();
 		_snapOnReleaseCheck?.SetPressedNoSignal(_client?.SnapOnRelease ?? true);
 		// S103: seed the commit-step toggle + threshold field from the live client values.

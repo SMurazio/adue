@@ -290,6 +290,17 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // S106: the local-player drivers' live cadences (ms), for tests asserting a live MovementSpeedChanged retunes
+    // BOTH drivers (not just the interpolator). Null when the respective driver isn't attached. The cosmetic
+    // accessor reads the underlying driver directly (NOT EntityState.Cosmetic, which gates on _cosmeticActive) so a
+    // test can assert the cadence is threaded even before the mode activates the cosmetic render.
+    internal double? LocalPredictorCadenceMsForTests => _predictor?.CadenceMs;
+
+    internal double? LocalCosmeticCadenceMsForTests =>
+        LocalNetworkId is { } id && _entities.TryGetValue(id, out var local)
+            ? local.CosmeticCadenceMsForTests
+            : null;
+
     // DIAG1: zeroes the local predictor's reconcile-outcome tallies (Matched / Corrected / Snapped) so the human
     // can reset them just before a loss burst and read fresh counts in the F3 read-out. No-op (safe) when no
     // predictor is attached. Measurement only — touches no prediction/reconcile state.
@@ -1721,6 +1732,11 @@ public sealed class MmoClient : IDisposable
         // reconciliation (pending state, accept-clear, reject snap-back) against the active driver.
         public LocalPlayerCosmetic? Cosmetic => _cosmeticActive ? _cosmetic : null;
 
+        // S106: the cosmetic driver's live cadence (ms), or null if the driver isn't attached. Reads the underlying
+        // driver regardless of _cosmeticActive (unlike Cosmetic) so a test can assert SetStepCooldownMs threaded the
+        // new cadence onto it even while the predictor mode is active. Test-only.
+        internal double? CosmeticCadenceMsForTests => _cosmetic?.CadenceMs;
+
         // S89: advances the cosmetic render to now (the early-lead glide). No-op if not attached.
         public void TickCosmetic(TimeSpan now)
         {
@@ -1823,6 +1839,13 @@ public sealed class MmoClient : IDisposable
             // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
             // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
             _predictor?.SetCadence(cadenceMs);
+            // S106: re-sync the parallel cosmetic driver too. A live MovementSpeedChanged (the F6 "Move speed"
+            // dropdown) must retune BOTH local-player drivers, not just the predictor: in CosmeticLead the cosmetic
+            // driver owns the render, and without this its glide/confirm tweens keep running at the OLD cadence after
+            // a speed change — a mid-move desync (the avatar glides at the wrong rate until the next mode/respawn
+            // re-creates the driver). Mirrors _predictor.SetCadence above; no-op when the cosmetic driver isn't
+            // attached. Re-arms the next glide/confirm tween at the new cadence in every mode that rides it.
+            _cosmetic?.SetCadence(cadenceMs);
         }
 
         public ReplicatedEntity ToSnapshot()
