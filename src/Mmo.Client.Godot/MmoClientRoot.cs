@@ -879,8 +879,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// RENDER1: the LOCAL player's render-model control is the 2-way render-mode button on the F6 movement panel
-		// (CosmeticLead / UoClientDriven).
+		// RENDER1/ICE1: the LOCAL player's render-mode control USED to live on the F6 movement panel (2-way
+		// CosmeticLead / UoClientDriven button); it is now ICED — the selector isn't built and the client stays in
+		// UoClientDriven. See BuildMovementPanel for the iced note. (Code retained for later un-icing.)
 
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -912,26 +913,36 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		note.Text = "— client-local (instant) · speed lives in F4 —";
 		rows.AddChild(note);
 
-		// RENDER1: 2-way render-mode cycling button. Cycles CosmeticLead <-> UoClientDriven on each press, calling
-		// MmoClient.SetMovementRenderMode. The label always shows the ACTIVE mode (client boots into UoClientDriven).
+		// ICE1 (2026-06-21): the render-mode SELECTOR is iced — UoClientDriven is the supported movement mode, and the
+		// other render modes (CosmeticLead, ...) are unreachable from the UI but KEPT in the codebase for later. We do
+		// NOT build the cycling button (so the client stays in its UoClientDriven default and cannot switch); the
+		// non-UO code path — the MovementRenderMode enum values, MmoClient.SetMovementRenderMode, the LocalPlayerCosmetic
+		// driver, the cadence plumbing, plus OnRenderModeCyclePressed / UpdateRenderModeButtonText / the model-B-only and
+		// predictor-only contextual rows below — is all retained, so un-icing later is just re-exposing this control.
+		// In place of the selector we show a disabled, self-documenting note so the panel reads cleanly.
 		var renderModeRow = new HBoxContainer { Name = "Row_RenderMode" };
 		renderModeRow.AddThemeConstantOverride("separation", 8);
 		var renderModeCaption = CreateOverlayLabel("Cap_RenderMode", 13);
 		renderModeCaption.Text = "Render mode";
 		renderModeCaption.CustomMinimumSize = new Vector2(170, 0);
 		renderModeRow.AddChild(renderModeCaption);
-		_renderModeButton = new Button { Name = "RenderModeButton", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		_renderModeButton.AddThemeFontSizeOverride("font_size", 13);
-		_renderModeButton.Pressed += OnRenderModeCyclePressed;
-		renderModeRow.AddChild(_renderModeButton);
+		var renderModeIced = CreateOverlayLabel("RenderModeIced", 13);
+		renderModeIced.Text = "UO only (others iced)";
+		renderModeIced.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+		renderModeRow.AddChild(renderModeIced);
 		rows.AddChild(renderModeRow);
+		// _renderModeButton intentionally left null (no selector built) — UpdateRenderModeButtonText short-circuits on
+		// null and is a no-op while iced; ApplyRenderModeContext is still driven on panel open (ToggleMovementPanel) so
+		// the model-B-only rows stay hidden in the active UoClientDriven mode.
 
-		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting (updated live on
-		// every render-mode cycle and on panel open via ApplyRenderModeContext / UpdateRenderModeButtonText).
+		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting. While iced it always
+		// reflects UoClientDriven (the only reachable mode). Written by ApplyRenderModeContext on panel open.
 		_renderModeCaption = CreateOverlayLabel("RenderModeCaption", 11);
 		rows.AddChild(_renderModeCaption);
 
-		UpdateRenderModeButtonText();
+		// Drive the contextual caption + row visibility once for the active (UoClientDriven) mode. (Calls
+		// ApplyRenderModeContext via the null-button short-circuit path; harmless while iced.)
+		ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.UoClientDriven);
 
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
 		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
@@ -1046,6 +1057,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
 	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
+	// ICE1: retained for later un-icing but currently UNWIRED — the F6 selector button isn't built, so nothing calls
+	// this. Re-expose it by rebuilding the render-mode button row in BuildMovementPanel and re-wiring Pressed here.
 	private void OnRenderModeCyclePressed()
 	{
 		if (_client is null)
