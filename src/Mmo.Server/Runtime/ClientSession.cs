@@ -53,6 +53,18 @@ public sealed class ClientSession
     private uint _lastMoveSeq;
     private uint _lastMoveIntentTick;
 
+    // NET6: StepCommit gets its OWN dedup cursor, separate from the MoveInput-intent cursor (_lastMoveSeq).
+    // The client mints both commit seqs and intent seqs off one shared monotonic counter, so a keyup STOP
+    // intent (seq N+1) carries a HIGHER seq than an unconfirmed tail commit (seq N). When both streams shared
+    // ONE cursor, that stop intent burned the cursor past commit N, and every re-send of commit N was then
+    // deduped away ("already seen") before it could reach the (healthy) authored-tick commit gate — stranding
+    // the tail and forcing a ForceResync snap, and stranding mid-stream commits behind interleaved direction-
+    // change intents (the runaway). Splitting the cursor lets a stranded commit re-send actually land: the
+    // commit gate is `seq > _lastCommitSeq`, independent of how far intents have advanced _lastMoveSeq. Commit
+    // seqs may have GAPS where intents took numbers — fine: the redundancy window applies entries oldest-first
+    // and advances _lastCommitSeq incrementally, and a stale/duplicate commit is still rejected on `<=`.
+    private uint _lastCommitSeq;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -83,6 +95,11 @@ public sealed class ClientSession
     public Direction8 MoveIntentDirection { get; private set; }
     public uint LastMoveIntentTick => _lastMoveIntentTick;
     public uint LastMoveSeq => _lastMoveSeq;
+
+    // NET6: the commit-stream dedup cursor (the highest StepCommit seq accepted). Separate from LastMoveSeq so
+    // an intent never burns the commit cursor (and vice-versa). HandleStepCommitBatch/ExtractFreshStepCommits
+    // gate the commit window on THIS, not LastMoveSeq.
+    public uint LastCommitSeq => _lastCommitSeq;
 
     // UO1: when true this session drives its own movement UO-style — it predicts + banks tiles locally and sends
     // one StepCommitRequest per accepted step, so the tick loop must NOT auto-pace its entity from the held
@@ -151,19 +168,23 @@ public sealed class ClientSession
         return true;
     }
 
-    // S103 commit-step: advances the SHARED move-sequence cursor for a StepCommitRequest without touching the
-    // held Moving/Direction intent (a commit is a one-shot "finish this step" request, not a new held intent —
-    // it must not, for example, set the session back to Moving after a keyup). Rejects stale sequences (seq <=
-    // lastSeq) like TryUpdateMoveIntent so a re-ordered/duplicate commit can't fire twice, and refreshes the
-    // keepalive tick. Returns true iff the sequence was fresh (the caller may then attempt the commit).
+    // S103 commit-step: advances the COMMIT-sequence cursor (_lastCommitSeq, NET6 — separate from the intent
+    // cursor _lastMoveSeq) for a StepCommitRequest without touching the held Moving/Direction intent (a commit
+    // is a one-shot "finish this step" request, not a new held intent — it must not, for example, set the
+    // session back to Moving after a keyup). Rejects stale sequences (seq <= the COMMIT cursor) so a re-ordered/
+    // duplicate commit can't fire twice, but does NOT consult or advance _lastMoveSeq — so a higher-numbered
+    // STOP/direction-change intent can no longer burn an unconfirmed commit's seq and strand it (the NET6 bug).
+    // Still refreshes the keepalive tick (preserving prior behavior: a fresh commit, like a fresh intent, proves
+    // the client alive and pushes back the keepalive safety timeout). Returns true iff the sequence was fresh on
+    // the commit cursor (the caller may then attempt the commit).
     public bool TryConsumeCommitSequence(uint sequence, uint serverTick)
     {
-        if (sequence <= _lastMoveSeq)
+        if (sequence <= _lastCommitSeq)
         {
             return false;
         }
 
-        _lastMoveSeq = sequence;
+        _lastCommitSeq = sequence;
         _lastMoveIntentTick = serverTick;
         return true;
     }
