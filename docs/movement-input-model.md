@@ -92,3 +92,16 @@ The *input* model above (held intent → server steps) is shared by every client
 - **C — full server follow (rejected, not built).** The local player treated like a remote entity:
   confirmed tiles only, buffered interpolator, playout delay → laggy. B is NOT C — B leads early on input;
   C lags. Do not build C and do not call B "follow the server."
+- **D — UO client-driven (UO1, opt-in via the F6 render-mode cycle → `UoClientDriven`).** Ultima-Online's
+  proven model: **instant client prediction + the server FOLLOWS the client's per-step requests
+  (accept/reject)** instead of auto-pacing. Reuses model A's `LocalPlayerPredictor` (predict + tick-grid
+  stepping + step-seq reconcile) for the local render, but additionally (1) declares the session client-driven
+  to the server via `MovementModeMessage(true)` so `StepHeldMovementIntents` stops auto-pacing that entity
+  (re-sent on (re)login/respawn; `false` on leaving), and (2) emits one `StepCommitRequest(++seq, dir)` per
+  predicted accepted step (the S103 commit-step path) so the server advances the entity only on accepted
+  commits. A rejected commit snaps via the predictor's existing `RecipientStepSeq` reconcile. The client still
+  sends `MoveIntent` for stop/keepalive/facing; the server just ignores it for *pacing* while the flag is set.
+  Anti-cheat is free: the cooldown gate + the commit's no-speedhack borrow cap the step rate regardless of how
+  fast the client requests, so no fastwalk throttle is needed. The commit anti-cheat floor
+  (`CommitAcceptFraction = 0.5`) is shared with S103 and **unchanged** — flagged for follow-up tuning (a
+  separate `ClientDrivenAcceptFraction`) only if a normal-cadence step ever spuriously rejects under latency.

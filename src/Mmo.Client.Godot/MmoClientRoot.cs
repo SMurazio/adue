@@ -939,9 +939,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(panel);
 	}
 
-	// S102: the three render modes in cycle order, with the label shown on the F6 button for each.
+	// S102/UO1: the render modes in cycle order, with the label shown on the F6 button for each. UO1 adds
+	// UoClientDriven (Ultima-Online-style: instant prediction + the server FOLLOWS per-step commits).
 	private static readonly MovementRenderMode[] RenderModeCycle =
-		[MovementRenderMode.Predicted, MovementRenderMode.CosmeticLead, MovementRenderMode.AcceptDeny];
+		[MovementRenderMode.Predicted, MovementRenderMode.CosmeticLead, MovementRenderMode.AcceptDeny, MovementRenderMode.UoClientDriven];
 
 	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
 	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
@@ -972,6 +973,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			MovementRenderMode.Predicted => "Predicted (A)",
 			MovementRenderMode.AcceptDeny => "AcceptDeny",
+			MovementRenderMode.UoClientDriven => "UoClientDriven",
 			_ => "CosmeticLead (B)",
 		};
 	}
