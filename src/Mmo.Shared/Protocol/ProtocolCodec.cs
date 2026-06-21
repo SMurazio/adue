@@ -8,7 +8,8 @@ public static class ProtocolCodec
     public const uint Magic = 0x314F4D4D;
     // COMBAT-S2A (v27): per-entity public HP (Health + MaxHealth, ushort each) added to EntityStateSnapshot for
     // the overhead HP bar. Server + client ship together.
-    public const byte Version = 27;
+    // COMBAT-S2B (v28): new client->server AttackMessage (own attack-seq + attack kind) on its own dedup cursor.
+    public const byte Version = 28;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -62,6 +63,10 @@ public static class ProtocolCodec
                 break;
             case MovementModeMessage value:
                 writer.Write(value.ClientDriven);
+                break;
+            case AttackMessage value:
+                writer.Write(value.Sequence);
+                writer.Write((byte)value.Kind);
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
@@ -218,6 +223,7 @@ public static class ProtocolCodec
             MessageType.MoveInput => ReadMoveInput(reader),
             MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
+            MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
@@ -578,6 +584,19 @@ public static class ProtocolCodec
         }
 
         return (Direction8)value;
+    }
+
+    // COMBAT-S2B: validate the attack-kind byte against the known set so a malformed/hostile packet can't
+    // smuggle an out-of-range kind into the server handler. Only MeleeCone exists this stage.
+    private static AttackKind ReadAttackKind(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)AttackKind.MeleeCone)
+        {
+            throw new ProtocolException($"Invalid AttackKind value: {value}.");
+        }
+
+        return (AttackKind)value;
     }
 
     private static void WriteGuid(BinaryWriter writer, Guid value)

@@ -53,6 +53,12 @@ public sealed class GameServer
     private const uint AuthoredTickPastWindow = 64;
     private const uint AuthoredTickFutureLead = 4;
 
+    // COMBAT-S2B: attack tuning constants. The per-entity attack cooldown (~600 ms — a watchable cadence,
+    // INDEPENDENT of the 150 ms move cooldown) and the melee-cone damage per enemy tile (20 HP). Plain constants
+    // for this stage (no live-tuning knob yet); converted ms->ticks via the configured tick rate at use site.
+    private const int AttackCooldownMs = 600;
+    private const int MeleeConeDamage = 20;
+
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
     // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
@@ -82,6 +88,9 @@ public sealed class GameServer
     private readonly List<WorldEntity> _entityScratch = [];
     private readonly List<WorldEntity> _aoiCandidateScratch = [];
     private readonly List<WorldEntity> _aoiInteractCandidateScratch = [];
+    // COMBAT-S2B: reused candidate buffer for the melee-cone occupancy query (entities in the cells overlapping the
+    // attacker's cone), filtered to the exact cone tiles at the call site. Single-threaded tick loop, so reuse is safe.
+    private readonly List<WorldEntity> _attackCandidateScratch = [];
     private readonly List<VisibleEntity> _visibleCandidateScratch = [];
     private readonly List<WorldEntity> _visibleEntityScratch = [];
     private readonly HashSet<uint> _visibleNetworkIdScratch = [];
@@ -397,6 +406,12 @@ public sealed class GameServer
                 if (session.IsAuthenticated)
                 {
                     HandleAdminSetStat(session, stat.Stat, stat.Value);
+                }
+                break;
+            case AttackMessage attack:
+                if (session.IsAuthenticated)
+                {
+                    HandleAttack(session, attack.Sequence, attack.Kind);
                 }
                 break;
             default:
@@ -1498,6 +1513,60 @@ public sealed class GameServer
             Log.Info($"{sender.DisplayName} set stat {(StatKind)stat}={value} (now {entity.Stats}).");
         }
     }
+
+    // COMBAT-S2B: server-authoritative resolution of an attack action. The first real combat path. Flow:
+    //   1. Dedup on the session's OWN attack cursor (_lastAttackSeq, ClientSession) — entirely separate from the
+    //      movement cursors. A stale/duplicate attack seq is rejected here and never resolves.
+    //   2. Resolve the attacker entity; reject if it is still on its INDEPENDENT per-entity attack cooldown
+    //      (WorldEntity.TryBeginAttack, ~600 ms) — the cooldown cannot be bypassed by spamming (a rejected attack
+    //      mutates nothing and the cursor is already burned, so the re-send is also deduped).
+    //   3. Compute the melee cone (3-tile front fan rotated by the attacker's facing, MeleeCone.Resolve).
+    //   4. Query occupancy on those tiles (the spatial grid returns a small candidate superset; filter to the exact
+    //      cone tiles) and apply MeleeConeDamage to each ENEMY — Dummy/Npc only, NEVER another Player (no friendly
+    //      fire) and never the attacker itself. The reduced HP rides the existing 2a public-HP snapshot field, so
+    //      the target's overhead bar drops automatically (no dedicated reply). HP may reach 0 (no death yet).
+    private void HandleAttack(ClientSession session, uint sequence, AttackKind kind)
+    {
+        // (1) Own attack cursor dedup — PARALLEL to, but independent of, the movement cursors. A stale or duplicate
+        // attack seq is dropped before any cooldown/cone work. The cursor advances even on a later cooldown reject,
+        // so a re-sent (already-seen) attack can never resolve twice.
+        if (!session.TryConsumeAttackSequence(sequence))
+        {
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var attacker))
+        {
+            return;
+        }
+
+        // Only the melee cone exists this stage; the codec already range-validated the kind, so anything else is a
+        // future kind we don't resolve yet.
+        if (kind != AttackKind.MeleeCone)
+        {
+            return;
+        }
+
+        // (2) Independent per-entity attack cooldown. A still-cooling attacker is rejected and changes nothing.
+        if (!attacker.TryBeginAttack(_serverTick, AttackCooldownTicks))
+        {
+            return;
+        }
+
+        // (3+4) Compute the cone + occupancy and apply damage. The whole cone resolution (cone tiles rotated by
+        // facing, the grid occupancy query, the friendly-fire gate, and the damage) lives in the testable static
+        // MeleeConeResolver — HandleAttack only owns the cursor dedup + cooldown gate around it.
+        var hits = MeleeConeResolver.ResolveAndDamage(_zone.World, attacker, MeleeConeDamage, _attackCandidateScratch);
+        if (hits > 0)
+        {
+            Log.Info($"{session.DisplayName} melee-cone hit {hits} target(s) for {MeleeConeDamage} each (facing {attacker.Facing}).");
+        }
+    }
+
+    // COMBAT-S2B: the per-entity attack cooldown in TICKS, derived from the ms constant and the configured tick
+    // rate (>= 1 tick so it always advances). Independent of the movement step cooldown.
+    private uint AttackCooldownTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(AttackCooldownMs / (1000d / _options.TickRate)));
 
     // Replicates an entity's authoritative vitals to its OWNER. Owner-only + reliable-ordered, like the inventory
     // snapshot — vitals stay off the hot snapshot path. Sent on login (initial truth) and on every change.

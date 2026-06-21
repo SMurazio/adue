@@ -535,6 +535,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// COMBAT-S2B: Space = melee attack. A clear, free key (no collision with WASD movement, F3-F7/F11 panels,
+		// E harvest, I inventory, Alt+R resync, or Enter/T chat). Not while typing in chat (so Space types a space
+		// in a message instead of swinging). Sends the attack on its own cursor (MmoClient.SendAttack) and shows an
+		// immediate cosmetic swing cue; the server authoritatively resolves the cone + damage (the target's overhead
+		// HP bar drops via the snapshot — no client-side damage prediction).
+		if (key.Keycode == Key.Space && _chatInput?.HasFocus() != true)
+		{
+			TryAttack();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		// S111: I = toggle the Inventory window. Not while typing in chat (so 'i' types normally). Free key —
 		// no collision with F3/F4/F5/F6/F11, E (harvest), WASD (movement, polled separately), or Enter/T (chat).
 		if (key.Keycode == Key.I && _chatInput?.HasFocus() != true)
@@ -550,6 +562,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			FocusChatInput();
 			GetViewport().SetInputAsHandled();
 		}
+	}
+
+	// COMBAT-S2B: send a melee-cone attack and give immediate cosmetic feedback. The attack rides its OWN cursor
+	// (MmoClient.SendAttack) and is server-authoritative — the client predicts only the FEEL (a swing cue), never
+	// the damage. The actual hit/HP drop confirms via the snapshot stream (the target's overhead bar). Minimal by
+	// design: a toast "Swing!" cue. The real telegraph (wind-up + danger tiles + dodge) is Stage 4.
+	private void TryAttack()
+	{
+		if (_client?.IsLoggedIn != true)
+		{
+			return;
+		}
+
+		_client.SendAttack();
+		ShowInteractFeedback("Swing!");
 	}
 
 	private void TryHarvest()

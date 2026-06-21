@@ -313,13 +313,41 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentySeven()
+    public void ProtocolVersionIsTwentyEight()
     {
-        // COMBAT-S2A protocol bump (v26 -> v27): adds public Health/MaxHealth to EntityStateSnapshot (drives the
-        // red overhead HP bar for dummies + other players). v26 was COMBAT-S1's owner-only PlayerStats/AdminSetStat.
-        // A snapshot-payload change is a breaking wire change (server + client ship together). Pin the version so an
-        // accidental change is caught.
-        Assert.Equal(27, ProtocolCodec.Version);
+        // COMBAT-S2B protocol bump (v27 -> v28): adds the client->server AttackMessage (own attack-seq + attack
+        // kind) on its own dedup cursor. A new wire message is a breaking change (server + client ship together).
+        // Pin the version so an accidental change is caught.
+        Assert.Equal(28, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void AttackMessageRoundTrips()
+    {
+        // COMBAT-S2B: the attack request round-trips its own sequence + the attack kind.
+        var original = new AttackMessage(4242, AttackKind.MeleeCone);
+
+        var decoded = Assert.IsType<AttackMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4242u, decoded.Sequence);
+        Assert.Equal(AttackKind.MeleeCone, decoded.Kind);
+    }
+
+    [Fact]
+    public void AttackMessageRejectsOutOfRangeKind()
+    {
+        // COMBAT-S2B: a malformed/hostile packet with an unknown attack kind byte is rejected on decode, so the
+        // server handler never sees an out-of-range kind. Hand-encode a valid header + seq + a bogus kind byte.
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(ProtocolCodec.Magic);
+        writer.Write(ProtocolCodec.Version);
+        writer.Write((ushort)MessageType.Attack);
+        writer.Write(7u);          // sequence
+        writer.Write((byte)200);   // out-of-range AttackKind
+        writer.Flush();
+
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(stream.ToArray()));
     }
 
     [Fact]

@@ -15,6 +15,8 @@ public enum MessageType : ushort
     StepCommitBatch = 11,
     // COMBAT-S1: admin-gated client->server "set my local player's current vital" verb (dev-set window).
     AdminSetStat = 12,
+    // COMBAT-S2B: client->server attack action (its OWN dedup cursor, never movement's). Reliable-ordered.
+    Attack = 13,
 
     ServerHello = 100,
     LoginResult = 101,

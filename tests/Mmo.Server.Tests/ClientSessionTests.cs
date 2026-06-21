@@ -280,6 +280,54 @@ public sealed class ClientSessionTests
         Assert.True(session.MoveIntentMoving);
     }
 
+    // COMBAT-S2B: the attack cursor dedups stale/duplicate attack seqs, monotonically advancing on accept.
+    [Fact]
+    public void AttackCursorDedupsStaleSequences()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.True(session.TryConsumeAttackSequence(1));
+        Assert.Equal(1u, session.LastAttackSeq);
+
+        // A duplicate / re-ordered (<=) attack seq is rejected and does not advance.
+        Assert.False(session.TryConsumeAttackSequence(1));
+        Assert.False(session.TryConsumeAttackSequence(0));
+        Assert.Equal(1u, session.LastAttackSeq);
+
+        // A higher seq is accepted and advances the cursor.
+        Assert.True(session.TryConsumeAttackSequence(5));
+        Assert.Equal(5u, session.LastAttackSeq);
+    }
+
+    // COMBAT-S2B (the #1 rule): the attack stream's dedup cursor is FULLY INDEPENDENT of the movement cursors.
+    // Advancing the attack cursor must not touch LastMoveSeq / LastCommitSeq, and advancing those must not touch
+    // the attack cursor — so an attack can never pre-dedup a movement input (or vice-versa), the NET6 desync bug.
+    [Fact]
+    public void AttackCursorIsIndependentOfMovementCursors()
+    {
+        var session = new ClientSession(null!);
+
+        // Advance the movement intent + commit cursors to high values.
+        Assert.True(session.TryUpdateMoveIntent(50, moving: true, Direction8.E, serverTick: 1));
+        Assert.True(session.TryConsumeCommitSequence(60, serverTick: 1));
+        Assert.Equal(50u, session.LastMoveSeq);
+        Assert.Equal(60u, session.LastCommitSeq);
+
+        // A LOW attack seq (1) is still fresh on the attack cursor — the move/commit cursors did not burn it.
+        Assert.True(session.TryConsumeAttackSequence(1));
+        Assert.Equal(1u, session.LastAttackSeq);
+
+        // The attack did not move the movement cursors.
+        Assert.Equal(50u, session.LastMoveSeq);
+        Assert.Equal(60u, session.LastCommitSeq);
+
+        // And a LOW movement seq is still rejected as stale (its own cursor is intact, untouched by the attack).
+        Assert.False(session.TryUpdateMoveIntent(1, moving: true, Direction8.W, serverTick: 2));
+        // While the move/commit cursors continue to advance independently, the attack cursor stays put.
+        Assert.True(session.TryUpdateMoveIntent(51, moving: true, Direction8.W, serverTick: 2));
+        Assert.Equal(1u, session.LastAttackSeq);
+    }
+
     [Fact]
     public void CollectSnapshotEntitiesMissingFromReusesDestination()
     {

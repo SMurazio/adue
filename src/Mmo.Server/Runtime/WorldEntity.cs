@@ -30,6 +30,13 @@ public sealed class WorldEntity
     // skew each other.
     private uint? _lastAuthoredCommitTick;
 
+    // COMBAT-S2B: the earliest server tick at which this entity's next ATTACK may fire. Null = never attacked, so
+    // the first attack is always eligible. INDEPENDENT of the movement cooldown (_nextEligibleTick) — an attack and
+    // a move pace on separate clocks, exactly as the task requires (a move never arms the attack cooldown and
+    // vice-versa). An accepted attack sets it to serverTick + the attack cooldown; a rejected (on-cooldown) attack
+    // leaves it untouched. Modelled the same way as _nextEligibleTick so the gate is underflow-safe near tick 0.
+    private uint? _nextEligibleAttackTick;
+
     public WorldEntity(
         ulong id,
         uint networkId,
@@ -117,6 +124,47 @@ public sealed class WorldEntity
         }
 
         Stats = updated;
+        return true;
+    }
+
+    // COMBAT-S2B: applies `amount` of damage to current Health, clamping the result into [0, MaxHealth]. Returns
+    // true iff the stored Health actually changed (so the caller only bumps replication / logs on a real hit),
+    // false otherwise (already at 0, or a non-positive amount). Distinct semantic from the dev-set
+    // TrySetStatCurrent (which sets an absolute value): this SUBTRACTS. HP may reach 0 (the overhead bar empties) —
+    // there is NO death/despawn this stage (Stage 6); a 0-HP entity simply sits at 0. The reduced Health rides the
+    // existing 2a public-HP snapshot field, so the change re-replicates and the overhead bar drops automatically.
+    public bool ApplyDamage(int amount)
+    {
+        if (amount <= 0)
+        {
+            return false;
+        }
+
+        // Subtract from current Health and clamp; WithHealth already floors at 0 and caps at MaxHealth.
+        var updated = Stats.WithHealth(Stats.Health - amount);
+        if (updated == Stats)
+        {
+            return false;
+        }
+
+        Stats = updated;
+        StateRevision++;
+        return true;
+    }
+
+    // COMBAT-S2B: the attack-cooldown gate, INDEPENDENT of the movement cooldown. Returns true and arms the attack
+    // cooldown (next eligible = serverTick + attackCooldownTicks) iff this entity is off its attack cooldown at
+    // serverTick; returns false WITHOUT mutating anything if it is still inside the window (the attack is rejected,
+    // it cannot be bypassed by spamming). Mirrors the movement next-eligible-tick gate but on its own field, so a
+    // move never lets an attack through early and an attack never blocks a move.
+    public bool TryBeginAttack(uint serverTick, uint attackCooldownTicks)
+    {
+        if (_nextEligibleAttackTick.HasValue && serverTick < _nextEligibleAttackTick.Value)
+        {
+            return false;
+        }
+
+        _nextEligibleAttackTick = serverTick + attackCooldownTicks;
         return true;
     }
 

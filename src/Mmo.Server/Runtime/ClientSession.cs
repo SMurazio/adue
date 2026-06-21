@@ -65,6 +65,14 @@ public sealed class ClientSession
     // and advances _lastCommitSeq incrementally, and a stale/duplicate commit is still rejected on `<=`.
     private uint _lastCommitSeq;
 
+    // COMBAT-S2B: the ATTACK-stream dedup cursor (the highest AttackMessage seq accepted). A SEPARATE, INDEPENDENT
+    // stream from movement — it shares NOTHING with _lastMoveSeq / _lastCommitSeq. This is the #1 rule from the NET6
+    // desync bug: two streams on one cursor strand each other. The client mints attack seqs off its OWN dedicated
+    // _attackSeq counter, and HandleAttack gates on THIS cursor only. An attack seq never touches the move/commit
+    // cursors and vice-versa, so a movement input can never pre-dedup an attack (or the reverse). Attacks are
+    // reliable-ordered + low-rate, so a strict `seq > cursor` monotonic gate is all the dedup needed.
+    private uint _lastAttackSeq;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -100,6 +108,10 @@ public sealed class ClientSession
     // an intent never burns the commit cursor (and vice-versa). HandleStepCommitBatch/ExtractFreshStepCommits
     // gate the commit window on THIS, not LastMoveSeq.
     public uint LastCommitSeq => _lastCommitSeq;
+
+    // COMBAT-S2B: the attack-stream dedup cursor (the highest accepted AttackMessage seq). Exposed for tests that
+    // assert the attack cursor advances independently of LastMoveSeq / LastCommitSeq.
+    public uint LastAttackSeq => _lastAttackSeq;
 
     // UO1: when true this session drives its own movement UO-style — it predicts + banks tiles locally and sends
     // one StepCommitRequest per accepted step, so the tick loop must NOT auto-pace its entity from the held
@@ -186,6 +198,23 @@ public sealed class ClientSession
 
         _lastCommitSeq = sequence;
         _lastMoveIntentTick = serverTick;
+        return true;
+    }
+
+    // COMBAT-S2B: advances the ATTACK-sequence cursor (_lastAttackSeq) for an inbound AttackMessage. Rejects stale
+    // sequences (seq <= the attack cursor) so a re-ordered/duplicate/replayed attack can't fire twice, and returns
+    // false WITHOUT mutating anything. Crucially it does NOT consult or advance _lastMoveSeq / _lastCommitSeq — the
+    // attack stream is fully independent of movement (the NET6 lesson). Returns true iff the seq was fresh on the
+    // attack cursor (the caller may then attempt to resolve the attack). The cursor advances even though the caller
+    // may later reject the attack on cooldown, so a re-sent already-seen attack is deduped here and never resolves.
+    public bool TryConsumeAttackSequence(uint sequence)
+    {
+        if (sequence <= _lastAttackSeq)
+        {
+            return false;
+        }
+
+        _lastAttackSeq = sequence;
         return true;
     }
 

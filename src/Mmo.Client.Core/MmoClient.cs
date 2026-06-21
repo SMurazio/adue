@@ -102,6 +102,12 @@ public sealed class MmoClient : IDisposable
     private int _snapshotRecvTimestampHead; // index of the oldest entry
 
     private uint _moveSequence;
+
+    // COMBAT-S2B: the attack stream's OWN monotonic sequence counter, entirely SEPARATE from _moveSequence (the
+    // NET6 lesson — two streams must never share a cursor). Every SendAttack mints the next attack seq off THIS
+    // counter only; it never touches _moveSequence, and _moveSequence never touches it. The server dedups attacks
+    // on its matching independent _lastAttackSeq cursor.
+    private uint _attackSeq;
     // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
     // current state PLUS a window of these prior inputs (as deltas) so a dropped packet's state change is
     // recovered from a later, still-redundant packet. Sized to ~the loss-recovery depth we send (≈8).
@@ -973,6 +979,19 @@ public sealed class MmoClient : IDisposable
     public void SendInteractRequest(uint targetNetworkId)
     {
         Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
+    }
+
+    // COMBAT-S2B: send a melee-cone attack. Mints the next sequence off the DEDICATED _attackSeq counter (never
+    // _moveSequence) and sends RELIABLE-ORDERED so the attack is never silently lost (attacks are low-rate, so
+    // reliable retransmit is fine — unlike movement's redundant-unreliable). No target id: the server resolves the
+    // cone from the attacker's facing. No client-side damage prediction — the authoritative result lands via the
+    // public-HP snapshot (the target's overhead bar drops); the caller may show a cosmetic swing immediately.
+    // Returns the attack seq sent (for tests / diagnostics).
+    public uint SendAttack()
+    {
+        var sequence = ++_attackSeq;
+        Send(new AttackMessage(sequence, AttackKind.MeleeCone), DeliveryMethod.ReliableOrdered);
+        return sequence;
     }
 
     // S60 admin live-tuning: ask the server to set a tuning key (e.g. "move.stepCooldownMs") to a value.

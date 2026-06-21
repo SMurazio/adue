@@ -104,6 +104,19 @@ public sealed record MovementModeMessage(bool ClientDriven) : IProtocolMessage
     public MessageType Type => MessageType.MovementMode;
 }
 
+// COMBAT-S2B (protocol v28): the first combat action — a client->server attack request on its OWN dedup
+// cursor, entirely SEPARATE from movement's sequence (the NET6 lesson: two streams sharing one cursor stranded
+// each other). The client mints Sequence off a DEDICATED _attackSeq counter (never _moveSequence) and the
+// server dedups it on a DEDICATED _lastAttackSeq cursor (never _lastMoveSeq/_lastCommitSeq). Kind is the attack
+// (only MeleeCone this stage — no target id; a cone is resolved server-side from the attacker's facing). Sent
+// RELIABLE-ORDERED: attacks are low-rate, so reliable retransmit is fine and a dropped attack must not be lost
+// (unlike movement's redundant-unreliable). The server validates the attack cooldown + computes the cone +
+// applies damage authoritatively; the result rides the existing public-HP snapshot field (no dedicated reply).
+public sealed record AttackMessage(uint Sequence, AttackKind Kind) : IProtocolMessage
+{
+    public MessageType Type => MessageType.Attack;
+}
+
 public sealed record ChatSendMessage(string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatSend;
