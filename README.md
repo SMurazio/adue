@@ -84,18 +84,18 @@ The default DB is `data/mmo.db`; delete it to reset local game data.
 
 The default database is `data/mmo.db`. Delete that file to reset local game data.
 
-## Working on the repo (no branch protection yet)
+## Working on the repo
 
-`main` is **not branch-protected** right now — anyone with access can push to it, and **CI runs _after_ a push, so
-it will not block a broken commit from landing.** Until protection is enabled, please be mindful:
+**Work on feature branches; `main` only takes tested + approved merges.** `main` is *not* GitHub-protected
+(by choice) — this is a **discipline, not enforcement**, so it relies on everyone following it:
 
-- **Run `run-checks` (build + all tests) locally before pushing to `main`** — don't push red.
-- **Build and run the Godot client locally** for any client change — CI does **not** compile or run the Godot side
-  (`Mmo.sln` excludes it), so your local run is the only gate there.
-- **`git pull` before you push** to avoid clobbering each other.
-- For anything non-trivial, prefer a **feature branch + PR** so CI runs on it before it reaches `main`.
-
-We'll likely turn on branch protection (require the CI check + a PR) once more than one person is committing regularly.
+- **Never commit directly to `main`.** Branch off `main` and do the work there.
+- **Run `run-checks` (build + all tests) on your branch before merging** — don't merge red. CI also runs it on
+  push, but the discipline is to be green *before* it reaches `main`.
+- **`godot-build` for any client change** — CI does **not** compile the Godot side (`Mmo.sln` excludes it), so
+  your local Godot build is the only gate there.
+- **Merge to `main` only when it's green and reviewed/approved.**
+- **`git pull` before starting a branch** to avoid drift.
 
 ## Dev Admin Commands
 
