@@ -1268,6 +1268,77 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);       // full banked lead held, not capped to 2
     }
 
+    // ---- UO5: a frame-drop overshoot (rejected commit burst) converges back; the release still holds -----
+
+    [Fact]
+    public void ClientDriven_FrameDropOvershoot_ServerStepSeqStalls_ConvergesBackToServer()
+    {
+        // THE UO5 BUG, pinned. A lag spike makes Tick's catch-up loop bank a BURST of accepted steps in one frame
+        // (here 6 E steps to (6,0) @ seq 6). In UoClientDriven each is an emitted StepCommitRequest, but the server
+        // RATE-LIMITS commits (CommitAcceptFraction of a cooldown between accepts), so the burst's later commits are
+        // REJECTED — serverStepSeq STALLS. Under UO3's uncapped hold the predictor would re-project all 6 forward
+        // forever (the permanent overshoot the user hit). With the UO5 stall guard, once serverStepSeq fails to
+        // advance for OverPredictStallLimit consecutive snapshots the hold falls back to the bounded MaxInFlightLead
+        // (2) and the prediction is pulled back toward the server within a bounded number of snapshots.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        // Frame-drop catch-up: a single Tick after a long stall banks several steps at once.
+        var buffer = new Direction8[8];
+        predictor.Tick(TimeSpan.FromMilliseconds(750), buffer, out var banked);   // 6 boundaries elapsed -> 6 steps
+        Assert.Equal(6, banked);
+        Assert.Equal(new TileCoord(6, 0), predictor.PredictedTile);
+        Assert.Equal(6u, predictor.PredictedStepSeq);
+
+        // The server accepts only the FIRST commit of the burst (seq -> 1 @ (1,0)); the rest are commit_too_early
+        // rejects, so serverStepSeq STALLS at 1 across the following snapshots while the lead (5) persists.
+        // First confirm at seq 1: first reconcile, no stall yet -> still holds forward at the banked head.
+        predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(800));
+        Assert.Equal(new TileCoord(6, 0), predictor.PredictedTile);               // still holding (1 stall not enough)
+
+        // Second confirm STILL at seq 1 — one stall. Lead persists; not yet over the limit, still holds.
+        predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(850));
+        Assert.Equal(new TileCoord(6, 0), predictor.PredictedTile);
+
+        // Third confirm STILL at seq 1 — TWO consecutive stalls (>= OverPredictStallLimit). The overshoot is deemed
+        // rejected: the hold falls back to MaxInFlightLead (2), pulling the prediction back to confirmed+2 == (3,0),
+        // NOT the stale (6,0). The permanent overshoot is broken — it converged within a bounded time.
+        var outcome = predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(900));
+        Assert.NotEqual(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome); // a real correction happened
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);              // confirmed(1) + capped lead(2)
+        Assert.Equal(3u, predictor.PredictedStepSeq);                            // seq pulled into the bounded window
+    }
+
+    [Fact]
+    public void ClientDriven_ReleaseDrains_ServerStepSeqAdvances_HoldsForward_NoFalsePullback()
+    {
+        // The UO3 release must SURVIVE the UO5 guard: a genuine banked stream DRAINS — every snapshot advances
+        // serverStepSeq toward the head — so the stall counter never trips and the render holds forward, settling
+        // onto the banked destination (no backward snap). Predict 4 E steps to (4,0), release, then confirm seq 1,
+        // 2, 3, 4 in order (the server working through the banked commits). The head stays (4,0) the whole way.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetClientDriven(true);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        for (var step = 0; step < 4; step++)
+        {
+            predictor.Tick(TimeSpan.FromMilliseconds(step * 150));
+        }
+
+        Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(610));
+
+        // serverStepSeq advances 1 -> 2 -> 3 -> 4 across snapshots: the counter resets each time, the head holds.
+        for (var seq = 1u; seq <= 4u; seq++)
+        {
+            var outcome = predictor.Reconcile(new TileCoord((int)seq, 0), seq, TimeSpan.FromMilliseconds(610 + seq * 50));
+            Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, outcome);
+            Assert.Equal(new TileCoord(4, 0), predictor.PredictedTile);          // held forward at the banked head
+        }
+
+        Assert.Equal(4u, predictor.PredictedStepSeq);
+    }
+
     // ---- UO4: stop-on-reversal (settle-then-go) toggle --------------------------------------------------
 
     [Fact]

@@ -117,6 +117,33 @@ public sealed class LocalPlayerPredictor
     // release IS overshoot the stopped server will never confirm, so they still converge down).
     private bool _clientDriven;
 
+    // UO5 — frame-drop overshoot guard. The UO3 client-driven re-projection holds the FULL predicted-past-confirm
+    // lead because a genuine banked commit stream IS in flight (the server is RTT-behind, still draining it). But a
+    // lag spike makes Tick's catch-up bank up to MaxTicksPerCall accepted steps in ONE frame, emitting a BURST of
+    // commits; the server's TryCommitStep rate-limits (CommitAcceptFraction of a cooldown between accepts), so the
+    // burst's later commits are REJECTED — serverStepSeq STALLS while the lead stays large. UO3's uncapped hold then
+    // re-projects that rejected overshoot forever: the prediction teleports forward and never reconciles.
+    //
+    // The distinguisher: a GENUINE in-flight lead DRAINS — every confirming snapshot advances serverStepSeq toward
+    // PredictedStepSeq (the release tests reconcile at serverStepSeq 1, 2, 3...). A REJECTED overshoot STALLS —
+    // serverStepSeq stops advancing while the lead persists. _stallReconciles counts consecutive confirming
+    // snapshots at which serverStepSeq did NOT advance while a positive lead remained; once it reaches
+    // OverPredictStallLimit the banked commits are deemed rejected (not in flight) and the hold falls back to the
+    // bounded MaxInFlightLead, correcting the overshoot DOWN within a bounded number of snapshots. _hasPrevServerStepSeq
+    // /_prevServerStepSeq remember the last serverStepSeq fed to Reconcile so the advance test survives across calls.
+    private uint _prevServerStepSeq;
+    private bool _hasPrevServerStepSeq;
+    private int _stallReconciles;
+
+    // How many consecutive confirming snapshots may show NO advance of serverStepSeq (while a positive lead remains)
+    // before the client-driven hold treats the banked commits as REJECTED and pulls the overshoot back to the bounded
+    // MaxInFlightLead. One stall is normal jitter (a 50 ms snapshot window can legitimately confirm zero new commits
+    // under healthy RTT); two consecutive stalls with a persistent lead is a rate-limit rejection, not in-flight
+    // latency. So a frame-drop overshoot converges within ~OverPredictStallLimit snapshots (~a few×50 ms), while the
+    // normal release (serverStepSeq advances every snapshot, resetting the counter) holds and settles forward as UO3
+    // intends.
+    private const int OverPredictStallLimit = 2;
+
     // UO4 — stop-on-reversal (settle-then-go). When on, a ~180° flip of the held direction while moving inserts one
     // clean settle beat before the avatar resumes the new way, instead of reversing mid-step (the left-right
     // bounce). _stopOnReversal is the live toggle (default OFF = today's immediate reverse). _lastAcceptedDir is the
@@ -554,6 +581,25 @@ public sealed class LocalPlayerPredictor
         _hasReconciled = true;
         _highestReconciledStepSeq = serverStepSeq;
 
+        // UO5: track whether serverStepSeq is ADVANCING (a genuine banked stream draining) or STALLED (a rejected
+        // overshoot). A confirming snapshot at the SAME serverStepSeq as the previous one, while a positive lead
+        // remains (predictedStepSeq > serverStepSeq), is a stall; once OverPredictStallLimit consecutive stalls
+        // accrue, the client-driven hold below falls back to the bounded cap and corrects the overshoot down. Any
+        // advance (or no lead) resets the counter so the normal release/drain path holds at full count.
+        var leadRemains = _predictedStepSeq > serverStepSeq;
+        if (_hasPrevServerStepSeq && serverStepSeq == _prevServerStepSeq && leadRemains)
+        {
+            _stallReconciles++;
+        }
+        else
+        {
+            _stallReconciles = 0;
+        }
+
+        _prevServerStepSeq = serverStepSeq;
+        _hasPrevServerStepSeq = true;
+        var overPredictStalled = _stallReconciles >= OverPredictStallLimit;
+
         // The in-flight steps are the ones we predicted past the server's confirmed point — the ones genuinely
         // sent-but-not-yet-acked (count = predictedStepSeq - serverStepSeq, when positive).
         //
@@ -584,11 +630,23 @@ public sealed class LocalPlayerPredictor
             rawInFlight = 0;
             cap = 0;
         }
-        else if (_clientDriven)
+        else if (_clientDriven && !overPredictStalled)
         {
             // Banked commits are in flight whether the key is held or released — the server follows them either way.
+            // While the stream is DRAINING (serverStepSeq advancing) we re-project the full count so the render holds
+            // forward onto the banked head (UO3). The cap is the recorded-direction ring so it can't read stale slots.
             rawInFlight = (int)(_predictedStepSeq - serverStepSeq);
             cap = InFlightDirCapacity;
+        }
+        else if (_clientDriven)
+        {
+            // UO5: the banked stream has STALLED for OverPredictStallLimit consecutive snapshots — the burst the
+            // catch-up loop emitted was rate-limit-REJECTED by the server (serverStepSeq isn't advancing), so the
+            // lead is a frame-drop OVERSHOOT, not in-flight latency. Fall back to the bounded MaxInFlightLead so the
+            // prediction is pulled back toward the server instead of holding the overshoot forever. This converges
+            // within a bounded number of snapshots; the normal release (serverStepSeq advancing) never reaches here.
+            rawInFlight = (int)(_predictedStepSeq - serverStepSeq);
+            cap = MaxInFlightLead;
         }
         else
         {
