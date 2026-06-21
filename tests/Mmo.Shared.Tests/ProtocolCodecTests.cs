@@ -89,6 +89,27 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void WorldSnapshotRoundTripsHealthFields()
+    {
+        // COMBAT-S2A: public HP (current + max) rides each per-entity state. A stat-bearing entity carries a
+        // partial HP (the dummy/player bar); a stat-less entity (resource) carries 0/0 ("no HP").
+        var original = new WorldSnapshotMessage(
+            21,
+            [
+                new EntityStateSnapshot(31, new TileCoord(8, 9), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+                new EntityStateSnapshot(32, new TileCoord(2, 3), Direction8.N, Depleted: false, Health: 0, MaxHealth: 0),
+            ]);
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((ushort)70, decoded.Entities[0].Health);
+        Assert.Equal((ushort)100, decoded.Entities[0].MaxHealth);
+        Assert.True(decoded.Entities[0].MaxHealth > 0);
+        Assert.Equal((ushort)0, decoded.Entities[1].Health);
+        Assert.Equal((ushort)0, decoded.Entities[1].MaxHealth);
+    }
+
+    [Fact]
     public void WorldSnapshotRoundTripsDepletedFlag()
     {
         var original = new WorldSnapshotMessage(
@@ -292,13 +313,34 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyFive()
+    public void ProtocolVersionIsTwentySeven()
     {
-        // NET3 protocol bump: extending StepCommitBatch with a per-commit authored tick (HeadTick + per-window-entry
-        // TickDelta) so the server applies each commit at its authored time is a breaking wire change (server +
-        // client ship together). v24 was NET2's StepCommitBatch; v23 was NET1's MoveInput. Pin the version so an
+        // COMBAT-S2A protocol bump (v26 -> v27): adds public Health/MaxHealth to EntityStateSnapshot (drives the
+        // red overhead HP bar for dummies + other players). v26 was COMBAT-S1's owner-only PlayerStats/AdminSetStat.
+        // A snapshot-payload change is a breaking wire change (server + client ship together). Pin the version so an
         // accidental change is caught.
-        Assert.Equal(25, ProtocolCodec.Version);
+        Assert.Equal(27, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void PlayerStatsRoundTrips()
+    {
+        var original = new PlayerStatsMessage(new CharacterStats(73, 100, 41, 120, 5, 80));
+
+        var decoded = Assert.IsType<PlayerStatsMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(new CharacterStats(73, 100, 41, 120, 5, 80), decoded.Stats);
+    }
+
+    [Fact]
+    public void AdminSetStatRoundTrips()
+    {
+        var original = new AdminSetStatMessage((byte)StatKind.Stamina, -17);
+
+        var decoded = Assert.IsType<AdminSetStatMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((byte)StatKind.Stamina, decoded.Stat);
+        Assert.Equal(-17, decoded.Value);
     }
 
     [Fact]
