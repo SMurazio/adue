@@ -21,7 +21,8 @@ At the start of every session:
 - Plans the work and makes architectural and scope decisions.
 - Writes paste-ready handoff prompts and populates the `todo/` queue.
 - Maintains planning docs in `docs/`.
-- Reviews the Implementer's output, verifying claims independently.
+- Commissions independent review of finished work (a fresh reviewer subagent) and synthesizes the verdict;
+  does NOT solely certify work it planned (see Review Independence).
 - Does not write or edit production code.
 
 **Implementer** (the coding agent)
@@ -46,13 +47,30 @@ At the start of every session:
    standard-gate stress run (**120 clients / 30s** — fixed and comparable across tasks; longer 60s+
    runs are reserved for milestone/capacity studies, not per-task gating), known gaps, highest-risk
    areas, and what the reviewer should check.
-4. **Review** - Orchestrator treats each file in `review/` as an inbound review task, independently
-   re-runs build/tests/stress, re-reads the diff, produces a severity-ranked verdict, updates
-   `todo/` with any new findings, and deletes the request file once reviewed.
+4. **Review** - For each file in `review/`, the Orchestrator commissions a **fresh independent reviewer
+   subagent** (clean context; given only the live symptom + the diff, never the plan — see Review
+   Independence) that re-runs build/tests/stress, re-reads the diff, and tests the hypothesis against the
+   actual symptom. The Orchestrator synthesizes its severity-ranked verdict, updates `todo/` with any new
+   findings, and deletes the request file once reviewed.
 5. Repeat.
 
 The baton alternates. The Implementer waits for a plan or populated queue; the Orchestrator waits
 for a review request.
+
+## Review Independence (author ≠ sole reviewer)
+
+The agent that **authored** a change — its plan, its handoff, or its code — is **never the sole reviewer of
+it.** Independent verification is the entire point of the loop, and it collapses when the author also designs
+the tests that "prove" the fix and then signs off on it. (Three movement-netcode misses — UO5-stall, NET2,
+NET3-live — each passed a headless test the author wrote, because the test inherited the same wrong model that
+produced the fix. An independent reviewer would have asked whether the test reproduces the *live* symptom.)
+
+**Mechanism.** When a unit of work is finished, the Orchestrator commissions a **fresh reviewer subagent** with
+a **clean context**, given **only the live symptom and the diff — NOT the plan or the handoff.** That reviewer
+independently re-runs build/tests/stress, re-reads the diff, and judges the *hypothesis against the actual
+symptom* — not merely "did the code match the plan." The Orchestrator synthesizes and relays the reviewer's
+verdict but does not self-certify work it planned; a finding the reviewer raises becomes a new `todo/` item.
+The human still makes the final live call (only the human can run the Godot client).
 
 ## Decision Authority
 
