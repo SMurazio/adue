@@ -1,5 +1,7 @@
 # MMO Learning Project
 
+[![CI](https://github.com/SMurazio/mmo/actions/workflows/ci.yml/badge.svg)](https://github.com/SMurazio/mmo/actions/workflows/ci.yml)
+
 This repo is a from-scratch, production-shaped learning project for a small 2D top-down MMO server/client.
 
 The first target is not a full game. The first target is the MMO spine:
@@ -9,7 +11,11 @@ The first target is not a full game. The first target is the MMO spine:
 - SQLite persistence now, with a Postgres path kept for later
 - one shared zone
 - login, spawn, movement, visibility snapshots, and chat
-- a simple diagnostic console client before any Godot client work
+- diagnostic clients (console + isometric web debug client) and a **Godot 4 (C#) 3D client**
+
+Movement is tile-stepped and server-authoritative; the local player runs client-side prediction +
+reconciliation. The active focus is a packet-loss / latency-robust input model (sequenced redundant-unreliable
+input + authored-tick server processing) — see `docs/movement-netcode-redesign-plan.md`.
 
 ## Current Prerequisites
 
@@ -113,10 +119,12 @@ Useful scripts:
 
 ```powershell
 .\.shared\skills\mmo-dev\scripts\start-server.cmd
+.\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
 .\.shared\skills\mmo-dev\scripts\start-web-client.cmd
 .\.shared\skills\mmo-dev\scripts\stress-test.cmd
 .\.shared\skills\mmo-dev\scripts\stop-mmo.cmd
-.\.shared\skills\mmo-dev\scripts\run-checks.cmd
+.\.shared\skills\mmo-dev\scripts\run-checks.cmd   # build + tests (also runs in CI)
+.\.shared\skills\mmo-dev\scripts\godot-build.cmd  # compile the Godot client (not in CI)
 ```
 
 To preview cleanup targets before stopping server/web processes:

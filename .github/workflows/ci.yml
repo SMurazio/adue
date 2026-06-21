@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build + test (Mmo.sln)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore Mmo.sln
+
+      # Mirrors .shared/skills/mmo-dev/scripts/run-checks.cmd: a full --no-incremental
+      # rebuild so a stale fast-up-to-date check can't run test assemblies compiled
+      # against an old signature, then --no-build test of the freshly-built assemblies.
+      - name: Build (no-incremental)
+        run: dotnet build Mmo.sln --configuration Debug --no-restore --no-incremental
+
+      - name: Test (no-build)
+        run: dotnet test Mmo.sln --configuration Debug --no-build --no-restore --verbosity normal
+
+# Note: this gates the C# solution (server, client-core, shared, tools, web + their tests).
+# The Godot client (Mmo.Client.Godot) is NOT in Mmo.sln and needs the Godot toolchain, so it is
+# verified locally via godot-build.cmd, not in CI.
