@@ -45,22 +45,15 @@ public sealed class ServerTuningTests
     }
 
     [Fact]
-    public void AppliesStepCooldownAndClampsToBounds()
+    public void StepCooldownIsPinnedAndNotLiveTunable()
     {
-        var tuning = new ServerTuning(Options());
+        // SPEED1: the move.stepCooldownMs live knob was removed — the base cooldown is a pinned constant.
+        // The registry must reject the old key and leave the seeded base untouched.
+        var tuning = new ServerTuning(Options(stepCooldownMs: 150));
 
-        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.StepCooldownMsKey, 250d, out var applied));
-        Assert.Equal(250, tuning.StepCooldownMs);
-        Assert.Equal(250d, applied);
-
-        // Below the [50, 5000] floor clamps to 50; above the ceiling clamps to 5000.
-        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.StepCooldownMsKey, 10d, out var low));
-        Assert.Equal(50, tuning.StepCooldownMs);
-        Assert.Equal(50d, low);
-
-        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.StepCooldownMsKey, 99999d, out var high));
-        Assert.Equal(5000, tuning.StepCooldownMs);
-        Assert.Equal(5000d, high);
+        Assert.False(ServerTuningRegistry.TryApply(tuning, "move.stepCooldownMs", 250d, out _));
+        Assert.False(ServerTuningRegistry.IsKnownKey("move.stepCooldownMs"));
+        Assert.Equal(150, tuning.StepCooldownMs);
     }
 
     [Fact]
@@ -94,7 +87,7 @@ public sealed class ServerTuningTests
     {
         var tuning = new ServerTuning(Options());
 
-        Assert.False(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.StepCooldownMsKey, double.NaN, out _));
+        Assert.False(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.InterestRadiusKey, double.NaN, out _));
         Assert.False(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.InterestRadiusKey, double.PositiveInfinity, out _));
     }
 }

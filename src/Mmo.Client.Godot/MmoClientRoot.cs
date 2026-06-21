@@ -76,7 +76,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _toastLabel;
 
 	// ---- S60 / S65 admin live-tuning panels --------------------------------------------------------
-	// F4 toggles the SERVER tuning panel (move.stepCooldownMs, aoi.interestRadius — ride
+	// F4 toggles the SERVER tuning panel (aoi.interestRadius — rides
 	// AdminSetTuning to the server, which admin-gates + clamps). F5 (S65) toggles the CLIENT-LOCAL VISUAL panel
 	// (camera zoom range, rock/tree/plant model scale, label pixel-size/height — applied instantly to local
 	// state/nodes, no server round-trip). Both are admin-only dev tools, not shipped UI — built once, shown only
@@ -84,7 +84,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _tuningPanel;
 	private bool _tuningPanelVisible;
 	private bool _tuningFieldsSeeded;
-	private LineEdit? _tuneStepCooldownMs;
+	// SPEED1: the move.stepCooldownMs field was removed — the base step cooldown is now a pinned constant
+	// (150 ms), not a live knob. aoi.interestRadius is the only remaining F4 server field.
 	private LineEdit? _tuneInterestRadius;
 
 	// F5 visual panel (S65).
@@ -109,7 +110,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// ---- S102 F6 movement / feel panel ------------------------------------------------------------
 	// A dedicated admin-gated panel (F6) for the movement/camera-FEEL levers, moved off the F5 visual panel so the
 	// render knobs and the feel knobs are unmistakable. All live (no restart); seeded from the current values on
-	// open. Movement SPEED (move.stepCooldownMs) is SERVER tuning and stays in F4 — NOT duplicated here.
+	// open. Per-entity SPEED is the F6 "Move speed" dropdown (sends /speed); the GLOBAL base cooldown is a pinned
+	// constant (SPEED1) — there is no longer a global move-speed server knob.
 	private PanelContainer? _movementPanel;
 	private bool _movementPanelVisible;
 	private bool _movementFieldsSeeded;
@@ -785,7 +787,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var serverHeader = CreateOverlayLabel("TuningServerHeader", 12);
 		serverHeader.Text = "— server (sent on Apply) —";
 		rows.AddChild(serverHeader);
-		_tuneStepCooldownMs = AddTuningField(rows, "move.stepCooldownMs", OnTuningApplyPressed);
 		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius", OnTuningApplyPressed);
 
 		var apply = new Button { Name = "TuningApply", Text = "Apply" };
@@ -896,8 +897,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// S102: the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (F6). Holds the movement/camera-FEEL levers moved
 	// off F5 (net latency, cosmetic lead distance, camera follow blend + smoothing) plus new ones (3-way render
 	// mode, camera teleport-snap distance, snap-on-release). All applied INSTANTLY client-side (no server round-
-	// trip, no restart) via the same Apply-all / live-toggle pattern as F4/F5. Movement SPEED (move.stepCooldownMs)
-	// is SERVER tuning and lives in F4 — deliberately NOT duplicated here (it affects all players, not local feel).
+	// trip, no restart) via the same Apply-all / live-toggle pattern as F4/F5. Per-entity move SPEED is the "Move
+	// speed" dropdown here (sends /speed); the GLOBAL base cooldown is a pinned constant (SPEED1), not a knob.
 	// Hidden until F6 is pressed by an Admin session; seeded on first open from the live local values.
 	private void BuildMovementPanel(CanvasLayer layer)
 	{
@@ -946,8 +947,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
 		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
-		// live via /speed <multiplier> (the existing per-entity path), NOT the F4 global move.stepCooldownMs. The
-		// items are populated on first panel open (SeedMovementFields) from ServerHello's base cadence + tick rate.
+		// live via /speed <multiplier> (the existing per-entity path), which scales off the pinned global base
+		// cadence (SPEED1). The items are populated on first panel open (SeedMovementFields) from ServerHello's
+		// base cadence + tick rate.
 		var speedRow = new HBoxContainer { Name = "Row_MoveSpeed" };
 		speedRow.AddThemeConstantOverride("separation", 8);
 		var speedCaption = CreateOverlayLabel("Cap_MoveSpeed", 13);
@@ -1137,7 +1139,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		var baseStepMs = _client?.Server?.StepCooldownMs ?? 140;
+		var baseStepMs = _client?.Server?.StepCooldownMs ?? 150;
 		var tickRate = _client?.Server?.TickRate ?? 20;
 		_moveSpeedOptions = MovementSpeedOptions.Build(baseStepMs, tickRate);
 
@@ -1765,9 +1767,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
 	{
-		var serverStep = _client?.Server?.StepCooldownMs ?? 140;
+		// SPEED1: only aoi.interestRadius remains — the base step cooldown is a pinned constant, no longer tunable.
 		var serverRadius = _client?.Server?.InterestRadiusTiles ?? 35f;
-		SetField(_tuneStepCooldownMs, serverStep);
 		SetField(_tuneInterestRadius, serverRadius);
 	}
 
@@ -1831,11 +1832,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// Server group — send the raw value; the server clamps to its registry bounds and applies live.
-		if (TryReadField(_tuneStepCooldownMs, out var stepMs))
-		{
-			_client.SendAdminSetTuning("move.stepCooldownMs", stepMs);
-		}
-
+		// SPEED1: move.stepCooldownMs was removed (the base cooldown is pinned); only interest radius remains.
 		if (TryReadField(_tuneInterestRadius, out var radius))
 		{
 			_client.SendAdminSetTuning("aoi.interestRadius", radius);
