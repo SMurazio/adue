@@ -26,7 +26,8 @@ if ($WorldWidth -gt 0) { $env:MMO_WORLD_WIDTH_TILES = "$WorldWidth" }
 if ($WorldHeight -gt 0) { $env:MMO_WORLD_HEIGHT_TILES = "$WorldHeight" }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
-$dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { 'dotnet' }
 $stopScript = Join-Path $PSScriptRoot 'stop-mmo.cmd'
 $startServerScript = Join-Path $PSScriptRoot 'start-server.cmd'
 $stressScript = Join-Path $PSScriptRoot 'stress-test.cmd'

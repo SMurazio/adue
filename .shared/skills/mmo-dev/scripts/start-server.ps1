@@ -9,7 +9,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
-$dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { 'dotnet' }
 $runDir = Join-Path $root '.run'
 $pidFile = Join-Path $runDir 'server.pid'
 $windowScript = Join-Path $PSScriptRoot 'run-server-window.ps1'

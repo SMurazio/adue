@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
-$dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { 'dotnet' }
 $projectDir = Join-Path $root '.run\MovementDebugTrace'
 $project = Join-Path $projectDir 'MovementDebugTrace.csproj'
 $program = Join-Path $projectDir 'Program.cs'

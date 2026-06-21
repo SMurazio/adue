@@ -20,4 +20,6 @@ if (-not [string]::IsNullOrWhiteSpace($ErrorLogPath)) {
     $env:MMO_SERVER_ERR_LOG_FILE = $ErrorLogPath
 }
 
-& (Join-Path $Root '.tools\dotnet\dotnet.exe') $ServerDll
+$localDotnet = Join-Path $Root '.tools\dotnet\dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { 'dotnet' }
+& $dotnet $ServerDll

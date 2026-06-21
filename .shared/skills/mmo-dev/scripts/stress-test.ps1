@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
-$dotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { 'dotnet' }
 $project = Join-Path $root 'src\Mmo.Tools.Stress\Mmo.Tools.Stress.csproj'
 
 $configuration = 'Debug'
