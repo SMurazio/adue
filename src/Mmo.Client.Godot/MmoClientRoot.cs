@@ -129,6 +129,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// (MmoClient.SetCommitStepThreshold, applied on Apply/Enter).
 	private CheckBox? _commitStepCheck;
 	private LineEdit? _moveCommitThreshold;
+	// UO2: one-line caption under the render-mode button naming what the ACTIVE mode does (self-documenting).
+	private Label? _renderModeCaption;
+	// UO2: the rows that are MODEL-B (CosmeticLead) ONLY — cosmetic lead distance, snap-on-release, commit-step +
+	// its threshold. These are documented "inert otherwise" in MmoClient, so the F6 panel HIDES them in
+	// Predicted / AcceptDeny / UoClientDriven. Captured as their owning row containers so visibility toggles the
+	// whole label+control row (not just the input). Re-evaluated on render-mode change and on panel open.
+	private readonly List<Control> _modelBOnlyRows = new();
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -880,6 +887,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_renderModeButton.Pressed += OnRenderModeCyclePressed;
 		renderModeRow.AddChild(_renderModeButton);
 		rows.AddChild(renderModeRow);
+
+		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting (updated live on
+		// every render-mode cycle and on panel open via ApplyRenderModeContext / UpdateRenderModeButtonText).
+		_renderModeCaption = CreateOverlayLabel("RenderModeCaption", 11);
+		rows.AddChild(_renderModeCaption);
+
 		UpdateRenderModeButtonText();
 
 		// Moved off F5 — applied on Apply/Enter:
@@ -887,7 +900,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
 		// S94: how far model B's cosmetic lead glides ahead of the confirmed tile, in tiles. [0, 1]; 1.0 = current
 		// model B, 0 ≈ no visible lead. Lower values shorten the visible lead (and the release snap).
+		// UO2 model-B-only: register the owning row so it hides outside CosmeticLead.
 		_moveCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnMovementApplyPressed);
+		RegisterModelBOnlyRow(_moveCosmeticLeadTiles);
 		// S95: camera focus blend between the confirmed tile (0) and the cosmetic character (1, default).
 		_moveCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnMovementApplyPressed);
 		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow.
@@ -909,6 +924,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		snapOnRelease.Toggled += ApplySnapOnRelease;
 		rows.AddChild(snapOnRelease);
 		_snapOnReleaseCheck = snapOnRelease;
+		_modelBOnlyRows.Add(snapOnRelease); // UO2: model-B-only.
 
 		// S103 new live toggle — flips on click, no Apply needed: commit a near-done step on release instead of
 		// snapping back. ON (default) = release past the threshold finishes the step + sends a server-validated
@@ -924,10 +940,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		commitStep.Toggled += ApplyCommitStepOnRelease;
 		rows.AddChild(commitStep);
 		_commitStepCheck = commitStep;
+		_modelBOnlyRows.Add(commitStep); // UO2: model-B-only.
 
 		// S103 commit threshold (0..1) — how far the cosmetic lead must have glided onto the next tile at release for
 		// a commit to fire. Default 0.7 ≈ "almost entirely on the next tile". Applied on Apply/Enter; clamped [0,1].
+		// UO2 model-B-only: register the owning row so it hides outside CosmeticLead.
 		_moveCommitThreshold = AddTuningField(rows, "Commit threshold (0..1)", OnMovementApplyPressed);
+		RegisterModelBOnlyRow(_moveCommitThreshold);
 
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -961,6 +980,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// S102: reflect the client's ACTIVE render mode on the F6 button (also called on seed so re-opening is correct).
+	// UO2: also refresh the contextual panel (caption + model-B-only row visibility) so the controls always match
+	// the active mode, both when cycling and when (re-)opening the panel.
 	private void UpdateRenderModeButtonText()
 	{
 		if (_renderModeButton is null)
@@ -976,6 +997,47 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			MovementRenderMode.UoClientDriven => "UoClientDriven",
 			_ => "CosmeticLead (B)",
 		};
+
+		ApplyRenderModeContext(mode);
+	}
+
+	// UO2: make the F6 panel CONTEXTUAL to the active render mode. The cosmetic-lead distance, snap-on-release,
+	// commit-step toggle, and commit-threshold rows are model-B (CosmeticLead) ONLY — documented "inert otherwise"
+	// in MmoClient — so we HIDE them in Predicted / AcceptDeny / UoClientDriven (hide, not grey, for cleanliness;
+	// the VBox just reflows so there are no dead rows). The render-mode button and the shared rows (net latency,
+	// camera feel) stay visible in every mode. Also writes the one-line "what this mode does" caption. UI-only.
+	private void ApplyRenderModeContext(MovementRenderMode mode)
+	{
+		var isModelB = mode == MovementRenderMode.CosmeticLead;
+		foreach (var row in _modelBOnlyRows)
+		{
+			row.Visible = isModelB;
+		}
+
+		if (_renderModeCaption is not null)
+		{
+			_renderModeCaption.Text = mode switch
+			{
+				MovementRenderMode.Predicted =>
+					"Predicted (A): instant client prediction; server reconciles (snap on divergence).",
+				MovementRenderMode.AcceptDeny =>
+					"AcceptDeny: avatar moves ONLY on a server-confirmed step (no early glide).",
+				MovementRenderMode.UoClientDriven =>
+					"UoClientDriven: instant prediction; server FOLLOWS per-step commits (UO-style).",
+				_ =>
+					"CosmeticLead (B): confirmed steps drive sim; render glides ahead by the cosmetic lead.",
+			};
+		}
+	}
+
+	// UO2: register a tuning-field ROW (the HBox built by AddTuningField, i.e. the LineEdit's parent) as model-B
+	// only, so ApplyRenderModeContext can hide the whole label+input row outside CosmeticLead.
+	private void RegisterModelBOnlyRow(LineEdit field)
+	{
+		if (field.GetParent() is Control row)
+		{
+			_modelBOnlyRows.Add(row);
+		}
 	}
 
 	// S102 F6 live toggle ("Snap on release (model B)"). Route the flag to the client (and the active cosmetic
@@ -1514,10 +1576,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		_movementPanelVisible = !_movementPanelVisible;
-		if (_movementPanelVisible && !_movementFieldsSeeded)
+		if (_movementPanelVisible)
 		{
-			SeedMovementFields();
-			_movementFieldsSeeded = true;
+			if (!_movementFieldsSeeded)
+			{
+				SeedMovementFields();
+				_movementFieldsSeeded = true;
+			}
+
+			// UO2: re-evaluate the contextual panel (caption + model-B row visibility) on EVERY open, so it always
+			// matches the live render mode even on re-opens (seeding only runs once). UI-only; no state change.
+			ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.CosmeticLead);
 		}
 
 		_movementPanel.Visible = _movementPanelVisible;
