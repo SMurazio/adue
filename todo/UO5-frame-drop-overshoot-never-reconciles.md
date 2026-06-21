@@ -1,6 +1,46 @@
-# UO5 — lag-spike/frame-drop teleports the prediction forward and it NEVER reconciles (UO mode)
+# UO5 — prediction teleports forward and NEVER reconciles (UO mode) — frame-drop AND packet-loss
 
-PRODUCTION on `review/tile-step-todo`. **HIGH priority — correctness/feel bug, reproduces easily at 50ms.**
+PRODUCTION on `main`. **PRIORITY S — correctness/feel bug. Reproduces LIVE under 100ms latency + 10% packet
+loss (user, 2026-06-21, forced via clumsy): the avatar "speeds up + desyncs", predicted (green) tile strands
+far ahead of confirmed (magenta), static, and DOES NOT RECOVER.** Originally found via frame-drop; the same
+uncapped-hold root is now confirmed loss-triggered.
+
+## UPDATE 2026-06-21 — NET1–3 shipped; bug STILL reproduces under loss; fix narrowed to the bounded hold
+The movement loss-robustness milestone shipped to `main`: **NET1** (held-intent input → redundant-unreliable),
+**NET2** (UO commit stream → redundant-unreliable), **NET3** (authored-tick command processing — the server
+applies a recovered commit at its AUTHORED tick so the cooldown gate ACCEPTS it instead of rejecting). NET3's
+headless loss-invariant passes. BUT the live desync under 100ms + 10% loss is UNCHANGED, because:
+
+- NET3 only helps commits that ARE **recovered** (delivered in the redundant window, then accepted). It does
+  **nothing** for confirmation that is genuinely **lost on the wire** — a commit never delivered, OR a
+  server→client snapshot/`RecipientStepSeq` confirm that drops (the confirm path has had NO loss-hardening).
+- When confirmation stalls for ANY reason, **UO3's still-uncapped hold re-projects the full
+  `PredictedStepSeq - serverStepSeq` lead forward forever** → the overshoot never drains → permanent desync.
+  This is the SAME root as the frame-drop case below; loss is just another way to stall confirmation.
+
+So the remaining fix is **candidate #1 only — the cadence/latency-bounded hold** (see "Fix" below): hold up to
+~`ceil(RTT/cadence) + margin` tiles of in-flight and converge anything beyond it toward the server. This
+converges the overshoot **regardless of WHY confirmation stalled** (lost commit, lost confirm, OR rejected
+burst), so it is robust to packet loss by construction. Do NOT add more redundancy/retransmit — the hold is
+the bug.
+
+### Mandate for this attempt (disciplined, given 3 prior misses — UO5-stall-counter, NET2, NET3-live)
+1. **REPRODUCE HEADLESS FIRST**, in the TEST1 timing-faithful harness
+   (`tests/Mmo.Client.Core.Tests/TimingFaithfulReconcileHarnessTests.cs`): a new loss-invariant at **100ms
+   latency + 10% drop**, dropping packets in **BOTH** directions (client→server commits that fall outside the
+   recovery window so they're never confirmed, AND server→client snapshots/confirms). Assert the
+   predicted-vs-server step-seq **stays permanently split** (the bug) on the current code. **If it cannot be
+   reproduced headlessly → STOP and report** — that means the mechanism is the confirm path or something the
+   harness still doesn't model, and we instrument live instead of guessing a fix.
+2. **Then fix** with the bounded hold, red→green against that loss-invariant (the split must CONVERGE within a
+   bounded time).
+3. **Regression guard (the exact thing the reverted stall-counter broke):** the steady-walk invariant
+   (normal 50–100ms walk, no loss) MUST stay green — **no caps, no snaps** on a legit RTT lead. Verify a live
+   100ms+10% run converges AND a live 100ms no-loss walk never snaps.
+
+---
+
+## Original frame-drop write-up (root mechanism — still accurate)
 User: a lag spike / frame drop made the avatar "teleport way forward and never reconciled" — the predicted
 (green) tile sits far ahead of the confirmed (magenta) tile, static, permanently.
 
