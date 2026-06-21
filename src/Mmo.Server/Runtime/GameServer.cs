@@ -1360,7 +1360,7 @@ public sealed class GameServer
 
         // Interest radius feeds the precomputed AOI query box; recompute it so a larger live radius still
         // gathers the full candidate superset (a smaller one just queries a tighter box). Cheap + only on
-        // apply, never per tick. Step cooldown needs no recompute — StepCooldownTicks derives it on read.
+        // apply, never per tick. (The base step cooldown is no longer a live knob — SPEED1 pinned it.)
         if (key == ServerTuningRegistry.InterestRadiusKey)
         {
             _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(_tuning.InterestRadius);

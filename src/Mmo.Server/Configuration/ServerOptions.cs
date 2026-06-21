@@ -58,7 +58,7 @@ public sealed record ServerOptions(
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
             ReadInt("MMO_WORLD_WIDTH_TILES", 128),
             ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
-            ReadInt("MMO_STEP_COOLDOWN_MS", 140),
+            ReadInt("MMO_STEP_COOLDOWN_MS", 150),
             ReadInt("MMO_PERSISTENCE_CHECKPOINT_SECONDS", 15),
             ReadFloat("MMO_INTEREST_RADIUS", 30f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),

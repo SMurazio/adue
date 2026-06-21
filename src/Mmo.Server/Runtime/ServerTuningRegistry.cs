@@ -8,16 +8,15 @@ namespace Mmo.Server.Runtime;
 // entry here + one field on ServerTuning + (optionally) one client field — that is the whole extension
 // surface. Unknown keys are rejected here (TryApply returns false) and ignored+logged by the handler.
 //
+// SPEED1 (2026-06-21): the global base step cooldown is now PINNED — it is no longer a live knob (the
+// move.stepCooldownMs key was removed) so an admin can't retune everyone's base walk speed mid-run. The
+// base is a constant 150 ms (3 ticks at 20 Hz); per-entity /speed (SpeedMultiplier) still scales off it.
+//
 // Bounds mirror the startup ServerOptions.Validate() bounds so live values can never reach a state the
-// server would have refused to boot with: step cooldown [50, 5000] ms (also the per-entity effective
-// clamp), interest radius (0, MaxInterestRadius]. No persistence — see ServerTuning.
+// server would have refused to boot with: interest radius (0, MaxInterestRadius]. No persistence — see ServerTuning.
 public static class ServerTuningRegistry
 {
-    public const string StepCooldownMsKey = "move.stepCooldownMs";
     public const string InterestRadiusKey = "aoi.interestRadius";
-
-    private const int MinStepCooldownMs = 50;
-    private const int MaxStepCooldownMs = 5000;
 
     // Sane upper bound for a live AOI radius. The startup options only require > 0; here a live max guards
     // against an admin typo turning every AOI query into a near-world scan and stalling the tick loop.
@@ -36,13 +35,6 @@ public static class ServerTuningRegistry
 
         switch (key)
         {
-            case StepCooldownMsKey:
-            {
-                var clamped = Math.Clamp((int)Math.Round(value, MidpointRounding.AwayFromZero), MinStepCooldownMs, MaxStepCooldownMs);
-                tuning.StepCooldownMs = clamped;
-                applied = clamped;
-                return true;
-            }
             case InterestRadiusKey:
             {
                 var clamped = Math.Clamp((float)value, MinInterestRadius, MaxInterestRadius);
@@ -55,7 +47,7 @@ public static class ServerTuningRegistry
         }
     }
 
-    public static bool IsKnownKey(string key) => key is StepCooldownMsKey or InterestRadiusKey;
+    public static bool IsKnownKey(string key) => key is InterestRadiusKey;
 
     public static string Format(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 }

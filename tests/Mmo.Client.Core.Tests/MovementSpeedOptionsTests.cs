@@ -9,7 +9,7 @@ namespace Mmo.Client.Core.Tests;
 // labelling directly.
 public sealed class MovementSpeedOptionsTests
 {
-    private const int DefaultBaseStepMs = 140; // ServerOptions default.
+    private const int DefaultBaseStepMs = 150; // ServerOptions default (SPEED1: pinned constant 150 ms = 3 ticks).
     private const int DefaultTickRate = 20;    // 50 ms tick interval.
 
     [Fact]
@@ -17,7 +17,7 @@ public sealed class MovementSpeedOptionsTests
     {
         var options = MovementSpeedOptions.Build(DefaultBaseStepMs, DefaultTickRate);
 
-        // baseWalkTicks = ceil(140 / 50) = 3, so N=3 is the 1.0x default walk.
+        // baseWalkTicks = ceil(150 / 50) = 3, so N=3 is the 1.0x default walk.
         var walk = options.Single(o => o.IsDefaultWalk);
         Assert.Equal(3, walk.Ticks);
         Assert.Equal(1.0d, walk.Multiplier, 9);

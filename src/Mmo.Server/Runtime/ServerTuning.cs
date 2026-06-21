@@ -23,9 +23,11 @@ public sealed class ServerTuning
         InterestRadius = options.InterestRadius;
     }
 
-    // Global base step cooldown in ms. The step loop derives the per-entity effective cadence from
-    // StepCooldownTicks (below); changing this live changes everyone's base walk speed on the next step.
-    public int StepCooldownMs { get; set; }
+    // Global base step cooldown in ms. PINNED (SPEED1): seeded once from ServerOptions and never changed at
+    // runtime — the old move.stepCooldownMs live knob was removed so the base walk speed is a constant 150 ms
+    // (3 ticks at 20 Hz). The step loop derives the per-entity effective cadence from StepCooldownTicks
+    // (below); per-entity /speed (SpeedMultiplier) still scales off this constant base.
+    public int StepCooldownMs { get; }
 
     // AOI interest radius in tiles. Read each AOI pass (snapshot selection + interact validation).
     public float InterestRadius { get; set; }
