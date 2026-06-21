@@ -7,7 +7,8 @@ namespace Mmo.Server.Tests;
 
 // NET2: the redundant-unreliable StepCommitBatch packet feeds the EXISTING per-step commit path via
 // GameServer.ExtractFreshStepCommits (pure: head + window deltas → fresh commits, ascending, deduped) and
-// ClientSession.TryConsumeCommitSequence (the shared move-seq cursor). These tests pin the two behaviours the
+// ClientSession.TryConsumeCommitSequence (the dedicated COMMIT cursor, NET6 — separate from the intent cursor).
+// These tests pin the two behaviours the
 // task calls out: (1) dedup — each commit seq applies at most once, in order, across redundant packets;
 // (2) a "dropped head" batch's commit is recovered from a LATER batch's window. The cooldown-gated stepping
 // (TryCommitStep) is untouched and not exercised here — only the delivery/dedup half (Stage 4 is authored-tick
@@ -15,12 +16,13 @@ namespace Mmo.Server.Tests;
 public sealed class StepCommitBatchIngestTests
 {
     // Mirrors HandleStepCommitBatch's cursor half: extract fresh commits (relative to the session's current
-    // LastMoveSeq) and consume each through TryConsumeCommitSequence (the gate HandleStepCommit checks before
-    // TryCommitStep). Returns the seqs that were actually consumed (fresh, in order).
+    // COMMIT cursor, NET6 — LastCommitSeq, not the intent cursor LastMoveSeq) and consume each through
+    // TryConsumeCommitSequence (the gate HandleStepCommit checks before TryCommitStep). Returns the seqs that
+    // were actually consumed (fresh, in order).
     private static List<uint> Consume(ClientSession session, StepCommitBatchMessage batch, uint serverTick)
     {
         var consumed = new List<uint>();
-        foreach (var (seq, _, _) in GameServer.ExtractFreshStepCommits(batch, session.LastMoveSeq))
+        foreach (var (seq, _, _) in GameServer.ExtractFreshStepCommits(batch, session.LastCommitSeq))
         {
             if (session.TryConsumeCommitSequence(seq, serverTick))
             {
@@ -125,7 +127,7 @@ public sealed class StepCommitBatchIngestTests
             new StepCommitWindowEntry(1, 3, Direction8.N), // seq 1 @ tick 57
         ]);
         Assert.Equal(new uint[] { 1, 2 }, Consume(session, a, serverTick: 10));
-        Assert.Equal(2u, session.LastMoveSeq);
+        Assert.Equal(2u, session.LastCommitSeq);
 
         // Batch B repeats 1 and 2 (redundant) and adds head 3. Only 3 is fresh — the repeats are deduped, so
         // the cooldown-gated commit fires at most once per step (no batched re-application → no speed-up).
@@ -135,7 +137,7 @@ public sealed class StepCommitBatchIngestTests
             new StepCommitWindowEntry(2, 6, Direction8.N), // seq 1 — already seen
         ]);
         Assert.Equal(new uint[] { 3 }, Consume(session, b, serverTick: 11));
-        Assert.Equal(3u, session.LastMoveSeq);
+        Assert.Equal(3u, session.LastCommitSeq);
     }
 
     [Fact]
@@ -145,7 +147,7 @@ public sealed class StepCommitBatchIngestTests
 
         // Establish commit seq 1.
         Consume(session, new StepCommitBatchMessage(1, 30, Direction8.E, []), serverTick: 10);
-        Assert.Equal(1u, session.LastMoveSeq);
+        Assert.Equal(1u, session.LastCommitSeq);
 
         // The batch whose HEAD is seq 2 is DROPPED on the wire — never delivered. A LATER batch (head seq 3)
         // still carries seq 2 in its window. Both 2 and 3 are fresh; consuming oldest-first re-creates the
@@ -158,6 +160,6 @@ public sealed class StepCommitBatchIngestTests
         var consumed = Consume(session, recovery, serverTick: 12);
 
         Assert.Equal(new uint[] { 2, 3 }, consumed); // the dropped head (2) recovered from the window
-        Assert.Equal(3u, session.LastMoveSeq);
+        Assert.Equal(3u, session.LastCommitSeq);
     }
 }

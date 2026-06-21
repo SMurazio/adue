@@ -38,7 +38,23 @@ public sealed class EntityRenderer
         {
             var state = renderStates[i];
             _seen.Add(state.NetworkId);
-            if (!_active.TryGetValue(state.NetworkId, out var visual))
+            if (_active.TryGetValue(state.NetworkId, out var visual))
+            {
+                // Self-heal a recycled NetworkId. Under packet loss a despawn can be dropped, leaving a stale
+                // visual parked under a NetworkId the server then RECYCLES (the NetworkIdPool reuses freed ids)
+                // for a DIFFERENT entity — e.g. a resource landing on a departed player's id would otherwise
+                // keep showing the player's cat. If the archetype the entity now needs no longer matches the
+                // parked visual, release it and acquire the right one. A stable entity yields the same archetype
+                // every frame, so this never rebuilds in normal operation (only on a genuine id reuse / toggle).
+                var want = EntityVisualFactory.ChooseArchetype(state, _tuning.DebugFacingBox, _tuning.DebugCatoSprite);
+                if (visual.Archetype != want)
+                {
+                    ReleaseVisual(state.NetworkId);
+                    visual = AcquireVisual(state);
+                    _active[state.NetworkId] = visual;
+                }
+            }
+            else
             {
                 visual = AcquireVisual(state);
                 _active[state.NetworkId] = visual;

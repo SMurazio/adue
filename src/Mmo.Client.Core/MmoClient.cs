@@ -86,6 +86,21 @@ public sealed class MmoClient : IDisposable
     // own accepted tile moves). Stashed only — the predictor's reconcile is UNCHANGED this stage; S77 will
     // match this against the predicted step to fix the reconcile rubberband.
     private uint _lastRecipientStepSeq;
+
+    // DIAG1/NET5: snapshots-received-per-second rate (the `recv/s` confirm-channel-alive read-out). The original
+    // DIAG1 metric used a tumbling 1-second window that ONLY republished on the next arrival after the window
+    // elapsed: when arrivals slowed or stopped (idle, or a loss burst) the window never closed and the read-out
+    // froze at a STALE value — misreading the same number (~1.0) at both 1% and 10% loss because what it actually
+    // reported was the last full window, not the current rate. NET5 replaces it with a true TRAILING-WINDOW rate:
+    // a ring of the last N arrival timestamps, and the rate is COMPUTED AT READ TIME (MovementDebug) as the count
+    // of arrivals within the trailing one second up to the current clock — so it falls toward 0 the instant
+    // arrivals stop and reads the real ~20/s under healthy delivery, regardless of when the last one landed.
+    // Measurement only — fed by NoteSnapshotReceived on every applied snapshot; never influences movement.
+    private const int SnapshotRecvTimestampCapacity = 64; // > one second of 20 Hz arrivals, with headroom
+    private readonly TimeSpan[] _snapshotRecvTimestamps = new TimeSpan[SnapshotRecvTimestampCapacity];
+    private int _snapshotRecvTimestampCount;
+    private int _snapshotRecvTimestampHead; // index of the oldest entry
+
     private uint _moveSequence;
     // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
     // current state PLUS a window of these prior inputs (as deltas) so a dropped packet's state change is
@@ -107,6 +122,31 @@ public sealed class MmoClient : IDisposable
         = new (uint, uint, Direction8)[StepCommitRingCapacity];
     private int _stepCommitRingCount;
     private int _stepCommitRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
+
+    // NET5: ack-driven re-send of unacked commits (tail-loss recovery). The redundant StepCommitBatch window rides
+    // SUBSEQUENT packets, so a mid-stream loss recovers within ~1 packet — but the LAST commit of a movement burst
+    // has no following packet to re-carry it. If it drops (and input has stopped) the server's accepted step-seq
+    // (`conf`) stays permanently behind the prediction (`pred`): a stuck `lead = pred - conf`. The fix: while
+    // lead > 0 AND the ack is OVERDUE (conf has not advanced for a grace > ~RTT + one cadence), re-ship the current
+    // ring (the same SendStepCommitBatch — deduped + applied at the authored tick by the server) at ~1 batch /
+    // cadence, INCLUDING after movement stops, until conf catches pred and lead drains to 0 with NO snap. In clean
+    // play conf advances every RTT, so the grace never elapses and NOT ONE extra packet is sent — the re-send is
+    // "the ack is overdue", never "there is something in flight". The bound (one batch per cadence, only while the
+    // ack is stalled) keeps it cheap and false-trip-proof.
+    //
+    // The fallback (RESYNC1): if the re-send has fired ResendFallbackCount times and conf STILL has not advanced
+    // (the commit is genuinely undeliverable — heavy/black loss), ForceResync converges the prediction onto the
+    // server. The K/T are chosen so a clean <=3% tail drop heals via re-send long before this trips.
+    private const double ResendStallGraceMs = 350d;        // ack overdue: > RTT(~200) + one cadence(~150)
+    private const int ResendFallbackCount = 6;             // K: re-sent this many times, conf still stuck
+    private const double ResendFallbackStuckMs = 1500d;    // T: conf stuck at least this long => ForceResync
+    private uint _resendLastConf;                          // last conf seen (detect ack progress)
+    private bool _hasResendLastConf;
+    private TimeSpan _resendConfStalledSince;              // when conf last advanced (the stall clock)
+    private TimeSpan _resendLastSentAt;                    // last re-send wall time (the cadence bound)
+    private bool _hasResendLastSentAt;
+    private int _resendsSinceConfAdvance;                  // re-sends since conf last moved (K counter)
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -220,7 +260,59 @@ public sealed class MmoClient : IDisposable
     // predictor this stage.
     public uint LastRecipientStepSeq => _lastRecipientStepSeq;
 
-    public MovementDebugSnapshot MovementDebug => _movementTrace.Snapshot;
+    // DIAG1: the live movement-debug read-out augmented with the local-player recovery-chain numbers. The base
+    // snapshot (sent/confirmed tile, queue depth, cadence, latency, render) comes from the trace; we overlay the
+    // predictor's live pred/conf/lead + reconcile-outcome counters and the snapshot `recv/s` rate so the F3 HUD
+    // can show which of the three recovery links is stuck under loss. All overlay fields are read-outs — reading
+    // them changes nothing. When no predictor is attached (pre-spawn / interpolation-only mode) the predictor
+    // fields stay 0 and only recv/s is meaningful.
+    public MovementDebugSnapshot MovementDebug
+    {
+        get
+        {
+            var snapshot = _movementTrace.Snapshot with { SnapshotsPerSecond = SnapshotsPerSecond };
+            if (_predictor is { } predictor)
+            {
+                var pred = predictor.PredictedStepSeq;
+                var conf = predictor.LastReconciledStepSeq;
+                snapshot = snapshot with
+                {
+                    PredictedStepSeq = pred,
+                    ConfirmedStepSeq = conf,
+                    LeadSteps = pred > conf ? pred - conf : 0u,
+                    ReconcileMatched = predictor.ReconcileMatched,
+                    ReconcileCorrected = predictor.ReconcileCorrected,
+                    ReconcileSnapped = predictor.ReconcileSnapped,
+                };
+            }
+
+            return snapshot;
+        }
+    }
+
+    // S106: the local-player drivers' live cadences (ms), for tests asserting a live MovementSpeedChanged retunes
+    // BOTH drivers (not just the interpolator). Null when the respective driver isn't attached. The cosmetic
+    // accessor reads the underlying driver directly (NOT EntityState.Cosmetic, which gates on _cosmeticActive) so a
+    // test can assert the cadence is threaded even before the mode activates the cosmetic render.
+    internal double? LocalPredictorCadenceMsForTests => _predictor?.CadenceMs;
+
+    internal double? LocalCosmeticCadenceMsForTests =>
+        LocalNetworkId is { } id && _entities.TryGetValue(id, out var local)
+            ? local.CosmeticCadenceMsForTests
+            : null;
+
+    // DIAG1: zeroes the local predictor's reconcile-outcome tallies (Matched / Corrected / Snapped) so the human
+    // can reset them just before a loss burst and read fresh counts in the F3 read-out. No-op (safe) when no
+    // predictor is attached. Measurement only — touches no prediction/reconcile state.
+    public void ResetReconcileCounters() => _predictor?.ResetReconcileCounters();
+
+    // RESYNC1: manual Force Resync — snaps the local prediction (tile, step-seq, render) onto the last
+    // server-confirmed position and clears any in-flight/banked-but-unconfirmed state so nothing stale replays
+    // forward. The reusable resync primitive the auto-tiers (UO5 tier-2, NET4 tier-3) will call; here it is wired
+    // to the F6 "Force Resync" button and the Alt+R hotkey. USER-TRIGGERED only — it changes nothing unless
+    // called, so the normal Tick/Reconcile movement path is untouched. No-op (safe) when no predictor is attached
+    // or the prediction is already in sync. Pass-through mirrors ResetReconcileCounters (DIAG1).
+    public void ForceResync() => _predictor?.ForceResync();
 
     // Client-side mirror of the owner's private inventory, updated by InventoryUpdate deltas. Read-only
     // view for the renderer; the server stays authoritative (each delta sets the new total).
@@ -338,8 +430,73 @@ public sealed class MmoClient : IDisposable
                 if (emit > 0)
                 {
                     SendStepCommitBatch();
+                    // NET5: a fresh batch just covered this cadence — restart the re-send timer so the tail-recovery
+                    // re-send doesn't pile a second packet on top of it.
+                    _resendLastSentAt = now;
+                    _hasResendLastSentAt = true;
                 }
+
+                // NET5: drive the ack-driven tail-recovery re-send (no-op unless a commit is genuinely stranded).
+                DriveAckDrivenResend(predictor, now, emittedFreshThisPoll: emit > 0);
             }
+        }
+    }
+
+    // NET5: ack-driven re-send of unacked commits (tail-loss recovery) + the bounded ForceResync fallback. Called
+    // every Poll in UoClientDriven mode AFTER the fresh-commit emission. While the prediction LEADS the server's
+    // learned ack (lead = pred - conf > 0) AND that ack is OVERDUE (conf has not advanced for ResendStallGraceMs,
+    // i.e. longer than a normal RTT round-trip), re-ship the current commit ring at most once per cadence — the
+    // existing redundant-unreliable SendStepCommitBatch, which the server dedups (cursor) and applies at the
+    // authored tick, so a re-delivered tail commit just lands and `conf` catches `pred` with NO snap. The re-send
+    // continues INCLUDING after movement stops (the stranded tail's defining case) until lead == 0.
+    //
+    // Clean play sends NOTHING extra: conf advances every RTT, so the stall grace never elapses and the re-send
+    // never fires — it triggers only when an expected ack is genuinely overdue. The fallback: after
+    // ResendFallbackCount re-sends with conf STILL stalled (>= ResendFallbackStuckMs), the commit is
+    // undeliverable; ForceResync (RESYNC1) converges. K/T are tuned so a clean <=3% tail drop heals via re-send
+    // first and never reaches the fallback.
+    private void DriveAckDrivenResend(LocalPlayerPredictor predictor, TimeSpan now, bool emittedFreshThisPoll)
+    {
+        // NET5b: the decision rule lives in ONE pure place (AckDrivenResendPolicy.Decide) that the headless tests
+        // also call. This wrapper just packs the carried _resend* state into the helper's state struct, asks for the
+        // decision, writes the (possibly advanced) state back, and performs the side effects (SendStepCommitBatch /
+        // predictor.ForceResync). Behaviour is identical to the previous inline implementation.
+        var state = new AckResendState
+        {
+            LastConf = _resendLastConf,
+            HasLastConf = _hasResendLastConf,
+            ConfStalledSinceMs = _resendConfStalledSince.TotalMilliseconds,
+            LastSentAtMs = _resendLastSentAt.TotalMilliseconds,
+            HasLastSentAt = _hasResendLastSentAt,
+            ResendsSinceConfAdvance = _resendsSinceConfAdvance,
+        };
+
+        var config = new AckResendConfig(
+            StallGraceMs: ResendStallGraceMs,
+            FallbackCount: ResendFallbackCount,
+            FallbackStuckMs: ResendFallbackStuckMs,
+            CadenceMs: predictor.CadenceMs);
+
+        var decision = AckDrivenResendPolicy.Decide(
+            now.TotalMilliseconds, predictor.PredictedStepSeq, predictor.LastReconciledStepSeq,
+            emittedFreshThisPoll, state, config);
+
+        var next = decision.State;
+        _resendLastConf = next.LastConf;
+        _hasResendLastConf = next.HasLastConf;
+        _resendConfStalledSince = TimeSpan.FromMilliseconds(next.ConfStalledSinceMs);
+        _resendLastSentAt = TimeSpan.FromMilliseconds(next.LastSentAtMs);
+        _hasResendLastSentAt = next.HasLastSentAt;
+        _resendsSinceConfAdvance = next.ResendsSinceConfAdvance;
+
+        if (decision.SendBatch)
+        {
+            SendStepCommitBatch();
+        }
+
+        if (decision.ForceResync)
+        {
+            predictor.ForceResync();
         }
     }
 
@@ -982,6 +1139,53 @@ public sealed class MmoClient : IDisposable
         local?.SetPredictorTickMs(ResolveTickMs());
     }
 
+    // DIAG1/NET5: records one applied-snapshot arrival timestamp into the trailing-window ring (the `recv/s`
+    // read-out source). The rate itself is computed AT READ TIME by SnapshotsPerSecond so it reflects the CURRENT
+    // arrival rate (and decays toward 0 the moment arrivals stop) rather than freezing on a stale tumbling window.
+    // Uses the client wall clock (_currentTime, set each Poll). Pure read-out — it counts confirms but never alters
+    // movement, prediction, or reconcile.
+    private void NoteSnapshotReceived()
+    {
+        if (_snapshotRecvTimestampCount < SnapshotRecvTimestampCapacity)
+        {
+            var slot = (_snapshotRecvTimestampHead + _snapshotRecvTimestampCount) % SnapshotRecvTimestampCapacity;
+            _snapshotRecvTimestamps[slot] = _currentTime;
+            _snapshotRecvTimestampCount++;
+        }
+        else
+        {
+            _snapshotRecvTimestamps[_snapshotRecvTimestampHead] = _currentTime;
+            _snapshotRecvTimestampHead = (_snapshotRecvTimestampHead + 1) % SnapshotRecvTimestampCapacity;
+        }
+    }
+
+    // DIAG1/NET5: the true snapshot arrival rate — the count of applied-snapshot arrivals within the trailing one
+    // second up to the current clock (_currentTime). Computed at read time so it reads the real ~20/s under healthy
+    // delivery and falls toward 0 the instant arrivals stop (no stale tumbling-window freeze). Pure read-out.
+    private double SnapshotsPerSecond
+    {
+        get
+        {
+            if (_snapshotRecvTimestampCount == 0)
+            {
+                return 0d;
+            }
+
+            var windowStart = _currentTime - TimeSpan.FromSeconds(1);
+            var count = 0;
+            for (var i = 0; i < _snapshotRecvTimestampCount; i++)
+            {
+                var slot = (_snapshotRecvTimestampHead + i) % SnapshotRecvTimestampCapacity;
+                if (_snapshotRecvTimestamps[slot] > windowStart)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+    }
+
     private void HandleSnapshot(WorldSnapshotMessage snapshot)
     {
         if (_lastAppliedSnapshotSequence.HasValue && snapshot.SnapshotSequence <= _lastAppliedSnapshotSequence.Value)
@@ -1027,6 +1231,10 @@ public sealed class MmoClient : IDisposable
 
     private void ApplySnapshot(uint serverTick, uint sequence, bool isComplete, IReadOnlyCollection<EntityStateSnapshot> entities)
     {
+        // DIAG1: tally this fully-applied snapshot for the `recv/s` confirm-channel-rate read-out (once per applied
+        // snapshot — a chunked snapshot is assembled before this is reached). Measurement only.
+        NoteSnapshotReceived();
+
         _snapshotVisibleScratch.Clear();
         foreach (var state in entities)
         {
@@ -1524,6 +1732,11 @@ public sealed class MmoClient : IDisposable
         // reconciliation (pending state, accept-clear, reject snap-back) against the active driver.
         public LocalPlayerCosmetic? Cosmetic => _cosmeticActive ? _cosmetic : null;
 
+        // S106: the cosmetic driver's live cadence (ms), or null if the driver isn't attached. Reads the underlying
+        // driver regardless of _cosmeticActive (unlike Cosmetic) so a test can assert SetStepCooldownMs threaded the
+        // new cadence onto it even while the predictor mode is active. Test-only.
+        internal double? CosmeticCadenceMsForTests => _cosmetic?.CadenceMs;
+
         // S89: advances the cosmetic render to now (the early-lead glide). No-op if not attached.
         public void TickCosmetic(TimeSpan now)
         {
@@ -1626,6 +1839,13 @@ public sealed class MmoClient : IDisposable
             // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
             // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
             _predictor?.SetCadence(cadenceMs);
+            // S106: re-sync the parallel cosmetic driver too. A live MovementSpeedChanged (the F6 "Move speed"
+            // dropdown) must retune BOTH local-player drivers, not just the predictor: in CosmeticLead the cosmetic
+            // driver owns the render, and without this its glide/confirm tweens keep running at the OLD cadence after
+            // a speed change — a mid-move desync (the avatar glides at the wrong rate until the next mode/respawn
+            // re-creates the driver). Mirrors _predictor.SetCadence above; no-op when the cosmetic driver isn't
+            // attached. Re-arms the next glide/confirm tween at the new cadence in every mode that rides it.
+            _cosmetic?.SetCadence(cadenceMs);
         }
 
         public ReplicatedEntity ToSnapshot()

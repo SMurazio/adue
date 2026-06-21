@@ -55,7 +55,9 @@ public sealed record MoveInputMessage(
 // into the current step) and, on accept, borrows the next step's cooldown so the average step rate can never
 // exceed the normal cadence (no speedhack). There is no dedicated reply: the RESULT is observed via the normal
 // snapshot stream — the confirmed tile advancing to the requested tile = accepted; staying = rejected. Sent
-// reliable-ordered. Sequence rejects stale requests (seq <= lastMoveSeq), shared with the MoveIntent cursor.
+// reliable-ordered. Sequence rejects stale requests on the server's COMMIT cursor (NET6 — a dedicated commit
+// dedup cursor, separate from the MoveIntent cursor, so an intent seq can't burn an unconfirmed commit). The
+// wire seq is still minted off the client's single shared monotonic counter; only the server bookkeeping splits.
 public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Direction) : IProtocolMessage
 {
     public MessageType Type => MessageType.StepCommitRequest;
@@ -75,7 +77,9 @@ public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Directio
 // eligible schedule to its authored end, and C3 (authored a cadence later) is then ACCEPTED instead of rejected as
 // "too early". Window entries carry BOTH a SeqDelta (HeadSeq - entry.Seq) and a TickDelta (HeadTick - entry.Tick)
 // off the head, so entry seq = HeadSeq - SeqDelta and entry authored tick = HeadTick - TickDelta. A commit has no
-// Moving flag (it is always a step). Sequence shares the MoveIntent/MoveInput cursor.
+// Moving flag (it is always a step). The wire seq is minted off the client's single shared monotonic counter, but
+// the SERVER dedups commits on a dedicated COMMIT cursor (NET6), separate from the MoveIntent/MoveInput cursor, so
+// a higher-numbered intent (e.g. a keyup STOP) can no longer pre-dedup an unconfirmed commit's re-send.
 public readonly record struct StepCommitWindowEntry(byte SeqDelta, uint TickDelta, Direction8 Direction);
 
 public sealed record StepCommitBatchMessage(

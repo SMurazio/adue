@@ -137,6 +137,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// RENDER1: 2-way render-mode selector (CosmeticLead / UoClientDriven) — a cycling button that calls
 	// MmoClient.SetMovementRenderMode.
 	private Button? _renderModeButton;
+	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). ALWAYS shown
+	// (speed is mode-agnostic). Each item carries its multiplier; selecting one sends /speed <mult> live. Populated
+	// once on first open from ServerHello (base cadence + tick rate). _moveSpeedOptions is the parallel option list
+	// (item index -> SpeedOption) so the selection handler can read the multiplier without re-deriving it.
+	private OptionButton? _moveSpeedDropdown;
+	private IReadOnlyList<MovementSpeedOptions.SpeedOption> _moveSpeedOptions = Array.Empty<MovementSpeedOptions.SpeedOption>();
 	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
 	private CheckBox? _snapOnReleaseCheck;
 	// New (S103): model B's commit-step-on-release toggle (MmoClient.SetCommitStepOnRelease) + threshold field
@@ -454,6 +460,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.F6)
 		{
 			ToggleMovementPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// DIAG1: Alt+Shift+R zeroes the local predictor's reconcile-outcome tallies (rec[M/C/S] in the F3
+		// read-out) so the human can reset them just before a loss burst and read fresh counts. A live in-client
+		// control (no restart); ignored while typing in chat. Measurement only. (Alt+R is reserved for RESYNC1's
+		// Force Resync.)
+		if (key.Keycode == Key.R && key.AltPressed && key.ShiftPressed && _chatInput?.HasFocus() != true)
+		{
+			_client?.ResetReconcileCounters();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// RESYNC1: Alt+R (NOT Shift -- Alt+Shift+R above is DIAG1's counter reset) manually forces a resync of
+		// the local prediction onto the last server-confirmed position, clearing any stranded in-flight lead
+		// under loss. The same reusable predictor primitive as the F6 "Force Resync" button. A live in-client
+		// control (no restart); ignored while typing in chat.
+		if (key.Keycode == Key.R && key.AltPressed && !key.ShiftPressed && _chatInput?.HasFocus() != true)
+		{
+			_client?.ForceResync();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -888,8 +916,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// RENDER1: the LOCAL player's render-model control is the 2-way render-mode button on the F6 movement panel
-		// (CosmeticLead / UoClientDriven).
+		// RENDER1/ICE1: the LOCAL player's render-mode control USED to live on the F6 movement panel (2-way
+		// CosmeticLead / UoClientDriven button); it is now ICED — the selector isn't built and the client stays in
+		// UoClientDriven. See BuildMovementPanel for the iced note. (Code retained for later un-icing.)
 
 		// S107 HUD scaffold — live debug control (no Apply, no restart, no launch flag, per the live-toggle rule).
 		// Each press cycles the STUBBED HudState (health/resource/portrait/cooldowns) through demo presets so the
@@ -929,26 +958,52 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		note.Text = "— client-local (instant) · speed lives in F4 —";
 		rows.AddChild(note);
 
-		// RENDER1: 2-way render-mode cycling button. Cycles CosmeticLead <-> UoClientDriven on each press, calling
-		// MmoClient.SetMovementRenderMode. The label always shows the ACTIVE mode (client boots into UoClientDriven).
+		// ICE1 (2026-06-21): the render-mode SELECTOR is iced — UoClientDriven is the supported movement mode, and the
+		// other render modes (CosmeticLead, ...) are unreachable from the UI but KEPT in the codebase for later. We do
+		// NOT build the cycling button (so the client stays in its UoClientDriven default and cannot switch); the
+		// non-UO code path — the MovementRenderMode enum values, MmoClient.SetMovementRenderMode, the LocalPlayerCosmetic
+		// driver, the cadence plumbing, plus OnRenderModeCyclePressed / UpdateRenderModeButtonText / the model-B-only and
+		// predictor-only contextual rows below — is all retained, so un-icing later is just re-exposing this control.
+		// In place of the selector we show a disabled, self-documenting note so the panel reads cleanly.
 		var renderModeRow = new HBoxContainer { Name = "Row_RenderMode" };
 		renderModeRow.AddThemeConstantOverride("separation", 8);
 		var renderModeCaption = CreateOverlayLabel("Cap_RenderMode", 13);
 		renderModeCaption.Text = "Render mode";
 		renderModeCaption.CustomMinimumSize = new Vector2(170, 0);
 		renderModeRow.AddChild(renderModeCaption);
-		_renderModeButton = new Button { Name = "RenderModeButton", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		_renderModeButton.AddThemeFontSizeOverride("font_size", 13);
-		_renderModeButton.Pressed += OnRenderModeCyclePressed;
-		renderModeRow.AddChild(_renderModeButton);
+		var renderModeIced = CreateOverlayLabel("RenderModeIced", 13);
+		renderModeIced.Text = "UO only (others iced)";
+		renderModeIced.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+		renderModeRow.AddChild(renderModeIced);
 		rows.AddChild(renderModeRow);
+		// _renderModeButton intentionally left null (no selector built) — UpdateRenderModeButtonText short-circuits on
+		// null and is a no-op while iced; ApplyRenderModeContext is still driven on panel open (ToggleMovementPanel) so
+		// the model-B-only rows stay hidden in the active UoClientDriven mode.
 
-		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting (updated live on
-		// every render-mode cycle and on panel open via ApplyRenderModeContext / UpdateRenderModeButtonText).
+		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting. While iced it always
+		// reflects UoClientDriven (the only reachable mode). Written by ApplyRenderModeContext on panel open.
 		_renderModeCaption = CreateOverlayLabel("RenderModeCaption", 11);
 		rows.AddChild(_renderModeCaption);
 
-		UpdateRenderModeButtonText();
+		// Drive the contextual caption + row visibility once for the active (UoClientDriven) mode. (Calls
+		// ApplyRenderModeContext via the null-button short-circuit path; harmless while iced.)
+		ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.UoClientDriven);
+
+		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
+		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
+		// live via /speed <multiplier> (the existing per-entity path), NOT the F4 global move.stepCooldownMs. The
+		// items are populated on first panel open (SeedMovementFields) from ServerHello's base cadence + tick rate.
+		var speedRow = new HBoxContainer { Name = "Row_MoveSpeed" };
+		speedRow.AddThemeConstantOverride("separation", 8);
+		var speedCaption = CreateOverlayLabel("Cap_MoveSpeed", 13);
+		speedCaption.Text = "Move speed";
+		speedCaption.CustomMinimumSize = new Vector2(170, 0);
+		speedRow.AddChild(speedCaption);
+		_moveSpeedDropdown = new OptionButton { Name = "MoveSpeedDropdown", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		_moveSpeedDropdown.AddThemeFontSizeOverride("font_size", 13);
+		_moveSpeedDropdown.ItemSelected += OnMoveSpeedSelected;
+		speedRow.AddChild(_moveSpeedDropdown);
+		rows.AddChild(speedRow);
 
 		// Moved off F5 — applied on Apply/Enter:
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
@@ -1019,6 +1074,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_stopOnReversalCheck = stopOnReversal;
 		_predictorOnlyRows.Add(stopOnReversal); // UO4: predictor-modes only.
 
+		// RESYNC1: manual Force Resync button. Calls MmoClient.ForceResync() -> LocalPlayerPredictor.ForceResync(),
+		// which hard-snaps the local prediction (tile, step-seq, render) onto the last server-confirmed position and
+		// clears any stranded in-flight lead. USER-TRIGGERED escape hatch for a loss-induced desync; the same primitive
+		// as the Alt+R hotkey, and the one UO5/NET4 auto-tiers will call. Live, no restart; works in every render mode
+		// (in cosmetic mode it is a harmless snap-to-server).
+		var forceResync = new Button { Name = "ForceResync", Text = "Force Resync" };
+		forceResync.AddThemeFontSizeOverride("font_size", 14);
+		forceResync.Pressed += () => _client?.ForceResync();
+		rows.AddChild(forceResync);
+
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnMovementApplyPressed;
@@ -1037,6 +1102,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
 	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
+	// ICE1: retained for later un-icing but currently UNWIRED — the F6 selector button isn't built, so nothing calls
+	// this. Re-expose it by rebuilding the render-mode button row in BuildMovementPanel and re-wiring Pressed here.
 	private void OnRenderModeCyclePressed()
 	{
 		if (_client is null)
@@ -1102,6 +1169,64 @@ public partial class MmoClientRoot : Node3D, IControlHost
 					"UO (client-driven — instant, server follows your steps): instant prediction; the server FOLLOWS your per-step commits.",
 			};
 		}
+	}
+
+	// S106: (re)populate the "Move speed" dropdown from ServerHello's base cadence + tick rate, and preselect the
+	// default walk (1.0x). Built lazily on first panel open (ServerHello has landed by login, so the base cadence is
+	// known). The item index maps 1:1 to _moveSpeedOptions so OnMoveSpeedSelected reads the multiplier directly.
+	// SetItemMetadata is avoided (the parallel list is simpler + test-mirrored by MovementSpeedOptions).
+	private void PopulateMoveSpeedDropdown()
+	{
+		if (_moveSpeedDropdown is null)
+		{
+			return;
+		}
+
+		var baseStepMs = _client?.Server?.StepCooldownMs ?? 140;
+		var tickRate = _client?.Server?.TickRate ?? 20;
+		_moveSpeedOptions = MovementSpeedOptions.Build(baseStepMs, tickRate);
+
+		_moveSpeedDropdown.Clear();
+		var selectIndex = 0;
+		for (var i = 0; i < _moveSpeedOptions.Count; i++)
+		{
+			var option = _moveSpeedOptions[i];
+			_moveSpeedDropdown.AddItem(option.Label, i);
+			if (option.IsDefaultWalk)
+			{
+				selectIndex = i;
+			}
+		}
+
+		if (_moveSpeedOptions.Count > 0)
+		{
+			// Preselect the default walk WITHOUT firing ItemSelected (we don't want to send a /speed on open — the
+			// player is already at walk; selecting reflects the live state, it doesn't change it).
+			_moveSpeedDropdown.Select(selectIndex);
+		}
+	}
+
+	// S106: a speed item was picked — set the LOCAL player's per-entity speed live by sending /speed <multiplier>
+	// (the existing chat-command path, like other dev commands). Admin-gated to match the rest of F6 (the server
+	// also admin-gates /speed, so a non-admin send is a server-side no-op; we gate client-side too for clarity). The
+	// server recomputes the effective cadence and replies with MovementSpeedChanged, which retunes BOTH local-player
+	// drivers (predictor + cosmetic) via EntityState.SetStepCooldownMs — so the avatar's glide tracks the new
+	// cadence in every render mode, including a mid-move switch.
+	private void OnMoveSpeedSelected(long index)
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		if (index < 0 || index >= _moveSpeedOptions.Count)
+		{
+			return;
+		}
+
+		var option = _moveSpeedOptions[(int)index];
+		_client.SendChat($"/speed {MovementSpeedOptions.FormatSpeedCommandArgument(option.Multiplier)}");
+		ShowInteractFeedback($"Move speed: {option.Label}");
 	}
 
 	// UO2: register a tuning-field ROW (the HBox built by AddTuningField, i.e. the LineEdit's parent) as model-B
@@ -1470,9 +1595,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				var server = _client.Server is null
 					? "server: pending"
 					: $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
-				var movementDebug = _client.DebugMovementEnabled
-					? "\n" + FormatMovementDebug(_client.MovementDebug)
-					: "";
+				var md = _client.MovementDebug;
+				// DIAG1: the recovery-chain read-out is ALWAYS shown under the F3 debug HUD (a live in-client
+				// toggle, no restart, no env var) so the human can read pred/conf/lead/recv/s + reconcile
+				// outcomes during a loss burst. The detailed MOVE trace line stays gated behind the (env)
+				// console-trace flag.
+				var movementDebug = "\n" + FormatRecoveryDiag(md);
+				if (_client.DebugMovementEnabled)
+				{
+					movementDebug += "\n" + FormatMovementDebug(md);
+				}
+
 				SetTextIfChanged(_statusLabel,
 					$"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
 					$"{server}\n" +
@@ -1829,6 +1962,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
 		// New (S102).
 		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
+		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
+		// default walk. Done here (first open) since ServerHello has landed by login.
+		PopulateMoveSpeedDropdown();
 		UpdateRenderModeButtonText();
 		_snapOnReleaseCheck?.SetPressedNoSignal(_client?.SnapOnRelease ?? true);
 		// S103: seed the commit-step toggle + threshold field from the live client values.
@@ -2802,6 +2938,24 @@ void fragment() {
 		var confirmedTile = debug.LastConfirmedTile?.ToString() ?? "-";
 		var render = $"{debug.RenderPosition.X.ToString("0.###", CultureInfo.InvariantCulture)},{debug.RenderPosition.Y.ToString("0.###", CultureInfo.InvariantCulture)}";
 		return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
+	}
+
+	// DIAG1: the 3-link recovery-chain read-out for the LOCAL player, refreshed every overlay tick (~10 Hz).
+	//   pred  = the predictor's accepted-step count (the snappy local head).
+	//   conf  = the last RecipientStepSeq the client has LEARNED the server accepted.
+	//   lead  = pred - conf, the in-flight steps that must DRAIN for the prediction to recover. A lead that never
+	//           returns toward 0 under loss is the permanent strand DIAG1 is hunting.
+	//   recv/s= snapshots applied per second (is the server->client confirm channel alive?).
+	//   rec   = reconcile outcomes since the last reset (Matched / Corrected / Snapped). Mostly-Matched = the lead
+	//           drained via benign confirms; climbing Corrected/Snapped = the server's confirm is diverging from
+	//           the prediction (forced re-base). Reset with Alt+Shift+R (ResetReconcileCounters).
+	// Pair this with the server-side trace (srvSeq / recvCommits / rejects, ServerMovementTrace mmo_trace
+	// event=commit_counters) to localise the stuck link per docs/movement-loss-degradation-tiers.md.
+	private static string FormatRecoveryDiag(MovementDebugSnapshot d)
+	{
+		return $"DIAG pred={d.PredictedStepSeq} conf={d.ConfirmedStepSeq} lead={d.LeadSteps} " +
+			$"recv/s={d.SnapshotsPerSecond:0.0} " +
+			$"rec[M/C/S]={d.ReconcileMatched}/{d.ReconcileCorrected}/{d.ReconcileSnapped}";
 	}
 
 	private void AppendSectionRow()

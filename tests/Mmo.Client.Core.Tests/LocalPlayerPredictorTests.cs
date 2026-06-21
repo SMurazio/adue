@@ -1382,4 +1382,116 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(new TileCoord(2, 0), predictor.PredictedTile);
         Assert.Equal(2u, predictor.PredictedStepSeq);
     }
+
+    // ---- DIAG1: reconcile-outcome counters + conf/lead read-outs (measurement only) --------------------
+
+    [Fact]
+    public void Diag1_ReconcileCounters_TallyEachOutcome_AndExposeConfLead()
+    {
+        // The DIAG1 read-out counts each reconcile outcome since reset and exposes the server-confirmed step-seq
+        // (conf) + the in-flight lead. A benign trailing confirm is Matched; a genuine divergence is Corrected; a
+        // teleport-sized jump is Snapped. The counters must tally exactly one per Reconcile call, and conf/lead
+        // must track the last confirm. These are pure read-outs — they do not change any outcome above.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+
+        Assert.Equal(0u, predictor.ReconcileMatched);
+        Assert.Equal(0u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+
+        // Benign trailing confirm (seq 1 @ (1,0), still moving) — the prediction was valid and ahead: Matched.
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Matched,
+            predictor.Reconcile(new TileCoord(1, 0), 1u, TimeSpan.FromMilliseconds(160)));
+        Assert.Equal(1u, predictor.ReconcileMatched);
+        // conf = the confirmed step-seq just reconciled; pred = 2, so lead = 1 (one in-flight step).
+        Assert.Equal(1u, predictor.LastReconciledStepSeq);
+        Assert.Equal(2u, predictor.PredictedStepSeq);
+
+        // Release, then a genuine divergence at seq 2 (server settled at (1,0), not the predicted (2,0)): Corrected.
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(165));
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Corrected,
+            predictor.Reconcile(new TileCoord(1, 0), 2u, TimeSpan.FromMilliseconds(200)));
+        Assert.Equal(1u, predictor.ReconcileMatched);
+        Assert.Equal(1u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+        Assert.Equal(2u, predictor.LastReconciledStepSeq);
+    }
+
+    [Fact]
+    public void Diag1_TeleportConfirm_CountsSnapped_AndResetZeroesTallies()
+    {
+        // A teleport-sized confirm snaps and bumps the Snapped tally; ResetReconcileCounters zeroes all three so the
+        // human can reset just before a loss burst. The reset must NOT touch the prediction (pred/conf unchanged).
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.SetIntent(false, Direction8.E, TimeSpan.FromMilliseconds(10));
+
+        Assert.Equal(
+            LocalPlayerPredictor.ReconcileOutcome.Snapped,
+            predictor.Reconcile(new TileCoord(40, 40), 1u, TimeSpan.FromMilliseconds(20)));
+        Assert.Equal(1u, predictor.ReconcileSnapped);
+
+        var predBefore = predictor.PredictedStepSeq;
+        var confBefore = predictor.LastReconciledStepSeq;
+        predictor.ResetReconcileCounters();
+        Assert.Equal(0u, predictor.ReconcileMatched);
+        Assert.Equal(0u, predictor.ReconcileCorrected);
+        Assert.Equal(0u, predictor.ReconcileSnapped);
+        // Reset is counters-only: the prediction state is untouched.
+        Assert.Equal(predBefore, predictor.PredictedStepSeq);
+        Assert.Equal(confBefore, predictor.LastReconciledStepSeq);
+    }
+
+    // ---- RESYNC1: manual Force Resync primitive ----------------------------------------------------
+
+    [Fact]
+    public void Resync1_ForceResync_SnapsPredictionOntoLastConfirmed_AndIsIdempotent()
+    {
+        // Drive the predictor AHEAD of the server (the loss-induced strand the manual resync exists to clear):
+        // step E several tiles while the server only confirms an OLDER, LOWER tile/seq. ForceResync must snap the
+        // predicted tile + step-seq onto the last server-confirmed (tile, seq) Reconcile anchored on, hard-snap the
+        // render onto it, and be a stable no-op when called again.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        // Predict three E steps -> (3,0), seq 3, with the key still held.
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+
+        // A lagging confirm: the server has only acknowledged tile (1,0) at seq 1. Reconcile re-anchors there and
+        // re-projects the in-flight steps forward, so the prediction stays AHEAD of the confirmed tile (the
+        // desync). This is the (tile, seq) the manual resync must snap back onto.
+        var confirmedTile = new TileCoord(1, 0);
+        const uint confirmedSeq = 1u;
+        predictor.Reconcile(confirmedTile, confirmedSeq, TimeSpan.FromMilliseconds(310));
+        Assert.Equal(confirmedSeq, predictor.LastReconciledStepSeq);
+        // Sanity: the prediction is genuinely desynced (still leading the confirmed tile/seq).
+        Assert.True(predictor.PredictedStepSeq > confirmedSeq);
+        Assert.NotEqual(confirmedTile, predictor.PredictedTile);
+
+        // Force the resync: predicted tile + seq snap exactly onto the last confirmed (tile, seq), and the render
+        // hard-snaps onto that tile (no blend — sampling at ANY later time stays put on the confirmed tile center).
+        predictor.ForceResync();
+        Assert.Equal(confirmedTile, predictor.PredictedTile);
+        Assert.Equal(confirmedSeq, predictor.PredictedStepSeq);
+        var snapped = predictor.Sample(TimeSpan.FromMilliseconds(400));
+        Assert.Equal(1d, snapped.X, 6);                                   // confirmed tile (1,0) center, no slide
+        Assert.Equal(0d, snapped.Y, 6);
+
+        // Idempotent: calling it again while already in sync is a stable no-op (tile/seq/render unchanged).
+        predictor.ForceResync();
+        Assert.Equal(confirmedTile, predictor.PredictedTile);
+        Assert.Equal(confirmedSeq, predictor.PredictedStepSeq);
+        var again = predictor.Sample(TimeSpan.FromMilliseconds(500));
+        Assert.Equal(snapped.X, again.X, 6);
+        Assert.Equal(snapped.Y, again.Y, 6);
+    }
 }

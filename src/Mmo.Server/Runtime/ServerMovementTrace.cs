@@ -90,6 +90,29 @@ internal sealed class ServerMovementTrace
             $" accepted={FormatBool(result.Accepted)} reason={result.Reason}");
     }
 
+    // DIAG1: emit the server side of the 3-link recovery chain for a watched entity after a commit was processed.
+    // srvSeq = the entity's ACTUAL accepted StepSequence (did the server APPLY the delivered commit?); recvCommits
+    // = commit attempts that reached the gate, so a recovered lost commit counts (is delivery recovering the lost
+    // commit at all — link 1?); the two
+    // reject tallies = commits the server REFUSED (link 2 — the anti-speedhack future-cap "too_early", or a wall
+    // "blocked"). Read against the client's pred/conf/lead per docs/movement-loss-degradation-tiers.md to localise
+    // the stuck link. Emitted on EVERY commit (accept AND reject) so the future-cap reject — which carries
+    // CooldownElapsed=false and is therefore NOT surfaced by MoveStep — is still visible. Measurement only.
+    public void CommitCounters(ClientSession session, WorldEntity entity, string lastResult, uint serverTick)
+    {
+        if (!ShouldTrace(session))
+        {
+            return;
+        }
+
+        _write(
+            "mmo_trace side=server event=commit_counters" +
+            $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)} player={Quote(session.DisplayName)}" +
+            $" srvSeq={entity.StepSequence.ToString(CultureInfo.InvariantCulture)} recvCommits={entity.RecvCommits.ToString(CultureInfo.InvariantCulture)}" +
+            $" rejectTooEarly={entity.RejectsCommitTooEarly.ToString(CultureInfo.InvariantCulture)} rejectBlocked={entity.RejectsBlocked.ToString(CultureInfo.InvariantCulture)}" +
+            $" lastResult={lastResult}");
+    }
+
     public void SnapshotCarried(ClientSession recipient, WorldEntity entity, uint snapshotSequence, uint serverTick, int chunkIndex, int chunkCount)
     {
         if (!ShouldTrace(entity))

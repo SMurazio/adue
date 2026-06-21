@@ -1637,7 +1637,7 @@ public sealed class GameServer
 
     // S103 commit-step on release. A client whose model-B cosmetic render glided past its commit threshold onto the
     // next tile at key-release asks the server to finish that one step early (instead of snapping back). Validate
-    // the sequence (shared with the move-intent cursor, so a stale/duplicate commit can't fire twice and a commit
+    // the sequence (on the dedicated commit cursor, NET6 — so a stale/duplicate commit can't fire twice and a commit
     // never resurrects a stopped intent), resolve the entity, then attempt a single server-validated commit step
     // with the anti-cheat floor. On accept the tile advances + StepSequence bumps, so the next snapshot's confirmed
     // tile + RecipientStepSeq carry the result to the client (no dedicated reply). On reject nothing changes and the
@@ -1700,7 +1700,7 @@ public sealed class GameServer
     // NET2/NET3: ingest a redundant-unreliable StepCommitBatch. The packet carries the newest committed step
     // (HeadSeq/HeadTick/Direction) plus a window of prior committed steps as seq/tick deltas off the head. We
     // reconstruct each commit's (sequence, authored tick), then apply them in ASCENDING seq order — the cursor
-    // dedups (TryConsumeCommitSequence drops seq <= LastMoveSeq) and each fresh commit is applied at its AUTHORED
+    // dedups (TryConsumeCommitSequence drops seq <= LastCommitSeq, NET6) and each fresh commit is applied at its AUTHORED
     // tick (NET3: TryCommitStepAuthored gates/schedules the cooldown on authored time, not the receive tick). This
     // is the loss-desync fix: a dropped commit recovered BUNDLED with the next ([C2,C3] in one packet) used to land
     // at the same receive tick — C2 accepted, C3 rejected "too early". Keying the schedule on authored ticks lets
@@ -1708,14 +1708,18 @@ public sealed class GameServer
     // window delivers recovered commits in order); a genuine reorder is dropped gracefully (Stage 4 owns rollback).
     private void HandleStepCommitBatch(ClientSession session, StepCommitBatchMessage batch)
     {
-        foreach (var (seq, authoredTick, direction) in ExtractFreshStepCommits(batch, session.LastMoveSeq))
+        // NET6: gate the commit window on the COMMIT cursor (LastCommitSeq), not the intent cursor. The two are
+        // now independent, so an interleaved STOP/direction-change intent (which advances LastMoveSeq) can no
+        // longer pre-dedup an unconfirmed commit out of this window before its re-send lands.
+        foreach (var (seq, authoredTick, direction) in ExtractFreshStepCommits(batch, session.LastCommitSeq))
         {
             HandleAuthoredStepCommit(session, seq, authoredTick, direction);
         }
     }
 
     // NET2/NET3 (pure, unit-testable): given a redundant StepCommitBatch and the last seq already accepted on the
-    // shared move cursor, returns the fresh commits (seq > lastSeq) in ASCENDING seq order — head plus window
+    // COMMIT cursor (NET6 — the caller passes session.LastCommitSeq, not the intent cursor), returns the fresh
+    // commits (seq > lastSeq) in ASCENDING seq order — head plus window
     // entries reconstructed from their deltas (entrySeq = HeadSeq - SeqDelta; entryTick = HeadTick - TickDelta).
     // Already-seen and malformed (seq delta 0 / underflowing, or a tick delta that underflows the head tick) entries
     // are dropped. Applying the result oldest-first feeds the commit path each new step once, each carrying the
@@ -1792,8 +1796,15 @@ public sealed class GameServer
 
         if (result.CooldownElapsed)
         {
-            _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
+            // NET6: a commit step's seq is the COMMIT cursor (LastCommitSeq), not the intent cursor — report it
+            // so the trace's seq column tracks the stream that actually advanced.
+            _movementTrace.MoveStep(session, session.LastCommitSeq, result, _serverTick);
         }
+
+        // DIAG1: surface the server-side recovery-chain counters on EVERY commit (accept AND reject). The
+        // future-cap reject ("commit_too_early") carries CooldownElapsed=false, so MoveStep above skips it — this
+        // line ensures the rejects-climbing-while-srvSeq-stalls (link-2) signal is always traced. Measurement only.
+        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
     }
 
     // S103: the reliable per-step StepCommitRequest path (still defined; the wire send is now StepCommitBatch). Keeps
@@ -1818,8 +1829,12 @@ public sealed class GameServer
 
         if (result.CooldownElapsed)
         {
-            _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
+            // NET6: report the commit cursor (see HandleAuthoredStepCommit).
+            _movementTrace.MoveStep(session, session.LastCommitSeq, result, _serverTick);
         }
+
+        // DIAG1: surface the server-side recovery-chain counters on every legacy commit too (see the authored path).
+        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
     }
 
     private void MarkDirtyDurableTile(WorldEntity entity)
