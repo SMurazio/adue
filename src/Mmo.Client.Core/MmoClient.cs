@@ -446,57 +446,46 @@ public sealed class MmoClient : IDisposable
     // first and never reaches the fallback.
     private void DriveAckDrivenResend(LocalPlayerPredictor predictor, TimeSpan now, bool emittedFreshThisPoll)
     {
-        var pred = predictor.PredictedStepSeq;
-        var conf = predictor.LastReconciledStepSeq;
-        var lead = pred > conf ? pred - conf : 0u;
-
-        // Reset the stall clock + fallback counter whenever the ack makes ANY progress (or on the first observation).
-        if (!_hasResendLastConf || conf != _resendLastConf)
+        // NET5b: the decision rule lives in ONE pure place (AckDrivenResendPolicy.Decide) that the headless tests
+        // also call. This wrapper just packs the carried _resend* state into the helper's state struct, asks for the
+        // decision, writes the (possibly advanced) state back, and performs the side effects (SendStepCommitBatch /
+        // predictor.ForceResync). Behaviour is identical to the previous inline implementation.
+        var state = new AckResendState
         {
-            _resendLastConf = conf;
-            _hasResendLastConf = true;
-            _resendConfStalledSince = now;
-            _resendsSinceConfAdvance = 0;
+            LastConf = _resendLastConf,
+            HasLastConf = _hasResendLastConf,
+            ConfStalledSinceMs = _resendConfStalledSince.TotalMilliseconds,
+            LastSentAtMs = _resendLastSentAt.TotalMilliseconds,
+            HasLastSentAt = _hasResendLastSentAt,
+            ResendsSinceConfAdvance = _resendsSinceConfAdvance,
+        };
+
+        var config = new AckResendConfig(
+            StallGraceMs: ResendStallGraceMs,
+            FallbackCount: ResendFallbackCount,
+            FallbackStuckMs: ResendFallbackStuckMs,
+            CadenceMs: predictor.CadenceMs);
+
+        var decision = AckDrivenResendPolicy.Decide(
+            now.TotalMilliseconds, predictor.PredictedStepSeq, predictor.LastReconciledStepSeq,
+            emittedFreshThisPoll, state, config);
+
+        var next = decision.State;
+        _resendLastConf = next.LastConf;
+        _hasResendLastConf = next.HasLastConf;
+        _resendConfStalledSince = TimeSpan.FromMilliseconds(next.ConfStalledSinceMs);
+        _resendLastSentAt = TimeSpan.FromMilliseconds(next.LastSentAtMs);
+        _hasResendLastSentAt = next.HasLastSentAt;
+        _resendsSinceConfAdvance = next.ResendsSinceConfAdvance;
+
+        if (decision.SendBatch)
+        {
+            SendStepCommitBatch();
         }
 
-        if (lead == 0)
-        {
-            return; // fully acked — nothing to recover.
-        }
-
-        // A fresh batch this poll already covered the cadence; the re-send only adds the no-new-step recovery
-        // packet, so skip when a fresh one just went out.
-        if (emittedFreshThisPoll)
-        {
-            return;
-        }
-
-        // Only re-send when the ack is genuinely OVERDUE (conf stalled past the grace) — in clean play conf keeps
-        // up within an RTT and this never trips, so no extra packet is sent.
-        if (now - _resendConfStalledSince < TimeSpan.FromMilliseconds(ResendStallGraceMs))
-        {
-            return;
-        }
-
-        // Bound to ~1 batch / cadence.
-        if (_hasResendLastSentAt && now - _resendLastSentAt < TimeSpan.FromMilliseconds(predictor.CadenceMs))
-        {
-            return;
-        }
-
-        SendStepCommitBatch();
-        _resendLastSentAt = now;
-        _hasResendLastSentAt = true;
-        _resendsSinceConfAdvance++;
-
-        // Bounded ForceResync fallback: re-sent K times AND conf stuck >= T ms => the commit is genuinely
-        // undeliverable (heavy/black loss); converge the prediction onto the server via the RESYNC1 primitive.
-        if (_resendsSinceConfAdvance >= ResendFallbackCount
-            && now - _resendConfStalledSince >= TimeSpan.FromMilliseconds(ResendFallbackStuckMs))
+        if (decision.ForceResync)
         {
             predictor.ForceResync();
-            _resendsSinceConfAdvance = 0;
-            _resendConfStalledSince = now;
         }
     }
 
