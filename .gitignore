@@ -18,3 +18,8 @@ logs/
 
 # Docker/Postgres local files
 postgres-data/
+
+# Godot engine cache / import artifacts (regenerated; never commit)
+.godot/
+.mono/
+*.translation
