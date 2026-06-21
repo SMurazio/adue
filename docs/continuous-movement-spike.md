@@ -1,6 +1,9 @@
 # Research Spike: Tile-Stepped → Continuous Movement
 
-Status: **research/decision-support only** — no code committed. The tile-stepped game is frozen and tagged
+Status: **PARKED — a "maybe" as of 2026-06-21.** Decision: keep iterating on tile-stepped (grid) movement;
+do NOT build the spike for now. Revisit only if varied/continuous speed (Albion-style mounts) becomes a
+priority — the spike prototype below is the de-risking entry point. Research/decision-support only — no
+production code was or will be touched by this. The tile-stepped game is frozen and tagged
 `tile-stepped-stable` (commit `0d51037`). This doc pairs (a) how continuous movement is built, drawn from our
 own `docs/networking-reference-catalogue.md` (canonical, already project-verdicted — not web research), with
 (b) a grounded lift estimate for migrating *this* codebase.
