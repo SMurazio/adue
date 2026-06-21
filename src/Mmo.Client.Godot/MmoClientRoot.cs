@@ -1383,6 +1383,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 		_worldRoot.AddChild(grid);
 
+		// S112: paint the textured tile floor from the design bitmap (one MultiMesh, one draw call). Visual-only
+		// — additive over the solid ground box (which picking still needs). When it builds, the painted tiles are
+		// the new look so the procedural grid plane is hidden; if textures can't load, BuildFloor returns null and
+		// we keep the grid visible as a graceful fallback.
+		var paintedFloor = Mmo.Client.Godot.Visuals.TerrainPainter.BuildFloor(_worldRoot, zone.Width, zone.Height);
+		if (paintedFloor is not null)
+		{
+			grid.Visible = false;
+		}
+
 		var wallTiles = new List<TileCoord>();
 		foreach (var tile in zone.BlockedTiles)
 		{
