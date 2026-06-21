@@ -99,6 +99,34 @@ Add `-LogToFile` to capture the server logs during that visual check.
 Inside the Godot client, press `F3` to toggle the performance HUD with FPS, frame timings, render
 counts, memory, GC, hitch count, and a rolling frame-time graph.
 
+## LAN / side-by-side play (two machines, one server)
+
+One machine HOSTS the server; the other JOINS it. The server already binds to all interfaces (`0.0.0.0` via
+`NetManager.Start(port)`), so LAN play is configuration only — no code change.
+
+Host (the machine running the server):
+
+1. Start the server normally — `start-server.cmd` (or `start-godot-visual-check.cmd` to also play locally).
+2. Open inbound UDP on the server port (default 7777) in Windows Firewall — needs admin, and must be permitted
+   by any central/company firewall policy:
+
+   ```powershell
+   New-NetFirewallRule -DisplayName "MMO Server UDP 7777" -Direction Inbound -Action Allow -Protocol UDP -LocalPort 7777
+   ```
+
+3. Tell the joiner the host's LAN IPv4 (`ipconfig` -> IPv4 Address).
+
+Joiner (the other machine, same LAN): launch ONE client pointed at the host — NO local server:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\connect-server.cmd                       # joins the default host IP in the script
+.\.shared\skills\mmo-dev\scripts\connect-server.cmd -Server 192.168.1.42 -Name Bob
+```
+
+`connect-server` builds the client, then launches a single Godot client with `MMO_HOST` set to the host
+(default in the script). It uses the shared `local-dev` connection key, which must match the host server's.
+Stop with `stop-mmo.cmd`.
+
 `godot-run` needs `MMO_GODOT` set to the Godot .NET executable (or `godot` on PATH):
 
 ```powershell
