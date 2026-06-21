@@ -22,6 +22,19 @@ public abstract partial class EntityVisual : Node3D
 {
     private Label3D? _label;
 
+    // COMBAT-S2A: the overhead red HP bar. Two billboarded unshaded quads — a dark background and a red
+    // fill — parented to a pivot just under the name label. The fill scales on X from a fixed LEFT edge so it
+    // shrinks toward the left as HP drops (current/max). Built lazily like the label and shown only for
+    // entities that carry public HP (dummies + other players); hidden for resources and (by default) the local
+    // player, which has the HUD bars. Lifted off the label mechanism per the spec (extend, don't rewrite).
+    private Node3D? _healthBar;
+    private MeshInstance3D? _healthBarFill;
+
+    // Bar geometry (world units at the visual's base scale). The quad is billboarded so it always faces the
+    // camera; FullWidth is the 100%-HP width and Height its thickness.
+    private const float HealthBarFullWidth = 1.0f;
+    private const float HealthBarHeight = 0.12f;
+
     protected VisualTuning Tuning { get; private set; } = null!;
 
     // The NetworkId this visual is currently bound to (0 when parked in the pool).
@@ -64,6 +77,9 @@ public abstract partial class EntityVisual : Node3D
             _label.Visible = true;
         }
 
+        EnsureHealthBar();
+        UpdateHealthBar(state);
+
         OnAcquire(state);
     }
 
@@ -98,6 +114,8 @@ public abstract partial class EntityVisual : Node3D
             // hides) so a mined node leaves no floating label, and show it again on respawn.
             _label.Visible = state.Kind != EntityKind.Resource || !state.Depleted;
         }
+
+        UpdateHealthBar(state);
 
         OnUpdate(state, now);
     }
@@ -175,5 +193,85 @@ public abstract partial class EntityVisual : Node3D
         {
             _label.Text = value;
         }
+    }
+
+    // ---- COMBAT-S2A overhead HP bar ----------------------------------------------------------------
+
+    // Where the HP bar sits above the wrapper — a touch below the name label so the two don't overlap.
+    private float HealthBarHeightValue => LabelHeight - 0.35f;
+
+    // Lazily builds the two-quad bar (dark background + red fill), parented to a pivot at HealthBarHeight.
+    // Billboarded + unshaded + no-depth-test so it reads like the name label. The fill is anchored so its
+    // LEFT edge is fixed (centre shifted right by half the full width), and UpdateHealthBar scales it on X.
+    private void EnsureHealthBar()
+    {
+        if (_healthBar is not null)
+        {
+            return;
+        }
+
+        _healthBar = new Node3D { Name = "HealthBar" };
+        _healthBar.Position = new Vector3(0f, HealthBarHeightValue, 0f);
+
+        var background = new MeshInstance3D
+        {
+            Name = "HealthBarBg",
+            Mesh = new QuadMesh { Size = new Vector2(HealthBarFullWidth, HealthBarHeight) },
+            MaterialOverride = CreateBarMaterial(new Color(0.05f, 0.05f, 0.05f)),
+        };
+        _healthBar.AddChild(background);
+
+        _healthBarFill = new MeshInstance3D
+        {
+            Name = "HealthBarFill",
+            Mesh = new QuadMesh { Size = new Vector2(HealthBarFullWidth, HealthBarHeight) },
+            MaterialOverride = CreateBarMaterial(new Color(0.85f, 0.12f, 0.12f)),
+        };
+        // Nudge the fill a hair toward the camera so it renders over the background; depth test is off so the
+        // small Z bias is purely a draw-order tie-break, not real depth.
+        _healthBarFill.Position = new Vector3(0f, 0f, 0.001f);
+        _healthBar.AddChild(_healthBarFill);
+
+        AddChild(_healthBar);
+    }
+
+    // Shows the bar (and sets its fill) only for entities that carry public HP and aren't the local player;
+    // hides it otherwise. The fill scales on X from the LEFT edge: anchor the scaled quad so its left side
+    // stays put while the right side moves in as HP drops.
+    private void UpdateHealthBar(EntityRenderState state)
+    {
+        if (_healthBar is null || _healthBarFill is null)
+        {
+            return;
+        }
+
+        // Local player uses the HUD bars (S1), so it skips its own overhead bar. Resources/stat-less entities
+        // replicate MaxHealth==0 (HasHealth=false) and are hidden too.
+        var show = state.HasHealth && !state.IsLocal;
+        _healthBar.Visible = show;
+        if (!show)
+        {
+            return;
+        }
+
+        var fraction = state.HealthFraction;
+        _healthBarFill.Scale = new Vector3(Mathf.Max(fraction, 0f), 1f, 1f);
+        // A QuadMesh is centred on its origin, so a quad scaled by `fraction` keeps its CENTRE fixed; shift it
+        // left by half the width it lost so its LEFT edge stays aligned with the background's left edge.
+        _healthBarFill.Position = new Vector3(-HealthBarFullWidth * (1f - fraction) * 0.5f, 0f, 0.001f);
+    }
+
+    // Unshaded, billboarded, no-depth-test material so the bar always faces the camera and renders on top of
+    // the body (same posture as the name label). Built per-quad with its own colour.
+    private static StandardMaterial3D CreateBarMaterial(Color color)
+    {
+        return new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            BillboardMode = BaseMaterial3D.BillboardModeEnum.Enabled,
+            NoDepthTest = true,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
     }
 }

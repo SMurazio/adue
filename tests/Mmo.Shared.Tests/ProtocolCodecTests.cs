@@ -89,6 +89,27 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
+    public void WorldSnapshotRoundTripsHealthFields()
+    {
+        // COMBAT-S2A: public HP (current + max) rides each per-entity state. A stat-bearing entity carries a
+        // partial HP (the dummy/player bar); a stat-less entity (resource) carries 0/0 ("no HP").
+        var original = new WorldSnapshotMessage(
+            21,
+            [
+                new EntityStateSnapshot(31, new TileCoord(8, 9), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+                new EntityStateSnapshot(32, new TileCoord(2, 3), Direction8.N, Depleted: false, Health: 0, MaxHealth: 0),
+            ]);
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((ushort)70, decoded.Entities[0].Health);
+        Assert.Equal((ushort)100, decoded.Entities[0].MaxHealth);
+        Assert.True(decoded.Entities[0].MaxHealth > 0);
+        Assert.Equal((ushort)0, decoded.Entities[1].Health);
+        Assert.Equal((ushort)0, decoded.Entities[1].MaxHealth);
+    }
+
+    [Fact]
     public void WorldSnapshotRoundTripsDepletedFlag()
     {
         var original = new WorldSnapshotMessage(
@@ -292,13 +313,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentySix()
+    public void ProtocolVersionIsTwentySeven()
     {
-        // COMBAT-S1 protocol bump (v25 -> v26): adds the owner-only PlayerStatsMessage (HP/mana/stamina, current+max)
-        // and the admin-gated AdminSetStatMessage. A new message type + new payload is a breaking wire change (server
-        // + client ship together). v25 was NET3's authored-tick StepCommitBatch. Pin the version so an accidental
-        // change is caught.
-        Assert.Equal(26, ProtocolCodec.Version);
+        // COMBAT-S2A protocol bump (v26 -> v27): adds public Health/MaxHealth to EntityStateSnapshot (drives the
+        // red overhead HP bar for dummies + other players). v26 was COMBAT-S1's owner-only PlayerStats/AdminSetStat.
+        // A snapshot-payload change is a breaking wire change (server + client ship together). Pin the version so an
+        // accidental change is caught.
+        Assert.Equal(27, ProtocolCodec.Version);
     }
 
     [Fact]

@@ -1270,7 +1270,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -1305,7 +1305,9 @@ public sealed class MmoClient : IDisposable
                 sequence,
                 _lastRecipientStepSeq,
                 serverTick,
-                localEntity.Depleted);
+                localEntity.Depleted,
+                localEntity.Health,
+                localEntity.MaxHealth);
         }
 
         if (isComplete)
@@ -1456,9 +1458,9 @@ public sealed class MmoClient : IDisposable
                 existing.SetStepCooldownMs(effectiveCooldown.Value, ResolveCadence(effectiveCooldown), existing.IsLocal);
             }
 
-            // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
-            // last snapshot set rather than resetting a known-depleted node to available.
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted);
+            // EntitySpawn carries no Depleted/HP bits (those ride the AOI snapshot), so preserve whatever the
+            // last snapshot set rather than resetting a known-depleted node to available or zeroing known HP.
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -1643,6 +1645,12 @@ public sealed class MmoClient : IDisposable
         // position so the renderer can grey/hide a node without affecting movement.
         public bool Depleted { get; private set; }
 
+        // COMBAT-S2A: public HP replicated on the AOI snapshot, threaded to the overhead red bar. 0/0 for
+        // entities without vitals (resources). Carried alongside Depleted (snapshot-driven, not interpolated).
+        public ushort Health { get; private set; }
+
+        public ushort MaxHealth { get; private set; }
+
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
             && DisplayName.StartsWith("#", StringComparison.Ordinal);
@@ -1661,7 +1669,7 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
         {
             var previousTile = Tile;
             // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -1669,6 +1677,10 @@ public sealed class MmoClient : IDisposable
             // render position, never this authoritative tile.
             Tile = tile;
             Depleted = depleted;
+            // COMBAT-S2A: adopt the replicated public HP (snapshot-driven, like Depleted). Preserving callers
+            // (the delta'd-out local re-apply and EntitySpawn) pass the current values so HP isn't reset to 0.
+            Health = health;
+            MaxHealth = maxHealth;
             LastSeenSnapshotSequence = snapshotSequence;
             // S89 model B: the cosmetic driver owns the render. The confirmed tile advances ONLY here (the server
             // ack). No step-seq / reconcile / replay — Confirm cuts/snaps the render to the confirmed tile. The
@@ -1870,7 +1882,7 @@ public sealed class MmoClient : IDisposable
 
         public ReplicatedEntity ToSnapshot()
         {
-            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted);
+            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
         }
 
         public EntityRenderState ToRenderState(TimeSpan now)
@@ -1898,7 +1910,7 @@ public sealed class MmoClient : IDisposable
                 position = _interpolator.Sample(now);
                 facing = Facing;
             }
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted, Health, MaxHealth);
         }
     }
 

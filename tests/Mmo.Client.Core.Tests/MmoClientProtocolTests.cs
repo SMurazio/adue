@@ -299,6 +299,32 @@ public sealed class MmoClientProtocolTests
         return client;
     }
 
+    [Fact]
+    public void SnapshotHealthThreadsToRenderState()
+    {
+        // COMBAT-S2A: the public HP on the snapshot threads through to the render state that drives the
+        // overhead bar. A stat-bearing entity carries a partial HP (HasHealth=true, a fractional fill); a
+        // stat-less entity carries 0/0 (HasHealth=false → the visual hides the bar).
+        using var client = CreateClient(out _);
+
+        client.HandleMessageForTests(Snapshot(
+            1,
+            isComplete: true,
+            new EntityStateSnapshot(1, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+            new EntityStateSnapshot(2, new TileCoord(6, 6), Direction8.S)));
+
+        var renders = client.GetRenderStates(TimeSpan.FromMilliseconds(200))
+            .ToDictionary(r => r.NetworkId);
+
+        Assert.True(renders[1].HasHealth);
+        Assert.Equal((ushort)70, renders[1].Health);
+        Assert.Equal((ushort)100, renders[1].MaxHealth);
+        Assert.Equal(0.70f, renders[1].HealthFraction, 3);
+
+        Assert.False(renders[2].HasHealth);
+        Assert.Equal(0f, renders[2].HealthFraction);
+    }
+
     private static WorldSnapshotMessage Snapshot(uint sequence, bool isComplete, params EntityStateSnapshot[] entities)
     {
         return new WorldSnapshotMessage(10, sequence, entities.Length, isComplete, 0, 1, entities);

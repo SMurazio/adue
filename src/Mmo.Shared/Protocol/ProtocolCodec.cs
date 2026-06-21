@@ -6,7 +6,9 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 26;
+    // COMBAT-S2A (v27): per-entity public HP (Health + MaxHealth, ushort each) added to EntityStateSnapshot for
+    // the overhead HP bar. Server + client ship together.
+    public const byte Version = 27;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -299,6 +301,10 @@ public static class ProtocolCodec
             WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
             writer.Write((byte)entity.Facing);
             writer.Write(entity.Depleted);
+            // COMBAT-S2A (v27): public HP rides each per-entity state, after Depleted. MaxHealth == 0 means
+            // "no HP" (resources/players-without-stats); the client hides the bar in that case.
+            writer.Write(entity.Health);
+            writer.Write(entity.MaxHealth);
         }
     }
 
@@ -499,7 +505,10 @@ public static class ProtocolCodec
             var y = reader.ReadInt16();
             var facing = ReadDirection(reader);
             var depleted = reader.ReadBoolean();
-            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing, depleted));
+            // COMBAT-S2A (v27): mirrors WriteEntityStates — Health then MaxHealth, ushort each.
+            var health = reader.ReadUInt16();
+            var maxHealth = reader.ReadUInt16();
+            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing, depleted, health, maxHealth));
         }
 
         return entities;
