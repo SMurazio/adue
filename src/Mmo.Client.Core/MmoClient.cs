@@ -86,6 +86,12 @@ public sealed class MmoClient : IDisposable
     // this. SetCosmeticLeadTiles routes it live to the active driver (no restart). Clamped on set.
     private double _cosmeticLeadTiles = 1.0d;
 
+    // S102: model B's release SNAP-to-confirmed (S91) toggle, default true (= current behavior). Held at the client
+    // level like _cosmeticLeadTiles so a value set before the local entity attaches — or after a respawn re-creates
+    // the cosmetic driver — is honoured (AttachCosmetic seeds the fresh driver from this). SetSnapOnRelease routes it
+    // live to the active driver (no restart). Only model B's release reads it.
+    private bool _snapOnRelease = true;
+
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
     {
@@ -298,6 +304,22 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // S102: whether model B snaps the render to the confirmed tile on release (S91). Reflects the value last set
+    // (seeded into the F6 toggle on panel open). Inert in Predicted/AcceptDeny.
+    public bool SnapOnRelease => _snapOnRelease;
+
+    // S102: live-toggles model B's release snap (F6 "Snap on release"). Routed to the active cosmetic driver
+    // immediately (no restart); stored at the client level too so a value set before the local entity attaches, or
+    // after a respawn re-creates the driver, is re-applied by AttachCosmetic. No-op safe when no cosmetic driver yet.
+    public void SetSnapOnRelease(bool snap)
+    {
+        _snapOnRelease = snap;
+        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+        {
+            local.SetSnapOnRelease(snap);
+        }
+    }
+
     // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
     // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
     // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
@@ -382,6 +404,9 @@ public sealed class MmoClient : IDisposable
         // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence is
         // threaded). Default 1.0 keeps model B byte-for-byte.
         local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
+        // S102: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current snap-on-release
+        // lever value, mirroring how the lead distance is threaded. Default true keeps model B byte-for-byte.
+        local.SetSnapOnRelease(_snapOnRelease);
         // If the active mode uses the cosmetic driver (the default B, or AcceptDeny) and the local entity only just
         // attached (or respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is
         // honoured without needing an F5 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
@@ -1097,6 +1122,16 @@ public sealed class MmoClient : IDisposable
             if (_cosmetic is not null)
             {
                 _cosmetic.MaxLeadTiles = tiles;
+            }
+        }
+
+        // S102: live-sets model B's release-snap flag on the cosmetic driver. No-op if the driver isn't attached
+        // yet; MmoClient.EnsurePredictor re-seeds the current value when AttachCosmetic creates it.
+        public void SetSnapOnRelease(bool snap)
+        {
+            if (_cosmetic is not null)
+            {
+                _cosmetic.SnapOnRelease = snap;
             }
         }
 

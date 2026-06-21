@@ -76,6 +76,14 @@ public sealed class LocalPlayerCosmetic
     // without re-creating the driver.
     public bool LeadEnabled { get; set; } = true;
 
+    // S102: whether model B's release SNAP-to-confirmed (S91) is performed. true (default) = current behavior: on
+    // keyup the render locks instantly onto the confirmed-tile center (no backward drift). false = let the in-flight
+    // glide settle on its own — the release tween (already toward a confirmed-or-adjacent tile) finishes instead of
+    // a hard snap, for a softer release. Only consulted in the LeadEnabled (model B) release branch; AcceptDeny never
+    // snapped anyway. Settable live via MmoClient.SetSnapOnRelease so an F6 toggle flips it without re-creating the
+    // driver. Note this only changes the release feel; the forward lead and confirm-cut are untouched.
+    public bool SnapOnRelease { get; set; } = true;
+
     // ---- Present-time render tween (reused from LocalPlayerPredictor; NOT a playout buffer) -----------------
     private RenderPosition _renderFrom;
     private RenderPosition _renderTo;
@@ -147,7 +155,7 @@ public sealed class LocalPlayerCosmetic
         else
         {
             _moving = false;
-            if (LeadEnabled)
+            if (LeadEnabled && SnapOnRelease)
             {
                 // S91 (model B): on release, SNAP instantly to the confirmed-tile center instead of tweening back
                 // over a cadence (the old ~150ms backward drift felt wrong). The confirmed tile IS truth, so
@@ -157,6 +165,16 @@ public sealed class LocalPlayerCosmetic
                 var center = RenderPosition.FromTile(_confirmedTile);
                 StartTween(center, center, now, _cadenceMs);
                 _renderPosition = center;
+            }
+            else if (LeadEnabled)
+            {
+                // S102 (SnapOnRelease == false): no hard snap. Stop extending the lead and let the render GLIDE back
+                // onto the confirmed-tile center over one cadence from where it is showing now — a soft settle (the
+                // pre-S91 release feel). The destination is still the confirmed tile (truth), so no overshoot
+                // persists; it just unwinds smoothly instead of cutting.
+                _leadTarget = null;
+                var center = RenderPosition.FromTile(_confirmedTile);
+                StartTween(SampleInternal(now), center, now, _cadenceMs);
             }
             // S92 accept/deny (LeadEnabled == false): do NOT snap. There is no forward lead to unwind, and any
             // in-progress tween is always toward a confirmed (truth) tile, so letting it finish is correct and

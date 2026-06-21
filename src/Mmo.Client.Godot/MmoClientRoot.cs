@@ -41,13 +41,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMin = 8f;
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
-	// S95: camera focus blend + temporal smoothing (both live F5 levers). Defaults reproduce TODAY's camera
+	// S95: camera focus blend + temporal smoothing (S102: now live F6 levers). Defaults reproduce TODAY's camera
 	// exactly: blend 1.0 = follow the cosmetic character, smoothing 0 = hard-follow (no glide). The tracker
 	// blends the confirmed tile and cosmetic position and frame-rate-independently smooths a persistent focus
-	// toward it, snapping on the first frame and on teleports (> CameraTeleportSnapTiles).
+	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
 	private float _cameraFollowBlend = 1.0f;
 	private float _cameraSmoothing = 0f;
-	private const float CameraTeleportSnapTiles = 4f;
+	// S95 default 4 tiles. S102: now a live F6 field (was a const) feeding CameraFocusTracker.Advance's
+	// teleport-snap threshold — beyond this jump the camera hard-snaps (respawn/zone change) instead of gliding.
+	private float _cameraTeleportSnapTiles = 4f;
 	private CameraFocusTracker _cameraFocus;
 	private double _lastFrameDelta;
 	private CheckBox? _uncapFpsCheck;
@@ -56,9 +58,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private CheckBox? _debugFacingBoxCheck;
 	private CheckBox? _catoSpriteCheck;
 	private CheckBox? _predictionTilesCheck;
-	// S89: F5 "Cosmetic lead (model B)" toggle. Flips the LOCAL player's MmoClient.RenderMode between model A
-	// (prediction, default) and model B (cosmetic lead) LIVE — no restart. Admin-gated like the rest of F5.
-	private CheckBox? _cosmeticLeadCheck;
 	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
 	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
 	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
@@ -99,15 +98,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tunePlantScale;
 	private LineEdit? _tuneLabelPixelSize;
 	private LineEdit? _tuneLabelHeight;
-	// S93: live artificial one-way network latency (ms) injected on this client's traffic (debug tooling).
-	private LineEdit? _tuneNetLatencyMs;
-	// S94: live cosmetic lead distance (tiles) for model B — how far the render glides ahead of the confirmed
-	// tile before holding. [0, 1]; default 1.0 = current model B.
-	private LineEdit? _tuneCosmeticLeadTiles;
-	// S95: live camera focus blend (0 = confirmed tile, 1 = cosmetic character) and follow smoothing (per-second
-	// rate, 0 = hard-follow). Defaults (1.0 / 0) reproduce today's camera.
-	private LineEdit? _tuneCameraFollowBlend;
-	private LineEdit? _tuneCameraSmoothing;
 	// S99: live Cato sprite placement — world pixel size (scale), Y offset (lift onto the tile), X offset
 	// (horizontal nudge). S101 adds depth (toward-camera). Pushed onto active Cato visuals on Apply without a
 	// respawn. Defaults on VisualTuning.
@@ -115,6 +105,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _tuneCatoYOffset;
 	private LineEdit? _tuneCatoXOffset;
 	private LineEdit? _tuneCatoDepth;
+
+	// ---- S102 F6 movement / feel panel ------------------------------------------------------------
+	// A dedicated admin-gated panel (F6) for the movement/camera-FEEL levers, moved off the F5 visual panel so the
+	// render knobs and the feel knobs are unmistakable. All live (no restart); seeded from the current values on
+	// open. Movement SPEED (move.stepCooldownMs) is SERVER tuning and stays in F4 — NOT duplicated here.
+	private PanelContainer? _movementPanel;
+	private bool _movementPanelVisible;
+	private bool _movementFieldsSeeded;
+	// Moved from F5: net latency (S93), cosmetic lead distance (S94), camera follow blend + smoothing (S95).
+	private LineEdit? _moveNetLatencyMs;
+	private LineEdit? _moveCosmeticLeadTiles;
+	private LineEdit? _moveCameraFollowBlend;
+	private LineEdit? _moveCameraSmoothing;
+	// New (S102): camera teleport-snap distance (tiles) — exposes the former CameraTeleportSnapTiles const live.
+	private LineEdit? _moveCameraTeleportSnapTiles;
+	// New (S102): 3-way render-mode selector (Predicted / CosmeticLead / AcceptDeny) — a cycling button that calls
+	// MmoClient.SetMovementRenderMode. Replaces the F5 "Accept/deny only" checkbox and re-exposes model A.
+	private Button? _renderModeButton;
+	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
+	private CheckBox? _snapOnReleaseCheck;
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -376,6 +386,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.F5)
 		{
 			ToggleVisualPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// F6: admin-only CLIENT-LOCAL MOVEMENT/FEEL tuning panel (S102 — render mode, cosmetic lead, net latency,
+		// camera blend/smoothing/teleport-snap, snap-on-release). Movement SPEED stays in F4 (server tuning).
+		if (key.Keycode == Key.F6)
+		{
+			ToggleMovementPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -683,6 +702,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		BuildTuningPanel(layer);
 		BuildVisualPanel(layer);
+		BuildMovementPanel(layer);
 
 		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
 		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
@@ -752,21 +772,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_tunePlantScale = AddTuningField(rows, "plant.modelScale", OnVisualApplyPressed);
 		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
 		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
-		// S93: artificial one-way network latency (ms each way). Applied INSTANTLY client-side on Apply/Enter —
-		// no server round-trip, no restart. 0 = off (default I/O path unchanged). Felt round-trip ≈ 2× this.
-		_tuneNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnVisualApplyPressed);
-		// S94: how far model B's cosmetic lead glides ahead of the confirmed tile, in tiles. Applied INSTANTLY
-		// client-side on Apply/Enter (no server round-trip, no restart). [0, 1]: 0 ≈ no visible lead (like
-		// accept/deny), 1.0 = one full tile (current model B / max in the single-tile cosmetic model). Lower values
-		// shorten the visible lead (and the release snap).
-		_tuneCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnVisualApplyPressed);
-		// S95: camera focus blend between the confirmed tile (0) and the cosmetic character (1, default = today's
-		// follow-the-character). Applied INSTANTLY client-side on Apply/Enter — no restart. Lower values mean the
-		// cosmetic lead/release-snap moves the camera less (blend 0 = camera trails on the confirmed tile, no pop).
-		_tuneCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnVisualApplyPressed);
-		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow (today).
-		// Higher = the camera glides toward the focus instead of snapping, so model B's release snap no longer pops.
-		_tuneCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnVisualApplyPressed);
+		// S102: the movement/camera-FEEL levers (net latency, cosmetic lead, camera blend/smoothing) moved to the
+		// dedicated F6 panel (BuildMovementPanel). F5 keeps the pure VISUAL knobs (scales, labels, Cato, debug).
 		// S99: live Cato sprite placement. Applied INSTANTLY client-side on Apply/Enter (no respawn): pushed onto
 		// every active Cato visual via the renderer. Scale (px size) 2× the S96 first-guess by default; the Y/X
 		// offsets centre the cat body on the tile (the frame centre sits above the cat, wand extending up-right).
@@ -822,17 +829,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// S92 live toggle — flips on click, no Apply needed: switch the LOCAL player's render model between B
-		// (cosmetic lead — the NEW DEFAULT, unchecked: the render glides early on input toward the held direction,
-		// banks NO tile, and snaps to the confirmed tile on release) and "accept/deny only" (checked: NO early
-		// lead and NO release snap — the avatar moves ONLY when the server confirms a step, so a hard-following
-		// camera has no snap/overshoot discontinuity to pop on). Model A (full prediction) is no longer on this
-		// toggle (still reachable in code). Takes effect WHILE the client runs.
-		var cosmeticLead = new CheckBox { Name = "CosmeticLead", Text = "Accept/deny only (no lead)", ButtonPressed = false };
-		cosmeticLead.AddThemeFontSizeOverride("font_size", 13);
-		cosmeticLead.Toggled += ApplyCosmeticLead;
-		rows.AddChild(cosmeticLead);
-		_cosmeticLeadCheck = cosmeticLead;
+		// S102: the LOCAL player's render-model control (was the F5 "Accept/deny only" checkbox) is now the 3-way
+		// render-mode button on the F6 movement panel (Predicted / CosmeticLead / AcceptDeny).
 
 		var apply = new Button { Name = "VisualApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -842,6 +840,124 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		panel.Visible = false;
 		_visualPanel = panel;
 		layer.AddChild(panel);
+	}
+
+	// S102: the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (F6). Holds the movement/camera-FEEL levers moved
+	// off F5 (net latency, cosmetic lead distance, camera follow blend + smoothing) plus new ones (3-way render
+	// mode, camera teleport-snap distance, snap-on-release). All applied INSTANTLY client-side (no server round-
+	// trip, no restart) via the same Apply-all / live-toggle pattern as F4/F5. Movement SPEED (move.stepCooldownMs)
+	// is SERVER tuning and lives in F4 — deliberately NOT duplicated here (it affects all players, not local feel).
+	// Hidden until F6 is pressed by an Admin session; seeded on first open from the live local values.
+	private void BuildMovementPanel(CanvasLayer layer)
+	{
+		// Below the F5 panel (same right column) so all three admin panels can be open without overlapping.
+		var panel = CreateOverlayPanel("MovementPanel", new Vector2(860, 524), new Vector2(360, 320));
+		var rows = CreatePanelVBox(panel);
+
+		var title = CreateOverlayLabel("MovementTitle", 15);
+		title.Text = "ADMIN MOVEMENT / FEEL (F6)";
+		rows.AddChild(title);
+
+		var note = CreateOverlayLabel("MovementSpeedNote", 12);
+		note.Text = "— client-local (instant) · speed lives in F4 —";
+		rows.AddChild(note);
+
+		// 3-way render-mode cycling button (S102, replaces the F5 "Accept/deny only" checkbox). Cycles
+		// Predicted -> CosmeticLead -> AcceptDeny on each press, calling MmoClient.SetMovementRenderMode. The label
+		// always shows the ACTIVE mode. Re-exposes model A (Predicted), which S92 dropped from the F5 toggle.
+		var renderModeRow = new HBoxContainer { Name = "Row_RenderMode" };
+		renderModeRow.AddThemeConstantOverride("separation", 8);
+		var renderModeCaption = CreateOverlayLabel("Cap_RenderMode", 13);
+		renderModeCaption.Text = "Render mode";
+		renderModeCaption.CustomMinimumSize = new Vector2(170, 0);
+		renderModeRow.AddChild(renderModeCaption);
+		_renderModeButton = new Button { Name = "RenderModeButton", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		_renderModeButton.AddThemeFontSizeOverride("font_size", 13);
+		_renderModeButton.Pressed += OnRenderModeCyclePressed;
+		renderModeRow.AddChild(_renderModeButton);
+		rows.AddChild(renderModeRow);
+		UpdateRenderModeButtonText();
+
+		// Moved off F5 — applied on Apply/Enter:
+		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
+		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
+		// S94: how far model B's cosmetic lead glides ahead of the confirmed tile, in tiles. [0, 1]; 1.0 = current
+		// model B, 0 ≈ no visible lead. Lower values shorten the visible lead (and the release snap).
+		_moveCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnMovementApplyPressed);
+		// S95: camera focus blend between the confirmed tile (0) and the cosmetic character (1, default).
+		_moveCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnMovementApplyPressed);
+		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow.
+		_moveCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnMovementApplyPressed);
+		// S102 new: camera teleport-snap distance (tiles). Beyond this single-frame jump the camera hard-snaps
+		// (respawn / zone change) instead of gliding; below it the smoothing glides. Was the const = 4.
+		_moveCameraTeleportSnapTiles = AddTuningField(rows, "Camera teleport-snap (tiles)", OnMovementApplyPressed);
+
+		// S102 new live toggle — flips on click, no Apply needed: model B's S91 snap-to-confirmed-on-release.
+		// ON (default) = current behavior (hard snap to the confirmed tile on keyup). OFF = let the release glide
+		// settle over one cadence (no hard snap). Only affects model B (CosmeticLead); inert otherwise.
+		var snapOnRelease = new CheckBox
+		{
+			Name = "SnapOnRelease",
+			Text = "Snap on release (model B)",
+			ButtonPressed = _client?.SnapOnRelease ?? true
+		};
+		snapOnRelease.AddThemeFontSizeOverride("font_size", 13);
+		snapOnRelease.Toggled += ApplySnapOnRelease;
+		rows.AddChild(snapOnRelease);
+		_snapOnReleaseCheck = snapOnRelease;
+
+		var apply = new Button { Name = "MovementApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnMovementApplyPressed;
+		rows.AddChild(apply);
+
+		panel.Visible = false;
+		_movementPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// S102: the three render modes in cycle order, with the label shown on the F6 button for each.
+	private static readonly MovementRenderMode[] RenderModeCycle =
+		[MovementRenderMode.Predicted, MovementRenderMode.CosmeticLead, MovementRenderMode.AcceptDeny];
+
+	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
+	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
+	private void OnRenderModeCyclePressed()
+	{
+		if (_client is null)
+		{
+			return;
+		}
+
+		var current = _client.RenderMode;
+		var index = Array.IndexOf(RenderModeCycle, current);
+		var next = RenderModeCycle[(index + 1) % RenderModeCycle.Length];
+		_client.SetMovementRenderMode(next);
+		UpdateRenderModeButtonText();
+	}
+
+	// S102: reflect the client's ACTIVE render mode on the F6 button (also called on seed so re-opening is correct).
+	private void UpdateRenderModeButtonText()
+	{
+		if (_renderModeButton is null)
+		{
+			return;
+		}
+
+		var mode = _client?.RenderMode ?? MovementRenderMode.CosmeticLead;
+		_renderModeButton.Text = mode switch
+		{
+			MovementRenderMode.Predicted => "Predicted (A)",
+			MovementRenderMode.AcceptDeny => "AcceptDeny",
+			_ => "CosmeticLead (B)",
+		};
+	}
+
+	// S102 F6 live toggle ("Snap on release (model B)"). Route the flag to the client (and the active cosmetic
+	// driver) immediately — no restart. ON = the S91 hard snap on keyup; OFF = soft settle over one cadence.
+	private void ApplySnapOnRelease(bool enabled)
+	{
+		_client?.SetSnapOnRelease(enabled);
 	}
 
 	// Live vsync / fps toggle, shared by the F5 checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
@@ -913,17 +1029,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				_confirmedTileMarker.Visible = false;
 			}
 		}
-	}
-
-	// S92 live toggle (F5 "Accept/deny only (no lead)"). Flip the local player's render model LIVE — checked =
-	// AcceptDeny (the cosmetic driver with the forward lead OFF: no early glide, no release snap; the avatar moves
-	// only on a confirmed step), unchecked = model B (CosmeticLead, the new default: lead + snap-on-release).
-	// SetMovementRenderMode re-anchors the newly-active driver from the current render position so the avatar
-	// doesn't pop on the switch. No restart. Admin-gated like the rest of F5 (the panel only shows for an Admin
-	// session).
-	private void ApplyCosmeticLead(bool enabled)
-	{
-		_client?.SetMovementRenderMode(enabled ? MovementRenderMode.AcceptDeny : MovementRenderMode.CosmeticLead);
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
@@ -1151,7 +1256,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_cameraFollowBlend,
 			_cameraSmoothing,
 			_lastFrameDelta,
-			CameraTeleportSnapTiles);
+			_cameraTeleportSnapTiles);
 		var focus = new Vector3((float)focusX, 0, (float)focusY);
 		_camera.Position = focus + new Vector3(24, 28, 24);
 		_camera.LookAt(focus, Vector3.Up);
@@ -1362,6 +1467,30 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_visualPanel.Visible = _visualPanelVisible;
 	}
 
+	// F6: toggle the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (S102). Same admin gating as F4/F5.
+	private void ToggleMovementPanel()
+	{
+		if (_movementPanel is null)
+		{
+			return;
+		}
+
+		if (_client?.Role != ClientRole.Admin)
+		{
+			ShowInteractFeedback("Movement panel requires Admin role.");
+			return;
+		}
+
+		_movementPanelVisible = !_movementPanelVisible;
+		if (_movementPanelVisible && !_movementFieldsSeeded)
+		{
+			SeedMovementFields();
+			_movementFieldsSeeded = true;
+		}
+
+		_movementPanel.Visible = _movementPanelVisible;
+	}
+
 	// Seed the F4 server fields from ServerHello (the server's startup truth). Only called once on first open
 	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
@@ -1382,18 +1511,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tunePlantScale, _tuning.PlantModelScale);
 		SetField(_tuneLabelPixelSize, _tuning.LabelPixelSize);
 		SetField(_tuneLabelHeight, _tuning.PlayerLabelHeight);
-		// S93: seed from the current injected latency so re-opening the panel shows the live value (0 by default).
-		SetField(_tuneNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
-		// S94: seed from the live cosmetic lead distance so re-opening the panel shows the current value (1.0 default).
-		SetField(_tuneCosmeticLeadTiles, _client?.CosmeticLeadTiles ?? 1.0d);
-		// S95: seed from the live camera blend/smoothing so re-opening the panel shows the current values (1.0 / 0).
-		SetField(_tuneCameraFollowBlend, _cameraFollowBlend);
-		SetField(_tuneCameraSmoothing, _cameraSmoothing);
+		// S102: net latency / cosmetic lead / camera blend+smoothing moved to F6 (SeedMovementFields).
 		// S99: seed from the live Cato placement so re-opening the panel shows the current values.
 		SetField(_tuneCatoPixelSize, _tuning.CatoPixelSize);
 		SetField(_tuneCatoYOffset, _tuning.CatoYOffset);
 		SetField(_tuneCatoXOffset, _tuning.CatoXOffset);
 		SetField(_tuneCatoDepth, _tuning.CatoDepth);
+	}
+
+	// S102: seed the F6 client-local movement/feel fields from the live local values. Only called once on first
+	// open (re-seeding would stomp un-applied edits), mirroring SeedVisualFields. The render-mode button and the
+	// snap-on-release checkbox reflect the live client state directly.
+	private void SeedMovementFields()
+	{
+		// Moved from F5 — seed from the live values so re-opening shows the current state.
+		SetField(_moveNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
+		SetField(_moveCosmeticLeadTiles, _client?.CosmeticLeadTiles ?? 1.0d);
+		SetField(_moveCameraFollowBlend, _cameraFollowBlend);
+		SetField(_moveCameraSmoothing, _cameraSmoothing);
+		// New (S102).
+		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
+		UpdateRenderModeButtonText();
+		_snapOnReleaseCheck?.SetPressedNoSignal(_client?.SnapOnRelease ?? true);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -1477,34 +1616,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_tuning.PlayerLabelHeight = Mathf.Clamp((float)labelHeight, 0f, 10f);
 		}
 
-		// S93: live-apply the artificial one-way network latency (ms). 0 = off; clamped to a sane debug range.
-		// Applied directly to the client (no server round-trip) — the injected delay flows through the existing
-		// send/receive paths so the movement models can be felt under real-world RTT (felt ≈ 2× this value).
-		if (TryReadField(_tuneNetLatencyMs, out var netLatency))
-		{
-			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
-		}
-
-		// S94: live-apply the cosmetic lead distance (tiles) for model B. Clamped [0, 1] (the client clamps again);
-		// routed straight to the active cosmetic driver — no server round-trip, no restart. Default 1.0 = current
-		// model B; lower values shorten the visible lead (and the release snap).
-		if (TryReadField(_tuneCosmeticLeadTiles, out var leadTiles))
-		{
-			_client.SetCosmeticLeadTiles(Mathf.Clamp((float)leadTiles, 0f, 1f));
-		}
-
-		// S95: live-apply the camera focus blend [0,1] and follow smoothing [0,30 /s]. Client-only, no restart;
-		// the next UpdateCamera reads the new values. Defaults (1.0 / 0) reproduce today's hard-follow camera.
-		if (TryReadField(_tuneCameraFollowBlend, out var followBlend))
-		{
-			_cameraFollowBlend = Mathf.Clamp((float)followBlend, 0f, 1f);
-		}
-
-		if (TryReadField(_tuneCameraSmoothing, out var cameraSmoothing))
-		{
-			_cameraSmoothing = Mathf.Clamp((float)cameraSmoothing, 0f, 30f);
-		}
-
+		// S102: net latency / cosmetic lead / camera follow blend + smoothing apply moved to F6 (OnMovementApplyPressed).
 		// S99: live-apply the Cato sprite placement. Scale (px size) clamped to the sane sprite range used by the
 		// label fields; offsets clamped to a generous tile range. Mirrored into _tuning (CatoSpriteVisual reads it
 		// on next acquire) and pushed onto active Cato visuals below so the change lands without a respawn.
@@ -1536,6 +1648,53 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_renderer?.ApplyCatoPlacementToExisting();
 
 		ShowInteractFeedback("Visual tuning applied.");
+	}
+
+	// S102 F6 apply-all: parse every CLIENT-LOCAL MOVEMENT/FEEL field and apply it INSTANTLY in place (no server
+	// round-trip, no restart). Net latency / cosmetic lead route to the client; camera blend/smoothing/teleport-
+	// snap are local _camera* fields the next UpdateCamera reads. The render-mode button and snap-on-release toggle
+	// apply live on click (not here). Invalid fields are skipped so a typo in one never blocks the others.
+	private void OnMovementApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		// S93: artificial one-way network latency (ms). 0 = off; clamped to a sane debug range. Routed to the
+		// client (no server round-trip) — the injected delay flows through the send/receive paths (felt ≈ 2× this).
+		if (TryReadField(_moveNetLatencyMs, out var netLatency))
+		{
+			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
+		}
+
+		// S94: cosmetic lead distance (tiles) for model B. Clamped [0, 1] (the client clamps again); routed to the
+		// active cosmetic driver. Default 1.0 = current model B; lower values shorten the visible lead + release snap.
+		if (TryReadField(_moveCosmeticLeadTiles, out var leadTiles))
+		{
+			_client.SetCosmeticLeadTiles(Mathf.Clamp((float)leadTiles, 0f, 1f));
+		}
+
+		// S95: camera focus blend [0,1] and follow smoothing [0,30 /s]. The next UpdateCamera reads the new values.
+		// Defaults (1.0 / 0) reproduce today's hard-follow camera.
+		if (TryReadField(_moveCameraFollowBlend, out var followBlend))
+		{
+			_cameraFollowBlend = Mathf.Clamp((float)followBlend, 0f, 1f);
+		}
+
+		if (TryReadField(_moveCameraSmoothing, out var cameraSmoothing))
+		{
+			_cameraSmoothing = Mathf.Clamp((float)cameraSmoothing, 0f, 30f);
+		}
+
+		// S102: camera teleport-snap distance (tiles). Clamped to a sane range; 0 would snap every frame (no glide),
+		// so the floor keeps a small minimum. The next UpdateCamera passes it to CameraFocusTracker.Advance.
+		if (TryReadField(_moveCameraTeleportSnapTiles, out var teleportSnap))
+		{
+			_cameraTeleportSnapTiles = Mathf.Clamp((float)teleportSnap, 0.5f, 100f);
+		}
+
+		ShowInteractFeedback("Movement tuning applied.");
 	}
 
 	private static bool TryReadField(LineEdit? field, out double value)

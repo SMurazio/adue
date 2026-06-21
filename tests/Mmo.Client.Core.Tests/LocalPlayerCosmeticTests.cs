@@ -164,6 +164,53 @@ public sealed class LocalPlayerCosmeticTests
         Assert.Equal(new TileCoord(4, 4), cosmetic.ConfirmedTile);
     }
 
+    // ---- S102: SnapOnRelease == false soft-settles instead of hard-snapping -----------------------
+
+    [Fact]
+    public void Release_WithSnapOnReleaseOff_DoesNotHardSnap_ButSettlesOverCadence()
+    {
+        // With SnapOnRelease OFF (model B), releasing must NOT cut the render to the confirmed tile at the same
+        // instant (the S91 hard snap). Instead the lead glide unwinds onto the confirmed center over one cadence —
+        // so immediately at release the render is still east of center, and a cadence later it has settled exactly.
+        var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
+        cosmetic.SnapOnRelease = false;
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        var lead = cosmetic.Sample(Ms(100));
+        Assert.True(lead.X > 4.0, $"precondition: render glided east of the confirmed center; was {lead.X}");
+
+        // Release at t=100. SnapOnRelease is off, so the render must NOT be on the confirmed center yet — the glide
+        // settles over a cadence rather than snapping.
+        cosmetic.SetIntent(false, Direction8.E, Ms(100));
+        var atRelease = cosmetic.Sample(Ms(100));
+        Assert.True(atRelease.X > 4.0, $"SnapOnRelease off: render should still be east of center at release; was {atRelease.X}");
+
+        // One cadence later it has settled exactly onto the confirmed tile (the destination is truth, no overshoot).
+        var settled = cosmetic.Sample(Ms(100 + Cadence + 1));
+        Assert.Equal(4.0, settled.X, 6);
+        Assert.Equal(4.0, settled.Y, 6);
+        Assert.Equal(new TileCoord(4, 4), cosmetic.ConfirmedTile);
+    }
+
+    [Fact]
+    public void Release_WithSnapOnReleaseOn_StillHardSnaps()
+    {
+        // The default (SnapOnRelease == true) must keep the S91 hard snap byte-for-byte: render is EXACTLY the
+        // confirmed center at the release instant. Guards the new flag's default against a regression.
+        var cosmetic = NewCosmetic(new TileCoord(4, 4), Direction8.E);
+        Assert.True(cosmetic.SnapOnRelease); // default
+
+        cosmetic.SetIntent(true, Direction8.E, Ms(0));
+        cosmetic.Tick(Ms(0));
+        cosmetic.Sample(Ms(100));
+
+        cosmetic.SetIntent(false, Direction8.E, Ms(100));
+        var atRelease = cosmetic.Sample(Ms(100));
+        Assert.Equal(4.0, atRelease.X, 6);
+        Assert.Equal(4.0, atRelease.Y, 6);
+    }
+
     // ---- Invariant 4: at rest == confirmed exactly (no latch) -------------------------------------
 
     [Fact]
