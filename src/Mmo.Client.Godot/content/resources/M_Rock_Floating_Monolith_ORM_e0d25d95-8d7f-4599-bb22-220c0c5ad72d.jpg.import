@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://4ahuuoxm2j8u"
-path="res://.godot/imported/M_Rock_Floating_Monolith_ORM_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-8feaaff311fe1746d5c1640b18e25c8e.ctex"
+path.s3tc="res://.godot/imported/M_Rock_Floating_Monolith_ORM_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-8feaaff311fe1746d5c1640b18e25c8e.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "b5cbadfd98ff98aad5b4b7b70fba764c"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://content/resources/M_Rock_Floating_Monolith_ORM_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg"
-dest_files=["res://.godot/imported/M_Rock_Floating_Monolith_ORM_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-8feaaff311fe1746d5c1640b18e25c8e.ctex"]
+dest_files=["res://.godot/imported/M_Rock_Floating_Monolith_ORM_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-8feaaff311fe1746d5c1640b18e25c8e.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

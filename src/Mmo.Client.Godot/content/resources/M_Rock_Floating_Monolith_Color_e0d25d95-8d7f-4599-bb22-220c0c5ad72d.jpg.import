@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://cgcdbkjvbsxdm"
-path="res://.godot/imported/M_Rock_Floating_Monolith_Color_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-6178811dd11c61074230f479db9b0614.ctex"
+path.s3tc="res://.godot/imported/M_Rock_Floating_Monolith_Color_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-6178811dd11c61074230f479db9b0614.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "2c8bcf5acb11c7d5d118f14ef3eddcb0"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://content/resources/M_Rock_Floating_Monolith_Color_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg"
-dest_files=["res://.godot/imported/M_Rock_Floating_Monolith_Color_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-6178811dd11c61074230f479db9b0614.ctex"]
+dest_files=["res://.godot/imported/M_Rock_Floating_Monolith_Color_e0d25d95-8d7f-4599-bb22-220c0c5ad72d.jpg-6178811dd11c61074230f479db9b0614.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

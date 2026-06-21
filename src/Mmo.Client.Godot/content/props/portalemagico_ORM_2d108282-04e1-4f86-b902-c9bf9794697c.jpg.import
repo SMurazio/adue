@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://cvvl5ty0dxkkq"
-path="res://.godot/imported/portalemagico_ORM_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-07856d10c5b0a83b27d20fc5b5f628a9.ctex"
+path.s3tc="res://.godot/imported/portalemagico_ORM_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-07856d10c5b0a83b27d20fc5b5f628a9.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "97f1e34c7df7c205d50860633e47d9e5"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://content/props/portalemagico_ORM_2d108282-04e1-4f86-b902-c9bf9794697c.jpg"
-dest_files=["res://.godot/imported/portalemagico_ORM_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-07856d10c5b0a83b27d20fc5b5f628a9.ctex"]
+dest_files=["res://.godot/imported/portalemagico_ORM_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-07856d10c5b0a83b27d20fc5b5f628a9.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

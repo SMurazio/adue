@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://onebgo4o251j"
-path="res://.godot/imported/ProvaPersonaggioWalkLoop_Color_0ca6054d-493f-4669-8a61-08b978c6315f.jpg-88fc9254edca5adaac5fed6b509875db.ctex"
+path.s3tc="res://.godot/imported/ProvaPersonaggioWalkLoop_Color_0ca6054d-493f-4669-8a61-08b978c6315f.jpg-88fc9254edca5adaac5fed6b509875db.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "a8e13a25a48777e64fe12bedfbc92877"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://content/characters/ProvaPersonaggioWalkLoop_Color_0ca6054d-493f-4669-8a61-08b978c6315f.jpg"
-dest_files=["res://.godot/imported/ProvaPersonaggioWalkLoop_Color_0ca6054d-493f-4669-8a61-08b978c6315f.jpg-88fc9254edca5adaac5fed6b509875db.ctex"]
+dest_files=["res://.godot/imported/ProvaPersonaggioWalkLoop_Color_0ca6054d-493f-4669-8a61-08b978c6315f.jpg-88fc9254edca5adaac5fed6b509875db.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

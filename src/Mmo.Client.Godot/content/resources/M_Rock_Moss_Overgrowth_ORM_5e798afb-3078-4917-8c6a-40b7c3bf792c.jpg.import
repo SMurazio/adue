@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bd38h6ccfxo6d"
-path="res://.godot/imported/M_Rock_Moss_Overgrowth_ORM_5e798afb-3078-4917-8c6a-40b7c3bf792c.jpg-a39b07126afe570b3b1c179bb419d6c7.ctex"
+path.s3tc="res://.godot/imported/M_Rock_Moss_Overgrowth_ORM_5e798afb-3078-4917-8c6a-40b7c3bf792c.jpg-a39b07126afe570b3b1c179bb419d6c7.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "936b9249a7ef35bb4cbac9860a153ff0"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://content/resources/M_Rock_Moss_Overgrowth_ORM_5e798afb-3078-4917-8c6a-40b7c3bf792c.jpg"
-dest_files=["res://.godot/imported/M_Rock_Moss_Overgrowth_ORM_5e798afb-3078-4917-8c6a-40b7c3bf792c.jpg-a39b07126afe570b3b1c179bb419d6c7.ctex"]
+dest_files=["res://.godot/imported/M_Rock_Moss_Overgrowth_ORM_5e798afb-3078-4917-8c6a-40b7c3bf792c.jpg-a39b07126afe570b3b1c179bb419d6c7.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0
