@@ -6,7 +6,7 @@ namespace Mmo.Shared.Protocol;
 public static class ProtocolCodec
 {
     public const uint Magic = 0x314F4D4D;
-    public const byte Version = 25;
+    public const byte Version = 26;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -64,6 +64,10 @@ public static class ProtocolCodec
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
                 break;
+            case AdminSetStatMessage value:
+                writer.Write(value.Stat);
+                writer.Write(value.Value);
+                break;
             case AdminSetTuningMessage value:
                 WriteString(writer, value.Key);
                 writer.Write(value.Value);
@@ -120,6 +124,9 @@ public static class ProtocolCodec
             case MovementSpeedChangedMessage value:
                 writer.Write(value.NetworkId);
                 writer.Write(value.StepCooldownMs);
+                break;
+            case PlayerStatsMessage value:
+                WriteCharacterStats(writer, value.Stats);
                 break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
@@ -210,6 +217,7 @@ public static class ProtocolCodec
             MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
+            MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
@@ -235,6 +243,7 @@ public static class ProtocolCodec
                 ReadDirection(reader),
                 reader.ReadUInt16()),
             MessageType.MovementSpeedChanged => new MovementSpeedChangedMessage(reader.ReadUInt32(), reader.ReadUInt16()),
+            MessageType.PlayerStats => new PlayerStatsMessage(ReadCharacterStats(reader)),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
@@ -514,6 +523,30 @@ public static class ProtocolCodec
         }
 
         writer.Write((short)value);
+    }
+
+    // COMBAT-S1: the six vital ints (current+max for HP/mana/stamina) in a fixed order. Mirrored in
+    // ReadCharacterStats. Ints (not packed) — vitals ride an owner-only, rarely-sent reliable message, so the
+    // few extra bytes are irrelevant and headroom is free.
+    private static void WriteCharacterStats(BinaryWriter writer, CharacterStats stats)
+    {
+        writer.Write(stats.Health);
+        writer.Write(stats.MaxHealth);
+        writer.Write(stats.Mana);
+        writer.Write(stats.MaxMana);
+        writer.Write(stats.Stamina);
+        writer.Write(stats.MaxStamina);
+    }
+
+    private static CharacterStats ReadCharacterStats(BinaryReader reader)
+    {
+        var health = reader.ReadInt32();
+        var maxHealth = reader.ReadInt32();
+        var mana = reader.ReadInt32();
+        var maxMana = reader.ReadInt32();
+        var stamina = reader.ReadInt32();
+        var maxStamina = reader.ReadInt32();
+        return new CharacterStats(health, maxHealth, mana, maxMana, stamina, maxStamina);
     }
 
     private static void WriteTile(BinaryWriter writer, TileCoord value)

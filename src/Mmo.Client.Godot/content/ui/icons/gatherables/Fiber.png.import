@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://d2kgjb2l0yc6f"
-path="res://.godot/imported/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-db523092e14840673dac263304ade19c.ctex"
+uid="uid://boi37kim5e7a1"
+path="res://.godot/imported/Fiber.png-6f96f125abe9338d7e84fb2761521e7d.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://content/props/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg"
-dest_files=["res://.godot/imported/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-db523092e14840673dac263304ade19c.ctex"]
+source_file="res://content/ui/icons/gatherables/Fiber.png"
+dest_files=["res://.godot/imported/Fiber.png-6f96f125abe9338d7e84fb2761521e7d.ctex"]
 
 [params]
 

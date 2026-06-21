@@ -318,6 +318,12 @@ public sealed class MmoClient : IDisposable
     // view for the renderer; the server stays authoritative (each delta sets the new total).
     public ClientInventory Inventory => _inventory;
 
+    // COMBAT-S1: client-side mirror of the LOCAL player's authoritative vitals (HP/mana/stamina, current+max),
+    // last replicated by PlayerStatsMessage. Null until the first PlayerStats arrives (right after login). The
+    // HUD reads this read-only; the server stays authoritative — the dev-set window sends AdminSetStat and the
+    // confirmed value lands back here.
+    public CharacterStats? LocalStats { get; private set; }
+
     // The most recent InteractResult the server sent, with a monotonic counter so a HUD can detect a new
     // result (success or a failure reason like "too_far"/"depleted") without an event subscription. Null
     // until the first interaction completes.
@@ -939,6 +945,9 @@ public sealed class MmoClient : IDisposable
         _predictor = null;
         // S103: drop any in-flight commit tracking — the entity it belonged to is gone (despawn / AOI exit / logout).
         _pendingCommit = null;
+        // COMBAT-S1: drop the cached vitals so a stale prior-session value can't briefly feed the HUD on reconnect
+        // (the next login always re-sends PlayerStats). Reset alongside the other local-entity state.
+        LocalStats = null;
     }
 
     // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
@@ -972,6 +981,14 @@ public sealed class MmoClient : IDisposable
     public void SendAdminSetTuning(string key, double value)
     {
         Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+    }
+
+    // COMBAT-S1: ask the server to set the LOCAL player's current vital (0=HP, 1=mana, 2=stamina) to value. The
+    // F7 dev-set window drives this. Reliable-ordered; the server admin-gates + clamps, and the authoritative
+    // result lands back via PlayerStatsMessage (no client-side prediction). A non-admin send is a server no-op.
+    public void SendAdminSetStat(byte stat, int value)
+    {
+        Send(new AdminSetStatMessage(stat, value), DeliveryMethod.ReliableOrdered);
     }
 
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
@@ -1068,6 +1085,9 @@ public sealed class MmoClient : IDisposable
                 break;
             case InventoryUpdateMessage inventory:
                 _inventory.Apply(inventory.ChangedStacks);
+                break;
+            case PlayerStatsMessage stats:
+                LocalStats = stats.Stats;
                 break;
         }
     }

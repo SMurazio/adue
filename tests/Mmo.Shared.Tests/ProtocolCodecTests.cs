@@ -292,13 +292,34 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyFive()
+    public void ProtocolVersionIsTwentySix()
     {
-        // NET3 protocol bump: extending StepCommitBatch with a per-commit authored tick (HeadTick + per-window-entry
-        // TickDelta) so the server applies each commit at its authored time is a breaking wire change (server +
-        // client ship together). v24 was NET2's StepCommitBatch; v23 was NET1's MoveInput. Pin the version so an
-        // accidental change is caught.
-        Assert.Equal(25, ProtocolCodec.Version);
+        // COMBAT-S1 protocol bump (v25 -> v26): adds the owner-only PlayerStatsMessage (HP/mana/stamina, current+max)
+        // and the admin-gated AdminSetStatMessage. A new message type + new payload is a breaking wire change (server
+        // + client ship together). v25 was NET3's authored-tick StepCommitBatch. Pin the version so an accidental
+        // change is caught.
+        Assert.Equal(26, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void PlayerStatsRoundTrips()
+    {
+        var original = new PlayerStatsMessage(new CharacterStats(73, 100, 41, 120, 5, 80));
+
+        var decoded = Assert.IsType<PlayerStatsMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(new CharacterStats(73, 100, 41, 120, 5, 80), decoded.Stats);
+    }
+
+    [Fact]
+    public void AdminSetStatRoundTrips()
+    {
+        var original = new AdminSetStatMessage((byte)StatKind.Stamina, -17);
+
+        var decoded = Assert.IsType<AdminSetStatMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((byte)StatKind.Stamina, decoded.Stat);
+        Assert.Equal(-17, decoded.Value);
     }
 
     [Fact]

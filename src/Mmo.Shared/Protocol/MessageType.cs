@@ -13,6 +13,8 @@ public enum MessageType : ushort
     MovementMode = 9,
     MoveInput = 10,
     StepCommitBatch = 11,
+    // COMBAT-S1: admin-gated client->server "set my local player's current vital" verb (dev-set window).
+    AdminSetStat = 12,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -24,5 +26,7 @@ public enum MessageType : ushort
     ZoneInfo = 107,
     InteractResult = 108,
     InventoryUpdate = 109,
-    MovementSpeedChanged = 110
+    MovementSpeedChanged = 110,
+    // COMBAT-S1: server->owner replication of the local player's vitals (HP/mana/stamina, current+max).
+    PlayerStats = 111
 }

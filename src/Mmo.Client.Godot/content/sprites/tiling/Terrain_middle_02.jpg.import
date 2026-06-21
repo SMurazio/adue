@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://d2kgjb2l0yc6f"
-path="res://.godot/imported/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-db523092e14840673dac263304ade19c.ctex"
+uid="uid://ckoc5skidp6gw"
+path="res://.godot/imported/Terrain_middle_02.jpg-9f9022259c82f5dda328c387540d1e1e.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://content/props/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg"
-dest_files=["res://.godot/imported/portalemagico_NormalGL_2d108282-04e1-4f86-b902-c9bf9794697c.jpg-db523092e14840673dac263304ade19c.ctex"]
+source_file="res://content/sprites/tiling/Terrain_middle_02.jpg"
+dest_files=["res://.godot/imported/Terrain_middle_02.jpg-9f9022259c82f5dda328c387540d1e1e.ctex"]
 
 [params]
 

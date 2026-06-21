@@ -109,6 +109,17 @@ public sealed record ChatSendMessage(string Text) : IProtocolMessage
     public MessageType Type => MessageType.ChatSend;
 }
 
+// COMBAT-S1 (protocol v26): admin-gated client->server "set the CALLER's own local-player vital" verb. Stat is
+// 0=Health, 1=Mana, 2=Stamina (mirrors WorldEntity.StatKind); Value is the desired CURRENT value (the server
+// clamps into [0, max]). Reliable-ordered — a dropped set must not be lost. The server REQUIRES the session to be
+// Admin (a non-admin request is ignored), exactly like /speed and AdminSetTuning. Drives the F7 dev-set window so
+// the bars can be watched tracking min/max. No client-side prediction: the authoritative value lands back via the
+// owner-only PlayerStatsMessage.
+public sealed record AdminSetStatMessage(byte Stat, int Value) : IProtocolMessage
+{
+    public MessageType Type => MessageType.AdminSetStat;
+}
+
 // S60 admin live-tuning: a generic "set this server param to this value" verb, reliable-ordered. Key is a
 // short registry key (e.g. "move.stepCooldownMs", "aoi.interestRadius"); Value is the desired value (the
 // server clamps/validates against the registry). The server REQUIRES the session to be Admin — a non-admin
@@ -229,6 +240,16 @@ public sealed record EntitySpawnMessage(
 public sealed record MovementSpeedChangedMessage(uint NetworkId, ushort StepCooldownMs) : IProtocolMessage
 {
     public MessageType Type => MessageType.MovementSpeedChanged;
+}
+
+// COMBAT-S1 (protocol v26): server->owner replication of the LOCAL player's vitals (HP/mana/stamina, each
+// current + max). Owner-only and reliable-ordered, like InventoryUpdate / MovementSpeedChanged — vitals change
+// rarely relative to position, so they ride this dedicated message and stay OFF the hot WorldSnapshot path. Sent
+// once on login (initial truth) and again whenever the values change (the dev-set window for now; damage/heal/
+// regen later). Other entities' vitals are a later stage — this stage replicates the recipient's own only.
+public sealed record PlayerStatsMessage(CharacterStats Stats) : IProtocolMessage
+{
+    public MessageType Type => MessageType.PlayerStats;
 }
 
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage

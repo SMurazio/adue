@@ -40,6 +40,25 @@ public sealed class MmoClientProtocolTests
     }
 
     [Fact]
+    public void PlayerStatsMessageUpdatesLocalStats()
+    {
+        using var client = CreateClient(out _);
+
+        // COMBAT-S1: until the first PlayerStats arrives, the local vitals are unknown.
+        Assert.Null(client.LocalStats);
+
+        client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(40, 100, 10, 120, 5, 80)));
+
+        Assert.NotNull(client.LocalStats);
+        Assert.Equal(new CharacterStats(40, 100, 10, 120, 5, 80), client.LocalStats!.Value);
+
+        // A later replication (e.g. a dev-set confirm) overwrites it.
+        client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(100, 100, 120, 120, 80, 80)));
+        Assert.Equal(100, client.LocalStats!.Value.Health);
+        Assert.Equal(120, client.LocalStats!.Value.Mana);
+    }
+
+    [Fact]
     public void InvalidChunkAndStaleSnapshotAreDroppedWithoutAckOrStateChange()
     {
         using var client = CreateClient(out var outbound);

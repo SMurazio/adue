@@ -390,6 +390,12 @@ public sealed class GameServer
                     HandleAdminSetTuning(session, tuning.Key, tuning.Value);
                 }
                 break;
+            case AdminSetStatMessage stat:
+                if (session.IsAuthenticated)
+                {
+                    HandleAdminSetStat(session, stat.Stat, stat.Value);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -447,6 +453,9 @@ public sealed class GameServer
                         {
                             SendInventoryUpdate(current, snapshot);
                         }
+                        // COMBAT-S1: replicate the player's initial vitals (full 100/100 each by default) so the
+                        // HUD bars render real values immediately on login, not the F5 stub.
+                        SendPlayerStats(current, entity);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -1394,6 +1403,44 @@ public sealed class GameServer
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
         }
+    }
+
+    // COMBAT-S1 dev-set handler. ADMIN-GATED (same role check as /speed and AdminSetTuning): a non-admin request
+    // is ignored and logged, never applied. An admin request sets the CALLER's own local-player vital current
+    // value (server clamps to [0, max] inside TrySetStatCurrent); on a real change the authoritative vitals are
+    // replicated back to the owner via PlayerStatsMessage so the HUD bars track it. No damage/regen — this is the
+    // Stage-1 hook to watch the bars move end-to-end.
+    private void HandleAdminSetStat(ClientSession sender, byte stat, int value)
+    {
+        if (sender.Role != ClientRole.Admin)
+        {
+            Log.Warn($"Denied AdminSetStat from non-admin {sender.DisplayName}: stat={stat} value={value}.");
+            return;
+        }
+
+        if (stat > (byte)StatKind.Stamina)
+        {
+            Log.Warn($"Ignored AdminSetStat from {sender.DisplayName}: unknown stat {stat}.");
+            return;
+        }
+
+        if (!TryGetSessionEntity(sender, out var entity))
+        {
+            return;
+        }
+
+        if (entity.TrySetStatCurrent((StatKind)stat, value))
+        {
+            SendPlayerStats(sender, entity);
+            Log.Info($"{sender.DisplayName} set stat {(StatKind)stat}={value} (now {entity.Stats}).");
+        }
+    }
+
+    // Replicates an entity's authoritative vitals to its OWNER. Owner-only + reliable-ordered, like the inventory
+    // snapshot — vitals stay off the hot snapshot path. Sent on login (initial truth) and on every change.
+    private void SendPlayerStats(ClientSession session, WorldEntity entity)
+    {
+        TrySend(session.Peer, new PlayerStatsMessage(entity.Stats), DeliveryMethod.ReliableOrdered);
     }
 
     private string FormatWho()
