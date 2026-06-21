@@ -305,6 +305,20 @@ public sealed class LocalPlayerPredictor
     // tween forward to now so the avatar glides smoothly between steps.
     public bool Tick(TimeSpan now)
     {
+        return Tick(now, default, out _);
+    }
+
+    // UO1 overload: same as Tick(now) but ALSO reports the direction of each step ACCEPTED this call into the
+    // caller-supplied buffer, in order, so the client-driven render mode can emit one StepCommitRequest per
+    // accepted step. The multi-step catch-up loop (a single Tick can resolve up to MaxTicksPerCall accepted steps
+    // when frames lag) fills the buffer per accept; blocked/cooldown ticks are NOT reported (the server only
+    // advances on an accepted move, so only accepts get a commit). acceptedCount is the number of entries written;
+    // entries beyond the buffer's length are dropped from the report (never from the prediction — the tile still
+    // advances) so a too-small buffer can only under-report, never corrupt state. Pass an empty span to ignore the
+    // report (what the parameterless Tick does). Returns true iff the predicted tile changed this call.
+    public bool Tick(TimeSpan now, Span<Direction8> acceptedSteps, out int acceptedCount)
+    {
+        acceptedCount = 0;
         var changed = false;
         if (_moving && _nextEligibleTick.HasValue)
         {
@@ -339,8 +353,17 @@ public sealed class LocalPlayerPredictor
                 // continuously) toward the new tile center, over one cadence, beginning at the boundary's
                 // wall-clock time so a late frame doesn't shorten the tween.
                 var stepStartedAt = TimeSpan.FromMilliseconds(TickToWallMs(actionTick));
-                AdvanceOneStep(_direction, stepStartedAt, startTween: true, tweenFrom: SampleInternal(now), now);
+                var acceptedDirection = _direction;
+                AdvanceOneStep(acceptedDirection, stepStartedAt, startTween: true, tweenFrom: SampleInternal(now), now);
                 _nextEligibleTick = actionTick + _stepCooldownTicks;
+                if (acceptedCount < acceptedSteps.Length)
+                {
+                    acceptedSteps[acceptedCount] = acceptedDirection;
+                }
+
+                // Count every accepted step even if the buffer was too small to record it (under-report rather
+                // than mis-count): a too-small buffer can drop a commit but never desync the predicted tile.
+                acceptedCount++;
                 changed = true;
             }
         }

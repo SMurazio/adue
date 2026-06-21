@@ -1098,4 +1098,65 @@ public sealed class LocalPlayerPredictorTests
         var slid = predictor.Reconcile(predictor.PredictedTile, predictor.PredictedStepSeq, TimeSpan.FromMilliseconds(610));
         Assert.Equal(LocalPlayerPredictor.ReconcileOutcome.Matched, slid);
     }
+
+    // ---- UO1: Tick reports accepted-step directions ------------------------------------------------
+
+    [Fact]
+    public void TickReportsAcceptedStepDirection_OnePerStep()
+    {
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        var buffer = new Direction8[8];
+
+        // First tick at t=0 accepts one E step.
+        Assert.True(predictor.Tick(TimeSpan.Zero, buffer, out var count));
+        Assert.Equal(1, count);
+        Assert.Equal(Direction8.E, buffer[0]);
+
+        // Frames within the same cadence accept nothing -> no reported steps.
+        Assert.False(predictor.Tick(TimeSpan.FromMilliseconds(70), buffer, out count));
+        Assert.Equal(0, count);
+
+        // Next cadence boundary accepts the second E step.
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(150), buffer, out count));
+        Assert.Equal(1, count);
+        Assert.Equal(Direction8.E, buffer[0]);
+    }
+
+    [Fact]
+    public void TickReportsMultipleAcceptedSteps_OnCatchUp()
+    {
+        // A single Tick that spans several cadence windows (a laggy frame) resolves multiple accepted steps and
+        // reports each one's direction in order. Cadence 150 = 15 ticks @ 10ms; jump ~3 cadences forward.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        var buffer = new Direction8[8];
+        Assert.True(predictor.Tick(TimeSpan.FromMilliseconds(300), buffer, out var count));
+
+        // t=0,150,300 are eligible boundaries -> 3 accepted E steps to (3,0).
+        Assert.Equal(3, count);
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        for (var i = 0; i < count; i++)
+        {
+            Assert.Equal(Direction8.E, buffer[i]);
+        }
+    }
+
+    [Fact]
+    public void TickReportsNoSteps_WhenBlocked()
+    {
+        // Wall at x>=1: the press is moving E but the very first step is blocked, so no accepted step is reported
+        // even though Tick runs the gate.
+        bool walkable(TileCoord t) => t.X < 1;
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E, walkable);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        var buffer = new Direction8[8];
+        predictor.Tick(TimeSpan.Zero, buffer, out var count);
+
+        Assert.Equal(0, count);
+        Assert.Equal(new TileCoord(0, 0), predictor.PredictedTile);
+    }
 }
