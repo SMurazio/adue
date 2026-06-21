@@ -1,24 +1,24 @@
 # Shared Memory Index
 
-This directory is the canonical, version-controlled memory store for the D:\MMO project. Both agents
-read this index at session start, then read any note relevant to the current task.
+This directory is the canonical, version-controlled memory store for the D:\MMO project. Read this index
+at session start, then read any note relevant to the current task.
 
-- [Review handoff loop](review-handoff-loop.md) - two-agent loop: Orchestrator plans/reviews,
-  Implementer writes code/tests, and review requests are verified independently.
+- [Review handoff loop](review-handoff-loop.md) - Claude-only loop: orchestrator plans/verifies/commits,
+  implementer subagents write code/tests, and a fresh reviewer subagent verifies independently.
 - [Production-ready intent](production-ready-intent.md) - production readiness means open seams and
   reversible decisions, not building every future feature immediately.
 - [Prefer scripts over MCP](prefer-scripts-over-mcp.md) - repeatable agent workflows should be
   deterministic scripts wrapped in shared skills.
 - [Shared skills layout](shared-skills-layout.md) - canonical skills live under `.shared/skills/`
-  with thin per-agent stubs.
+  with a thin stub under `.claude/skills/`.
 - [Review findings to todo](review-findings-to-todo.md) - actionable review findings become
   `todo/` files.
 - [Shared startup and memory layout](shared-startup-and-memory-layout.md) - canonical startup
-  instructions and durable project memory live under `.shared/`, with root entry-point stubs.
+  instructions and durable project memory live under `.shared/`, with a root `CLAUDE.md` import stub.
 - [Server tick performance](server-tick-performance.md) - the movement-slowdown saga (scheduler +
   GC, S21/S22), what "good" tick timing looks like, and why perf must be measured in Release.
 - [Safe local execution](safe-local-execution.md) - run server/clients only via the skill scripts;
-  never hidden-window / exec-bypass / PID-kill commands (triggers Defender). Binds both agents.
+  never hidden-window / exec-bypass / PID-kill commands (triggers Defender). Binds the orchestrator and every subagent.
 - [Orchestrator runs verification](orchestrator-runs-verification.md) - when Claude drives the loop via
   subagents: agents edit (accept-edits) but can't run scripts, so the Orchestrator runs all
   build/test/stress + commits; a targeted allowlist enables unattended runs; single shared tree (SDK is

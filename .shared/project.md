@@ -1,8 +1,8 @@
-# Shared Project Instructions
+# Project Instructions
 
-This project is built by two AI agents working in step, coordinated by the human who relays messages
-between them. This file is the canonical shared contract for both agents. Root `AGENTS.md` and
-`CLAUDE.md` are entry-point stubs that point here. The `todo/` queue is the shared backlog; see
+This project is built by Claude Code: a main **orchestrator** loop that plans and drives the work, spawning
+**Implementer subagents** to write code and **independent reviewer subagents** to verify it. This file is the
+canonical project contract. Root `CLAUDE.md` imports it. The `todo/` queue is the backlog; see
 `todo/README.md`.
 
 ## Startup Checklist
@@ -16,79 +16,87 @@ At the start of every session:
 
 ## Roles
 
-**Orchestrator** (planner/reviewer, the Claude / architect agent)
+All roles are played by Claude Code — a main **orchestrator** loop plus the **subagents** it spawns. There is
+no second external agent and no human relay.
 
-- Plans the work and makes architectural and scope decisions.
-- Writes paste-ready handoff prompts and populates the `todo/` queue.
-- Maintains planning docs in `docs/`.
-- Commissions independent review of finished work (a fresh reviewer subagent) and synthesizes the verdict;
-  does NOT solely certify work it planned (see Review Independence).
-- Does not write or edit production code.
+**Orchestrator** (the main loop)
 
-**Implementer** (the coding agent)
+- Plans the work and makes architectural, scope, protocol, and priority decisions.
+- Populates the `todo/` queue and maintains planning docs in `docs/`.
+- Drives implementation by spawning Implementer subagents (or, for small changes, editing directly).
+- Runs ALL build/test/stress verification and makes the commits — subagents can edit files but cannot run the
+  gated scripts (`run-checks`, `dotnet`, stress, server launches), so the orchestrator is the single source of
+  verification truth. See `.shared/memory/orchestrator-runs-verification.md`.
+- Commissions an independent reviewer subagent to verify finished work and synthesizes the verdict; does NOT
+  solely certify work it authored (see Review Independence).
 
-- Implements explicit handoffs and `todo/` items; writes code and tests.
-- Does not make architectural, scope, protocol, or priority decisions unilaterally.
-- Surfaces architectural forks, ambiguous specs, or disagreements instead of guessing.
-- Emits a review-request briefing when a unit of work is done.
-- Does not invent work outside the queue or an explicit handoff prompt.
+**Implementer subagent** (spawned per unit of work)
+
+- Implements a `todo/` item or explicit task; writes code and tests; emits a review-request briefing.
+- Does not make architectural, scope, protocol, or priority decisions unilaterally — surfaces forks, ambiguous
+  specs, or disagreements back to the orchestrator instead of guessing.
+- Does not invent work outside its task.
+
+**Reviewer subagent** (fresh, per review)
+
+- Independently verifies finished work — given only the live symptom and the diff, not the plan (see Review
+  Independence).
 
 ## The Loop
 
-1. **Plan** - Orchestrator produces a handoff prompt and/or `todo/` items.
-2. **Implement** - Implementer works `todo/` in priority order (`S` before `N`): one commit per
-   task, referencing the task filename; delete the task file in that same commit on success; a task
-   that cannot be finished gets a `## Blocked` note and stays. Run
-   `.\.shared\skills\mmo-dev\scripts\run-checks.cmd` before and after. New issues become new
-   `todo/` files, never silent extra changes.
-3. **Report** - Implementer writes a self-contained review-request briefing as
-   `review/review-request-<slug>.md`. It must include intent, branch and base commit, how to diff,
-   change manifest, decisions and deviations, self-verification evidence including a fresh
-   standard-gate stress run (**120 clients / 30s** — fixed and comparable across tasks; longer 60s+
-   runs are reserved for milestone/capacity studies, not per-task gating), known gaps, highest-risk
-   areas, and what the reviewer should check.
-4. **Review** - For each file in `review/`, the Orchestrator commissions a **fresh independent reviewer
-   subagent** (clean context; given only the live symptom + the diff, never the plan — see Review
-   Independence) that re-runs build/tests/stress, re-reads the diff, and tests the hypothesis against the
-   actual symptom. The Orchestrator synthesizes its severity-ranked verdict, updates `todo/` with any new
-   findings, and deletes the request file once reviewed.
+1. **Plan** - Orchestrator picks the next `todo/` item (priority `S` before `N`) or defines the task.
+2. **Implement** - An Implementer subagent (or the orchestrator directly, for small changes) writes the code
+   and tests, surfacing forks/ambiguities rather than guessing. New issues become new `todo/` files, never
+   silent extra changes. The subagent emits a self-contained review-request briefing as
+   `review/review-request-<slug>.md`: intent, base commit, how to diff, change manifest, decisions and
+   deviations, self-verification notes, known gaps, highest-risk areas, and what the reviewer should check.
+3. **Verify + commit** - The orchestrator runs `.\.shared\skills\mmo-dev\scripts\run-checks.cmd` (and a stress
+   run when relevant — the standard gate is **120 clients / 30s**, fixed and comparable across tasks; longer
+   60s+ runs are reserved for milestone/capacity studies), then makes ONE discrete revertable commit per task
+   referencing the task filename and deletes the task file in that same commit on success. A task that cannot
+   be finished gets a `## Blocked` note and stays.
+4. **Review** - For each file in `review/`, the orchestrator commissions a **fresh independent reviewer
+   subagent** (clean context; given only the live symptom + the diff, never the plan — see Review Independence)
+   that re-runs build/tests/stress, re-reads the diff, and tests the hypothesis against the actual symptom. The
+   orchestrator synthesizes its severity-ranked verdict, updates `todo/` with any new findings, and deletes the
+   request file once reviewed.
 5. Repeat.
 
-The baton alternates. The Implementer waits for a plan or populated queue; the Orchestrator waits
-for a review request.
+The orchestrator drives the whole loop; subagents are spawned per step and return their results to it. Some
+verification (anything that runs the live Godot client) only the human can do — the orchestrator asks for it.
 
 ## Review Independence (author ≠ sole reviewer)
 
-The agent that **authored** a change — its plan, its handoff, or its code — is **never the sole reviewer of
-it.** Independent verification is the entire point of the loop, and it collapses when the author also designs
-the tests that "prove" the fix and then signs off on it. (Three movement-netcode misses — UO5-stall, NET2,
-NET3-live — each passed a headless test the author wrote, because the test inherited the same wrong model that
-produced the fix. An independent reviewer would have asked whether the test reproduces the *live* symptom.)
+The part of Claude that **authored** a change — its plan, its handoff, or its code — is **never the sole
+reviewer of it.** Independent verification is the entire point of the loop, and it collapses when the author
+also designs the tests that "prove" the fix and then signs off on it. (Three movement-netcode misses —
+UO5-stall, NET2, NET3-live — each passed a headless test the author wrote, because the test inherited the same
+wrong model that produced the fix. An independent reviewer would have asked whether the test reproduces the
+*live* symptom.)
 
-**Mechanism.** When a unit of work is finished, the Orchestrator commissions a **fresh reviewer subagent** with
+**Mechanism.** When a unit of work is finished, the orchestrator commissions a **fresh reviewer subagent** with
 a **clean context**, given **only the live symptom and the diff — NOT the plan or the handoff.** That reviewer
 independently re-runs build/tests/stress, re-reads the diff, and judges the *hypothesis against the actual
-symptom* — not merely "did the code match the plan." The Orchestrator synthesizes and relays the reviewer's
+symptom* — not merely "did the code match the plan." The orchestrator synthesizes and relays the reviewer's
 verdict but does not self-certify work it planned; a finding the reviewer raises becomes a new `todo/` item.
 The human still makes the final live call (only the human can run the Godot client).
 
 ## Decision Authority
 
-- Architecture, scope, protocol, and priorities are the Orchestrator's call.
-- Implementation details inside an accepted task are the Implementer's call.
-- If the Implementer hits an architectural fork, an ambiguous spec, or a disagreement with the plan,
+- Architecture, scope, protocol, and priorities are the orchestrator's call.
+- Implementation details inside an accepted task are the implementer subagent's call.
+- If an implementer subagent hits an architectural fork, an ambiguous spec, or a disagreement with the plan,
   it raises the issue in the briefing or a new `todo/` file rather than deciding unilaterally.
 
 ## Shared Artifacts
 
 - `.shared/project.md` - canonical project contract and startup instructions.
-- `.shared/memory/` - canonical, version-controlled durable project knowledge. Both agents read
+- `.shared/memory/` - canonical, version-controlled durable project knowledge. Read
   `.shared/memory/MEMORY.md` at session start.
 - `.shared/skills/` - canonical repo-local skills and scripts.
-- `AGENTS.md` - Codex entry-point stub that points to this file.
-- `CLAUDE.md` - Claude Code entry-point import that points to this file.
+- `CLAUDE.md` - entry-point stub that imports this file.
 - `todo/` - live backlog and source of truth for outstanding work.
-- `review/` - Orchestrator's inbound review queue.
+- `review/` - the orchestrator's inbound review queue (review-request briefings awaiting independent review).
 - `docs/` - plans and decision records.
 
 ## Project Guardrails
@@ -106,7 +114,7 @@ The human still makes the final live call (only the human can run the Godot clie
   restarts: every avoided client/server restart tightens the debug loop. (Precedents: the F5 uncap-FPS
   checkbox; the F5 "Frame log (CSV)" toggle, S68.)
 
-## Safe Local Execution (binds BOTH agents)
+## Safe Local Execution (binds the orchestrator and every subagent)
 
 Run the server and clients **only** through the repo skill scripts under
 `.shared\skills\mmo-dev\scripts\` (e.g. `start-server.cmd`, `start-godot-visual-check.cmd`,

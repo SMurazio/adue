@@ -11,7 +11,7 @@ servers.
 
 Why: an MCP injects tool schemas into context every turn and adds per-call overhead for processes
 that are usually fixed and repeatable. A script has no standing context cost, is auditable in git,
-and is easy for both agents to run.
+and is easy to run.
 
 How to apply: when a repeatable capability is needed, add or update a small `.cmd` or `.ps1` under
 `.shared/skills/mmo-dev/scripts/` and document it in `.shared/skills/mmo-dev/SKILL.md`. Reserve MCPs

@@ -1,6 +1,6 @@
 # Safe local execution: use the skill scripts, never malware-shaped commands
 
-Binds BOTH agents. Run the MMO server and Godot clients only through the repo skill scripts under
+Binds the orchestrator and every subagent. Run the MMO server and Godot clients only through the repo skill scripts under
 `.shared/skills/mmo-dev/scripts/` (`start-server.cmd`, `start-godot-visual-check.cmd`,
 `review-stress*.cmd`, `stop-mmo.cmd`, etc.). See the "Safe Local Execution" guardrail in
 `.shared/project.md`.

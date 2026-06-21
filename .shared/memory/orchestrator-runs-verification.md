@@ -25,5 +25,5 @@ allowlist patterns.
 
 **Single shared tree, not worktrees:** the repo-local SDK (`.tools/`) is gitignored, so `git worktree`
 checkouts have no SDK and can't build — run Implementers sequentially in the main tree, Orchestrator
-reviewing+committing between each (which is how the two-agent loop was designed anyway). Related:
+reviewing+committing between each (which suits the single-agent loop with subagents anyway). Related:
 [[review-handoff-loop]], [[prefer-scripts-over-mcp]].

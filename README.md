@@ -163,8 +163,7 @@ The stress tool defaults to strict pass criteria: every spawned client must auth
 Repo-local workflow skill: `.shared/skills/mmo-dev/SKILL.md`.
 
 New project skills should use the shared layout: put the canonical skill under
-`.shared/skills/<skill-name>/`, then add thin discovery stubs for each agent under `.codex/skills/`
-and `.claude/skills/`.
+`.shared/skills/<skill-name>/`, then add a thin discovery stub under `.claude/skills/`.
 
 Useful scripts:
 

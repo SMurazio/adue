@@ -1,6 +1,6 @@
 ---
 name: mmo-dev
-description: Project-specific MMO development workflows for D:\MMO. Use when Codex needs to run, stop, verify, debug, or explain this MMO repo, including starting the .NET server, starting the browser debug client, running build/tests, resetting SQLite, checking logs, or avoiding Docker/Postgres assumptions.
+description: Project-specific MMO development workflows for D:\MMO. Use when Claude needs to run, stop, verify, debug, or explain this MMO repo, including starting the .NET server, starting the browser debug client, running build/tests, resetting SQLite, checking logs, or avoiding Docker/Postgres assumptions.
 ---
 
 # MMO Dev
