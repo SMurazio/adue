@@ -406,6 +406,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_maxOverlayMs = Math.Max(_maxOverlayMs, _lastOverlayMs);
 	}
 
+	// Tab = toggle the Inventory window. Handled in _Input (which runs BEFORE Godot's GUI focus navigation,
+	// where Tab is bound to ui_focus_next) so Tab reliably opens/closes the inventory instead of cycling
+	// control focus. Ignored while typing in chat so Tab behaves normally in the chat box.
+	public override void _Input(InputEvent @event)
+	{
+		if (@event is InputEventKey { Pressed: true, Echo: false } key
+			&& key.Keycode == Key.Tab
+			&& _chatInput?.HasFocus() != true)
+		{
+			_hud?.ToggleInventory();
+			GetViewport().SetInputAsHandled();
+		}
+	}
+
 	public override void _UnhandledInput(InputEvent @event)
 	{
 		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
@@ -510,15 +524,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.E && _chatInput?.HasFocus() != true)
 		{
 			TryHarvest();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// S111: I = toggle the Inventory window. Not while typing in chat (so 'i' types normally). Free key —
-		// no collision with F3/F4/F5/F6/F11, E (harvest), WASD (movement, polled separately), or Enter/T (chat).
-		if (key.Keycode == Key.I && _chatInput?.HasFocus() != true)
-		{
-			_hud?.ToggleInventory();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
