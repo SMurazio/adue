@@ -432,6 +432,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// RESYNC1: Alt+R (NOT Shift -- Alt+Shift+R above is DIAG1's counter reset) manually forces a resync of
+		// the local prediction onto the last server-confirmed position, clearing any stranded in-flight lead
+		// under loss. The same reusable predictor primitive as the F6 "Force Resync" button. A live in-client
+		// control (no restart); ignored while typing in chat.
+		if (key.Keycode == Key.R && key.AltPressed && !key.ShiftPressed && _chatInput?.HasFocus() != true)
+		{
+			_client?.ForceResync();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		if (key.Keycode == Key.F11)
 		{
 			var mode = DisplayServer.WindowGetMode();
@@ -984,6 +995,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(stopOnReversal);
 		_stopOnReversalCheck = stopOnReversal;
 		_predictorOnlyRows.Add(stopOnReversal); // UO4: predictor-modes only.
+
+		// RESYNC1: manual Force Resync button. Calls MmoClient.ForceResync() -> LocalPlayerPredictor.ForceResync(),
+		// which hard-snaps the local prediction (tile, step-seq, render) onto the last server-confirmed position and
+		// clears any stranded in-flight lead. USER-TRIGGERED escape hatch for a loss-induced desync; the same primitive
+		// as the Alt+R hotkey, and the one UO5/NET4 auto-tiers will call. Live, no restart; works in every render mode
+		// (in cosmetic mode it is a harmless snap-to-server).
+		var forceResync = new Button { Name = "ForceResync", Text = "Force Resync" };
+		forceResync.AddThemeFontSizeOverride("font_size", 14);
+		forceResync.Pressed += () => _client?.ForceResync();
+		rows.AddChild(forceResync);
 
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);

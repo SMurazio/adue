@@ -1446,4 +1446,52 @@ public sealed class LocalPlayerPredictorTests
         Assert.Equal(predBefore, predictor.PredictedStepSeq);
         Assert.Equal(confBefore, predictor.LastReconciledStepSeq);
     }
+
+    // ---- RESYNC1: manual Force Resync primitive ----------------------------------------------------
+
+    [Fact]
+    public void Resync1_ForceResync_SnapsPredictionOntoLastConfirmed_AndIsIdempotent()
+    {
+        // Drive the predictor AHEAD of the server (the loss-induced strand the manual resync exists to clear):
+        // step E several tiles while the server only confirms an OLDER, LOWER tile/seq. ForceResync must snap the
+        // predicted tile + step-seq onto the last server-confirmed (tile, seq) Reconcile anchored on, hard-snap the
+        // render onto it, and be a stable no-op when called again.
+        var predictor = NewPredictor(new TileCoord(0, 0), Direction8.E);
+        predictor.SetIntent(true, Direction8.E, TimeSpan.Zero);
+
+        // Predict three E steps -> (3,0), seq 3, with the key still held.
+        predictor.Tick(TimeSpan.Zero);                                    // (1,0) seq 1
+        predictor.Tick(TimeSpan.FromMilliseconds(150));                   // (2,0) seq 2
+        predictor.Tick(TimeSpan.FromMilliseconds(300));                   // (3,0) seq 3
+        Assert.Equal(new TileCoord(3, 0), predictor.PredictedTile);
+        Assert.Equal(3u, predictor.PredictedStepSeq);
+
+        // A lagging confirm: the server has only acknowledged tile (1,0) at seq 1. Reconcile re-anchors there and
+        // re-projects the in-flight steps forward, so the prediction stays AHEAD of the confirmed tile (the
+        // desync). This is the (tile, seq) the manual resync must snap back onto.
+        var confirmedTile = new TileCoord(1, 0);
+        const uint confirmedSeq = 1u;
+        predictor.Reconcile(confirmedTile, confirmedSeq, TimeSpan.FromMilliseconds(310));
+        Assert.Equal(confirmedSeq, predictor.LastReconciledStepSeq);
+        // Sanity: the prediction is genuinely desynced (still leading the confirmed tile/seq).
+        Assert.True(predictor.PredictedStepSeq > confirmedSeq);
+        Assert.NotEqual(confirmedTile, predictor.PredictedTile);
+
+        // Force the resync: predicted tile + seq snap exactly onto the last confirmed (tile, seq), and the render
+        // hard-snaps onto that tile (no blend — sampling at ANY later time stays put on the confirmed tile center).
+        predictor.ForceResync();
+        Assert.Equal(confirmedTile, predictor.PredictedTile);
+        Assert.Equal(confirmedSeq, predictor.PredictedStepSeq);
+        var snapped = predictor.Sample(TimeSpan.FromMilliseconds(400));
+        Assert.Equal(1d, snapped.X, 6);                                   // confirmed tile (1,0) center, no slide
+        Assert.Equal(0d, snapped.Y, 6);
+
+        // Idempotent: calling it again while already in sync is a stable no-op (tile/seq/render unchanged).
+        predictor.ForceResync();
+        Assert.Equal(confirmedTile, predictor.PredictedTile);
+        Assert.Equal(confirmedSeq, predictor.PredictedStepSeq);
+        var again = predictor.Sample(TimeSpan.FromMilliseconds(500));
+        Assert.Equal(snapped.X, again.X, 6);
+        Assert.Equal(snapped.Y, again.Y, 6);
+    }
 }

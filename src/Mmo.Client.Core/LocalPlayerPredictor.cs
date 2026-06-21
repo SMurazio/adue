@@ -102,6 +102,13 @@ public sealed class LocalPlayerPredictor
     // already processed.
     private uint _highestReconciledStepSeq;
     private bool _hasReconciled;
+    // RESYNC1: the last server-confirmed tile Reconcile re-anchored on (the authoritative position at
+    // _highestReconciledStepSeq). Remembered ONLY so the manual ForceResync primitive has an authoritative target
+    // to snap the prediction onto — Reconcile already re-anchors _predictedTile to this on every confirm, but the
+    // value is then re-projected forward by the in-flight steps, so the bare confirmed tile is not otherwise
+    // retained. Stored at the top of Reconcile before any re-projection; changes nothing about the reconcile
+    // behaviour (write-only here, read only by ForceResync). Defaults to the initial tile until the first confirm.
+    private TileCoord _lastConfirmedTile;
 
     // DIAG1: reconcile-outcome tallies (see the public accessors). Bumped once per Reconcile call at each return
     // point; reset by ResetReconcileCounters so the human can zero them before a loss burst. Measurement only.
@@ -188,6 +195,7 @@ public sealed class LocalPlayerPredictor
     {
         _isWalkable = isWalkable ?? throw new ArgumentNullException(nameof(isWalkable));
         _predictedTile = initialTile;
+        _lastConfirmedTile = initialTile;
         _facing = facing;
         _tickMs = Math.Max(1, tickMs);
         _cadenceMs = Math.Max(1, cadenceMs);
@@ -603,6 +611,9 @@ public sealed class LocalPlayerPredictor
 
         _hasReconciled = true;
         _highestReconciledStepSeq = serverStepSeq;
+        // RESYNC1: remember the authoritative confirmed tile/seq so the manual ForceResync primitive has a target
+        // to snap onto. Write-only — the normal reconcile below is byte-for-byte unchanged by this line.
+        _lastConfirmedTile = confirmedTile;
 
         // The in-flight steps are the ones we predicted past the server's confirmed point — the ones genuinely
         // sent-but-not-yet-acked (count = predictedStepSeq - serverStepSeq, when positive).
@@ -739,6 +750,47 @@ public sealed class LocalPlayerPredictor
         _reconcileMatched = 0;
         _reconcileCorrected = 0;
         _reconcileSnapped = 0;
+    }
+
+    // RESYNC1: manual Force Resync — the reusable resync PRIMITIVE (UO5 tier-2 + NET4 tier-3 will call this; do
+    // NOT inline its logic in a UI handler). Hard-resets the local prediction onto the last server-confirmed
+    // state the predictor reconciled against, and clears any in-flight / banked-but-unconfirmed state so nothing
+    // stale replays forward:
+    //   * _predictedTile  -> _lastConfirmedTile      (the authoritative position Reconcile last anchored on)
+    //   * _predictedStepSeq -> _highestReconciledStepSeq (the server's confirmed step-seq — re-anchor)
+    //   * the render is HARD-SNAPPED to the confirmed tile (no blend — this is an explicit resync, unlike
+    //     Reconcile's near-miss present-time blend), and the tween is collapsed onto it so the next Sample/Tick
+    //     can't drift toward a stale target.
+    //   * the action gate is re-armed one fresh cooldown out (mirrors Reconcile's snap branch) so the very next
+    //     predicted step happens a full cooldown after the resync instead of immediately re-opening the gap.
+    //   * any armed reversal settle is dropped (no in-flight reversal to honour after a hard snap).
+    // After this the in-flight count (PredictedStepSeq - serverStepSeq) is 0, so the NEXT Reconcile re-projects
+    // nothing and the banked _inFlightDir slots — which are only ever read in the [serverStepSeq+1 .. predictedSeq]
+    // window — are unreachable until genuinely overwritten by fresh live steps.
+    //
+    // USER-TRIGGERED ONLY: nothing calls this in the normal Tick/Reconcile/SetIntent path, so automatic movement
+    // is unchanged. IDEMPOTENT / safe in sync: if the prediction is already on the confirmed tile/seq this snaps
+    // tile/seq to the same values and the render onto the tile it already shows — a stable no-op. Before the first
+    // Reconcile, _lastConfirmedTile is the initial tile and _highestReconciledStepSeq is 0 (the predictor's start
+    // state), so an early resync simply returns the avatar to spawn — still a clean, well-defined snap.
+    public void ForceResync()
+    {
+        _predictedTile = _lastConfirmedTile;
+        _predictedStepSeq = _highestReconciledStepSeq;
+        _settleReversalArmed = false;
+
+        // Hard-snap the render onto the confirmed tile (no present-time blend) and collapse the tween onto it.
+        var at = RenderPosition.FromTile(_predictedTile);
+        StartTween(at, at, TimeSpan.Zero, _cadenceMs);
+        _renderPosition = at;
+
+        // Re-arm the gate one fresh cooldown out so the next step doesn't immediately re-diverge from the truth we
+        // just snapped to (mirrors the Reconcile snap branch). Only when a schedule is armed; an idle predictor
+        // (no _nextEligibleTick) stays idle.
+        if (_nextEligibleTick.HasValue && _hasEstimatedTick)
+        {
+            _nextEligibleTick = _lastEstimatedTick + _stepCooldownTicks;
+        }
     }
 
     // Updates facing-only from a confirmed snapshot when the position matched (so a server-side turn with no

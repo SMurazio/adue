@@ -264,6 +264,14 @@ public sealed class MmoClient : IDisposable
     // predictor is attached. Measurement only — touches no prediction/reconcile state.
     public void ResetReconcileCounters() => _predictor?.ResetReconcileCounters();
 
+    // RESYNC1: manual Force Resync — snaps the local prediction (tile, step-seq, render) onto the last
+    // server-confirmed position and clears any in-flight/banked-but-unconfirmed state so nothing stale replays
+    // forward. The reusable resync primitive the auto-tiers (UO5 tier-2, NET4 tier-3) will call; here it is wired
+    // to the F6 "Force Resync" button and the Alt+R hotkey. USER-TRIGGERED only — it changes nothing unless
+    // called, so the normal Tick/Reconcile movement path is untouched. No-op (safe) when no predictor is attached
+    // or the prediction is already in sync. Pass-through mirrors ResetReconcileCounters (DIAG1).
+    public void ForceResync() => _predictor?.ForceResync();
+
     // Client-side mirror of the owner's private inventory, updated by InventoryUpdate deltas. Read-only
     // view for the renderer; the server stays authoritative (each delta sets the new total).
     public ClientInventory Inventory => _inventory;
