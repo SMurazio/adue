@@ -40,6 +40,25 @@ public sealed class MmoClientProtocolTests
     }
 
     [Fact]
+    public void PlayerStatsMessageUpdatesLocalStats()
+    {
+        using var client = CreateClient(out _);
+
+        // COMBAT-S1: until the first PlayerStats arrives, the local vitals are unknown.
+        Assert.Null(client.LocalStats);
+
+        client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(40, 100, 10, 120, 5, 80)));
+
+        Assert.NotNull(client.LocalStats);
+        Assert.Equal(new CharacterStats(40, 100, 10, 120, 5, 80), client.LocalStats!.Value);
+
+        // A later replication (e.g. a dev-set confirm) overwrites it.
+        client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(100, 100, 120, 120, 80, 80)));
+        Assert.Equal(100, client.LocalStats!.Value.Health);
+        Assert.Equal(120, client.LocalStats!.Value.Mana);
+    }
+
+    [Fact]
     public void InvalidChunkAndStaleSnapshotAreDroppedWithoutAckOrStateChange()
     {
         using var client = CreateClient(out var outbound);
@@ -278,6 +297,32 @@ public sealed class MmoClientProtocolTests
             new ClientMovementTrace(debugMovement, traceSink));
         client.OutboundSinkForTests = (message, _) => captured.Add(message);
         return client;
+    }
+
+    [Fact]
+    public void SnapshotHealthThreadsToRenderState()
+    {
+        // COMBAT-S2A: the public HP on the snapshot threads through to the render state that drives the
+        // overhead bar. A stat-bearing entity carries a partial HP (HasHealth=true, a fractional fill); a
+        // stat-less entity carries 0/0 (HasHealth=false → the visual hides the bar).
+        using var client = CreateClient(out _);
+
+        client.HandleMessageForTests(Snapshot(
+            1,
+            isComplete: true,
+            new EntityStateSnapshot(1, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+            new EntityStateSnapshot(2, new TileCoord(6, 6), Direction8.S)));
+
+        var renders = client.GetRenderStates(TimeSpan.FromMilliseconds(200))
+            .ToDictionary(r => r.NetworkId);
+
+        Assert.True(renders[1].HasHealth);
+        Assert.Equal((ushort)70, renders[1].Health);
+        Assert.Equal((ushort)100, renders[1].MaxHealth);
+        Assert.Equal(0.70f, renders[1].HealthFraction, 3);
+
+        Assert.False(renders[2].HasHealth);
+        Assert.Equal(0f, renders[2].HealthFraction);
     }
 
     private static WorldSnapshotMessage Snapshot(uint sequence, bool isComplete, params EntityStateSnapshot[] entities)

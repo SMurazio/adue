@@ -318,6 +318,12 @@ public sealed class MmoClient : IDisposable
     // view for the renderer; the server stays authoritative (each delta sets the new total).
     public ClientInventory Inventory => _inventory;
 
+    // COMBAT-S1: client-side mirror of the LOCAL player's authoritative vitals (HP/mana/stamina, current+max),
+    // last replicated by PlayerStatsMessage. Null until the first PlayerStats arrives (right after login). The
+    // HUD reads this read-only; the server stays authoritative — the dev-set window sends AdminSetStat and the
+    // confirmed value lands back here.
+    public CharacterStats? LocalStats { get; private set; }
+
     // The most recent InteractResult the server sent, with a monotonic counter so a HUD can detect a new
     // result (success or a failure reason like "too_far"/"depleted") without an event subscription. Null
     // until the first interaction completes.
@@ -939,6 +945,9 @@ public sealed class MmoClient : IDisposable
         _predictor = null;
         // S103: drop any in-flight commit tracking — the entity it belonged to is gone (despawn / AOI exit / logout).
         _pendingCommit = null;
+        // COMBAT-S1: drop the cached vitals so a stale prior-session value can't briefly feed the HUD on reconnect
+        // (the next login always re-sends PlayerStats). Reset alongside the other local-entity state.
+        LocalStats = null;
     }
 
     // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
@@ -972,6 +981,14 @@ public sealed class MmoClient : IDisposable
     public void SendAdminSetTuning(string key, double value)
     {
         Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+    }
+
+    // COMBAT-S1: ask the server to set the LOCAL player's current vital (0=HP, 1=mana, 2=stamina) to value. The
+    // F7 dev-set window drives this. Reliable-ordered; the server admin-gates + clamps, and the authoritative
+    // result lands back via PlayerStatsMessage (no client-side prediction). A non-admin send is a server no-op.
+    public void SendAdminSetStat(byte stat, int value)
+    {
+        Send(new AdminSetStatMessage(stat, value), DeliveryMethod.ReliableOrdered);
     }
 
     public void RecordFrameHitch(double durationMs, int gc0, int gc1, int gc2)
@@ -1068,6 +1085,9 @@ public sealed class MmoClient : IDisposable
                 break;
             case InventoryUpdateMessage inventory:
                 _inventory.Apply(inventory.ChangedStacks);
+                break;
+            case PlayerStatsMessage stats:
+                LocalStats = stats.Stats;
                 break;
         }
     }
@@ -1250,7 +1270,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted);
+            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -1285,7 +1305,9 @@ public sealed class MmoClient : IDisposable
                 sequence,
                 _lastRecipientStepSeq,
                 serverTick,
-                localEntity.Depleted);
+                localEntity.Depleted,
+                localEntity.Health,
+                localEntity.MaxHealth);
         }
 
         if (isComplete)
@@ -1436,9 +1458,9 @@ public sealed class MmoClient : IDisposable
                 existing.SetStepCooldownMs(effectiveCooldown.Value, ResolveCadence(effectiveCooldown), existing.IsLocal);
             }
 
-            // EntitySpawn carries no Depleted bit (that rides the AOI snapshot), so preserve whatever the
-            // last snapshot set rather than resetting a known-depleted node to available.
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted);
+            // EntitySpawn carries no Depleted/HP bits (those ride the AOI snapshot), so preserve whatever the
+            // last snapshot set rather than resetting a known-depleted node to available or zeroing known HP.
+            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -1623,6 +1645,12 @@ public sealed class MmoClient : IDisposable
         // position so the renderer can grey/hide a node without affecting movement.
         public bool Depleted { get; private set; }
 
+        // COMBAT-S2A: public HP replicated on the AOI snapshot, threaded to the overhead red bar. 0/0 for
+        // entities without vitals (resources). Carried alongside Depleted (snapshot-driven, not interpolated).
+        public ushort Health { get; private set; }
+
+        public ushort MaxHealth { get; private set; }
+
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
             && DisplayName.StartsWith("#", StringComparison.Ordinal);
@@ -1641,7 +1669,7 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal || IsLocal;
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false)
+        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
         {
             var previousTile = Tile;
             // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -1649,6 +1677,10 @@ public sealed class MmoClient : IDisposable
             // render position, never this authoritative tile.
             Tile = tile;
             Depleted = depleted;
+            // COMBAT-S2A: adopt the replicated public HP (snapshot-driven, like Depleted). Preserving callers
+            // (the delta'd-out local re-apply and EntitySpawn) pass the current values so HP isn't reset to 0.
+            Health = health;
+            MaxHealth = maxHealth;
             LastSeenSnapshotSequence = snapshotSequence;
             // S89 model B: the cosmetic driver owns the render. The confirmed tile advances ONLY here (the server
             // ack). No step-seq / reconcile / replay — Confirm cuts/snaps the render to the confirmed tile. The
@@ -1850,7 +1882,7 @@ public sealed class MmoClient : IDisposable
 
         public ReplicatedEntity ToSnapshot()
         {
-            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted);
+            return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
         }
 
         public EntityRenderState ToRenderState(TimeSpan now)
@@ -1878,7 +1910,7 @@ public sealed class MmoClient : IDisposable
                 position = _interpolator.Sample(now);
                 facing = Facing;
             }
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted, Health, MaxHealth);
         }
     }
 

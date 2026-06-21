@@ -29,13 +29,15 @@ public partial class Hud : CanvasLayer
     private TextureRect? _mountBadge;
     private ColorRect? _healthFill;
     private ColorRect? _resourceFill;
+    // COMBAT-S1: the third vitals bar — stamina (yellow). Same track+fill structure as health/resource.
+    private ColorRect? _staminaFill;
 
     // S109: the top-right framed minimap (its own scene/controller). The HUD owns it as a child and pushes the
     // current HudState into it each Refresh; the minimap reads the local position/facing + static map from there.
     private Minimap? _minimap;
 
     // S111: the toggleable centered Inventory window (replaces the old top-right text panel). The HUD owns it as
-    // a child; MmoClientRoot toggles it ("I") and feeds it the (Version-guarded) inventory rows. Hidden by default.
+    // a child; MmoClientRoot toggles it (Tab) and feeds it the (Version-guarded) inventory rows. Hidden by default.
     private InventoryWindow? _inventory;
 
     // The portrait's base (white) modulate so we can toggle the low-health red tint without losing the texture.
@@ -219,6 +221,8 @@ public partial class Hud : CanvasLayer
         col.AddThemeConstantOverride("separation", 4);
         col.AddChild(BuildVitalBar(out _healthFill, new Color(0.20f, 0.78f, 0.30f, 1f)));
         col.AddChild(BuildVitalBar(out _resourceFill, new Color(0.22f, 0.50f, 0.95f, 1f)));
+        // COMBAT-S1: stamina bar (yellow), matching the existing track/fill look.
+        col.AddChild(BuildVitalBar(out _staminaFill, new Color(0.92f, 0.82f, 0.20f, 1f)));
         return col;
     }
 
@@ -285,6 +289,11 @@ public partial class Hud : CanvasLayer
         if (_resourceFill is not null)
         {
             _resourceFill.OffsetRight = VitalsBarWidth * Ratio(State.Resource, State.MaxResource);
+        }
+
+        if (_staminaFill is not null)
+        {
+            _staminaFill.OffsetRight = VitalsBarWidth * Ratio(State.Stamina, State.MaxStamina);
         }
 
         ApplyPortrait();

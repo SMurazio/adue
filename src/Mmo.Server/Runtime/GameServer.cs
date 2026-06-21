@@ -16,7 +16,9 @@ public sealed class GameServer
     private const int MaxSequencedSnapshotBytes = 1000;
     private const int ProtocolHeaderBytes = 7;
     private const int SnapshotHeaderBytes = 17;
-    private const int EntityStateFixedBytes = 8;
+    // Per-entity snapshot state wire size: networkId(2) + x(2) + y(2) + facing(1) + depleted(1) = 8, plus
+    // COMBAT-S2A's public HP Health(2) + MaxHealth(2) = 12.
+    private const int EntityStateFixedBytes = 12;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -130,6 +132,7 @@ public sealed class GameServer
             options.SpawnDistribution,
             ResolveEntityGridCellSize(options.InterestRadius));
         ScatterResourceNodes();
+        SpawnDummies();
         _netManager = new NetManager(_listener)
         {
             AutoRecycle = false,
@@ -390,6 +393,12 @@ public sealed class GameServer
                     HandleAdminSetTuning(session, tuning.Key, tuning.Value);
                 }
                 break;
+            case AdminSetStatMessage stat:
+                if (session.IsAuthenticated)
+                {
+                    HandleAdminSetStat(session, stat.Stat, stat.Value);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -447,6 +456,9 @@ public sealed class GameServer
                         {
                             SendInventoryUpdate(current, snapshot);
                         }
+                        // COMBAT-S1: replicate the player's initial vitals (full 100/100 each by default) so the
+                        // HUD bars render real values immediately on login, not the F5 stub.
+                        SendPlayerStats(current, entity);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -966,8 +978,23 @@ public sealed class GameServer
 
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
-        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted);
+        // COMBAT-S2A: replicate PUBLIC HP (current + max) on the per-entity state for the overhead bar. Only
+        // entities that actually HAVE vitals report HP (players + dummies); everything else (resource nodes,
+        // any future stat-less kind) replicates 0/0, which the client reads as "no HP" and hides the bar for.
+        // WorldEntity.Stats defaults to 100/100 for every kind, so the kind gate — not the value — is what
+        // distinguishes "has HP" from "no HP". Mana/stamina are deliberately NOT here (owner-only via
+        // PlayerStatsMessage). Clamp to ushort defensively (HP is small and non-negative in practice).
+        var (health, maxHealth) = HasPublicHealth(entity.Kind)
+            ? (ToHealthWire(entity.Stats.Health), ToHealthWire(entity.Stats.MaxHealth))
+            : ((ushort)0, (ushort)0);
+        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted, health, maxHealth);
     }
+
+    // Which entity kinds expose a public HP bar. Players and dummies carry CharacterStats that drive the
+    // overhead bar; resources and anything else do not (they replicate 0/0 and the client hides the bar).
+    private static bool HasPublicHealth(EntityKind kind) => kind is EntityKind.Player or EntityKind.Dummy;
+
+    private static ushort ToHealthWire(int value) => (ushort)Math.Clamp(value, 0, ushort.MaxValue);
 
     private static int EstimateEntityStateBytes()
     {
@@ -1037,6 +1064,51 @@ public sealed class GameServer
             _zone.PlanResourceNodeScatter(_resourceNodes, _options.ResourceNodeDensityTilesPerNode))
         {
             _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
+        }
+    }
+
+    // COMBAT-S2A: spawn a couple of stationary "Dummy" enemies near the primary spawn so a logged-in player
+    // immediately sees a hittable target with a partial red overhead HP bar (the proof the current/max HP
+    // replication renders). They are EntityKind.Dummy transients with CharacterStats (HP); their current HP is
+    // dev-set to a PARTIAL value so the bar shows a non-full fill. No behaviour/AI/damage/regen this stage —
+    // they just stand there and replicate their HP via the snapshot like any other entity. Placement is
+    // deterministic: a short Chebyshev-radius scan outward from the first spawn tile for distinct walkable
+    // tiles, so the same world regenerates the same dummies on restart (no PRNG, no clock).
+    private void SpawnDummies()
+    {
+        const int dummyCount = 2;
+        const int partialHealth = 70; // out of the CharacterStats.Default MaxHealth (100) → a 70% bar.
+
+        var anchor = _zone.SpawnTiles.Count > 0 ? _zone.SpawnTiles[0] : Zone.DefaultSpawnTile;
+        var placed = 0;
+        // Ring-scan outward from the anchor (radius 2 onward so dummies don't land on the spawn tile itself),
+        // taking the first `dummyCount` distinct walkable tiles. Deterministic iteration order = deterministic
+        // layout. Bounded radius so a pathological map can't loop forever; if fewer than dummyCount tiles are
+        // found, we simply spawn fewer (a target is still present).
+        for (var radius = 2; radius <= 6 && placed < dummyCount; radius++)
+        {
+            for (var dy = -radius; dy <= radius && placed < dummyCount; dy++)
+            {
+                for (var dx = -radius; dx <= radius && placed < dummyCount; dx++)
+                {
+                    // Only the ring at this Chebyshev radius (skip the filled interior visited at smaller radii).
+                    if (Math.Max(Math.Abs(dx), Math.Abs(dy)) != radius)
+                    {
+                        continue;
+                    }
+
+                    var tile = anchor.Offset(dx, dy);
+                    if (!_zone.IsWalkable(tile))
+                    {
+                        continue;
+                    }
+
+                    var dummy = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Dummy, "Dummy", tile, Direction8.S);
+                    // Partial HP so the overhead bar is visibly non-full (proves current/max rendering).
+                    dummy.TrySetStatCurrent(StatKind.Health, partialHealth);
+                    placed++;
+                }
+            }
         }
     }
 
@@ -1394,6 +1466,44 @@ public sealed class GameServer
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
         }
+    }
+
+    // COMBAT-S1 dev-set handler. ADMIN-GATED (same role check as /speed and AdminSetTuning): a non-admin request
+    // is ignored and logged, never applied. An admin request sets the CALLER's own local-player vital current
+    // value (server clamps to [0, max] inside TrySetStatCurrent); on a real change the authoritative vitals are
+    // replicated back to the owner via PlayerStatsMessage so the HUD bars track it. No damage/regen — this is the
+    // Stage-1 hook to watch the bars move end-to-end.
+    private void HandleAdminSetStat(ClientSession sender, byte stat, int value)
+    {
+        if (sender.Role != ClientRole.Admin)
+        {
+            Log.Warn($"Denied AdminSetStat from non-admin {sender.DisplayName}: stat={stat} value={value}.");
+            return;
+        }
+
+        if (stat > (byte)StatKind.Stamina)
+        {
+            Log.Warn($"Ignored AdminSetStat from {sender.DisplayName}: unknown stat {stat}.");
+            return;
+        }
+
+        if (!TryGetSessionEntity(sender, out var entity))
+        {
+            return;
+        }
+
+        if (entity.TrySetStatCurrent((StatKind)stat, value))
+        {
+            SendPlayerStats(sender, entity);
+            Log.Info($"{sender.DisplayName} set stat {(StatKind)stat}={value} (now {entity.Stats}).");
+        }
+    }
+
+    // Replicates an entity's authoritative vitals to its OWNER. Owner-only + reliable-ordered, like the inventory
+    // snapshot — vitals stay off the hot snapshot path. Sent on login (initial truth) and on every change.
+    private void SendPlayerStats(ClientSession session, WorldEntity entity)
+    {
+        TrySend(session.Peer, new PlayerStatsMessage(entity.Stats), DeliveryMethod.ReliableOrdered);
     }
 
     private string FormatWho()

@@ -10,4 +10,6 @@ public sealed record ReplicatedEntity(
     TileCoord Tile,
     Direction8 Facing,
     bool IsLocal,
-    bool Depleted = false);
+    bool Depleted = false,
+    ushort Health = 0,
+    ushort MaxHealth = 0);

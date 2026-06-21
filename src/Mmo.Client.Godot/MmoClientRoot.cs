@@ -164,6 +164,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// model-B-only rows.
 	private CheckBox? _stopOnReversalCheck;
 	private readonly List<Control> _predictorOnlyRows = new();
+
+	// ---- COMBAT-S1 F7 dev-set vitals panel --------------------------------------------------------
+	// A dedicated admin-gated panel (F7) to set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row
+	// is a label + LineEdit; Apply sends the three current values to the server via AdminSetStat (the server admin-
+	// gates + clamps authoritatively, then replicates the result back via PlayerStatsMessage so the bars track it).
+	// Same panel/Apply pattern as F4. Seeded on open from the live replicated stats. Set so the bars move min/max.
+	private PanelContainer? _statPanel;
+	private bool _statPanelVisible;
+	private LineEdit? _statHealthEdit;
+	private LineEdit? _statManaEdit;
+	private LineEdit? _statStaminaEdit;
+
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -406,6 +418,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_maxOverlayMs = Math.Max(_maxOverlayMs, _lastOverlayMs);
 	}
 
+	// Tab = toggle the Inventory window. Handled in _Input (which runs BEFORE Godot's GUI focus navigation,
+	// where Tab is bound to ui_focus_next) so Tab reliably opens/closes the inventory instead of cycling
+	// control focus. Ignored while typing in chat so Tab behaves normally in the chat box.
+	public override void _Input(InputEvent @event)
+	{
+		if (@event is InputEventKey { Pressed: true, Echo: false } key
+			&& key.Keycode == Key.Tab
+			&& _chatInput?.HasFocus() != true)
+		{
+			_hud?.ToggleInventory();
+			GetViewport().SetInputAsHandled();
+		}
+	}
+
 	public override void _UnhandledInput(InputEvent @event)
 	{
 		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
@@ -466,6 +492,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// F7: admin-only COMBAT-S1 dev-set vitals panel — set the local player's current HP/mana/stamina live so
+		// the HUD bars can be watched tracking min/max. Same admin gating as F4/F5/F6 (panel never shows otherwise).
+		if (key.Keycode == Key.F7)
+		{
+			ToggleStatPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		// DIAG1: Alt+Shift+R zeroes the local predictor's reconcile-outcome tallies (rec[M/C/S] in the F3
 		// read-out) so the human can reset them just before a loss burst and read fresh counts. A live in-client
 		// control (no restart); ignored while typing in chat. Measurement only. (Alt+R is reserved for RESYNC1's
@@ -510,15 +545,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.E && _chatInput?.HasFocus() != true)
 		{
 			TryHarvest();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// S111: I = toggle the Inventory window. Not while typing in chat (so 'i' types normally). Free key —
-		// no collision with F3/F4/F5/F6/F11, E (harvest), WASD (movement, polled separately), or Enter/T (chat).
-		if (key.Keycode == Key.I && _chatInput?.HasFocus() != true)
-		{
-			_hud?.ToggleInventory();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -793,6 +819,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		BuildTuningPanel(layer);
 		BuildVisualPanel(layer);
 		BuildMovementPanel(layer);
+		BuildStatPanel(layer);
 
 		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
 		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
@@ -1093,6 +1120,38 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		panel.Visible = false;
 		_movementPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// COMBAT-S1: the admin dev-set VITALS panel (F7). Three rows (HP/mana/stamina) of label + LineEdit; one Apply
+	// sends each current value to the server via AdminSetStat (server admin-gates + clamps, then replicates the
+	// authoritative result back via PlayerStatsMessage so the bars track min/max). Same row/Apply pattern as F4.
+	// Hidden until F7 is pressed by an Admin session; seeded on first open from the live replicated stats.
+	private void BuildStatPanel(CanvasLayer layer)
+	{
+		// Below the F4 server-tuning panel (same left column) so it doesn't overlap the other admin panels.
+		var panel = CreateOverlayPanel("StatPanel", new Vector2(490, 430), new Vector2(360, 200));
+		var rows = CreatePanelVBox(panel);
+
+		var title = CreateOverlayLabel("StatTitle", 15);
+		title.Text = "ADMIN DEV-SET VITALS (F7)";
+		rows.AddChild(title);
+
+		var header = CreateOverlayLabel("StatHeader", 12);
+		header.Text = "— local player · current value · sent on Apply —";
+		rows.AddChild(header);
+
+		_statHealthEdit = AddTuningField(rows, "hp (current)", OnStatApplyPressed);
+		_statManaEdit = AddTuningField(rows, "mana (current)", OnStatApplyPressed);
+		_statStaminaEdit = AddTuningField(rows, "stamina (current)", OnStatApplyPressed);
+
+		var apply = new Button { Name = "StatApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnStatApplyPressed;
+		rows.AddChild(apply);
+
+		panel.Visible = false;
+		_statPanel = panel;
 		layer.AddChild(panel);
 	}
 
@@ -1668,6 +1727,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_hudState.LocalY = _localRenderY;
 		_hudState.LocalFacing = _lastSentDirection;
 
+		// COMBAT-S1: feed the 3 vitals bars from the REAL replicated stats (HP green / mana blue / stamina yellow),
+		// filled proportional to current/max. Once a PlayerStatsMessage has arrived (right after login) this is
+		// authoritative each frame; before that the stub/F5 values remain so the HUD still renders. Read-only.
+		if (_client?.LocalStats is { } stats)
+		{
+			_hudState.Health = stats.Health;
+			_hudState.MaxHealth = stats.MaxHealth;
+			_hudState.Resource = stats.Mana;
+			_hudState.MaxResource = stats.MaxMana;
+			_hudState.Stamina = stats.Stamina;
+			_hudState.MaxStamina = stats.MaxStamina;
+		}
+
 		// S110: feed the minimap world objects (trees/rocks/resource nodes) from the SAME per-frame render-state
 		// list the 3D world renders from — read-only, AOI-scoped ("current environment"). Rebuilt in place each
 		// refresh (AOI-bounded count) so no new server feed is needed and no allocation churns per frame.
@@ -1719,6 +1791,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_hudStubPreset = (_hudStubPreset + 1) % 4;
 		_hudState.MaxHealth = 100f;
 		_hudState.MaxResource = 100f;
+		_hudState.MaxStamina = 100f;
 		_hudState.Cooldowns.Clear();
 
 		// S108: also seed the action-bar stub fields so the F5 cycler visibly drives the new bar. Consumable stack
@@ -1732,12 +1805,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			case 0: // healthy, full resource, no cooldowns
 				_hudState.Health = 100f;
 				_hudState.Resource = 100f;
+				_hudState.Stamina = 100f;
 				_hudState.Mounted = false;
 				_hudState.SelectedSlot = "R";
 				break;
 			case 1: // mid health/resource, several cooldowns running across slot types
 				_hudState.Health = 60f;
 				_hudState.Resource = 35f;
+				_hudState.Stamina = 50f;
 				_hudState.Mounted = false;
 				_hudState.SelectedSlot = "Q";
 				_hudState.Cooldowns["Q"] = 4.5f;
@@ -1747,6 +1822,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			case 2: // low health -> portrait should flip to LowHealth (red tint)
 				_hudState.Health = 15f;
 				_hudState.Resource = 10f;
+				_hudState.Stamina = 20f;
 				_hudState.Mounted = false;
 				_hudState.SelectedSlot = "E";
 				_hudState.Cooldowns["E"] = 6f;
@@ -1755,6 +1831,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			default: // mounted -> portrait should flip to Mount (mount badge)
 				_hudState.Health = 80f;
 				_hudState.Resource = 70f;
+				_hudState.Stamina = 85f;
 				_hudState.Mounted = true;
 				_hudState.SelectedSlot = "F";
 				_hudState.Cooldowns["F"] = 10f;
@@ -1934,6 +2011,43 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_movementPanel.Visible = _movementPanelVisible;
 	}
 
+	// F7: toggle the COMBAT-S1 admin dev-set vitals panel. Same admin gating as F4/F5/F6. Re-seeded from the live
+	// replicated stats on EVERY open so the fields reflect the current authoritative values (not stale edits) — the
+	// values change server-side (dev-set / later damage), so showing the latest truth on open is the right default.
+	private void ToggleStatPanel()
+	{
+		if (_statPanel is null)
+		{
+			return;
+		}
+
+		if (_client?.Role != ClientRole.Admin)
+		{
+			ShowInteractFeedback("Vitals panel requires Admin role.");
+			return;
+		}
+
+		_statPanelVisible = !_statPanelVisible;
+		if (_statPanelVisible)
+		{
+			SeedStatFields();
+		}
+
+		_statPanel.Visible = _statPanelVisible;
+	}
+
+	// COMBAT-S1: seed the F7 fields from the live replicated vitals (PlayerStatsMessage). Until the first stats
+	// arrive the local player has no replicated vitals, so the fields are left blank.
+	private void SeedStatFields()
+	{
+		if (_client?.LocalStats is { } stats)
+		{
+			SetField(_statHealthEdit, stats.Health);
+			SetField(_statManaEdit, stats.Mana);
+			SetField(_statStaminaEdit, stats.Stamina);
+		}
+	}
+
 	// Seed the F4 server fields from ServerHello (the server's startup truth). Only called once on first open
 	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
@@ -2010,6 +2124,34 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		ShowInteractFeedback("Server tuning applied.");
+	}
+
+	// COMBAT-S1 F7 apply: parse each vitals field and send its CURRENT value to the server via AdminSetStat (stat
+	// byte 0=HP, 1=mana, 2=stamina; the server admin-gates + clamps to [0,max] and replicates the result back so
+	// the bars track it). Invalid/blank fields are skipped so a typo in one never blocks the others.
+	private void OnStatApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		if (TryReadField(_statHealthEdit, out var hp))
+		{
+			_client.SendAdminSetStat((byte)StatKind.Health, (int)Math.Round(hp));
+		}
+
+		if (TryReadField(_statManaEdit, out var mana))
+		{
+			_client.SendAdminSetStat((byte)StatKind.Mana, (int)Math.Round(mana));
+		}
+
+		if (TryReadField(_statStaminaEdit, out var stamina))
+		{
+			_client.SendAdminSetStat((byte)StatKind.Stamina, (int)Math.Round(stamina));
+		}
+
+		ShowInteractFeedback("Vitals sent.");
 	}
 
 	// F5 apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server

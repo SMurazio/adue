@@ -5,6 +5,13 @@ This project is built by Claude Code: a main **orchestrator** loop that plans an
 canonical project contract. Root `CLAUDE.md` imports it. The `todo/` queue is the backlog; see
 `todo/README.md`.
 
+## Usage Budget — ALWAYS true
+
+Never spend more than the subscription's included usage. **Never activate extra / overage / pay-as-you-go usage
+of any kind.** If a usage limit is reached, STOP and surface it to the user — do not opt into additional paid
+usage to keep going. This binds every agent and subagent, always, and overrides any instinct to "just finish
+the task."
+
 ## Startup Checklist
 
 At the start of every session:
@@ -80,6 +87,31 @@ independently re-runs build/tests/stress, re-reads the diff, and judges the *hyp
 symptom* — not merely "did the code match the plan." The orchestrator synthesizes and relays the reviewer's
 verdict but does not self-certify work it planned; a finding the reviewer raises becomes a new `todo/` item.
 The human still makes the final live call (only the human can run the Godot client).
+
+## Branch Workflow
+
+Work happens on **feature branches, never directly on `main`.** `main` only receives work that is **tested
+(gates green) and approved (independent review, plus the human's sign-off where relevant).** Per unit of work:
+branch off `main`, commit there, run the gates + the independent review on the branch, and merge to `main` only
+once it is green and approved. (Not enforced on GitHub by choice — it is a discipline the agents follow.)
+
+## Scale Rigor to Risk (avoid waste)
+
+Match the process to the change's risk — full rigor is for risky work, not everything:
+
+- **Trivial** (comments, docs, config constants, UI gating, deleting/moving a control): the orchestrator edits
+  it **directly** — no implementer subagent, **no independent reviewer**. Gate only what the change touches
+  (build-only for comment/whitespace edits; nothing for pure docs).
+- **Standard** (a contained code change): orchestrator or one implementer subagent; gate the affected suite;
+  independent review only if it changes behavior in a way a test wouldn't obviously catch.
+- **High-risk** (netcode, protocol, server-authoritative logic, prediction, concurrency): full rigor —
+  measure/repro first, independent review, full gates.
+
+Gate **once per branch at merge**, not per commit, and skip a redundant pre-work gate (`main` is green by the
+Branch Workflow). Reserve subagents for large/parallel/context-heavy work and for independent review — spinning
+a fresh subagent for a small mechanical edit costs more than it saves. Quality non-negotiables stay: measure
+before guessing, independent review for risky/behavioral changes, headless repro before any netcode fix, green
+gate before merge.
 
 ## Decision Authority
 

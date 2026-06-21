@@ -30,6 +30,11 @@ public sealed class HudState
     public float Resource { get; set; } = 40f;
     public float MaxResource { get; set; } = 100f;
 
+    // COMBAT-S1: the third vital — stamina (yellow bar). Fed from the real replicated stats in RefreshHud once a
+    // PlayerStatsMessage has arrived; stub default until then (and varied by the F5 cycler).
+    public float Stamina { get; set; } = 60f;
+    public float MaxStamina { get; set; } = 100f;
+
     // --- Cooldowns ----------------------------------------------------------------------------------------
     // TODO(server): client-local timers only on this branch (S-HUD-3 will start them on keypress/click). Maps a
     // slot id (e.g. "Q", "E", "F", "R", "1", "2", "LMB", "RMB") to remaining cooldown seconds. Empty == all ready.

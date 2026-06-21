@@ -91,6 +91,35 @@ public sealed class WorldEntity
         return true;
     }
 
+    // COMBAT-S1: server-authoritative character vitals (HP / mana / stamina, each current + max). Defaults to
+    // full 100/100 each on spawn. No damage/regen/death yet — this stage only models them existing, being
+    // dev-set (clamped to [0, max]), and replicated to the owning client. Mirrors the SpeedMultiplier pattern:
+    // private setter, a Try* mutator that clamps + reports whether the value actually changed so the caller only
+    // re-replicates on a real change.
+    public CharacterStats Stats { get; private set; } = CharacterStats.Default;
+
+    // Sets the CURRENT value of one vital, clamping into [0, max] for that vital. Returns true if the stored
+    // value actually changed (so the caller only re-replicates a real change), false otherwise. The dev-set
+    // window drives this through the admin-gated server command; later damage/heal/regen will too.
+    public bool TrySetStatCurrent(StatKind stat, int value)
+    {
+        var updated = stat switch
+        {
+            StatKind.Health => Stats.WithHealth(value),
+            StatKind.Mana => Stats.WithMana(value),
+            StatKind.Stamina => Stats.WithStamina(value),
+            _ => Stats,
+        };
+
+        if (updated == Stats)
+        {
+            return false;
+        }
+
+        Stats = updated;
+        return true;
+    }
+
     // Derives this entity's effective per-step cooldown in TICKS from the server's base cooldown and the
     // speed multiplier, clamped to the configured [minTicks, maxTicks] tick bounds (mirrors the ms clamp).
     // Default multiplier 1.0 returns baseStepCooldownTicks unchanged ⇒ behaviour parity with pre-S51. The
