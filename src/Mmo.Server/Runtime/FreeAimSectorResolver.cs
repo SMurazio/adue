@@ -25,6 +25,11 @@ public static class FreeAimSectorResolver
     //
     // `candidateScratch` is a caller-owned reusable buffer (cleared by the gather) so the hot path allocates
     // nothing per attack — mirrors the cone resolver's contract.
+    // A single victim that actually took damage from a resolved attack: the entity and the HP actually removed this
+    // hit (equal to `damage` for now, but kept explicit so a future variable/partial damage still reports correctly).
+    // COMBAT-QOL: HandleAttack turns each of these into an AOI-gated cosmetic DamageEventMessage.
+    public readonly record struct DamagedVictim(WorldEntity Victim, int Amount);
+
     public static int ResolveAndDamage(
         WorldState world,
         WorldEntity attacker,
@@ -33,7 +38,23 @@ public static class FreeAimSectorResolver
         double radiusTiles,
         int damage,
         List<WorldEntity> candidateScratch)
+        => ResolveAndDamage(world, attacker, aimRadians, halfAngleRadians, radiusTiles, damage, candidateScratch, null);
+
+    // Overload that ALSO appends each victim whose HP actually changed to `damagedScratch` (cleared first when
+    // non-null) so the caller can emit a cosmetic damage event per real hit. Behaviour and return value are otherwise
+    // identical to the parameterless-collection overload — the existing resolver tests exercise that one unchanged.
+    public static int ResolveAndDamage(
+        WorldState world,
+        WorldEntity attacker,
+        double aimRadians,
+        double halfAngleRadians,
+        double radiusTiles,
+        int damage,
+        List<WorldEntity> candidateScratch,
+        List<DamagedVictim>? damagedScratch)
     {
+        damagedScratch?.Clear();
+
         // Gather every entity within a tile box that is a SUPERSET of the sector's reach (radius rounded up), via
         // the SAME spatial index as AOI so occupancy and replication can never diverge; then apply the exact
         // geometric test to each candidate.
@@ -77,6 +98,7 @@ public static class FreeAimSectorResolver
             if (candidate.ApplyDamage(damage))
             {
                 hits++;
+                damagedScratch?.Add(new DamagedVictim(candidate, damage));
             }
         }
 

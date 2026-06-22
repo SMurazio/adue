@@ -313,13 +313,25 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyOne()
+    public void ProtocolVersionIsThirtyTwo()
     {
-        // COMBAT-TUNING protocol bump (v30 -> v31): new server->client CombatTuningMessage replicating the live combat
-        // feel-knobs (attack cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's
-        // wedge/predictor/cooldown viz match the server's authoritative resolution. A new message type is breaking
-        // (server + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(31, ProtocolCodec.Version);
+        // COMBAT-QOL protocol bump (v31 -> v32): new server->client DamageEventMessage (AOI-gated cosmetic damage
+        // numbers). A new message type is breaking (server + client ship together). Pin the version so an accidental
+        // change is caught.
+        Assert.Equal(32, ProtocolCodec.Version);
+    }
+
+    [Fact]
+    public void DamageEventRoundTrips()
+    {
+        // COMBAT-QOL: the cosmetic damage event round-trips the victim's NetworkId, the damage amount, and the new HP.
+        var original = new DamageEventMessage(4242u, 20, 80);
+
+        var decoded = Assert.IsType<DamageEventMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4242u, decoded.NetworkId);
+        Assert.Equal(20, decoded.Amount);
+        Assert.Equal((ushort)80, decoded.Health);
     }
 
     [Fact]

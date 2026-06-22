@@ -91,6 +91,10 @@ public sealed class GameServer
     // COMBAT-S2B: reused candidate buffer for the melee-cone occupancy query (entities in the cells overlapping the
     // attacker's cone), filtered to the exact cone tiles at the call site. Single-threaded tick loop, so reuse is safe.
     private readonly List<WorldEntity> _attackCandidateScratch = [];
+    // COMBAT-QOL: reused buffer of the victims a resolved attack actually damaged (entity + amount), so HandleAttack
+    // can emit one AOI-gated cosmetic DamageEventMessage per real hit without allocating per attack. Single-threaded
+    // tick/handler path, so reuse across attacks is safe.
+    private readonly List<FreeAimSectorResolver.DamagedVictim> _damagedVictimScratch = [];
     private readonly List<VisibleEntity> _visibleCandidateScratch = [];
     private readonly List<WorldEntity> _visibleEntityScratch = [];
     private readonly HashSet<uint> _visibleNetworkIdScratch = [];
@@ -577,6 +581,7 @@ public sealed class GameServer
         using (tickBudget.Measure(TickBudgetCategory.Other))
         {
             RespawnResourceNodes();
+            RegenEnemies();
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
@@ -1139,6 +1144,30 @@ public sealed class GameServer
         _resourceRespawns.DrainDue(_serverTick, static _ => { });
     }
 
+    // COMBAT-QOL: heal stationary enemy targets (Dummy/Npc) toward MaxHealth at a HEAVY per-tick rate so a hit dummy
+    // refills fast and stays a permanent test target. Gated on the SAME kinds that can TAKE damage
+    // (MeleeConeResolver.IsAttackableEnemy) so we never "regen" a player or a resource. TryRegenHealth clamps at max,
+    // no-ops at full (so a healthy dummy costs nothing), and bumps StateRevision only on a real change — the refilled
+    // HP rides the existing snapshot HP field, so the overhead bar fills automatically. NO DamageEventMessage is ever
+    // emitted here: only real damage floats a number. Iterates the live entity collection directly (no per-tick
+    // allocation); the count is tiny (a couple of dummies) so the linear scan is negligible.
+    private void RegenEnemies()
+    {
+        var perTick = _tuning.EnemyRegenPerTick;
+        if (perTick <= 0)
+        {
+            return;
+        }
+
+        foreach (var entity in _zone.World.Entities)
+        {
+            if (MeleeConeResolver.IsAttackableEnemy(entity))
+            {
+                entity.TryRegenHealth(perTick);
+            }
+        }
+    }
+
     // Server-authoritative resolution of a generic Interact verb. Harvest is the only dispatch target
     // for now: validate authentication, that the target is a visible-and-adjacent harvestable resource
     // node, and that the node is Available; on success grant the yield through the inventory service,
@@ -1607,10 +1636,48 @@ public sealed class GameServer
             _tuning.FreeAimHalfAngleRadians,
             _tuning.FreeAimRadiusTiles,
             damage,
-            _attackCandidateScratch);
+            _attackCandidateScratch,
+            _damagedVictimScratch);
         if (hits > 0)
         {
+            // COMBAT-QOL: float a cosmetic damage number over each victim that actually lost HP. AOI-gated to the
+            // victim's viewers (the attacker included) so it matches replication exactly. Cosmetic only — the
+            // authoritative HP already rode the snapshot via ApplyDamage. Regen never reaches here, so only real
+            // damage pops a number.
+            foreach (var damaged in _damagedVictimScratch)
+            {
+                BroadcastDamageEvent(damaged.Victim, damaged.Amount);
+            }
+
             Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {damage} each (aim {aimRadians:F2} rad).");
+        }
+    }
+
+    // COMBAT-QOL: send a cosmetic DamageEventMessage for `victim` to every authenticated viewer whose AOI currently
+    // includes it (the attacker included) — the SAME viewer-scoping as BroadcastMovementSpeedChanged, so a damage
+    // number appears exactly where the entity is replicated and nowhere else. UNRELIABLE: a dropped number is harmless
+    // (the next snapshot already carries the true HP), and reliable retransmit would only add latency. A viewer that
+    // does not yet know the entity is skipped — it has no visual to float a number over and the spawn carries the HP.
+    private void BroadcastDamageEvent(WorldEntity victim, int amount)
+    {
+        var newHealth = (ushort)Math.Clamp(victim.Stats.Health, 0, ushort.MaxValue);
+        var message = new DamageEventMessage(victim.NetworkId, amount, newHealth);
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated || !session.KnowsEntity(victim.NetworkId))
+            {
+                continue;
+            }
+
+            if (!TryGetSessionEntity(session, out var viewerEntity))
+            {
+                continue;
+            }
+
+            if (IsEntityInInterest(viewerEntity, victim, session, _tuning.InterestRadius))
+            {
+                TrySend(session.Peer, message, DeliveryMethod.Unreliable);
+            }
         }
     }
 

@@ -232,6 +232,70 @@ public sealed class WorldEntityCombatTests
         Assert.Equal(4u, fromRate);
     }
 
+    [Fact]
+    public void RegenHealthAddsTowardMaxAndReportsChange()
+    {
+        // COMBAT-QOL: TryRegenHealth ADDS toward MaxHealth (the inverse of ApplyDamage). Start damaged, heal up.
+        var entity = CreateDummy();
+        Assert.True(entity.TrySetStatCurrent(StatKind.Health, 40));
+
+        Assert.True(entity.TryRegenHealth(25));
+        Assert.Equal(65, entity.Stats.Health);
+
+        Assert.True(entity.TryRegenHealth(25));
+        Assert.Equal(90, entity.Stats.Health);
+    }
+
+    [Fact]
+    public void RegenHealthClampsAtMaxAndDoesNotOvershoot()
+    {
+        // A heavy regen that would exceed MaxHealth is clamped to max — never overshoots.
+        var entity = CreateDummy();
+        Assert.True(entity.TrySetStatCurrent(StatKind.Health, 90));
+
+        // 25 against 90/100 lands on 100 (clamped), and reports a change.
+        Assert.True(entity.TryRegenHealth(25));
+        Assert.Equal(100, entity.Stats.Health);
+    }
+
+    [Fact]
+    public void RegenHealthIsNoOpAtFull()
+    {
+        // At full HP regen reports NO change (and must not bump StateRevision) — a healthy dummy costs nothing.
+        var entity = CreateDummy();
+        Assert.Equal(100, entity.Stats.Health);
+        var before = entity.StateRevision;
+
+        Assert.False(entity.TryRegenHealth(50));
+        Assert.Equal(100, entity.Stats.Health);
+        Assert.Equal(before, entity.StateRevision);
+    }
+
+    [Fact]
+    public void RegenHealthIgnoresNonPositiveAmount()
+    {
+        var entity = CreateDummy();
+        Assert.True(entity.TrySetStatCurrent(StatKind.Health, 50));
+        var before = entity.StateRevision;
+
+        Assert.False(entity.TryRegenHealth(0));
+        Assert.False(entity.TryRegenHealth(-30));
+        Assert.Equal(50, entity.Stats.Health);
+        Assert.Equal(before, entity.StateRevision);
+    }
+
+    [Fact]
+    public void RegenHealthBumpsStateRevisionOnRealChange()
+    {
+        // A real heal bumps StateRevision so the refilled HP re-replicates through the snapshot delta path.
+        var entity = CreateDummy();
+        Assert.True(entity.TrySetStatCurrent(StatKind.Health, 50));
+        var before = entity.StateRevision;
+
+        Assert.True(entity.TryRegenHealth(10));
+        Assert.True(entity.StateRevision > before);
+    }
+
     private static WorldEntity CreateDummy()
     {
         return new WorldEntity(

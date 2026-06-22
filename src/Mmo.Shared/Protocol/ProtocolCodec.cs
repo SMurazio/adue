@@ -19,7 +19,10 @@ public static class ProtocolCodec
     // cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's wedge/predictor/
     // cooldown-viz match the server's authoritative resolution. Sent on login + on every combat.* tuning change.
     // Server + client ship together.
-    public const byte Version = 31;
+    // COMBAT-QOL (v32): new server->client DamageEventMessage (victim NetworkId + Amount damage + new Health),
+    // AOI-gated to the victim's viewers, so the client floats a "-N" number over the entity. Cosmetic only; sent
+    // unreliable. Server + client ship together.
+    public const byte Version = 32;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -153,6 +156,11 @@ public static class ProtocolCodec
             case CombatTuningMessage value:
                 WriteCombatTuning(writer, value.Tuning);
                 break;
+            case DamageEventMessage value:
+                writer.Write(value.NetworkId);
+                writer.Write(value.Amount);
+                writer.Write(value.Health);
+                break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
                 writer.Write(value.NetworkId);
@@ -271,6 +279,7 @@ public static class ProtocolCodec
             MessageType.MovementSpeedChanged => new MovementSpeedChangedMessage(reader.ReadUInt32(), reader.ReadUInt16()),
             MessageType.PlayerStats => new PlayerStatsMessage(ReadCharacterStats(reader)),
             MessageType.CombatTuning => new CombatTuningMessage(ReadCombatTuning(reader)),
+            MessageType.DamageEvent => new DamageEventMessage(reader.ReadUInt32(), reader.ReadInt32(), reader.ReadUInt16()),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")

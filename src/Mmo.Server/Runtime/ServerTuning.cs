@@ -42,6 +42,20 @@ public sealed class ServerTuning
 
     public double FreeAimHalfAngleRadians => FreeAimHalfAngleDegrees * System.Math.PI / 180d;
 
+    // COMBAT-QOL: HEAVY HP regen rate for stationary enemy targets (dummies/NPCs), in HP PER SECOND. 50 HP/s heals a
+    // full 100-HP dummy from empty in ~2 s, so a hit (number pops, bar drops) heals back fast and the dummy is a
+    // permanent test target. Centralized here (not a magic number in the tick loop) and read each tick by
+    // GameServer.RegenDummies; the per-tick amount is derived from the tick rate so the wall-clock heal speed is
+    // independent of the configured tick rate. Damage events are NEVER emitted for regen — only real hits float a
+    // number; the refilled HP rides the snapshot and the overhead bar fills on its own.
+    public int EnemyRegenPerSecond { get; set; } = 50;
+
+    // The per-tick regen amount derived from EnemyRegenPerSecond and the tick rate, rounded UP and floored at 1 so a
+    // small per-second rate still heals at least 1 HP/tick (never a 0-HP no-op loop). At 50 HP/s and 20 Hz this is
+    // 3 HP/tick (≈33 ticks / 1.65 s from empty — comfortably "heavy").
+    public int EnemyRegenPerTick =>
+        Math.Max(1, (int)Math.Ceiling(EnemyRegenPerSecond / (double)_tickRate));
+
     // Attack cooldown in TICKS, derived exactly like the old GameServer.AttackCooldownTicks (Ceiling, >= 1) so the
     // default value is unchanged and a live change stays tick-quantised the same way.
     public uint AttackCooldownTicks =>

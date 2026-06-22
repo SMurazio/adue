@@ -292,6 +292,19 @@ public sealed record CombatTuningMessage(CombatTuningSnapshot Tuning) : IProtoco
     public MessageType Type => MessageType.CombatTuning;
 }
 
+// COMBAT-QOL (protocol v32): a server->client COSMETIC damage event. Emitted by HandleAttack whenever a free-aim
+// hit ACTUALLY reduced a victim's HP (no event for a 0-damage / already-dead hit, and never for regen), and sent
+// AOI-gated to every viewer that can currently SEE the victim — exactly like MovementSpeedChanged is scoped to the
+// entity's viewers. The client floats a red "-Amount" number above that entity (presentation only). NetworkId is the
+// VICTIM's id; Amount is the HP actually removed this hit; Health is the victim's NEW current HP after the hit (so a
+// late/odd-ordered event can't drive the number off a stale bar — though the authoritative bar still rides the
+// snapshot). Sent UNRELIABLE: a dropped damage number is purely cosmetic and the next snapshot already carries the
+// true HP, so reliable retransmit would only add latency for no gameplay benefit.
+public sealed record DamageEventMessage(uint NetworkId, int Amount, ushort Health) : IProtocolMessage
+{
+    public MessageType Type => MessageType.DamageEvent;
+}
+
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntityDespawn;

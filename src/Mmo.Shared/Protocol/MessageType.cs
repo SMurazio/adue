@@ -34,5 +34,10 @@ public enum MessageType : ushort
     // COMBAT-TUNING (v31): server->client replication of the live combat feel-knobs (attack cooldown, swing-root
     // duration, sector half-angle/radius, damage). Sent on login + on every admin tuning change so the client's
     // wedge/predictor/cooldown-viz match the server's resolution. See CombatTuningSnapshot.
-    CombatTuning = 112
+    CombatTuning = 112,
+    // COMBAT-QOL (v32): server->client cosmetic damage event — emitted when a hit actually reduces an entity's HP,
+    // AOI-gated to viewers that can see the victim, so the client floats a "-N" number above it. Presentation only;
+    // the authoritative HP still rides the snapshot. Sent UNRELIABLE (a dropped number is harmless). See
+    // DamageEventMessage.
+    DamageEvent = 113
 }

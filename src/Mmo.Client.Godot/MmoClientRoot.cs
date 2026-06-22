@@ -28,6 +28,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	[Export] public float RockModelScale { get; set; } = 4f;
 	private readonly VisualTuning _tuning = new();
 	private EntityRenderer? _renderer;
+	// COMBAT-QOL: floating "-N" damage numbers. Created over the entity root in BuildSceneShell, fed each frame from
+	// the client's drained DamageEvents (anchored at the victim visual's live position), and advanced for rise/fade.
+	private FloatingTextManager? _floatingText;
+	private readonly List<DamageEvent> _damageEventScratch = new();
 
 	private MmoClient? _client;
 	private Node3D? _worldRoot;
@@ -409,6 +413,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SampleRenderStates(now);
 		var t1 = Time.GetTicksUsec();
 		UpdateEntities();
+		UpdateFloatingDamageNumbers(delta);
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
 		UpdatePredictionTileMarkers();
@@ -859,6 +864,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// entity root. All per-frame entity spawn/update/despawn flows through it (S61).
 		_tuning.RockModelScale = RockModelScale;
 		_renderer = new EntityRenderer(_entityRoot, _tuning);
+		// COMBAT-QOL: floating damage numbers live under the SAME entity root so a victim visual's local Position is
+		// the world anchor to spawn the number at.
+		_floatingText = new FloatingTextManager(_entityRoot);
 
 		var light = new DirectionalLight3D
 		{
@@ -1781,6 +1789,32 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void UpdateEntities()
 	{
 		_renderer?.Sync(_renderStates, _elapsedSeconds);
+	}
+
+	// COMBAT-QOL: drain this frame's damage events and float a "-N" number over each victim, then advance the rise/fade
+	// of all live numbers. Each event is anchored at the victim VISUAL's current position (so the number tracks where
+	// the entity is rendered, including interpolation); if the victim isn't currently rendered (out of view / not yet
+	// spawned) the event is simply dropped — there is nothing to float a number over. Runs AFTER UpdateEntities so the
+	// visuals' positions are this frame's. Pooling + the manager's cap keep rapid hits from leaking nodes.
+	private void UpdateFloatingDamageNumbers(double delta)
+	{
+		if (_client is null || _floatingText is null || _renderer is null)
+		{
+			return;
+		}
+
+		if (_client.DrainDamageEvents(_damageEventScratch) > 0)
+		{
+			foreach (var damage in _damageEventScratch)
+			{
+				if (_renderer.TryGetActiveVisual(damage.NetworkId, out var visual))
+				{
+					_floatingText.Spawn(visual.Position, damage.Amount);
+				}
+			}
+		}
+
+		_floatingText.Update(delta);
 	}
 
 	private void UpdateCamera()

@@ -152,6 +152,30 @@ public sealed class WorldEntity
         return true;
     }
 
+    // COMBAT-QOL: regenerates `amount` of Health toward MaxHealth, clamping the result into [0, MaxHealth]. Returns
+    // true iff the stored Health actually changed (so the caller only bumps replication on a real change), false
+    // otherwise (already at full, or a non-positive amount). The inverse of ApplyDamage: it ADDS, and WithHealth caps
+    // at MaxHealth so a heavy regen can never overshoot. The increased Health rides the same public-HP snapshot field,
+    // so the overhead bar REFILLS automatically with no dedicated message — and crucially NO DamageEventMessage is
+    // emitted for regen (only real damage floats a number). Drives the dummy heal-back loop (RegenDummies).
+    public bool TryRegenHealth(int amount)
+    {
+        if (amount <= 0)
+        {
+            return false;
+        }
+
+        var updated = Stats.WithHealth(Stats.Health + amount);
+        if (updated == Stats)
+        {
+            return false;
+        }
+
+        Stats = updated;
+        StateRevision++;
+        return true;
+    }
+
     // COMBAT-S2B: the attack-cooldown gate, INDEPENDENT of the movement cooldown. Returns true and arms the attack
     // cooldown (next eligible = serverTick + attackCooldownTicks) iff this entity is off its attack cooldown at
     // serverTick; returns false WITHOUT mutating anything if it is still inside the window (the attack is rejected,

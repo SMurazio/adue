@@ -139,4 +139,43 @@ public sealed class FreeAimSectorResolverTests
         Assert.Equal(1, hitSouth);
         Assert.Equal(80, dummy.Stats.Health);
     }
+
+    [Fact]
+    public void DamagedScratchCollectsEachVictimAndAmount()
+    {
+        // COMBAT-QOL: the overload appends each victim whose HP actually changed (entity + amount) so HandleAttack can
+        // emit one cosmetic damage event per real hit. Two dummies in the sector, one Player outside it (no event).
+        var world = new WorldState();
+        var attacker = Attacker(world);
+        var d1 = world.AddTransient(2, EntityKind.Dummy, "D1", new TileCoord(11, 10), Direction8.S);
+        var d2 = world.AddTransient(3, EntityKind.Dummy, "D2", new TileCoord(11, 9), Direction8.S);
+
+        var damaged = new System.Collections.Generic.List<FreeAimSectorResolver.DamagedVictim>();
+        var hits = FreeAimSectorResolver.ResolveAndDamage(world, attacker, AimEast, HalfAngle, Radius, Damage, [], damaged);
+
+        Assert.Equal(2, hits);
+        Assert.Equal(2, damaged.Count);
+        Assert.All(damaged, v => Assert.Equal(Damage, v.Amount));
+        Assert.Contains(damaged, v => v.Victim.NetworkId == d1.NetworkId);
+        Assert.Contains(damaged, v => v.Victim.NetworkId == d2.NetworkId);
+    }
+
+    [Fact]
+    public void DamagedScratchIsClearedAndEmptyOnAMiss()
+    {
+        // A resolve that hits nothing must leave the damaged scratch empty (it is cleared up front), so HandleAttack
+        // emits no spurious damage events. Pre-fill the list to prove it is cleared.
+        var world = new WorldState();
+        var attacker = Attacker(world);
+        world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(10, 11), Direction8.S); // due south, outside east arc.
+
+        var damaged = new System.Collections.Generic.List<FreeAimSectorResolver.DamagedVictim>
+        {
+            new(attacker, 999),
+        };
+        var hits = FreeAimSectorResolver.ResolveAndDamage(world, attacker, AimEast, HalfAngle, Radius, Damage, [], damaged);
+
+        Assert.Equal(0, hits);
+        Assert.Empty(damaged);
+    }
 }

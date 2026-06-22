@@ -63,6 +63,12 @@ public sealed class MmoClient : IDisposable
     private readonly Dictionary<uint, ClientEntity> _entities = [];
     private readonly List<ChatLine> _chatLog = [];
     private readonly List<ClientError> _errors = [];
+    // COMBAT-QOL: a DRAIN queue of cosmetic damage events (one per DamageEventMessage) the presentation layer empties
+    // each frame to spawn floating "-N" numbers. Unlike the chat/error logs (which accumulate), these are transient —
+    // DrainDamageEvents copies and clears them so they never grow unbounded under rapid hits. Capped on enqueue so a
+    // hostile flood can't balloon the buffer if the renderer ever stalls draining.
+    private readonly List<DamageEvent> _damageEvents = [];
+    private const int MaxBufferedDamageEvents = 256;
     private readonly HashSet<uint> _snapshotVisibleScratch = [];
     private readonly List<uint> _staleEntityScratch = [];
     private readonly long _startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -256,6 +262,22 @@ public sealed class MmoClient : IDisposable
     public IReadOnlyList<ChatLine> ChatLog => _chatLog;
 
     public IReadOnlyList<ClientError> Errors => _errors;
+
+    // COMBAT-QOL: copy any damage events received since the last call into `destination` (cleared first) and clear the
+    // internal queue, so the presentation layer can spawn a floating number per event and the buffer never accumulates.
+    // Returns the count copied. Called once per frame by the Godot root.
+    public int DrainDamageEvents(List<DamageEvent> destination)
+    {
+        destination.Clear();
+        if (_damageEvents.Count == 0)
+        {
+            return 0;
+        }
+
+        destination.AddRange(_damageEvents);
+        _damageEvents.Clear();
+        return destination.Count;
+    }
 
     public int EntityCount => _entities.Count;
 
@@ -1206,6 +1228,16 @@ public sealed class MmoClient : IDisposable
                 // predictor's swing-root reads the live RootMs at SendAttack time.
                 CombatTuning = tuning.Tuning;
                 CombatTuningVersion++;
+                break;
+            case DamageEventMessage damage:
+                // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the
+                // OLDEST if the buffer is somehow full (renderer stalled / flood) so it can never grow unbounded.
+                if (_damageEvents.Count >= MaxBufferedDamageEvents)
+                {
+                    _damageEvents.RemoveAt(0);
+                }
+
+                _damageEvents.Add(new DamageEvent(damage.NetworkId, damage.Amount, damage.Health));
                 break;
         }
     }
