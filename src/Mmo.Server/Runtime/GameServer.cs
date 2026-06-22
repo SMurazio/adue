@@ -1641,12 +1641,13 @@ public sealed class GameServer
         if (hits > 0)
         {
             // COMBAT-QOL: float a cosmetic damage number over each victim that actually lost HP. AOI-gated to the
-            // victim's viewers (the attacker included) so it matches replication exactly. Cosmetic only — the
-            // authoritative HP already rode the snapshot via ApplyDamage. Regen never reaches here, so only real
-            // damage pops a number.
+            // victim's viewers, EXCLUDING the attacker's OWN session — the attacker now PREDICTS its own numbers
+            // client-side (instant on swing, no round-trip), so re-sending the server event would double the number.
+            // Other AOI observers have no prediction, so they still receive it. Cosmetic only — the authoritative HP
+            // already rode the snapshot via ApplyDamage. Regen never reaches here, so only real damage pops a number.
             foreach (var damaged in _damagedVictimScratch)
             {
-                BroadcastDamageEvent(damaged.Victim, damaged.Amount);
+                BroadcastDamageEvent(damaged.Victim, damaged.Amount, session);
             }
 
             Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {damage} each (aim {aimRadians:F2} rad).");
@@ -1654,16 +1655,25 @@ public sealed class GameServer
     }
 
     // COMBAT-QOL: send a cosmetic DamageEventMessage for `victim` to every authenticated viewer whose AOI currently
-    // includes it (the attacker included) — the SAME viewer-scoping as BroadcastMovementSpeedChanged, so a damage
-    // number appears exactly where the entity is replicated and nowhere else. UNRELIABLE: a dropped number is harmless
-    // (the next snapshot already carries the true HP), and reliable retransmit would only add latency. A viewer that
-    // does not yet know the entity is skipped — it has no visual to float a number over and the spawn carries the HP.
-    private void BroadcastDamageEvent(WorldEntity victim, int amount)
+    // includes it — the SAME viewer-scoping as BroadcastMovementSpeedChanged, so a damage number appears exactly
+    // where the entity is replicated and nowhere else. UNRELIABLE: a dropped number is harmless (the next snapshot
+    // already carries the true HP), and reliable retransmit would only add latency. A viewer that does not yet know
+    // the entity is skipped — it has no visual to float a number over and the spawn carries the HP.
+    //
+    // FREEAIM-PREDICT: `excludeSession` (the ATTACKER) is skipped — the attacker PREDICTS its own damage numbers
+    // client-side (instant on swing), so sending it the event too would pop a SECOND number. Other observers have no
+    // such prediction, so they still get the event. Pass null to broadcast to every viewer (no exclusion).
+    private void BroadcastDamageEvent(WorldEntity victim, int amount, ClientSession? excludeSession = null)
     {
         var newHealth = (ushort)Math.Clamp(victim.Stats.Health, 0, ushort.MaxValue);
         var message = new DamageEventMessage(victim.NetworkId, amount, newHealth);
         foreach (var session in _sessions.Values)
         {
+            if (ReferenceEquals(session, excludeSession))
+            {
+                continue;
+            }
+
             if (!session.IsAuthenticated || !session.KnowsEntity(victim.NetworkId))
             {
                 continue;

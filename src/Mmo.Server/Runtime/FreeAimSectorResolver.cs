@@ -19,10 +19,10 @@ namespace Mmo.Server.Runtime;
 // verbatim from MeleeConeResolver.IsAttackableEnemy.
 public static class FreeAimSectorResolver
 {
-    // COMBAT: the target body radius (tiles) for the sector-vs-circle overlap. Targets are circles of this radius,
-    // so the wedge hits one it merely CLIPS, not only one whose tile-centre is inside it. ~half a tile = forgiving
-    // but not oversized. (Easy to expose to F8 later if you want to tune the hit "stickiness".)
-    public const double EntityHitRadiusTiles = 0.5;
+    // COMBAT: the target body radius (tiles) for the sector-vs-circle overlap. Now CANONICAL in the shared
+    // FreeAimSector (so the client's swing prediction reuses the identical body radius); this forwards to it so the
+    // existing server call sites and tests keep reading FreeAimSectorResolver.EntityHitRadiusTiles unchanged.
+    public const double EntityHitRadiusTiles = FreeAimSector.EntityHitRadiusTiles;
 
     // Resolves the free-aim sector for `attacker` aiming along `aimRadians` and applies `damage` to each ENEMY
     // whose tile-centre world position falls inside the sector (within radius AND within ±halfAngle of the aim).
@@ -67,10 +67,9 @@ public static class FreeAimSectorResolver
         world.GatherInterestCandidates(attacker.Tile, gatherRadiusTiles, candidateScratch);
 
         // Treat each target as a CIRCLE of EntityHitRadiusTiles (a body), not a point: the wedge hits a target it
-        // merely CLIPS, not only one whose tile-centre is dead inside it. Range is widened by the body radius; the
-        // angular gate by the body's angular half-width asin(r/d). A target overlapping the attacker is always hit.
-        var reach = radiusTiles + EntityHitRadiusTiles;
-        var reachSquared = reach * reach;
+        // merely CLIPS, not only one whose tile-centre is dead inside it. The geometry (squared range vs radius+body,
+        // sqrt + asin(body/dist) angular widen, point-blank always-hit, the NormalizePi reduction) lives in the
+        // SHARED Mmo.Shared.Domain.FreeAimSector.IsHit so the client can predict its own swing with the SAME maths.
         var attackerX = (double)attacker.Tile.X;
         var attackerZ = (double)attacker.Tile.Y;
 
@@ -82,28 +81,17 @@ public static class FreeAimSectorResolver
                 continue;
             }
 
-            var dx = candidate.Tile.X - attackerX;
-            var dz = candidate.Tile.Y - attackerZ;
-
-            // Range gate (squared, cheap): the target's body circle must reach within the sector radius.
-            var distSquared = (dx * dx) + (dz * dz);
-            if (distSquared > reachSquared)
+            if (!FreeAimSector.IsHit(
+                    attackerX,
+                    attackerZ,
+                    aimRadians,
+                    halfAngleRadians,
+                    radiusTiles,
+                    EntityHitRadiusTiles,
+                    candidate.Tile.X,
+                    candidate.Tile.Y))
             {
                 continue;
-            }
-
-            var dist = System.Math.Sqrt(distSquared);
-            if (dist > EntityHitRadiusTiles)
-            {
-                // Angular gate widened by the body's angular half-width asin(r/d) so a target the wedge edge clips
-                // still counts. (A target overlapping the attacker, dist <= body radius, skips this — always in-sector.)
-                var bearing = System.Math.Atan2(dz, dx);
-                var delta = NormalizePi(bearing - aimRadians);
-                var angularHalfWidth = System.Math.Asin(System.Math.Min(EntityHitRadiusTiles / dist, 1d));
-                if (System.Math.Abs(delta) > halfAngleRadians + angularHalfWidth)
-                {
-                    continue;
-                }
             }
 
             if (candidate.ApplyDamage(damage))
@@ -114,23 +102,5 @@ public static class FreeAimSectorResolver
         }
 
         return hits;
-    }
-
-    // Reduce an angle difference to the principal range (-π, π] so the |delta| <= halfAngle test is correct across
-    // the 0/2π seam (e.g. aim just below 2π, target just above 0).
-    private static double NormalizePi(double radians)
-    {
-        var twoPi = 2d * System.Math.PI;
-        radians %= twoPi;
-        if (radians <= -System.Math.PI)
-        {
-            radians += twoPi;
-        }
-        else if (radians > System.Math.PI)
-        {
-            radians -= twoPi;
-        }
-
-        return radians;
     }
 }

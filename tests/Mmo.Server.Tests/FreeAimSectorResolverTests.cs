@@ -179,4 +179,45 @@ public sealed class FreeAimSectorResolverTests
         Assert.Equal(0, hits);
         Assert.Empty(damaged);
     }
+
+    // FREEAIM-PREDICT: the SHARED FreeAimSector.IsHit (which the Godot client uses to PREDICT its own swing) must
+    // reproduce the SERVER resolver's hit/miss for every existing scenario. We run the resolver against one dummy at
+    // a given tile + aim, observe whether its HP changed (the authoritative hit), and assert the shared geometry
+    // helper agrees for the SAME attacker pos (10,10), aim, tuning, body radius, and target pos. If these ever
+    // diverge the client would predict a number the server never deals (or miss one it does) — exactly what this pins.
+    [Theory]
+    [InlineData(11, 10, AimEast, true)]              // due east, in arc + radius.
+    [InlineData(10, 11, AimEast, false)]             // due south, outside east arc.
+    [InlineData(13, 10, AimEast, false)]             // due east but beyond radius+body.
+    [InlineData(11, 9, AimEast, true)]               // NE, on the -45° arc edge.
+    [InlineData(11, 11, AimEast, true)]              // SE, on the +45° arc edge.
+    [InlineData(10, 11, System.Math.PI / 2d, true)]  // due south, hit by a south-aimed sector.
+    [InlineData(10, 11, 0d, false)]                  // due south, missed by the east-aimed sector (aim rotates arc).
+    public void SharedHelperReproducesResolverHitMiss(int targetX, int targetY, double aim, bool expectedHit)
+    {
+        var world = new WorldState();
+        var attacker = Attacker(world);
+        var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(targetX, targetY), Direction8.S);
+
+        var hits = FreeAimSectorResolver.ResolveAndDamage(world, attacker, aim, HalfAngle, Radius, Damage, []);
+        var resolverHit = hits == 1 && dummy.Stats.Health < 100;
+
+        var sharedHit = FreeAimSector.IsHit(
+            10d, 10d, aim, HalfAngle, Radius, FreeAimSectorResolver.EntityHitRadiusTiles, targetX, targetY);
+
+        // Both must agree with each other AND with the documented expectation.
+        Assert.Equal(expectedHit, resolverHit);
+        Assert.Equal(resolverHit, sharedHit);
+    }
+
+    [Fact]
+    public void SharedHelperPointBlankAlwaysHitsRegardlessOfAim()
+    {
+        // A target overlapping the attacker (dist <= body radius) is always in-sector, even aimed the opposite way —
+        // the resolver's point-blank always-hit, captured by the shared helper. Target half a body radius off-centre,
+        // aimed due WEST while the target is to the east.
+        var pointBlank = FreeAimSector.IsHit(
+            10d, 10d, System.Math.PI, HalfAngle, Radius, FreeAimSectorResolver.EntityHitRadiusTiles, 10.25d, 10d);
+        Assert.True(pointBlank);
+    }
 }

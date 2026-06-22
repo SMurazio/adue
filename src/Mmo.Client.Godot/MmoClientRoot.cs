@@ -648,12 +648,71 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_client.SendAttack(AimAngle.Quantize(aimRadians));
 		ShowInteractFeedback("Swing!");
 
-		// Flash the free-aim WEDGE (a pie slice: FreeAimHalfAngle, FreeAimRadius) on the ground from the local
-		// player, oriented along the aim — the danger area the server resolves. Purely cosmetic; the authoritative
-		// hit still confirms via the HP snapshot.
 		if (TryGetLocalRenderPosition(out var px, out var pz))
 		{
+			// Flash the free-aim WEDGE (a pie slice: FreeAimHalfAngle, FreeAimRadius) on the ground from the local
+			// player, oriented along the aim — the danger area the server resolves. Purely cosmetic; the authoritative
+			// hit still confirms via the HP snapshot.
 			FlashAimWedge(new Vector3(px, 0f, pz), aimRadians);
+
+			// FREEAIM-PREDICT: pop the damage number INSTANTLY (no server round-trip) over every rendered enemy the
+			// swing should hit, mirroring movement prediction. Uses the SHARED FreeAimSector.IsHit (identical geometry
+			// to the server resolver) against each enemy's RENDER position, the local render position as the attacker,
+			// and the REPLICATED combat tuning. Cosmetic only — the authoritative HP still rides the snapshot, and the
+			// server suppresses its own DamageEventMessage to THIS attacker so the number isn't doubled. An occasional
+			// mispredict (a stray/missing number when render positions disagree with the server tile) is acceptable.
+			PredictSwingDamageNumbers(px, pz, aimRadians);
+		}
+	}
+
+	// FREEAIM-PREDICT: predict + pop the attacker's own damage numbers for a swing from (attackerX, attackerZ) along
+	// `aimRadians`. Mirrors the server's no-friendly-fire gate (Dummy/Npc only, skip self) and reuses the SHARED
+	// FreeAimSector.IsHit with the replicated half-angle/radius/damage + the shared body radius, so the predicted
+	// hit/miss matches the server's resolution. No-op before the first replicated CombatTuningSnapshot arrives.
+	private void PredictSwingDamageNumbers(float attackerX, float attackerZ, double aimRadians)
+	{
+		if (_client?.CombatTuning is not { } tuning || _floatingText is null || _renderer is null)
+		{
+			return;
+		}
+
+		var localId = _client.LocalNetworkId;
+		foreach (var state in _renderStates)
+		{
+			// No friendly fire: only Dummy/Npc are damageable; never the local player / self.
+			if (state.IsLocal || state.NetworkId == localId)
+			{
+				continue;
+			}
+
+			if (state.Kind is not (EntityKind.Dummy or EntityKind.Npc))
+			{
+				continue;
+			}
+
+			if (!FreeAimSector.IsHit(
+					attackerX,
+					attackerZ,
+					aimRadians,
+					tuning.HalfAngleRadians,
+					tuning.RadiusTiles,
+					FreeAimSector.EntityHitRadiusTiles,
+					state.Position.X,
+					state.Position.Y))
+			{
+				continue;
+			}
+
+			// Pop the number at the victim's live visual (same path/position as the server-driven number). Fall back
+			// to the render-state XZ if no visual is bound this frame, so the prediction still shows.
+			if (_renderer.TryGetActiveVisual(state.NetworkId, out var visual))
+			{
+				_floatingText.Spawn(visual.Position, tuning.Damage);
+			}
+			else
+			{
+				_floatingText.Spawn(new Vector3((float)state.Position.X, 0f, (float)state.Position.Y), tuning.Damage);
+			}
 		}
 	}
 
