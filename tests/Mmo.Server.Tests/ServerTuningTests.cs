@@ -1,5 +1,6 @@
 using Mmo.Server.Configuration;
 using Mmo.Server.Runtime;
+using Mmo.Shared.Domain;
 using Xunit;
 
 namespace Mmo.Server.Tests;
@@ -102,6 +103,8 @@ public sealed class ServerTuningTests
         Assert.Equal(45d, tuning.FreeAimHalfAngleDegrees);
         Assert.Equal(1.6d, tuning.FreeAimRadiusTiles);
         Assert.Equal(20, tuning.AttackDamage);
+        // SWING-SLOW: the swing-move factor defaults to the SHARED constant (so server + predictor default identically).
+        Assert.Equal(CombatTuning.DefaultSwingMoveFactor, tuning.SwingMoveFactor);
 
         var snapshot = tuning.CombatSnapshot;
         Assert.Equal(600, snapshot.AttackCooldownMs);
@@ -109,6 +112,7 @@ public sealed class ServerTuningTests
         Assert.Equal(45d, snapshot.HalfAngleDegrees);
         Assert.Equal(1.6d, snapshot.RadiusTiles);
         Assert.Equal(20, snapshot.Damage);
+        Assert.Equal(CombatTuning.DefaultSwingMoveFactor, snapshot.SwingMoveFactor);
     }
 
     [Fact]
@@ -121,6 +125,7 @@ public sealed class ServerTuningTests
                      ServerTuningRegistry.FreeAimHalfAngleDegKey,
                      ServerTuningRegistry.FreeAimRadiusTilesKey,
                      ServerTuningRegistry.AttackDamageKey,
+                     ServerTuningRegistry.SwingMoveFactorKey,
                  })
         {
             Assert.True(ServerTuningRegistry.IsKnownKey(key));
@@ -152,6 +157,11 @@ public sealed class ServerTuningTests
 
         Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackDamageKey, 50d, out _));
         Assert.Equal(50, tuning.AttackDamage);
+
+        // SWING-SLOW: an in-range factor applies verbatim.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.SwingMoveFactorKey, 0.4d, out var factor));
+        Assert.Equal(0.4d, factor);
+        Assert.Equal(0.4d, tuning.SwingMoveFactor);
     }
 
     [Fact]
@@ -184,6 +194,12 @@ public sealed class ServerTuningTests
         Assert.True(tuning.AttackDamage >= 0);
         Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackDamageKey, 1_000_000d, out _));
         Assert.True(tuning.AttackDamage <= 10000);
+
+        // SWING-SLOW: a negative factor clamps to 0 (full stop) and an above-1 factor clamps to 1 (no slow).
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.SwingMoveFactorKey, -1d, out _));
+        Assert.Equal(0d, tuning.SwingMoveFactor);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.SwingMoveFactorKey, 5d, out _));
+        Assert.Equal(1d, tuning.SwingMoveFactor);
     }
 
     [Fact]

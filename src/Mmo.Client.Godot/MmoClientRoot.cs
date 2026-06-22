@@ -193,6 +193,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private int _combatPanelSeededVersion = -1;
 	private LineEdit? _combatAttackCooldownMs;
 	private LineEdit? _combatRootMs;
+	// SWING-SLOW: how HARD movement is slowed during the swing window, shown/entered as a PERCENT (0..100): 0 = full
+	// stop (the old root), 100 = no slow, 40 (default) = move at 40% speed. Sent to the server as the [0,1] fraction
+	// combat.swingMoveFactor (percent / 100). _combatRootMs above is now the slow DURATION (how long the slow lasts).
+	private LineEdit? _combatSwingMovePct;
 	private LineEdit? _combatHalfAngleDeg;
 	private LineEdit? _combatRadiusTiles;
 	private LineEdit? _combatDamage;
@@ -1324,7 +1328,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(header);
 
 		_combatAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnCombatApplyPressed);
-		_combatRootMs = AddTuningField(rows, "swing root (ms)", OnCombatApplyPressed);
+		// SWING-SLOW: the swing window DURATION (relabelled from "swing root") and, next to it, how HARD the slow is
+		// within that window as a percent (0 = full stop, 100 = no slow, 40 = 40% speed).
+		_combatRootMs = AddTuningField(rows, "swing slow (ms)", OnCombatApplyPressed);
+		_combatSwingMovePct = AddTuningField(rows, "swing move %", OnCombatApplyPressed);
 		_combatHalfAngleDeg = AddTuningField(rows, "half-angle (deg)", OnCombatApplyPressed);
 		_combatRadiusTiles = AddTuningField(rows, "radius (tiles)", OnCombatApplyPressed);
 		_combatDamage = AddTuningField(rows, "damage (hp)", OnCombatApplyPressed);
@@ -2285,6 +2292,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			SetField(_combatAttackCooldownMs, tuning.AttackCooldownMs);
 			SetField(_combatRootMs, tuning.RootMs);
+			// SWING-SLOW: show the [0,1] factor as a percent (0.4 -> 40).
+			SetField(_combatSwingMovePct, tuning.SwingMoveFactor * 100d);
 			SetField(_combatHalfAngleDeg, tuning.HalfAngleDegrees);
 			SetField(_combatRadiusTiles, tuning.RadiusTiles);
 			SetField(_combatDamage, tuning.Damage);
@@ -2428,6 +2437,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_combatRootMs, out var rootMs))
 		{
 			_client.SendAdminSetTuning("combat.rootMs", rootMs);
+		}
+
+		// SWING-SLOW: the field is a PERCENT (0..100); send the [0,1] fraction. The server clamps to [0,1] anyway,
+		// so an out-of-range percent is bounded authoritatively.
+		if (TryReadField(_combatSwingMovePct, out var swingMovePct))
+		{
+			_client.SendAdminSetTuning("combat.swingMoveFactor", swingMovePct / 100d);
 		}
 
 		if (TryReadField(_combatHalfAngleDeg, out var halfAngle))

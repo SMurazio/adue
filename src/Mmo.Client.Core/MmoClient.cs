@@ -1027,18 +1027,22 @@ public sealed class MmoClient : IDisposable
         _lastAttackSentAt = _currentTime;
         _lastAttackCooldownMs = CombatTuning?.AttackCooldownMs ?? DefaultAttackCooldownMs;
 
-        // SWING-COMMIT (predictor mirror): the local player just committed a swing, so root the predicted movement
-        // IDENTICALLY to the server's WorldEntity.ApplyAttackMovementRoot (driven from GameServer.HandleAttack). We
-        // compute rootTicks from the SAME Mmo.Shared.Domain.CombatTuning source the server uses, off the predictor's
-        // tick interval AND the LIVE replicated rootMs (combat.rootMs) — so steady-state both sides root for the
-        // identical window. Falls back to the shared default rootMs before the first snapshot. Anchored on the SAME
-        // authoredTick we put on the wire (not a re-estimate). No predictor => nothing to root; the server still roots.
+        // SWING-SLOW (predictor mirror): the local player just committed a swing, so open the SAME swing-slow window
+        // the server opens (WorldEntity.ApplyAttackMovementSlowAuthored, driven from GameServer.HandleAttack). The
+        // window DURATION (rootTicks) is computed from the SAME Mmo.Shared.Domain.CombatTuning source the server
+        // uses, off the predictor's tick interval AND the LIVE replicated rootMs (combat.rootMs); the FACTOR is the
+        // LIVE replicated combat.swingMoveFactor — so steady-state both sides slow for the identical window by the
+        // identical factor. Both fall back to the SHARED defaults before the first snapshot (so they default
+        // identically). Anchored on the SAME authoredTick we put on the wire (not a re-estimate). No predictor =>
+        // nothing to slow; the server still slows authoritatively.
         if (_predictor is { } predictor)
         {
             var rootMs = CombatTuning?.RootMs ?? Mmo.Shared.Domain.CombatTuning.MovementRootMs;
-            predictor.ApplyAttackMovementRootAt(
+            var swingMoveFactor = CombatTuning?.SwingMoveFactor ?? Mmo.Shared.Domain.CombatTuning.DefaultSwingMoveFactor;
+            predictor.ApplyAttackMovementSlowAt(
                 authoredTick,
-                Mmo.Shared.Domain.CombatTuning.RootTicksFromTickMs(predictor.TickMs, rootMs));
+                Mmo.Shared.Domain.CombatTuning.RootTicksFromTickMs(predictor.TickMs, rootMs),
+                swingMoveFactor);
         }
 
         return sequence;

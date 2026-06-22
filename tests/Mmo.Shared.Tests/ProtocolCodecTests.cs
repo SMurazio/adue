@@ -313,13 +313,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyOne()
+    public void ProtocolVersionIsThirtyTwo()
     {
-        // COMBAT-TUNING protocol bump (v30 -> v31): new server->client CombatTuningMessage replicating the live combat
-        // feel-knobs (attack cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's
-        // wedge/predictor/cooldown viz match the server's authoritative resolution. A new message type is breaking
-        // (server + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(31, ProtocolCodec.Version);
+        // SWING-SLOW protocol bump (v31 -> v32): the CombatTuningMessage snapshot gains a SwingMoveFactor ([0,1]) —
+        // the movement factor applied during the swing window (0 = full stop / old root, 1 = no slow, 0.4 = 40%
+        // speed). Extending a replicated wire struct is breaking (server + client ship together). Pin the version so
+        // an accidental change is caught.
+        Assert.Equal(32, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -393,14 +393,15 @@ public sealed class ProtocolCodecTests
     [Fact]
     public void CombatTuningRoundTrips()
     {
-        // COMBAT-TUNING (v31): the five combat feel-knobs replicate intact, including the fractional geometry
-        // (half-angle deg, radius tiles) the panel can nudge.
+        // COMBAT-TUNING (v31) / SWING-SLOW (v32): the six combat feel-knobs replicate intact, including the
+        // fractional geometry (half-angle deg, radius tiles) and the swing-move factor ([0,1]) the panel can nudge.
         var original = new CombatTuningMessage(new CombatTuningSnapshot(
             AttackCooldownMs: 750,
             RootMs: 180,
             HalfAngleDegrees: 37.5,
             RadiusTiles: 2.25,
-            Damage: 33));
+            Damage: 33,
+            SwingMoveFactor: 0.4));
 
         var decoded = Assert.IsType<CombatTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -409,6 +410,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(37.5, decoded.Tuning.HalfAngleDegrees);
         Assert.Equal(2.25, decoded.Tuning.RadiusTiles);
         Assert.Equal(33, decoded.Tuning.Damage);
+        Assert.Equal(0.4, decoded.Tuning.SwingMoveFactor);
     }
 
     [Fact]

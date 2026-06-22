@@ -37,6 +37,40 @@ public sealed class WorldEntity
     // leaves it untouched. Modelled the same way as _nextEligibleTick so the gate is underflow-safe near tick 0.
     private uint? _nextEligibleAttackTick;
 
+    // SWING-SLOW: the swing-slow WINDOW and its factor, the replacement for the old hard movement root. A swing
+    // opens a window [anchorTick, _swingSlowUntilTick) during which movement is SLOWED (not frozen) by
+    // _swingMoveFactor in [0,1]: a step that lands inside the window costs a LONGER cooldown
+    // (CombatTuning.SlowedStepCooldownTicks), so the entity moves at `factor` of its normal speed. factor == 0 is
+    // the full-stop special case — a step inside the window is BLOCKED, reproducing the old root exactly. The
+    // window end is anchored on the CLAMPED AUTHORED tick (same anchor the old root used) so the predictor mirrors
+    // it byte-identically. _swingSlowUntilTick == 0 with no swing applied means "no active window" (a real
+    // swing always ends at anchor + >= 1 tick). The predictor holds the SAME two fields and the same window/cooldown
+    // math (LocalPlayerPredictor) — this is the swing-slow parity point.
+    private uint _swingSlowUntilTick;
+    private double _swingMoveFactor = CombatTuning.DefaultSwingMoveFactor;
+
+    // SWING-SLOW: the BASE per-step cooldown the last accepted step was scheduled with (before any swing-slow). The
+    // retroactive-slow fix in ApplySwingSlowWindow needs it to re-slow a step accepted at base just before the
+    // server learned of the swing — so it computes the SAME slowed cooldown the predictor computed for that step.
+    // Defaults to 1 (harmless until the first step sets it). Tracked on every accepted step alongside _lastStepTick.
+    private uint _lastStepCooldownTicks = 1;
+
+    // SWING-SLOW (commit-path parity fix): the AUTHORED tick of the last accepted step — the EXACT mirror of the
+    // predictor's LocalPlayerPredictor._lastLiveStepTick (its gate/action tick). This is the value the retroactive
+    // slow keys on, NOT _lastStepTick. The two FIELDS differ on the UoClientDriven authored-commit path when the
+    // commit is PACED: TryCommitStepAuthored sets _lastStepTick = scheduledTick (the paced/clamped tick the step is
+    // applied at), but the predictor records its pre-pacing gate tick. A recovered/bundled/reordered commit that the
+    // server paces up to _lastAuthoredCommitTick + cooldown makes scheduledTick > the authored tick, so keying the
+    // retroactive slow on _lastStepTick diverges from the predictor (server↔predictor next-eligible mismatch → the
+    // slow-form rubberband). Keying on the AUTHORED tick — which both sides compute identically (the predictor's
+    // actionTick == the clamped authoredTick the server applies at realistic latency) — makes the retroactive-slow
+    // inputs (lastStepAuthoredTick, _lastStepCooldownTicks) byte-identical on both sides in the paced case.
+    //
+    // On the held-intent (TryStep) and S103 (TryCommitStep) paths the authored tick == _lastStepTick (TryStep stamps
+    // serverTick == the predictor's actionTick; TryCommitStep is not driven by the predictor's live step loop), so
+    // this is exactly _lastStepTick there and nothing changes for those paths. Null = never stepped, like _lastStepTick.
+    private uint? _lastStepAuthoredTick;
+
     public WorldEntity(
         ulong id,
         uint networkId,
@@ -221,6 +255,109 @@ public sealed class WorldEntity
         }
     }
 
+    // SWING-SLOW (the live path; replaces the old hard root): open a swing-slow WINDOW anchored on the CLIENT's
+    // AUTHORED tick (clamped exactly like ApplyAttackMovementRootAuthored / TryCommitStepAuthored). During
+    // [clampedAuthored, clampedAuthored + slowDurationTicks) movement is SLOWED by `factor` rather than frozen: a
+    // step inside the window costs CombatTuning.SlowedStepCooldownTicks(base, factor). factor == 0 reproduces the
+    // old root (a step inside the window is BLOCKED). The window is a FLOOR like the old root — a NEW swing only
+    // EXTENDS an existing active window's end (max), it never shortens it, and the latest swing's factor wins (the
+    // typical case: a single swing at a time). The predictor calls the same-shaped method (ApplyAttackMovementSlowAt)
+    // with the SAME clamped authored tick and the SAME factor from the replicated tuning — byte-identical windows.
+    public void ApplyAttackMovementSlowAuthored(
+        uint authoredTick,
+        uint serverTick,
+        uint slowDurationTicks,
+        double factor,
+        uint pastWindowTicks,
+        uint futureLeadTicks)
+    {
+        var windowFloor = serverTick > pastWindowTicks ? serverTick - pastWindowTicks : 0u;
+        var windowCeil = serverTick + futureLeadTicks;
+        var clampedAuthored = authoredTick < windowFloor
+            ? windowFloor
+            : (authoredTick > windowCeil ? windowCeil : authoredTick);
+
+        ApplySwingSlowWindow(clampedAuthored, slowDurationTicks, factor);
+    }
+
+    // SWING-SLOW shared window-open: set the swing-slow window end (a max-FLOOR — never shortens an existing active
+    // window) and capture the factor. Used by the server's authored path AND (mirror) the predictor (which holds the
+    // SAME field set + the SAME retroactive fix). The factor of the most recent swing wins for the merged window.
+    //
+    // RETROACTIVE SLOW (the latency-parity fix — see LocalPlayerPredictor.ApplyAttackMovementSlowAt for the mirror):
+    // the server learns of the swing `latency` ticks AFTER it was authored, so a step it ALREADY accepted at a tick
+    // INSIDE the window [A, A+D) was scheduled with the BASE cooldown (the server didn't yet know to slow it). Left
+    // alone, that step's next-eligible tick would be `lastStepAuthored + base`, while the predictor (which knew
+    // immediately) scheduled `lastStepAuthored + slowed` — a divergence (the swing-then-move rubberband, in slow
+    // form). So at window-open we RE-SLOW that pending step: if the last accepted step's AUTHORED tick landed inside
+    // the window, push its next-eligible tick out to `lastStepAuthored + slowedCooldown` (a max-FLOOR, never earlier).
+    // This depends only on (A, D, factor, _lastStepAuthoredTick, _lastStepCooldownTicks) — all identical on both sides
+    // for that step — so it is order-independent: whether a side slows the step at accept-time (predictor, knew early)
+    // or at window-open-time (server, learned late), both land on the SAME next-eligible tick. Anchoring on the
+    // AUTHORED tick (not the paced/clamped scheduledTick _lastStepTick) is the COMMIT-PATH parity fix — see the inner
+    // comment. A last step BEFORE the window needs no fix — it was correctly base-paced, and the FIRST step that falls
+    // inside the window is slowed when IT is accepted.
+    private void ApplySwingSlowWindow(uint anchorTick, uint slowDurationTicks, double factor)
+    {
+        var slowUntil = anchorTick + slowDurationTicks;
+        if (slowUntil > _swingSlowUntilTick)
+        {
+            _swingSlowUntilTick = slowUntil;
+        }
+
+        _swingMoveFactor = factor;
+
+        // RETROACTIVE SLOW: if the last accepted step landed inside the (just-merged) window, re-slow its pending
+        // next-eligible tick. Skip for the block factor (0) — the block gate already withholds every step inside the
+        // window, so there is no slowed-cadence step to reschedule (the old root semantics need no reschedule).
+        //
+        // COMMIT-PATH PARITY FIX: key on the AUTHORED tick of the last step (_lastStepAuthoredTick), the value the
+        // predictor records as its _lastLiveStepTick — NOT on _lastStepTick (the paced/clamped scheduled tick the
+        // commit was applied at). On the UoClientDriven authored-commit path a PACED commit makes _lastStepTick
+        // (scheduledTick) > the authored tick, so keying on _lastStepTick would compute a DIFFERENT slowedNext than
+        // the predictor (which keyed on its gate tick) → server↔predictor divergence (the slow-form rubberband). The
+        // authored tick is byte-identical on both sides (predictor actionTick == clamped authoredTick at realistic
+        // latency), so (lastStepAuthoredTick, _lastStepCooldownTicks) — and thus slowedNext — match exactly. On the
+        // held-intent / S103 paths _lastStepAuthoredTick == _lastStepTick, so this is unchanged there.
+        if (!CombatTuning.IsSwingBlockFactor(factor)
+            && _lastStepAuthoredTick.HasValue
+            && _lastStepAuthoredTick.Value >= anchorTick
+            && _lastStepAuthoredTick.Value < _swingSlowUntilTick)
+        {
+            var slowedNext = _lastStepAuthoredTick.Value + CombatTuning.SlowedStepCooldownTicks(_lastStepCooldownTicks, factor);
+            if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value < slowedNext)
+            {
+                _nextEligibleTick = slowedNext;
+            }
+        }
+    }
+
+    // SWING-SLOW: is `actionTick` inside the active swing-slow window? Both the block decision (factor 0) and the
+    // slowed-cooldown decision key on this. A step at/after _swingSlowUntilTick is outside (the window is
+    // half-open [anchor, until)).
+    private bool IsInSwingSlowWindow(uint actionTick) => actionTick < _swingSlowUntilTick;
+
+    // SWING-SLOW: the effective per-step cooldown for a step accepted at `actionTick`, given the base cooldown.
+    // Inside the swing window it is the slowed cooldown (CombatTuning.SlowedStepCooldownTicks); outside it is the
+    // base unchanged. Centralised so TryStep / TryCommitStep / TryCommitStepAuthored all slow identically, and so
+    // the predictor mirrors the SAME call. (factor 0 returns the SwingBlockCooldownTicks sentinel, but the block
+    // gate refuses the step before this is used as a cooldown, so the sentinel is never stored.)
+    private uint EffectiveStepCooldownWithSwingSlow(uint actionTick, uint baseStepCooldownTicks)
+    {
+        if (!IsInSwingSlowWindow(actionTick))
+        {
+            return baseStepCooldownTicks;
+        }
+
+        return CombatTuning.SlowedStepCooldownTicks(baseStepCooldownTicks, _swingMoveFactor);
+    }
+
+    // SWING-SLOW: should a step at `actionTick` be BLOCKED by the swing window? Only the full-stop factor (0)
+    // blocks — it reproduces the old hard root (no step inside the window). A non-zero factor never blocks; it
+    // slows via the cooldown instead.
+    private bool IsBlockedBySwingSlow(uint actionTick)
+        => IsInSwingSlowWindow(actionTick) && CombatTuning.IsSwingBlockFactor(_swingMoveFactor);
+
     // Derives this entity's effective per-step cooldown in TICKS from the server's base cooldown and the
     // speed multiplier, clamped to the configured [minTicks, maxTicks] tick bounds (mirrors the ms clamp).
     // Default multiplier 1.0 returns baseStepCooldownTicks unchanged ⇒ behaviour parity with pre-S51. The
@@ -312,7 +449,10 @@ public sealed class WorldEntity
     {
         // Gate on the next-eligible tick (set by the previous step). A step that arrives early — before its
         // cooldown has elapsed — is dropped, unchanged from the pre-S63 cooldown behaviour for accepted steps.
-        if (_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value)
+        // SWING-SLOW: a full-stop swing window (factor 0) ALSO blocks the step here — the exact old root behaviour
+        // (a step inside the window is refused with "cooldown"). A non-zero factor does NOT block here; it slows
+        // the cooldown applied on accept below.
+        if ((_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value) || IsBlockedBySwingSlow(serverTick))
         {
             var cooldownDelta = direction.Delta();
             var cooldownTarget = Tile.Offset(cooldownDelta.X, cooldownDelta.Y);
@@ -371,7 +511,15 @@ public sealed class WorldEntity
         var from = Tile;
         Tile = target;
         _lastStepTick = serverTick;
-        _nextEligibleTick = serverTick + stepCooldownTicks;
+        // SWING-SLOW (commit-path parity): on the held-intent path the AUTHORED tick == serverTick (the predictor's
+        // gate actionTick is exactly this tick), so the authored anchor and _lastStepTick coincide.
+        _lastStepAuthoredTick = serverTick;
+        // SWING-SLOW: remember the BASE cooldown of this step (not the slowed effective one) so a later
+        // retroactive-slow at window-open can re-slow it from the same base the predictor used.
+        _lastStepCooldownTicks = stepCooldownTicks;
+        // SWING-SLOW: a step accepted INSIDE the swing window costs the SLOWED cooldown (longer = slower); outside,
+        // the base cooldown. factor 0 never reaches here (blocked above). The predictor applies the identical rule.
+        _nextEligibleTick = serverTick + EffectiveStepCooldownWithSwingSlow(serverTick, stepCooldownTicks);
         StateRevision++;
         // S76: count this accepted tile move. ONLY here — blocked/cooldown steps above return early without
         // touching StepSequence, so it advances in lockstep with the actual tile.
@@ -477,6 +625,26 @@ public sealed class WorldEntity
             }
         }
 
+        // SWING-SLOW: a full-stop swing window (factor 0) blocks a release-commit that lands inside it. Keyed on the
+        // schedule base (the tick the step effectively lands at), the same tick the slowed cooldown below uses, so
+        // block and slow agree. A non-zero factor slows the next cooldown instead of blocking.
+        var nominalEnd = _lastStepTick.HasValue ? _lastStepTick.Value + stepCooldownTicks : serverTick;
+        var scheduleBase = nominalEnd > serverTick ? nominalEnd : serverTick;
+        if (IsBlockedBySwingSlow(scheduleBase))
+        {
+            RejectsCommitTooEarly++;
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                target,
+                CooldownElapsed: false,
+                TargetWalkable: true,
+                Accepted: false,
+                "commit_too_early",
+                Tile);
+            return false;
+        }
+
         var from = Tile;
         Tile = target;
         Facing = direction;
@@ -485,10 +653,14 @@ public sealed class WorldEntity
         // would have elapsed = _lastStepTick + cooldown (which is exactly the old _nextEligibleTick). If the commit
         // arrives at/after that nominal end (or the entity never stepped), it is just an on-time step scheduled from
         // serverTick.
-        var nominalEnd = _lastStepTick.HasValue ? _lastStepTick.Value + stepCooldownTicks : serverTick;
-        var scheduleBase = nominalEnd > serverTick ? nominalEnd : serverTick;
         _lastStepTick = scheduleBase;
-        _nextEligibleTick = scheduleBase + stepCooldownTicks;
+        // SWING-SLOW (commit-path parity): the S103 release-commit path is not driven by the predictor's live step
+        // loop (it is a cosmetic-lead model-B completion), so its authored anchor is simply the schedule base it
+        // applies at — the same value _lastStepTick takes here. No paced authored-tick divergence exists on this path.
+        _lastStepAuthoredTick = scheduleBase;
+        _lastStepCooldownTicks = stepCooldownTicks;
+        // SWING-SLOW: slowed cooldown inside the window (keyed on the schedule base), base outside.
+        _nextEligibleTick = scheduleBase + EffectiveStepCooldownWithSwingSlow(scheduleBase, stepCooldownTicks);
         StateRevision++;
         StepSequence++;
         result = new MovementStepResult(
@@ -563,6 +735,25 @@ public sealed class WorldEntity
             }
         }
 
+        // SWING-SLOW: a full-stop swing window (factor 0) blocks a client-driven commit that lands inside it, the
+        // exact old root behaviour for the per-step commit path. Keyed on the SCHEDULED (paced) tick the step lands
+        // on — the same tick the slowed cooldown below is keyed on — so block and slow agree. A non-zero factor does
+        // not block; it slows the next-eligible cooldown after accept.
+        if (IsBlockedBySwingSlow(scheduledTick))
+        {
+            RejectsCommitTooEarly++;
+            result = new MovementStepResult(
+                direction,
+                Tile,
+                Tile,
+                CooldownElapsed: false,
+                TargetWalkable: true,
+                Accepted: false,
+                "commit_too_early",
+                Tile);
+            return false;
+        }
+
         // REAL-TIME CAP: the schedule can never run ahead of real time by more than the small in-flight lead. If the
         // paced slot is beyond serverTick + futureLead, reject "too early" — the client is trying to claim steps
         // faster than real time allows (a serialised spam burst, or a far-future authored tick). It re-tries on a
@@ -612,7 +803,17 @@ public sealed class WorldEntity
         // S103-style receive-time commit or a switch back to server-paced reads a sane base rather than a stale one.
         _lastAuthoredCommitTick = scheduledTick;
         _lastStepTick = scheduledTick;
-        _nextEligibleTick = scheduledTick + stepCooldownTicks;
+        // SWING-SLOW (commit-path parity fix — THE load-bearing line): the retroactive-slow anchor is the AUTHORED
+        // tick the client banked the step on (clampedAuthored == the predictor's gate actionTick at realistic
+        // latency), NOT the paced scheduledTick. When a recovered/bundled/reordered commit is PACED, scheduledTick
+        // is pushed out to _lastAuthoredCommitTick + cooldown while clampedAuthored stays at the predictor's gate
+        // tick — so anchoring on clampedAuthored keeps the retroactive-slow inputs (anchor + base cooldown)
+        // byte-identical with the predictor's _lastLiveStepTick, killing the slow-form rubberband on the commit path.
+        _lastStepAuthoredTick = clampedAuthored;
+        _lastStepCooldownTicks = stepCooldownTicks;
+        // SWING-SLOW: a commit accepted inside the swing window costs the slowed cooldown (keyed on the scheduled
+        // tick the step lands on); outside, the base. Mirrors TryStep's slow on the same window/factor.
+        _nextEligibleTick = scheduledTick + EffectiveStepCooldownWithSwingSlow(scheduledTick, stepCooldownTicks);
         StateRevision++;
         StepSequence++;
         result = new MovementStepResult(

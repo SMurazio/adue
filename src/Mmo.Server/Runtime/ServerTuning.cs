@@ -40,6 +40,13 @@ public sealed class ServerTuning
     public double FreeAimRadiusTiles { get; set; } = 1.6d;
     public int AttackDamage { get; set; } = 20;
 
+    // SWING-SLOW (live, combat.swingMoveFactor): how HARD movement is slowed DURING the swing window (AttackRootMs
+    // long). [0,1]: 0 = full stop (the old hard root), 1 = no slow, 0.4 (the default) = move at 40% speed. Seeded
+    // to the SHARED CombatTuning.DefaultSwingMoveFactor so the server and the client predictor (which falls back to
+    // the same constant before its first snapshot) default identically. Read fresh per attack in HandleAttack and
+    // replicated in CombatSnapshot; the predictor mirrors it off the snapshot for swing-slow parity.
+    public double SwingMoveFactor { get; set; } = CombatTuning.DefaultSwingMoveFactor;
+
     public double FreeAimHalfAngleRadians => FreeAimHalfAngleDegrees * System.Math.PI / 180d;
 
     // Attack cooldown in TICKS, derived exactly like the old GameServer.AttackCooldownTicks (Ceiling, >= 1) so the
@@ -53,7 +60,7 @@ public sealed class ServerTuning
 
     // The current combat knobs as the wire snapshot the server replicates to clients (login + on change).
     public CombatTuningSnapshot CombatSnapshot =>
-        new(AttackCooldownMs, AttackRootMs, FreeAimHalfAngleDegrees, FreeAimRadiusTiles, AttackDamage);
+        new(AttackCooldownMs, AttackRootMs, FreeAimHalfAngleDegrees, FreeAimRadiusTiles, AttackDamage, SwingMoveFactor);
 
     // Global base step cooldown in ms. PINNED (SPEED1): seeded once from ServerOptions and never changed at
     // runtime — the old move.stepCooldownMs live knob was removed so the base walk speed is a constant 150 ms

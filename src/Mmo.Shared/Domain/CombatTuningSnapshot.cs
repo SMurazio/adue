@@ -10,12 +10,19 @@ namespace Mmo.Shared.Domain;
 // Units: AttackCooldownMs and RootMs are milliseconds; HalfAngleDegrees is the sector HALF-angle in degrees (full
 // arc = 2x); RadiusTiles is the sector reach in tiles; Damage is HP per enemy hit. These mirror the registry keys
 // combat.attackCooldownMs / combat.rootMs / combat.halfAngleDeg / combat.radiusTiles / combat.damage.
+//
+// SWING-SLOW (protocol v32): RootMs is now the swing-slow WINDOW DURATION (how long the slow lasts) and the new
+// SwingMoveFactor in [0,1] is how HARD the slow is within that window — 0 = full stop (the old root), 1 = no slow,
+// 0.4 (default) = move at 40% speed. Both ride the snapshot so the client predictor slows its movement by the SAME
+// factor over the SAME window the server does (the swing-slow parity point). SwingMoveFactor mirrors the registry
+// key combat.swingMoveFactor.
 public readonly record struct CombatTuningSnapshot(
     int AttackCooldownMs,
     int RootMs,
     double HalfAngleDegrees,
     double RadiusTiles,
-    int Damage)
+    int Damage,
+    double SwingMoveFactor)
 {
     public double HalfAngleRadians => HalfAngleDegrees * System.Math.PI / 180d;
 }

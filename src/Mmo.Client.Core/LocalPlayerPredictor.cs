@@ -172,6 +172,24 @@ public sealed class LocalPlayerPredictor
     // step; there is no separate turn beat or turn delay.)
     private long? _nextEligibleTick;
 
+    // SWING-SLOW: the predictor's mirror of the server's swing-slow window (WorldEntity._swingSlowUntilTick /
+    // _swingMoveFactor). A local swing opens a window [anchorTick, _swingSlowUntilTick) during which a predicted
+    // step costs the SLOWED cooldown (CombatTuning.SlowedStepCooldownTicks) — factor 0 BLOCKS the step inside the
+    // window (the old root), a non-zero factor slows it. Both the window end and the factor come from the SAME
+    // values the server uses (the authored tick the client stamps + the replicated combat.swingMoveFactor), so the
+    // predictor slows the SAME steps to the SAME ticks the server does. _swingSlowUntilTick stays at its default
+    // (long.MinValue, "never") until the first swing; the default factor matches the shared pre-snapshot fallback.
+    private long _swingSlowUntilTick = long.MinValue;
+    private double _swingMoveFactor = CombatTuning.DefaultSwingMoveFactor;
+
+    // SWING-SLOW: the gate tick (action tick) of the predictor's last LIVE accepted step, and the BASE cooldown it
+    // was scheduled with — the EXACT mirror of the server's _lastStepTick / _lastStepCooldownTicks. Only the
+    // retroactive-slow fix in ApplyAttackMovementSlowAt reads them (to re-slow a step accepted at base just before
+    // the predictor learned of a swing — the symmetric case to the server learning late). Set on every live step in
+    // Tick (NOT on a re-projection replay, which replays historical steps). _lastLiveStepTick null = never stepped.
+    private long? _lastLiveStepTick;
+    private uint _lastLiveStepCooldownTicks = 1;
+
     private double _cadenceMs;
 
     // ---- Present-time render tween (the snappy part; NOT a playout buffer) ------------------------------
@@ -470,6 +488,18 @@ public sealed class LocalPlayerPredictor
                     continue;
                 }
 
+                // SWING-SLOW: a full-stop swing window (factor 0) BLOCKS the step at this boundary — the old root.
+                // Mirror the server's TryStep block: do NOT move the tile and do NOT consume the cooldown, just
+                // re-test the NEXT tick (advance _nextEligibleTick by one) until the window elapses. A non-zero
+                // factor never blocks here; it slows the cooldown applied on accept below. Keyed on actionTick, the
+                // SAME tick the server keys its block on (the gate boundary this step would fire at).
+                if (IsBlockedBySwingSlow(actionTick))
+                {
+                    _facing = _direction;
+                    _nextEligibleTick = actionTick + 1;
+                    continue;
+                }
+
                 // S98: a direction change steps IMMEDIATELY in the new direction — there is no separate turn
                 // beat. The step itself faces you (AdvanceOneStep / the blocked-hold branch below set _facing =
                 // _direction), exactly mirroring the server's WorldEntity.TryStep after S98.
@@ -493,7 +523,15 @@ public sealed class LocalPlayerPredictor
                 var stepStartedAt = TimeSpan.FromMilliseconds(TickToWallMs(actionTick));
                 var acceptedDirection = _direction;
                 AdvanceOneStep(acceptedDirection, stepStartedAt, startTween: true, tweenFrom: SampleInternal(now), now);
-                _nextEligibleTick = actionTick + _stepCooldownTicks;
+                // SWING-SLOW: remember this live step's gate tick + BASE cooldown so a later retroactive-slow at
+                // window-open can re-slow it from the same base the server uses (the symmetric latency case).
+                _lastLiveStepTick = actionTick;
+                _lastLiveStepCooldownTicks = _stepCooldownTicks;
+                // SWING-SLOW: a step accepted INSIDE the swing window costs the SLOWED cooldown (longer = slower);
+                // outside, the base cooldown. The EXACT mirror of the server's TryStep next-eligible computation
+                // (same CombatTuning.SlowedStepCooldownTicks, same base, same factor), so the next predicted step
+                // lands on the SAME tick the server schedules it.
+                _nextEligibleTick = actionTick + EffectiveStepCooldownWithSwingSlow(actionTick);
                 if (acceptedCount < acceptedSteps.Length)
                 {
                     acceptedSteps[acceptedCount] = acceptedDirection;
@@ -825,6 +863,66 @@ public sealed class LocalPlayerPredictor
             _nextEligibleTick = rootUntil;
         }
     }
+
+    // SWING-SLOW (predictor mirror — the load-bearing parity): the LOCAL player committed a swing, so open the SAME
+    // swing-slow window the server opens (WorldEntity.ApplyAttackMovementSlowAuthored), anchored on the SAME authored
+    // tick the client stamps on the AttackMessage and with the SAME factor from the replicated tuning. During the
+    // window [anchorTick, anchorTick + slowDurationTicks) a predicted step is SLOWED by `factor` (factor 0 BLOCKS it
+    // — the old root). The window end is a max-FLOOR (a new swing only extends an active window), exactly like the
+    // server. The Tick step loop reads this window/factor with the SAME CombatTuning.SlowedStepCooldownTicks math,
+    // so the predictor slows the same steps to the same ticks the server does — no swing-then-move rubberband.
+    public void ApplyAttackMovementSlowAt(uint anchorTick, uint slowDurationTicks, double factor)
+    {
+        var slowUntil = (long)anchorTick + slowDurationTicks;
+        if (slowUntil > _swingSlowUntilTick)
+        {
+            _swingSlowUntilTick = slowUntil;
+        }
+
+        _swingMoveFactor = factor;
+
+        // RETROACTIVE SLOW (the EXACT mirror of WorldEntity.ApplySwingSlowWindow's fix): if the last LIVE accepted
+        // step landed inside the (just-merged) window, re-slow its pending next-eligible tick to lastStep + slowed.
+        // This is the symmetric latency case — normally the predictor learns of its OWN swing immediately, but if a
+        // step was already accepted at base in the SAME frame just before the swing was sent, this brings it onto
+        // the slowed schedule the server will use. Depends only on (anchor, window, factor, _lastLiveStepTick) — the
+        // same inputs (and same values for that step) the server uses — so it is order-independent (parity). Skipped
+        // for the block factor (0): the block gate withholds every in-window step, so there is nothing to reslow.
+        if (!CombatTuning.IsSwingBlockFactor(factor)
+            && _lastLiveStepTick.HasValue
+            && _lastLiveStepTick.Value >= anchorTick
+            && _lastLiveStepTick.Value < _swingSlowUntilTick)
+        {
+            var slowedNext = _lastLiveStepTick.Value + CombatTuning.SlowedStepCooldownTicks(_lastLiveStepCooldownTicks, factor);
+            if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value < slowedNext)
+            {
+                _nextEligibleTick = slowedNext;
+            }
+        }
+    }
+
+    // SWING-SLOW: is `actionTick` inside the active swing-slow window? Half-open [anchor, until), exactly like the
+    // server's WorldEntity.IsInSwingSlowWindow.
+    private bool IsInSwingSlowWindow(long actionTick) => actionTick < _swingSlowUntilTick;
+
+    // SWING-SLOW: the effective per-step cooldown (in ticks) for a predicted step accepted at `actionTick` — the
+    // slowed cooldown inside the swing window, the base cooldown outside. The EXACT mirror of the server's
+    // WorldEntity.EffectiveStepCooldownWithSwingSlow (same CombatTuning.SlowedStepCooldownTicks, same base, same
+    // factor from the replicated tuning), so server and predictor schedule the next step on the identical tick.
+    private uint EffectiveStepCooldownWithSwingSlow(long actionTick)
+    {
+        if (!IsInSwingSlowWindow(actionTick))
+        {
+            return _stepCooldownTicks;
+        }
+
+        return CombatTuning.SlowedStepCooldownTicks(_stepCooldownTicks, _swingMoveFactor);
+    }
+
+    // SWING-SLOW: should a predicted step at `actionTick` be BLOCKED by the swing window? Only the full-stop factor
+    // (0) blocks — reproducing the old root. The EXACT mirror of WorldEntity.IsBlockedBySwingSlow.
+    private bool IsBlockedBySwingSlow(long actionTick)
+        => IsInSwingSlowWindow(actionTick) && CombatTuning.IsSwingBlockFactor(_swingMoveFactor);
 
     // Updates facing-only from a confirmed snapshot when the position matched (so a server-side turn with no
     // step still rotates the avatar). Cheap and safe — never moves the predicted tile.

@@ -49,7 +49,7 @@ public sealed class CombatTuningTests
     [Fact]
     public void SnapshotComputesHalfAngleRadians()
     {
-        var snapshot = new CombatTuningSnapshot(600, 200, 90d, 1.6d, 20);
+        var snapshot = new CombatTuningSnapshot(600, 200, 90d, 1.6d, 20, CombatTuning.DefaultSwingMoveFactor);
 
         Assert.Equal(System.Math.PI / 2d, snapshot.HalfAngleRadians, 9);
     }

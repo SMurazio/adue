@@ -232,6 +232,73 @@ public sealed class WorldEntityCombatTests
         Assert.Equal(4u, fromRate);
     }
 
+    [Fact]
+    public void SwingSlowFactorZeroBlocksStepsInsideWindow_LikeTheOldRoot()
+    {
+        // SWING-SLOW: factor 0 is the FULL-STOP case — a step inside the swing window is BLOCKED, reproducing the
+        // old hard root exactly. Open a slow window [0, 4) at factor 0; every step inside is rejected, the first
+        // step at/after the window end is accepted.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+        const uint slowDuration = 4;
+
+        entity.ApplyAttackMovementSlowAuthored(0, 0, slowDuration, factor: 0d, pastWindowTicks: 64, futureLeadTicks: 4);
+        var startTile = entity.Tile;
+
+        for (uint tick = 0; tick < slowDuration; tick++)
+        {
+            Assert.False(entity.TryStep(Direction8.E, tick, stepCooldownTicks: 3, grid, out _));
+            Assert.Equal(startTile, entity.Tile);
+        }
+
+        Assert.True(entity.TryStep(Direction8.E, slowDuration, stepCooldownTicks: 3, grid, out _));
+        Assert.Equal(startTile.Offset(1, 0), entity.Tile);
+    }
+
+    [Fact]
+    public void SwingSlowFactorInRangeSlowsButDoesNotFreezeMovement()
+    {
+        // SWING-SLOW: a non-zero factor SLOWS movement during the window rather than freezing it. With base cadence
+        // 3 ticks and factor 0.4, a step ACCEPTED inside the window costs ceil(3 / 0.4) = 8 ticks before the next.
+        // Hold E into open space, open a long slow window so the first post-swing step lands inside it, and assert
+        // the gap to the following step is the slowed 8 ticks (movement continued — it did not stop).
+        var entity = CreateDummy();
+        var grid = new TileGrid(64, 64, []);
+        const uint baseCooldown = 3;
+        const double factor = 0.4d;
+        var slowed = CombatTuning.SlowedStepCooldownTicks(baseCooldown, factor);
+        Assert.Equal(8u, slowed);
+
+        // A window long enough to contain two steps' worth of slowed cadence.
+        const uint slowDuration = 20;
+        entity.ApplyAttackMovementSlowAuthored(0, 0, slowDuration, factor, pastWindowTicks: 64, futureLeadTicks: 4);
+
+        // First step at tick 0 is accepted (inside the window, factor != 0 so not blocked) and schedules the next
+        // step a SLOWED cooldown out.
+        Assert.True(entity.TryStep(Direction8.E, 0, baseCooldown, grid, out _));
+
+        // The next step is NOT eligible at base cadence (tick 3) — it is slowed — but IS at the slowed cadence (8).
+        Assert.False(entity.TryStep(Direction8.E, baseCooldown, baseCooldown, grid, out _));
+        Assert.True(entity.TryStep(Direction8.E, slowed, baseCooldown, grid, out _));
+    }
+
+    [Fact]
+    public void SwingSlowWindowIsAFloorNeverShortensAnActiveWindow()
+    {
+        // SWING-SLOW: like the old root, a new swing only EXTENDS the slow window — it never pulls a later window end
+        // earlier. Open a long window [0, 30), then a second swing with a SHORTER window anchored at tick 2 (ends at
+        // 6): the earlier-ending window must NOT shorten the active one. With factor 0 (block) the entity stays
+        // blocked until the LONGER window end (30), proving the floor.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+
+        entity.ApplyAttackMovementSlowAuthored(0, 0, slowDurationTicks: 30, factor: 0d, pastWindowTicks: 64, futureLeadTicks: 4);
+        entity.ApplyAttackMovementSlowAuthored(2, 2, slowDurationTicks: 4, factor: 0d, pastWindowTicks: 64, futureLeadTicks: 4);
+
+        Assert.False(entity.TryStep(Direction8.E, 29, stepCooldownTicks: 3, grid, out _)); // still inside [0,30)
+        Assert.True(entity.TryStep(Direction8.E, 30, stepCooldownTicks: 3, grid, out _));  // window elapsed
+    }
+
     private static WorldEntity CreateDummy()
     {
         return new WorldEntity(
