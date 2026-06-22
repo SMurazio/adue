@@ -53,11 +53,20 @@ public sealed class GameServer
     private const uint AuthoredTickPastWindow = 64;
     private const uint AuthoredTickFutureLead = 4;
 
-    // COMBAT-S2B: attack tuning constants. The per-entity attack cooldown (~600 ms — a watchable cadence,
-    // INDEPENDENT of the 150 ms move cooldown) and the melee-cone damage per enemy tile (20 HP). Plain constants
-    // for this stage (no live-tuning knob yet); converted ms->ticks via the configured tick rate at use site.
+    // COMBAT-S2B / FREEAIM: attack tuning constants. The per-entity attack cooldown (~600 ms — a watchable cadence,
+    // INDEPENDENT of the 150 ms move cooldown) and the melee damage per enemy hit (20 HP). Plain constants for this
+    // stage (no live-tuning knob yet); converted ms->ticks via the configured tick rate at use site.
     private const int AttackCooldownMs = 600;
     private const int MeleeConeDamage = 20;
+
+    // FREEAIM FEEL KNOBS. The free-aim melee sector replacing the tile cone: a pie slice of HalfAngle (so the full
+    // arc is 2× this) and Radius tiles, centred on the attacker and pointed along the client's continuous aim. These
+    // are the primary "combat feel" levers for the exploration — widen/narrow the arc, lengthen/shorten the reach.
+    // 45° half-angle = a 90° arc; 1.6-tile radius reaches a hair past the adjacent diagonal (~1.41) without spanning
+    // two full tiles. Centralized here so tuning is one edit; flagged in the review request as the knobs to sweep.
+    private const double FreeAimHalfAngleDegrees = 45d;
+    private const double FreeAimRadiusTiles = 1.6d;
+    private static readonly double FreeAimHalfAngleRadians = FreeAimHalfAngleDegrees * System.Math.PI / 180d;
 
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
@@ -411,7 +420,7 @@ public sealed class GameServer
             case AttackMessage attack:
                 if (session.IsAuthenticated)
                 {
-                    HandleAttack(session, attack.Sequence, attack.Kind);
+                    HandleAttack(session, attack.Sequence, attack.Kind, attack.AimAngle);
                 }
                 break;
             default:
@@ -1520,12 +1529,14 @@ public sealed class GameServer
     //   2. Resolve the attacker entity; reject if it is still on its INDEPENDENT per-entity attack cooldown
     //      (WorldEntity.TryBeginAttack, ~600 ms) — the cooldown cannot be bypassed by spamming (a rejected attack
     //      mutates nothing and the cursor is already burned, so the re-send is also deduped).
-    //   3. Compute the melee cone (3-tile front fan rotated by the attacker's facing, MeleeCone.Resolve).
-    //   4. Query occupancy on those tiles (the spatial grid returns a small candidate superset; filter to the exact
-    //      cone tiles) and apply MeleeConeDamage to each ENEMY — Dummy/Npc only, NEVER another Player (no friendly
-    //      fire) and never the attacker itself. The reduced HP rides the existing 2a public-HP snapshot field, so
-    //      the target's overhead bar drops automatically (no dedicated reply). HP may reach 0 (no death yet).
-    private void HandleAttack(ClientSession session, uint sequence, AttackKind kind)
+    //   3. FREEAIM: decode the client's continuous aim angle and resolve a GEOMETRIC SECTOR (half-angle + radius)
+    //      about the attacker's world position — replacing the facing-derived tile cone. The aim is a client-chosen
+    //      continuous value the server validates purely by geometry (like the move direction), so it stays
+    //      server-authoritative.
+    //   4. Apply MeleeConeDamage to each ENEMY whose tile-centre falls in the sector — Dummy/Npc only, NEVER another
+    //      Player (no friendly fire) and never the attacker itself. The reduced HP rides the existing 2a public-HP
+    //      snapshot field, so the target's overhead bar drops automatically (no dedicated reply). HP may reach 0.
+    private void HandleAttack(ClientSession session, uint sequence, AttackKind kind, ushort aimAngle)
     {
         // (1) Own attack cursor dedup — PARALLEL to, but independent of, the movement cursors. A stale or duplicate
         // attack seq is dropped before any cooldown/cone work. The cursor advances even on a later cooldown reject,
@@ -1540,7 +1551,7 @@ public sealed class GameServer
             return;
         }
 
-        // Only the melee cone exists this stage; the codec already range-validated the kind, so anything else is a
+        // Only the melee sector exists this stage; the codec already range-validated the kind, so anything else is a
         // future kind we don't resolve yet.
         if (kind != AttackKind.MeleeCone)
         {
@@ -1553,13 +1564,22 @@ public sealed class GameServer
             return;
         }
 
-        // (3+4) Compute the cone + occupancy and apply damage. The whole cone resolution (cone tiles rotated by
-        // facing, the grid occupancy query, the friendly-fire gate, and the damage) lives in the testable static
-        // MeleeConeResolver — HandleAttack only owns the cursor dedup + cooldown gate around it.
-        var hits = MeleeConeResolver.ResolveAndDamage(_zone.World, attacker, MeleeConeDamage, _attackCandidateScratch);
+        // (3+4) FREEAIM: resolve the geometric sector + apply damage. The whole resolution (the radius/angle test
+        // against entity world positions, the grid occupancy query, the friendly-fire gate, and the damage) lives in
+        // the testable static FreeAimSectorResolver — HandleAttack only owns the cursor dedup + cooldown gate and the
+        // aim decode around it.
+        var aimRadians = AimAngle.ToRadians(aimAngle);
+        var hits = FreeAimSectorResolver.ResolveAndDamage(
+            _zone.World,
+            attacker,
+            aimRadians,
+            FreeAimHalfAngleRadians,
+            FreeAimRadiusTiles,
+            MeleeConeDamage,
+            _attackCandidateScratch);
         if (hits > 0)
         {
-            Log.Info($"{session.DisplayName} melee-cone hit {hits} target(s) for {MeleeConeDamage} each (facing {attacker.Facing}).");
+            Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {MeleeConeDamage} each (aim {aimRadians:F2} rad).");
         }
     }
 

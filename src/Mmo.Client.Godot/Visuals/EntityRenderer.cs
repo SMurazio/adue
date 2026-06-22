@@ -78,6 +78,13 @@ public sealed class EntityRenderer
         }
     }
 
+    // FREEAIM: look up the live visual currently bound to `networkId` (e.g. the local player) so the root can layer
+    // a render-only continuous-facing yaw on it. Returns false when no active visual is bound to that id this frame.
+    public bool TryGetActiveVisual(uint networkId, out EntityVisual visual)
+    {
+        return _active.TryGetValue(networkId, out visual!);
+    }
+
     // Push the live label tuning (pixel size + player label height) onto every active visual so an F4-panel
     // apply is visible without a respawn (parity with the old ApplyLabelTuningToExisting).
     public void ApplyLabelTuningToExisting()

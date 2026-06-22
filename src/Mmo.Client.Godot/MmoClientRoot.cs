@@ -64,11 +64,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private MeshInstance3D? _predictedTileMarker;
 	private MeshInstance3D? _confirmedTileMarker;
 
-	// COMBAT-S2B: red ground markers flashed on the melee-cone tiles when the local player attacks, so the hit
-	// area is visible (and verifies the cone matches the server's MeleeCone across all 8 facings). Always three
-	// (the cone is MeleeCone.TileCount tiles); shown on attack and hidden after a brief window by UpdateConeMarkers.
-	private MeshInstance3D[]? _coneHitMarkers;
-	private ulong _coneMarkersHideAtMs;
+	// FREEAIM: a flat WEDGE (pie-slice) mesh flashed on the ground from the local player, oriented along the aim,
+	// showing the free-aim sector's danger area (half-angle + radius matching the server). One MeshInstance3D under
+	// the world root; positioned + yawed on attack and hidden after a brief window by UpdateAimWedge.
+	private MeshInstance3D? _aimWedge;
+	private ulong _aimWedgeHideAtMs;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -397,7 +397,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
 		UpdatePredictionTileMarkers();
-		UpdateConeMarkers();
+		UpdateAimWedge();
+		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
 		var t4 = Time.GetTicksUsec();
@@ -575,10 +576,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// COMBAT-S2B: send a melee-cone attack and give immediate cosmetic feedback. The attack rides its OWN cursor
-	// (MmoClient.SendAttack) and is server-authoritative — the client predicts only the FEEL (a swing cue), never
-	// the damage. The actual hit/HP drop confirms via the snapshot stream (the target's overhead bar). Minimal by
-	// design: a toast "Swing!" cue. The real telegraph (wind-up + danger tiles + dodge) is Stage 4.
+	// FREEAIM: send a free-aim melee attack and give immediate cosmetic feedback. The attack rides its OWN cursor
+	// (MmoClient.SendAttack) and is server-authoritative — the client predicts only the FEEL (the wedge telegraph),
+	// never the damage. The aim is the CONTINUOUS player→cursor world bearing (NOT a Direction8), quantized via the
+	// shared AimAngle so it decodes to the same radians the server resolves the sector with. The actual hit/HP drop
+	// confirms via the snapshot stream (the target's overhead bar) — no client-side damage prediction.
 	private void TryAttack()
 	{
 		if (_client?.IsLoggedIn != true)
@@ -586,37 +588,76 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		_client.SendAttack();
+		// Aim continuously toward the cursor's ground point. Falls back to the local player's discrete facing only
+		// if the cursor pick fails (no camera / ray miss), so a swing always has a defined aim.
+		var aimRadians = TryGetAimToCursor(out var cursorAim)
+			? cursorAim
+			: LocalFacingRadians();
+
+		_client.SendAttack(AimAngle.Quantize(aimRadians));
 		ShowInteractFeedback("Swing!");
 
-		// Flash the melee-cone tiles using the SAME MeleeCone.Resolve the server uses, from the local player's
-		// confirmed tile + facing, so the hit area is visible (and verifiable across facings). Purely cosmetic —
-		// it never gates or predicts damage; the authoritative hit still confirms via the HP snapshot.
-		if (TryGetLocalConeOrigin(out var origin, out var facing))
+		// Flash the free-aim WEDGE (a pie slice: FreeAimHalfAngle, FreeAimRadius) on the ground from the local
+		// player, oriented along the aim — the danger area the server resolves. Purely cosmetic; the authoritative
+		// hit still confirms via the HP snapshot.
+		if (TryGetLocalRenderPosition(out var px, out var pz))
 		{
-			Span<TileCoord> tiles = stackalloc TileCoord[MeleeCone.TileCount];
-			MeleeCone.Resolve(origin, facing, tiles);
-			FlashConeMarkers(tiles);
+			FlashAimWedge(new Vector3(px, 0f, pz), aimRadians);
 		}
 	}
 
-	// Finds the local player's confirmed tile + facing from the per-frame render states (the IsLocal entry).
-	// Returns false before login / between snapshots so no stale cone is drawn.
-	private bool TryGetLocalConeOrigin(out TileCoord origin, out Direction8 facing)
+	// FREEAIM: the continuous player→cursor world bearing in radians (atan2(dz, dx), +X east / +Z south — the same
+	// convention the shared AimAngle uses and the server's sector resolver reduces against). Returns false before
+	// login, when there is no local render position yet, or when the ground ray misses; in the dead-zone (cursor on
+	// the player) it still returns a (possibly noisy) bearing — an attack always has an aim, unlike movement which
+	// stops in the dead-zone.
+	private bool TryGetAimToCursor(out float radians)
+	{
+		radians = 0f;
+		if (_client?.IsLoggedIn != true)
+		{
+			return false;
+		}
+
+		if (!TryGetLocalRenderPosition(out var playerX, out var playerZ))
+		{
+			return false;
+		}
+
+		var screenPosition = GetViewport().GetMousePosition();
+		if (!TryPickGroundPoint(screenPosition, out var hit))
+		{
+			return false;
+		}
+
+		var dx = hit.X - playerX;
+		var dz = hit.Z - playerZ;
+		if (Mathf.IsZeroApprox(dx) && Mathf.IsZeroApprox(dz))
+		{
+			return false;
+		}
+
+		radians = Mathf.Atan2(dz, dx);
+		return true;
+	}
+
+	// Fallback aim when the cursor pick fails: the local player's discrete 8-way facing as a world bearing (same
+	// atan2(delta.Y, delta.X) convention). Defaults to east if facing is unknown.
+	private float LocalFacingRadians()
 	{
 		foreach (var state in _renderStates)
 		{
 			if (state.IsLocal)
 			{
-				origin = state.AuthoritativeTile;
-				facing = state.Facing;
-				return true;
+				var delta = state.Facing.Delta();
+				if (delta.X != 0 || delta.Y != 0)
+				{
+					return Mathf.Atan2(delta.Y, delta.X);
+				}
 			}
 		}
 
-		origin = default;
-		facing = Direction8.S;
-		return false;
+		return 0f;
 	}
 
 	private void TryHarvest()
@@ -2948,70 +2989,136 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_predictedTileMarker.Visible = true;
 	}
 
-	// COMBAT-S2B: red ground material for the cone hit markers — unshaded + alpha so it sits flat over any terrain.
-	private static readonly StandardMaterial3D ConeHitMarkerMaterial = MarkerMaterial(new Color(0.95f, 0.15f, 0.15f, 0.5f));
+	// FREEAIM FEEL KNOBS (client telegraph). MUST match the server's FreeAimSectorResolver knobs (GameServer
+	// FreeAimHalfAngleDegrees / FreeAimRadiusTiles) so the drawn wedge equals the real danger area. Kept here as the
+	// client-side mirror; if the server values change, change these too (a single shared tuning source is a later
+	// nicety — flagged in the review request).
+	private const float FreeAimHalfAngleDegrees = 45f;
+	private const float FreeAimRadiusTiles = 1.6f;
 
-	// How long the cone markers stay lit after an attack (ms). Shorter than the ~600ms attack cooldown so each
-	// swing's flash clears before the next.
-	private const ulong ConeMarkerFlashMs = 400;
+	// FREEAIM: red ground material for the aim wedge — unshaded + alpha so it sits flat over any terrain.
+	private static readonly StandardMaterial3D AimWedgeMaterial = MarkerMaterial(new Color(0.95f, 0.15f, 0.15f, 0.45f));
 
-	// Creates the three cone-hit markers under the world root on first use (idempotent, hidden). No-op pre-zone.
-	private void EnsureConeMarkers()
+	// How long the wedge stays lit after an attack (ms). Shorter than the ~600ms attack cooldown so each swing's
+	// flash clears before the next.
+	private const ulong AimWedgeFlashMs = 400;
+
+	// The flat wedge (pie-slice) mesh, authored ONCE in the XZ plane pointing along +X, spanning [-half, +half]
+	// around it out to FreeAimRadiusTiles. A triangle fan from the apex (player origin). The MeshInstance3D is then
+	// yawed about +Y by -aimRadians so +X maps to the world aim bearing (atan2(dz, dx)).
+	private static readonly ArrayMesh AimWedgeMesh = BuildAimWedgeMesh();
+
+	private static ArrayMesh BuildAimWedgeMesh()
 	{
-		if (_worldRoot is null || _coneHitMarkers is not null)
+		const int segments = 16;
+		var half = Mathf.DegToRad(FreeAimHalfAngleDegrees);
+		var verts = new Godot.Collections.Array();
+		verts.Resize((int)Mesh.ArrayType.Max);
+
+		var points = new System.Collections.Generic.List<Vector3>(segments + 2)
 		{
-			return;
+			Vector3.Zero // apex at the player origin
+		};
+		for (var i = 0; i <= segments; i++)
+		{
+			var a = -half + (2f * half * i / segments);
+			// Author in XZ pointing along +X: (cos a, 0, sin a) * radius. Yawing by -aim later rotates +X to the aim.
+			points.Add(new Vector3(Mathf.Cos(a) * FreeAimRadiusTiles, 0f, Mathf.Sin(a) * FreeAimRadiusTiles));
 		}
 
-		_coneHitMarkers = new MeshInstance3D[MeleeCone.TileCount];
-		for (var i = 0; i < _coneHitMarkers.Length; i++)
+		var vertexArray = new Vector3[segments * 3];
+		var v = 0;
+		for (var i = 1; i <= segments; i++)
 		{
-			var marker = new MeshInstance3D
-			{
-				Name = $"ConeHitMarker{i}",
-				Mesh = PredictionTileMarkerMesh,
-				MaterialOverride = ConeHitMarkerMaterial,
-				Visible = false
-			};
-			_coneHitMarkers[i] = marker;
-			_worldRoot.AddChild(marker);
+			// Wind so the triangle faces up (+Y); the material is double-sided (CullMode.Disabled) anyway.
+			vertexArray[v++] = points[0];
+			vertexArray[v++] = points[i + 1];
+			vertexArray[v++] = points[i];
 		}
+
+		verts[(int)Mesh.ArrayType.Vertex] = vertexArray;
+		var mesh = new ArrayMesh();
+		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, verts);
+		return mesh;
 	}
 
-	// Lights the cone markers on the given tiles for ConeMarkerFlashMs. Called from TryAttack with the same tiles
-	// the server's MeleeCone resolves, so the player sees exactly the hit area.
-	private void FlashConeMarkers(ReadOnlySpan<TileCoord> tiles)
+	// Creates the wedge MeshInstance3D under the world root on first use (idempotent, hidden). No-op pre-zone.
+	private void EnsureAimWedge()
 	{
-		EnsureConeMarkers();
-		if (_coneHitMarkers is null)
+		if (_worldRoot is null || _aimWedge is not null)
 		{
 			return;
 		}
 
-		for (var i = 0; i < _coneHitMarkers.Length; i++)
+		_aimWedge = new MeshInstance3D
 		{
-			// Just above the ground (matches the prediction markers) so the squares read clearly over terrain.
-			_coneHitMarkers[i].Position = TileToWorld(tiles[i], 0.05f);
-			_coneHitMarkers[i].Visible = true;
-		}
-
-		_coneMarkersHideAtMs = Time.GetTicksMsec() + ConeMarkerFlashMs;
+			Name = "AimWedge",
+			Mesh = AimWedgeMesh,
+			MaterialOverride = AimWedgeMaterial,
+			Visible = false
+		};
+		_worldRoot.AddChild(_aimWedge);
 	}
 
-	// Per-frame: hide the cone markers once their flash window elapses. Cheap no-op while already hidden.
-	private void UpdateConeMarkers()
+	// Flashes the wedge from the local player `origin` (world XZ) oriented along `aimRadians` for AimWedgeFlashMs.
+	// Called from TryAttack with the SAME aim the server resolves the sector with, so the player sees the danger area.
+	private void FlashAimWedge(Vector3 origin, float aimRadians)
 	{
-		if (_coneHitMarkers is null || _coneMarkersHideAtMs == 0 || Time.GetTicksMsec() < _coneMarkersHideAtMs)
+		EnsureAimWedge();
+		if (_aimWedge is null)
 		{
 			return;
 		}
 
-		foreach (var marker in _coneHitMarkers)
+		// Just above the ground (matches the prediction markers) so it reads clearly over terrain.
+		_aimWedge.Position = new Vector3(origin.X, 0.05f, origin.Z);
+		// Yaw +X -> world aim. A +Y rotation by θ maps +X=(1,0,0) to (cosθ,0,-sinθ); the aim direction is
+		// (cos aim, 0, sin aim), so θ = -aim.
+		_aimWedge.Rotation = new Vector3(0f, -aimRadians, 0f);
+		_aimWedge.Visible = true;
+		_aimWedgeHideAtMs = Time.GetTicksMsec() + AimWedgeFlashMs;
+	}
+
+	// Per-frame: hide the wedge once its flash window elapses. Cheap no-op while already hidden.
+	private void UpdateAimWedge()
+	{
+		if (_aimWedge is null || _aimWedgeHideAtMs == 0 || Time.GetTicksMsec() < _aimWedgeHideAtMs)
 		{
-			marker.Visible = false;
+			return;
 		}
 
-		_coneMarkersHideAtMs = 0;
+		_aimWedge.Visible = false;
+		_aimWedgeHideAtMs = 0;
+	}
+
+	// FREEAIM: continuous local facing. Render-only, local-only, NOT replicated — the local player's visual yaws
+	// smoothly toward the cursor's ground point each frame so the avatar "looks where you aim". The server still
+	// only knows the discrete movement facing; this is pure presentation layered over it. No-op when the cursor pick
+	// fails or the local visual isn't spawned yet.
+	private void UpdateLocalContinuousFacing()
+	{
+		if (_renderer is null || _client?.LocalNetworkId is not uint localId)
+		{
+			return;
+		}
+
+		if (!_renderer.TryGetActiveVisual(localId, out var visual))
+		{
+			return;
+		}
+
+		if (!TryGetAimToCursor(out var aimRadians))
+		{
+			// No aim this frame: drop the override so the visual falls back to its discrete movement facing.
+			visual.ClearContinuousYaw();
+			return;
+		}
+
+		// Model forward is -Z; a yaw θ about +Y turns -Z into (-sinθ,0,-cosθ). The aim direction is
+		// (cos aim,0,sin aim), so θ = atan2(-cos aim, -sin aim) = atan2(-dx,-dz) with the aim's unit components.
+		var dx = Mathf.Cos(aimRadians);
+		var dz = Mathf.Sin(aimRadians);
+		visual.SetContinuousYaw(Mathf.Atan2(-dx, -dz));
 	}
 
 	private static ShaderMaterial CreateGridMaterial()

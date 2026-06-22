@@ -9,7 +9,9 @@ public static class ProtocolCodec
     // COMBAT-S2A (v27): per-entity public HP (Health + MaxHealth, ushort each) added to EntityStateSnapshot for
     // the overhead HP bar. Server + client ship together.
     // COMBAT-S2B (v28): new client->server AttackMessage (own attack-seq + attack kind) on its own dedup cursor.
-    public const byte Version = 28;
+    // FREEAIM (v29): AttackMessage gains a quantized continuous AIM ANGLE (ushort, 0..65535 -> [0,2π)) — the
+    // player→cursor world bearing the server resolves a geometric sector against. Server + client ship together.
+    public const byte Version = 29;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -67,6 +69,8 @@ public static class ProtocolCodec
             case AttackMessage value:
                 writer.Write(value.Sequence);
                 writer.Write((byte)value.Kind);
+                // FREEAIM (v29): quantized continuous aim angle, after the kind. Mirrored in the Attack decode.
+                writer.Write(value.AimAngle);
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
@@ -223,7 +227,7 @@ public static class ProtocolCodec
             MessageType.MoveInput => ReadMoveInput(reader),
             MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
-            MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader)),
+            MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16()),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),

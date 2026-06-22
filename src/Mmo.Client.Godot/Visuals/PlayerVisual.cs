@@ -134,10 +134,20 @@ public sealed partial class PlayerVisual : EntityVisual
 
     // Rotate the model so its forward axis points along the entity's 8-way Facing. Direction8 -> tile delta
     // -> world heading (X=tileX, Z=tileY); yaw the model to it plus the tunable rig-forward correction.
+    //
+    // FREEAIM: when a continuous-yaw override is set (the local player aiming at the cursor), use THAT yaw instead of
+    // the discrete facing — the avatar then looks continuously where you aim. The override is already in the same
+    // model-forward convention (θ such that -Z maps to the aim), so it just gets the rig-forward correction added.
     private void ApplyFacing(Direction8 facing)
     {
         if (_model is null)
         {
+            return;
+        }
+
+        if (ContinuousYaw is float continuousYaw)
+        {
+            _model.Rotation = new Vector3(0f, continuousYaw + Mathf.DegToRad(ForwardOffsetDegrees), 0f);
             return;
         }
 

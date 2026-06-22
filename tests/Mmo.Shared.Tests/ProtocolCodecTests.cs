@@ -313,38 +313,64 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyEight()
+    public void ProtocolVersionIsTwentyNine()
     {
-        // COMBAT-S2B protocol bump (v27 -> v28): adds the client->server AttackMessage (own attack-seq + attack
-        // kind) on its own dedup cursor. A new wire message is a breaking change (server + client ship together).
-        // Pin the version so an accidental change is caught.
-        Assert.Equal(28, ProtocolCodec.Version);
+        // FREEAIM protocol bump (v28 -> v29): AttackMessage gains a quantized continuous aim angle (ushort). A wire
+        // layout change is breaking (server + client ship together). Pin the version so an accidental change is caught.
+        Assert.Equal(29, ProtocolCodec.Version);
     }
 
     [Fact]
     public void AttackMessageRoundTrips()
     {
-        // COMBAT-S2B: the attack request round-trips its own sequence + the attack kind.
-        var original = new AttackMessage(4242, AttackKind.MeleeCone);
+        // FREEAIM: the attack request round-trips its own sequence + the attack kind + the quantized aim angle.
+        var original = new AttackMessage(4242, AttackKind.MeleeCone, 12345);
 
         var decoded = Assert.IsType<AttackMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(4242u, decoded.Sequence);
         Assert.Equal(AttackKind.MeleeCone, decoded.Kind);
+        Assert.Equal((ushort)12345, decoded.AimAngle);
+    }
+
+    [Theory]
+    // FREEAIM: the aim quantization is lossy (2π/65536 ≈ 0.0055°), so a decoded angle must land within one
+    // quantization step (~0.0001 rad) of the original. Cover the cardinal bearings + the 0/2π seam.
+    [InlineData(0.0)]
+    [InlineData(1.5707963)]   // +π/2 (south)
+    [InlineData(3.1415926)]   // π (west)
+    [InlineData(4.7123889)]   // 3π/2 (north)
+    [InlineData(6.2831)]      // ~2π, just below the seam
+    [InlineData(-0.7853981)]  // negative input normalizes into [0,2π)
+    public void AimAngleQuantizationRoundTripsWithinTolerance(double radians)
+    {
+        var quantized = AimAngle.Quantize(radians);
+        var decoded = AimAngle.ToRadians(quantized);
+
+        // Compare on the circle: the smallest signed difference reduced to (-π, π], so the seam wrap is handled.
+        var twoPi = 2.0 * System.Math.PI;
+        var normalizedInput = ((radians % twoPi) + twoPi) % twoPi;
+        var delta = decoded - normalizedInput;
+        if (delta > System.Math.PI) delta -= twoPi;
+        if (delta <= -System.Math.PI) delta += twoPi;
+
+        // One quantization step is 2π/65536 ≈ 9.6e-5 rad; allow a touch over a full step for the rounding boundary.
+        Assert.True(System.Math.Abs(delta) <= twoPi / 65536.0 + 1e-6, $"delta {delta} too large for {radians}");
     }
 
     [Fact]
     public void AttackMessageRejectsOutOfRangeKind()
     {
-        // COMBAT-S2B: a malformed/hostile packet with an unknown attack kind byte is rejected on decode, so the
-        // server handler never sees an out-of-range kind. Hand-encode a valid header + seq + a bogus kind byte.
+        // FREEAIM: a malformed/hostile packet with an unknown attack kind byte is rejected on decode, so the server
+        // handler never sees an out-of-range kind. Hand-encode a valid header + seq + a bogus kind byte + aim.
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
         writer.Write(ProtocolCodec.Magic);
         writer.Write(ProtocolCodec.Version);
         writer.Write((ushort)MessageType.Attack);
-        writer.Write(7u);          // sequence
-        writer.Write((byte)200);   // out-of-range AttackKind
+        writer.Write(7u);            // sequence
+        writer.Write((byte)200);     // out-of-range AttackKind (rejected before the aim is read)
+        writer.Write((ushort)0);     // aim angle
         writer.Flush();
 
         Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(stream.ToArray()));

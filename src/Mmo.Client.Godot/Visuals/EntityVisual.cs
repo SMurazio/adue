@@ -54,6 +54,19 @@ void fragment() {
 ",
     };
 
+    // FREEAIM: a render-only continuous facing yaw (radians about +Y) that, when set, OVERRIDES the discrete
+    // movement facing for this visual's body. Local-only and not replicated — the root sets it on the local player
+    // each frame so the avatar looks toward the cursor; null restores the normal 8-way facing. Subclasses read it in
+    // their facing application (PlayerVisual); others ignore it.
+    private float? _continuousYaw;
+
+    // Set/clear the continuous facing override. Idempotent and cheap; the next OnUpdate applies it.
+    public void SetContinuousYaw(float yawRadians) => _continuousYaw = yawRadians;
+    public void ClearContinuousYaw() => _continuousYaw = null;
+
+    // The current continuous-yaw override (null = use discrete facing). Read by subclasses that support it.
+    protected float? ContinuousYaw => _continuousYaw;
+
     protected VisualTuning Tuning { get; private set; } = null!;
 
     // The NetworkId this visual is currently bound to (0 when parked in the pool).
@@ -117,6 +130,9 @@ void fragment() {
     {
         NetworkId = 0;
         Visible = false;
+        // FREEAIM: drop any continuous-facing override so a pooled visual reused for a different entity doesn't
+        // inherit the previous (local-player) aim yaw.
+        _continuousYaw = null;
         GetParent()?.RemoveChild(this);
         OnRelease();
     }

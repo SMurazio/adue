@@ -107,12 +107,18 @@ public sealed record MovementModeMessage(bool ClientDriven) : IProtocolMessage
 // COMBAT-S2B (protocol v28): the first combat action — a client->server attack request on its OWN dedup
 // cursor, entirely SEPARATE from movement's sequence (the NET6 lesson: two streams sharing one cursor stranded
 // each other). The client mints Sequence off a DEDICATED _attackSeq counter (never _moveSequence) and the
-// server dedups it on a DEDICATED _lastAttackSeq cursor (never _lastMoveSeq/_lastCommitSeq). Kind is the attack
-// (only MeleeCone this stage — no target id; a cone is resolved server-side from the attacker's facing). Sent
-// RELIABLE-ORDERED: attacks are low-rate, so reliable retransmit is fine and a dropped attack must not be lost
-// (unlike movement's redundant-unreliable). The server validates the attack cooldown + computes the cone +
+// server dedups it on a DEDICATED _lastAttackSeq cursor (never _lastMoveSeq/_lastCommitSeq). Kind is the attack.
+// Sent RELIABLE-ORDERED: attacks are low-rate, so reliable retransmit is fine and a dropped attack must not be
+// lost (unlike movement's redundant-unreliable). The server validates the attack cooldown + resolves the hit +
 // applies damage authoritatively; the result rides the existing public-HP snapshot field (no dedicated reply).
-public sealed record AttackMessage(uint Sequence, AttackKind Kind) : IProtocolMessage
+//
+// FREEAIM (protocol v29): adds a continuous, quantized AIM ANGLE chosen by the client (the player→cursor world
+// bearing), NOT a Direction8 — that continuity is the whole point of free aim. AimAngle is a ushort mapping the
+// full 0..65535 range onto [0, 2π) (≈0.0055°/step), wrapping at the seam (65535 ≈ 359.99°). The server resolves
+// a GEOMETRIC SECTOR (half-angle + radius) about this aim against entity world positions — no longer the
+// facing-derived tile cone. The aim is a client-chosen continuous value the server validates by geometry
+// (exactly like the move direction is a client-chosen value the server validates), so it stays server-authoritative.
+public sealed record AttackMessage(uint Sequence, AttackKind Kind, ushort AimAngle) : IProtocolMessage
 {
     public MessageType Type => MessageType.Attack;
 }

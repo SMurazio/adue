@@ -981,16 +981,17 @@ public sealed class MmoClient : IDisposable
         Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
     }
 
-    // COMBAT-S2B: send a melee-cone attack. Mints the next sequence off the DEDICATED _attackSeq counter (never
-    // _moveSequence) and sends RELIABLE-ORDERED so the attack is never silently lost (attacks are low-rate, so
-    // reliable retransmit is fine — unlike movement's redundant-unreliable). No target id: the server resolves the
-    // cone from the attacker's facing. No client-side damage prediction — the authoritative result lands via the
-    // public-HP snapshot (the target's overhead bar drops); the caller may show a cosmetic swing immediately.
-    // Returns the attack seq sent (for tests / diagnostics).
-    public uint SendAttack()
+    // COMBAT-S2B / FREEAIM: send a melee attack with a continuous AIM ANGLE. Mints the next sequence off the
+    // DEDICATED _attackSeq counter (never _moveSequence) and sends RELIABLE-ORDERED so the attack is never silently
+    // lost (attacks are low-rate, so reliable retransmit is fine — unlike movement's redundant-unreliable). No target
+    // id: the server resolves a geometric SECTOR about `aimAngle` (the player→cursor world bearing the caller
+    // computed and quantized via AimAngle.Quantize). No client-side damage prediction — the authoritative result
+    // lands via the public-HP snapshot (the target's overhead bar drops); the caller may show a cosmetic swing/wedge
+    // immediately. Returns the attack seq sent (for tests / diagnostics).
+    public uint SendAttack(ushort aimAngle)
     {
         var sequence = ++_attackSeq;
-        Send(new AttackMessage(sequence, AttackKind.MeleeCone), DeliveryMethod.ReliableOrdered);
+        Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle), DeliveryMethod.ReliableOrdered);
         return sequence;
     }
 
