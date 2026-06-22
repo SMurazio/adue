@@ -19,6 +19,11 @@ namespace Mmo.Server.Runtime;
 // verbatim from MeleeConeResolver.IsAttackableEnemy.
 public static class FreeAimSectorResolver
 {
+    // COMBAT: the target body radius (tiles) for the sector-vs-circle overlap. Targets are circles of this radius,
+    // so the wedge hits one it merely CLIPS, not only one whose tile-centre is inside it. ~half a tile = forgiving
+    // but not oversized. (Easy to expose to F8 later if you want to tune the hit "stickiness".)
+    public const double EntityHitRadiusTiles = 0.5;
+
     // Resolves the free-aim sector for `attacker` aiming along `aimRadians` and applies `damage` to each ENEMY
     // whose tile-centre world position falls inside the sector (within radius AND within ±halfAngle of the aim).
     // Returns the number of entities whose HP actually changed.
@@ -61,7 +66,11 @@ public static class FreeAimSectorResolver
         var gatherRadiusTiles = System.Math.Max(1, (int)System.Math.Ceiling(radiusTiles));
         world.GatherInterestCandidates(attacker.Tile, gatherRadiusTiles, candidateScratch);
 
-        var radiusSquared = radiusTiles * radiusTiles;
+        // Treat each target as a CIRCLE of EntityHitRadiusTiles (a body), not a point: the wedge hits a target it
+        // merely CLIPS, not only one whose tile-centre is dead inside it. Range is widened by the body radius; the
+        // angular gate by the body's angular half-width asin(r/d). A target overlapping the attacker is always hit.
+        var reach = radiusTiles + EntityHitRadiusTiles;
+        var reachSquared = reach * reach;
         var attackerX = (double)attacker.Tile.X;
         var attackerZ = (double)attacker.Tile.Y;
 
@@ -76,20 +85,22 @@ public static class FreeAimSectorResolver
             var dx = candidate.Tile.X - attackerX;
             var dz = candidate.Tile.Y - attackerZ;
 
-            // (b for free first) Radius gate. A point exactly on the attacker's tile (distance 0) has no defined
-            // bearing; treat it as in-sector (it is point-blank and within any radius) and let it through.
+            // Range gate (squared, cheap): the target's body circle must reach within the sector radius.
             var distSquared = (dx * dx) + (dz * dz);
-            if (distSquared > radiusSquared)
+            if (distSquared > reachSquared)
             {
                 continue;
             }
 
-            if (distSquared > 0d)
+            var dist = System.Math.Sqrt(distSquared);
+            if (dist > EntityHitRadiusTiles)
             {
-                // (b) Angular gate: bearing of the candidate from the attacker, reduced against the aim to (-π, π].
+                // Angular gate widened by the body's angular half-width asin(r/d) so a target the wedge edge clips
+                // still counts. (A target overlapping the attacker, dist <= body radius, skips this — always in-sector.)
                 var bearing = System.Math.Atan2(dz, dx);
                 var delta = NormalizePi(bearing - aimRadians);
-                if (System.Math.Abs(delta) > halfAngleRadians)
+                var angularHalfWidth = System.Math.Asin(System.Math.Min(EntityHitRadiusTiles / dist, 1d));
+                if (System.Math.Abs(delta) > halfAngleRadians + angularHalfWidth)
                 {
                     continue;
                 }

@@ -54,8 +54,9 @@ public sealed class FreeAimSectorResolverTests
     {
         var world = new WorldState();
         var attacker = Attacker(world);
-        // Due east, 2 tiles out: bearing 0 (on-aim) but distance 2.0 > 1.6 — the radius gate rejects it.
-        var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(12, 10), Direction8.S);
+        // Due east, 3 tiles out: bearing 0 (on-aim) but distance 3.0 > radius 1.6 + body 0.5 = 2.1 — even the
+        // target's body circle can't reach the sector, so it's a clean miss.
+        var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(13, 10), Direction8.S);
 
         var hits = FreeAimSectorResolver.ResolveAndDamage(world, attacker, AimEast, HalfAngle, Radius, Damage, []);
 
