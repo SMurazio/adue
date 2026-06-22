@@ -146,20 +146,16 @@ public partial class SlotButton : Control
         if (_radial is null)
         {
             _radial = new RadialCooldownOverlay { Name = "RadialCooldown" };
-            // Fill the slot; ignore mouse so clicks pass to the world/slot beneath.
+            // Cover ONLY the square icon, not the keybind label beneath: parent the overlay to the icon and fill
+            // it (so FullRect == the square). Ignore mouse so clicks pass to the world/slot beneath.
             _radial.SetAnchorsPreset(LayoutPreset.FullRect);
             _radial.MouseFilter = MouseFilterEnum.Ignore;
-            AddChild(_radial);
+            (_icon is not null ? (Control)_icon : this).AddChild(_radial);
         }
 
-        // The overlay owns both the pie-slice sweep AND the centered whole-second countdown number.
+        // The overlay owns both the pie-slice sweep AND the centered whole-second countdown number. The icon is
+        // left at FULL colour on purpose — only the radial sweep darkens the slot, the whole icon does not grey.
         _radial.Set(fraction, remainingSeconds);
-
-        if (_icon is not null)
-        {
-            // Darken the icon while cooling, matching the local-tick path, so the slot reads as "not ready".
-            _icon.Modulate = fraction > 0f ? new Color(0.45f, 0.45f, 0.45f, 1f) : Colors.White;
-        }
     }
 
     public override void _Process(double delta)
