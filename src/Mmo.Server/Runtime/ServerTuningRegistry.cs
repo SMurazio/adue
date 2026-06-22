@@ -27,8 +27,6 @@ public static class ServerTuningRegistry
     public const string FreeAimHalfAngleDegKey = "combat.halfAngleDeg";
     public const string FreeAimRadiusTilesKey = "combat.radiusTiles";
     public const string AttackDamageKey = "combat.damage";
-    // SWING-SLOW: how hard movement is slowed DURING the swing window [0,1] (0 = full stop, 1 = no slow).
-    public const string SwingMoveFactorKey = "combat.swingMoveFactor";
 
     // Sane upper bound for a live AOI radius. The startup options only require > 0; here a live max guards
     // against an admin typo turning every AOI query into a near-world scan and stalling the tick loop.
@@ -51,10 +49,6 @@ public static class ServerTuningRegistry
     private const double MaxRadiusTiles = 16d;
     private const int MinAttackDamage = 0;
     private const int MaxAttackDamage = 10000;
-    // SWING-SLOW: the movement factor is a fraction [0,1] (0 = full stop, 1 = no slow). Clamped here so a typo
-    // can't push it negative (an absurd cooldown) or above 1 (which would SPEED movement during a swing).
-    private const double MinSwingMoveFactor = 0d;
-    private const double MaxSwingMoveFactor = 1d;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -110,13 +104,6 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
-            case SwingMoveFactorKey:
-            {
-                var clamped = Math.Clamp(value, MinSwingMoveFactor, MaxSwingMoveFactor);
-                tuning.SwingMoveFactor = clamped;
-                applied = clamped;
-                return true;
-            }
             default:
                 return false;
         }
@@ -128,8 +115,7 @@ public static class ServerTuningRegistry
     // CombatTuningSnapshot to all clients when (and only when) one of these changes, so the wedge/predictor/viz stay
     // in sync — an interest-radius change does not need a combat re-broadcast.
     public static bool IsCombatKey(string key) =>
-        key is AttackCooldownMsKey or AttackRootMsKey or FreeAimHalfAngleDegKey or FreeAimRadiusTilesKey
-            or AttackDamageKey or SwingMoveFactorKey;
+        key is AttackCooldownMsKey or AttackRootMsKey or FreeAimHalfAngleDegKey or FreeAimRadiusTilesKey or AttackDamageKey;
 
     public static string Format(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 }

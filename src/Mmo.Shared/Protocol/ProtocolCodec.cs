@@ -19,10 +19,7 @@ public static class ProtocolCodec
     // cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's wedge/predictor/
     // cooldown-viz match the server's authoritative resolution. Sent on login + on every combat.* tuning change.
     // Server + client ship together.
-    // SWING-SLOW (v32): CombatTuningMessage's snapshot gains a SwingMoveFactor (double, [0,1]) — the movement
-    // factor applied DURING the swing window (0 = full stop / the old root, 1 = no slow, 0.4 = 40% speed). The
-    // client predictor slows by the SAME factor over the SAME window the server does. Server + client ship together.
-    public const byte Version = 32;
+    public const byte Version = 31;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -585,8 +582,6 @@ public static class ProtocolCodec
         writer.Write(tuning.HalfAngleDegrees);
         writer.Write(tuning.RadiusTiles);
         writer.Write(tuning.Damage);
-        // SWING-SLOW (v32): the swing-slow movement factor [0,1].
-        writer.Write(tuning.SwingMoveFactor);
     }
 
     private static CombatTuningSnapshot ReadCombatTuning(BinaryReader reader)
@@ -596,9 +591,7 @@ public static class ProtocolCodec
         var halfAngleDeg = reader.ReadDouble();
         var radiusTiles = reader.ReadDouble();
         var damage = reader.ReadInt32();
-        // SWING-SLOW (v32): the swing-slow movement factor [0,1].
-        var swingMoveFactor = reader.ReadDouble();
-        return new CombatTuningSnapshot(attackCooldownMs, rootMs, halfAngleDeg, radiusTiles, damage, swingMoveFactor);
+        return new CombatTuningSnapshot(attackCooldownMs, rootMs, halfAngleDeg, radiusTiles, damage);
     }
 
     private static CharacterStats ReadCharacterStats(BinaryReader reader)

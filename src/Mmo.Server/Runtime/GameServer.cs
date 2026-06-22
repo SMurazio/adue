@@ -1580,20 +1580,14 @@ public sealed class GameServer
         // tick (clamped to a window around _serverTick so a hostile client can't root far in the future/past, exactly
         // like TryCommitStepAuthored bounds its authored tick) makes the two root windows identical. This MIRRORS the
         // NET3 authored-tick step commit — same estimator on the client, same clamp bounds on the server.
-        // COMBAT-TUNING: the swing-slow WINDOW duration is the LIVE combat.rootMs (via _tuning.AttackRootTicks,
-        // which uses the SAME CombatTuning.RootTicks conversion the client predictor mirrors off the replicated
-        // rootMs) — so steady-state both sides slow for the identical window. A brief transient mismatch right as a
-        // combat.* knob is tweaked is acceptable for a dev tuning tool (the per-client snapshot lands a frame later).
-        //
-        // SWING-SLOW: instead of a hard root, open a swing-slow window with the LIVE combat.swingMoveFactor — during
-        // the window movement is SLOWED by that factor (0 = full stop = the old root, 1 = no slow, default 0.4 = 40%
-        // speed). Anchored on the SAME clamped authored tick the old root used; the predictor mirrors the SAME window
-        // + factor (off the replicated snapshot) so server and prediction slow the same steps to the same ticks.
-        attacker.ApplyAttackMovementSlowAuthored(
+        // COMBAT-TUNING: the swing-root duration is now the LIVE combat.rootMs (via _tuning.AttackRootTicks, which
+        // uses the SAME CombatTuning.RootTicks conversion the client predictor mirrors off the replicated rootMs) —
+        // so steady-state both sides root for the identical window. A brief transient mismatch right as rootMs is
+        // tweaked is acceptable for a dev tuning tool (the per-client snapshot lands a frame later).
+        attacker.ApplyAttackMovementRootAuthored(
             authoredTick,
             _serverTick,
             _tuning.AttackRootTicks,
-            _tuning.SwingMoveFactor,
             AuthoredTickPastWindow,
             AuthoredTickFutureLead);
 
