@@ -865,6 +865,185 @@ public sealed class LocalPlayerPredictorTests
     }
 
     [Fact]
+    public void SwingCommitRoot_AgainstRealWorldEntity_ServerAndPredictorRootMovementInLockstep()
+    {
+        // SWING-COMMIT parity (the load-bearing proof): drive the REAL server WorldEntity and the predictor on the
+        // SAME 50 ms tick grid. Both step a couple of tiles, then at the SAME tick both COMMIT a swing — the server
+        // via ApplyAttackMovementRoot (as GameServer.HandleAttack does), the predictor via ApplyAttackMovementRoot
+        // (as MmoClient.SendAttack does), using the SAME CombatTuning.RootTicks math. Then, with movement still held
+        // the WHOLE time, assert: (a) the server's next accepted step and the predictor's next accepted step land on
+        // the EXACT SAME tick — i.e. held movement is withheld on BOTH for the same number of ticks — and (b) they
+        // stay tile-for-tile and seq-for-seq in lockstep through and after the root. A mismatch here is exactly the
+        // swing-then-move rubberband (predictor steps where the server rejects).
+        const int tickRate = 20;                 // 50 ms/tick
+        const double tickMs = 1000d / tickRate;  // 50 ms
+        const uint stepCooldownTicks = 3;        // 150 ms
+        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);     // 150 ms
+        var rootTicks = CombatTuning.RootTicks(tickRate);                              // server-side rootTicks
+        // PARITY ANCHOR: the predictor must compute the identical rootTicks off the tick interval. Pin it so a
+        // future change to either CombatTuning overload that broke the equality fails here, not just live.
+        Assert.Equal(rootTicks, CombatTuning.RootTicksFromTickMs(tickMs));
+        Assert.True(rootTicks >= 1);
+
+        var grid = new TileGrid(64, 64, []);
+        var entity = new WorldEntity(1, 1, EntityKind.Player, new TileCoord(10, 10), Direction8.E,
+            "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var predictor = new LocalPlayerPredictor(new TileCoord(10, 10), Direction8.E, stepCadenceMs,
+            t => grid.IsWalkable(t), tickMs);
+
+        // Hold E the whole time so every eligible tick is a MOVE attempt — the root is the ONLY thing that can
+        // withhold a step, so any divergence is purely the root machinery.
+        const Direction8 held = Direction8.E;
+        predictor.SetIntent(true, held, TimeSpan.Zero);
+
+        // The tick at which BOTH sides commit the swing. Choose one where both are mid-cadence so the root's
+        // max-FLOOR is exercised against a live (not idle) movement cooldown on both sides.
+        const uint attackTick = 4;
+
+        uint? serverFirstStepAfterAttack = null;
+        uint? predictorFirstStepAfterAttack = null;
+
+        for (uint tick = 0; tick <= 30; tick++)
+        {
+            // Commit the swing on BOTH at the SAME tick, the same way the live paths do.
+            if (tick == attackTick)
+            {
+                entity.ApplyAttackMovementRoot(tick, rootTicks);
+                // SWING-COMMIT-FIX: the predictor now roots at an EXPLICIT authored tick (the value the client would
+                // stamp on the AttackMessage). At zero latency that authored tick equals the loop tick — the same
+                // tick the server roots on — so this parity test is unchanged in behaviour.
+                predictor.ApplyAttackMovementRootAt(tick, rootTicks);
+            }
+
+            var serverStepped = entity.TryStep(held, tick, stepCooldownTicks, grid);
+            var serverSeqBefore = entity.StepSequence;
+
+            var predictedSeqBefore = predictor.PredictedStepSeq;
+            predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
+            var predictorStepped = predictor.PredictedStepSeq > predictedSeqBefore;
+
+            // Record the FIRST accepted step on each side strictly AFTER the attack tick — they must be equal (the
+            // root withheld movement for the same number of ticks on both). serverStepped reflects this tick's TryStep.
+            if (tick > attackTick && serverStepped && serverFirstStepAfterAttack is null)
+            {
+                serverFirstStepAfterAttack = tick;
+            }
+
+            if (tick > attackTick && predictorStepped && predictorFirstStepAfterAttack is null)
+            {
+                predictorFirstStepAfterAttack = tick;
+            }
+
+            // Tile / facing / accepted-step-count lockstep EVERY tick, through and after the root.
+            Assert.Equal(entity.Tile, predictor.PredictedTile);
+            Assert.Equal(entity.Facing, predictor.Facing);
+            Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
+        }
+
+        // Held movement resumed on the SAME tick on both sides — the root delayed the next step identically.
+        Assert.NotNull(serverFirstStepAfterAttack);
+        Assert.Equal(serverFirstStepAfterAttack, predictorFirstStepAfterAttack);
+
+        // And that first post-swing step is no earlier than the root window (attackTick + rootTicks) — the swing
+        // genuinely committed (a held step did not slip through during the root).
+        Assert.True(serverFirstStepAfterAttack!.Value >= attackTick + rootTicks);
+    }
+
+    [Fact]
+    public void SwingCommitRoot_UnderLatency_ServerRootsAtAuthoredTick_ResumeInLockstep()
+    {
+        // SWING-COMMIT-FIX — THE REAL PROOF (the latency-injecting test the zero-latency parity test is blind to).
+        // The predictor roots its movement at the AUTHORED tick T (the tick it stamps on the AttackMessage at send
+        // time). The server receives that attack LATENCY ticks LATER (its _serverTick = T + latency at receipt) and
+        // roots the attacker's movement on the message's AUTHORED tick (clamped), NOT on its receive tick.
+        //
+        // The bug this catches: the pre-fix server anchored the root on its RECEIVE tick (_serverTick = T + latency),
+        // so the server's root ended at (T + latency + rootTicks) while the predictor's ended at (T + rootTicks) —
+        // the server withheld the next step LATENCY ticks LONGER than the predictor, so the predictor stepped during
+        // [T + rootTicks, T + latency + rootTicks) into a step the server REJECTED → the swing-then-move rubberband.
+        // With the authored-tick anchor both sides root until (T + rootTicks), so they resume on the SAME tick.
+        //
+        // The discriminating assertion is the FIRST tick each side's movement gate re-opens after the swing: it MUST
+        // be equal. On the receive-tick anchor it is NOT (off by `latency`); on the authored-tick anchor it is.
+        const int tickRate = 20;                 // 50 ms/tick
+        const double tickMs = 1000d / tickRate;  // 50 ms
+        const uint stepCooldownTicks = 3;        // 150 ms
+        var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
+        var rootTicks = CombatTuning.RootTicks(tickRate);
+
+        // Server-side authored-tick clamp window (mirrors GameServer.AuthoredTickPastWindow / AuthoredTickFutureLead).
+        const uint pastWindow = 64;
+        const uint futureLead = 4;
+
+        // The client authors the swing at tick T; the server receives it `latency` ticks later. Latency is chosen
+        // LESS than rootTicks (so on the buggy receive-tick anchor the divergence is purely the late root-end, not a
+        // step that slipped through entirely) and within the future/past clamp window (so the authored tick is used
+        // verbatim — the realistic case where server and predictor must agree exactly).
+        const uint authorTick = 6;
+        const uint latency = 2;
+        Assert.True(latency < rootTicks);                 // the regime where the late-root-end rubberband shows
+        Assert.True(latency <= futureLead || true);       // doc: clamp is a no-op here (authored within window)
+
+        var grid = new TileGrid(64, 64, []);
+        var entity = new WorldEntity(1, 1, EntityKind.Player, new TileCoord(10, 10), Direction8.E,
+            "Local", System.Guid.NewGuid(), ownerSession: null, isDurable: true);
+        var predictor = new LocalPlayerPredictor(new TileCoord(10, 10), Direction8.E, stepCadenceMs,
+            t => grid.IsWalkable(t), tickMs);
+
+        // Hold E the whole time so every eligible tick is a MOVE attempt — the root is the ONLY thing that can
+        // withhold a step, isolating the root machinery.
+        const Direction8 held = Direction8.E;
+        predictor.SetIntent(true, held, TimeSpan.Zero);
+
+        uint? predictorFirstStepAfterAuthor = null;
+        uint? serverFirstStepAfterAuthor = null;
+
+        for (uint tick = 0; tick <= 40; tick++)
+        {
+            // Predictor: roots its OWN movement at the authored tick the INSTANT it swings (tick == authorTick) — the
+            // same authoredTick it stamps on the wire (here == authorTick, the predictor's current-tick estimate).
+            if (tick == authorTick)
+            {
+                predictor.ApplyAttackMovementRootAt(authorTick, rootTicks);
+            }
+
+            // Server: the attack arrives `latency` ticks later. At receipt its _serverTick is (authorTick + latency),
+            // and it roots on the message's AUTHORED tick (authorTick), clamped to its window — NOT on _serverTick.
+            if (tick == authorTick + latency)
+            {
+                entity.ApplyAttackMovementRootAuthored(authorTick, tick, rootTicks, pastWindow, futureLead);
+            }
+
+            var predictedSeqBefore = predictor.PredictedStepSeq;
+            predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
+            if (tick > authorTick && predictor.PredictedStepSeq > predictedSeqBefore && predictorFirstStepAfterAuthor is null)
+            {
+                predictorFirstStepAfterAuthor = tick;
+            }
+
+            var serverStepped = entity.TryStep(held, tick, stepCooldownTicks, grid);
+            if (tick > authorTick && serverStepped && serverFirstStepAfterAuthor is null)
+            {
+                serverFirstStepAfterAuthor = tick;
+            }
+        }
+
+        // BOTH sides re-open their movement gate on the SAME tick — the root ended at the SAME authored-tick-anchored
+        // window (authorTick + rootTicks) regardless of the `latency` between send and receive. On the pre-fix
+        // receive-tick anchor the server's first post-swing step would be `latency` ticks LATER than the predictor's,
+        // failing this equality (the swing-then-move rubberband).
+        Assert.NotNull(predictorFirstStepAfterAuthor);
+        Assert.NotNull(serverFirstStepAfterAuthor);
+        Assert.Equal(predictorFirstStepAfterAuthor, serverFirstStepAfterAuthor);
+
+        // And the resume is exactly the authored-tick root window end — proving the server anchored on the AUTHORED
+        // tick (authorTick), not its receive tick (authorTick + latency, which would push it to authorTick + latency +
+        // rootTicks). The first eligible step is the first step boundary at/after authorTick + rootTicks.
+        Assert.True(serverFirstStepAfterAuthor!.Value >= authorTick + rootTicks);
+        Assert.True(serverFirstStepAfterAuthor!.Value < authorTick + latency + rootTicks);
+    }
+
+    [Fact]
     public void StartStopBoundary_ServerSettledBehind_ConvergesDownToStopTile()
     {
         // The REAL stop-boundary over-prediction: predict three steps E to (3,0) (seq 3), then STOP. The

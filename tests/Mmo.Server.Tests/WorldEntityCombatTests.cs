@@ -97,6 +97,141 @@ public sealed class WorldEntityCombatTests
         Assert.False(entity.TryBeginAttack(1, 100));
     }
 
+    [Fact]
+    public void AttackMovementRootDelaysNextStepByRootTicksThenAllowsIt()
+    {
+        // SWING-COMMIT: an accepted swing roots MOVEMENT — the next held step is withheld for rootTicks, then
+        // accepted. Start fresh (no prior step), root at tick 0 for 4 ticks, hold E into open space.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+        const uint rootTicks = 4;
+
+        entity.ApplyAttackMovementRoot(0, rootTicks);
+        var startTile = entity.Tile;
+
+        // Inside the root window [0, rootTicks): every step is rejected and the tile does not move.
+        for (uint tick = 0; tick < rootTicks; tick++)
+        {
+            Assert.False(entity.TryStep(Direction8.E, tick, stepCooldownTicks: 3, grid, out _));
+            Assert.Equal(startTile, entity.Tile);
+        }
+
+        // At rootTicks the step is accepted (the root window has elapsed).
+        Assert.True(entity.TryStep(Direction8.E, rootTicks, stepCooldownTicks: 3, grid, out _));
+        Assert.Equal(startTile.Offset(1, 0), entity.Tile);
+    }
+
+    [Fact]
+    public void AttackMovementRootIsAFloorNeverShortensALongerExistingCooldown()
+    {
+        // The root is max(existing, serverTick + rootTicks) — it must never pull an already-LATER movement cooldown
+        // earlier. Step at tick 10 with a long cooldown (so _nextEligibleTick = 30), then root with a SHORT window
+        // anchored at tick 12: the root window (12 + 4 = 16) is earlier than 30, so it must change nothing.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+
+        Assert.True(entity.TryStep(Direction8.E, 10, stepCooldownTicks: 20, grid, out _)); // next eligible = 30
+        entity.ApplyAttackMovementRoot(12, rootTicks: 4); // 16 < 30 -> floor leaves it at 30
+
+        // Still rejected at 29 (the longer step cooldown wins), accepted at 30.
+        Assert.False(entity.TryStep(Direction8.E, 29, stepCooldownTicks: 20, grid, out _));
+        Assert.True(entity.TryStep(Direction8.E, 30, stepCooldownTicks: 20, grid, out _));
+    }
+
+    [Fact]
+    public void AttackMovementRootDoesNotAffectAttackCadence()
+    {
+        // The root is a MOVEMENT gate only — it must not touch the INDEPENDENT attack cooldown. Arm the attack
+        // cooldown at tick 0, then apply a movement root: the attack cooldown is unchanged (still rejecting), and
+        // a separate attack-eligibility check is governed solely by the attack cooldown, not the root.
+        var entity = CreateDummy();
+        const uint attackCooldown = 12;
+
+        Assert.True(entity.TryBeginAttack(0, attackCooldown));   // arms attack cooldown -> eligible again at 12
+        entity.ApplyAttackMovementRoot(0, rootTicks: 4);          // movement root only
+
+        // Attack cadence is governed purely by the attack cooldown: still rejected before 12, accepted at 12 —
+        // the movement root neither shortened nor lengthened it.
+        Assert.False(entity.TryBeginAttack(11, attackCooldown));
+        Assert.True(entity.TryBeginAttack(12, attackCooldown));
+    }
+
+    [Fact]
+    public void AuthoredAttackRootAnchorsOnAuthoredTickNotReceiveTick()
+    {
+        // SWING-COMMIT-FIX: the server roots on the message's AUTHORED tick, not its receive tick. The client authored
+        // the swing at tick 6 and the server received it at tick 8 (latency 2). The root window must end at
+        // authored(6) + rootTicks(4) = 10 — the SAME tick the predictor (which rooted at the authored tick) resumes —
+        // NOT at receive(8) + 4 = 12. So the step is rejected up to 9 and accepted at 10.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+        const uint rootTicks = 4;
+        const uint authoredTick = 6;
+        const uint receiveTick = 8;     // latency 2
+
+        entity.ApplyAttackMovementRootAuthored(authoredTick, receiveTick, rootTicks, pastWindowTicks: 64, futureLeadTicks: 4);
+        var startTile = entity.Tile;
+
+        // Rejected at tick 9 (inside the authored window [6,10)); accepted at tick 10 (authored 6 + rootTicks 4).
+        Assert.False(entity.TryStep(Direction8.S, 9, stepCooldownTicks: 3, grid, out _));
+        Assert.Equal(startTile, entity.Tile);
+        Assert.True(entity.TryStep(Direction8.S, 10, stepCooldownTicks: 3, grid, out _));
+    }
+
+    [Fact]
+    public void AuthoredAttackRootClampsFarFutureAuthoredTickToWindowCeil()
+    {
+        // SWING-COMMIT-FIX anti-cheat: a hostile/buggy client that stamps a far-FUTURE authored tick cannot push the
+        // root window arbitrarily far out. The authored tick is clamped to receiveTick + futureLead before use, so the
+        // root ends at (receiveTick + futureLead) + rootTicks, not (absurdFutureTick) + rootTicks.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+        const uint rootTicks = 4;
+        const uint receiveTick = 10;
+        const uint futureLead = 4;
+        const uint absurdFutureAuthored = 10_000;   // way past the window ceiling (14)
+
+        entity.ApplyAttackMovementRootAuthored(absurdFutureAuthored, receiveTick, rootTicks, pastWindowTicks: 64, futureLeadTicks: futureLead);
+
+        // Clamped authored = receiveTick(10) + futureLead(4) = 14; root window ends at 14 + 4 = 18 — NOT 10_004.
+        Assert.False(entity.TryStep(Direction8.S, 17, stepCooldownTicks: 3, grid, out _));
+        Assert.True(entity.TryStep(Direction8.S, 18, stepCooldownTicks: 3, grid, out _));
+    }
+
+    [Fact]
+    public void AuthoredAttackRootClampsFarPastAuthoredTickToWindowFloor()
+    {
+        // SWING-COMMIT-FIX anti-cheat: a far-PAST authored tick (a very stale/tampered stamp) cannot dodge the
+        // committed-swing penalty by making the root a no-op. The authored tick is clamped UP to
+        // receiveTick - pastWindow, so the root still withholds movement for a window anchored there.
+        var entity = CreateDummy();
+        var grid = new TileGrid(16, 16, []);
+        const uint rootTicks = 4;
+        const uint receiveTick = 100;
+        const uint pastWindow = 64;
+
+        // Authored tick 2 is far below the floor (100 - 64 = 36); it is clamped up to 36, so the window ends at 40.
+        entity.ApplyAttackMovementRootAuthored(2, receiveTick, rootTicks, pastWindowTicks: pastWindow, futureLeadTicks: 4);
+
+        Assert.False(entity.TryStep(Direction8.S, 39, stepCooldownTicks: 3, grid, out _));
+        Assert.True(entity.TryStep(Direction8.S, 40, stepCooldownTicks: 3, grid, out _));
+    }
+
+    [Fact]
+    public void AttackMovementRootTickCountMatchesCombatTuning()
+    {
+        // The server derives rootTicks from CombatTuning.RootTicks(tickRate) and the predictor from
+        // RootTicksFromTickMs(tickMs). At 20 Hz they must agree and be >= 1 — the parity invariant the live root
+        // depends on. (Pinned here too so a server-side break is caught in the server suite.)
+        const int tickRate = 20;
+        var fromRate = CombatTuning.RootTicks(tickRate);
+        var fromTickMs = CombatTuning.RootTicksFromTickMs(1000d / tickRate);
+        Assert.True(fromRate >= 1);
+        Assert.Equal(fromRate, fromTickMs);
+        // 200 ms at 50 ms/tick = 4 ticks (Ceiling).
+        Assert.Equal(4u, fromRate);
+    }
+
     private static WorldEntity CreateDummy()
     {
         return new WorldEntity(

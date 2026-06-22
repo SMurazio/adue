@@ -168,6 +168,59 @@ public sealed class WorldEntity
         return true;
     }
 
+    // SWING-COMMIT: briefly ROOT this entity's MOVEMENT after a committed swing. Pushes the next-eligible MOVEMENT
+    // tick forward to at least serverTick + rootTicks, so the attacker cannot start a new step until the root
+    // window elapses. This is the SAME machinery as the normal step cooldown (it bumps the same _nextEligibleTick
+    // gate TryStep gates on), which is exactly why the client predictor can mirror it for free.
+    //
+    // It is a FLOOR, never a shortener: max(existing, serverTick + rootTicks). If the entity is already on a
+    // LONGER movement cooldown (e.g. it just stepped, so _nextEligibleTick is further out), the root must not pull
+    // it earlier — only extend it. Symmetrically the client predictor applies the identical max-floor against its
+    // own next-eligible tick. Distinct from the ATTACK cooldown (TryBeginAttack / _nextEligibleAttackTick), which
+    // this never touches — the root is a movement gate only, so a swing delays the next STEP, not the next attack.
+    public void ApplyAttackMovementRoot(uint serverTick, uint rootTicks)
+    {
+        var rootUntil = serverTick + rootTicks;
+        if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value < rootUntil)
+        {
+            _nextEligibleTick = rootUntil;
+        }
+    }
+
+    // SWING-COMMIT-FIX: root the attacker's movement anchored on the CLIENT's AUTHORED tick (carried on the wire),
+    // not on the server's RECEIVE tick. This is the parity fix: the predictor roots its own movement at the same
+    // authored tick (LocalPlayerPredictor.ApplyAttackMovementRootAt), so under latency the two sides compute the
+    // IDENTICAL root window (max(existing, authoredTick + rootTicks)) instead of the server's window ending ~d ticks
+    // later (its receive-tick anchor) than the predictor's — which let the predictor step where the server rejected
+    // (the swing-then-move rubberband).
+    //
+    // The authored tick is CLAMPED to [serverTick - pastWindow, serverTick + futureLead] before use, EXACTLY like
+    // TryCommitStepAuthored clamps its authored commit tick: a hostile/buggy client cannot root itself far in the
+    // FUTURE (an authored tick way ahead would freeze its own movement for a long time — self-harm, but we still
+    // bound it so it can't interact badly with the schedule) or in the far PAST (an ancient authored tick would make
+    // the root a no-op, dodging the committed-swing penalty). At realistic latency the authored tick is within the
+    // window, so the clamp is a no-op and the server's root window equals the predictor's exactly. Still a FLOOR
+    // (max(existing, ...)) — it never shortens a longer existing movement cooldown.
+    public void ApplyAttackMovementRootAuthored(
+        uint authoredTick,
+        uint serverTick,
+        uint rootTicks,
+        uint pastWindowTicks,
+        uint futureLeadTicks)
+    {
+        var windowFloor = serverTick > pastWindowTicks ? serverTick - pastWindowTicks : 0u;
+        var windowCeil = serverTick + futureLeadTicks;
+        var clampedAuthored = authoredTick < windowFloor
+            ? windowFloor
+            : (authoredTick > windowCeil ? windowCeil : authoredTick);
+
+        var rootUntil = clampedAuthored + rootTicks;
+        if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value < rootUntil)
+        {
+            _nextEligibleTick = rootUntil;
+        }
+    }
+
     // Derives this entity's effective per-step cooldown in TICKS from the server's base cooldown and the
     // speed multiplier, clamped to the configured [minTicks, maxTicks] tick bounds (mirrors the ms clamp).
     // Default multiplier 1.0 returns baseStepCooldownTicks unchanged ⇒ behaviour parity with pre-S51. The

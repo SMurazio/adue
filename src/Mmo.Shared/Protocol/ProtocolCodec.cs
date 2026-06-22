@@ -11,7 +11,11 @@ public static class ProtocolCodec
     // COMBAT-S2B (v28): new client->server AttackMessage (own attack-seq + attack kind) on its own dedup cursor.
     // FREEAIM (v29): AttackMessage gains a quantized continuous AIM ANGLE (ushort, 0..65535 -> [0,2π)) — the
     // player→cursor world bearing the server resolves a geometric sector against. Server + client ship together.
-    public const byte Version = 29;
+    // SWING-COMMIT-FIX (v30): AttackMessage gains an AUTHORED TICK (uint) — the integer server tick the client
+    // stamped the swing on — so the server roots the attacker's movement at the SAME logical tick the predictor
+    // did (mirroring the NET3 authored-tick step commit), killing the swing-then-move rubberband under latency.
+    // Server + client ship together.
+    public const byte Version = 30;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -71,6 +75,9 @@ public static class ProtocolCodec
                 writer.Write((byte)value.Kind);
                 // FREEAIM (v29): quantized continuous aim angle, after the kind. Mirrored in the Attack decode.
                 writer.Write(value.AimAngle);
+                // SWING-COMMIT-FIX (v30): authored tick last, so the server can root the swing at the same logical
+                // tick the predictor did. Mirrored in the Attack decode (read in the same order).
+                writer.Write(value.AuthoredTick);
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
@@ -227,7 +234,7 @@ public static class ProtocolCodec
             MessageType.MoveInput => ReadMoveInput(reader),
             MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
-            MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16()),
+            MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16(), reader.ReadUInt32()),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),

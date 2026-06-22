@@ -118,7 +118,16 @@ public sealed record MovementModeMessage(bool ClientDriven) : IProtocolMessage
 // a GEOMETRIC SECTOR (half-angle + radius) about this aim against entity world positions — no longer the
 // facing-derived tile cone. The aim is a client-chosen continuous value the server validates by geometry
 // (exactly like the move direction is a client-chosen value the server validates), so it stays server-authoritative.
-public sealed record AttackMessage(uint Sequence, AttackKind Kind, ushort AimAngle) : IProtocolMessage
+//
+// SWING-COMMIT-FIX (protocol v30): adds an AUTHORED TICK — the integer server tick the CLIENT stamped the swing on
+// (its monotonic-clamped EstimateServerTick at send time, the SAME estimator the NET3 step-commit path uses). The
+// swing ROOTS the attacker's movement, and BOTH sides must compute the identical root window or the predictor steps
+// where the server will reject (the swing-then-move rubberband under latency). The pre-v30 server anchored the root
+// on its RECEIVE tick (_serverTick), which under latency lands ~d ticks AFTER the predictor's send-time anchor → the
+// server's root ends later → reject → rubberband. Carrying the authored tick lets the server root at the SAME logical
+// tick the predictor did (clamped to a sane window around its own tick, like TryCommitStepAuthored bounds its
+// authored tick), so server and predictor compute the identical root window regardless of arrival latency.
+public sealed record AttackMessage(uint Sequence, AttackKind Kind, ushort AimAngle, uint AuthoredTick) : IProtocolMessage
 {
     public MessageType Type => MessageType.Attack;
 }

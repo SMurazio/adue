@@ -313,24 +313,28 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsTwentyNine()
+    public void ProtocolVersionIsThirty()
     {
-        // FREEAIM protocol bump (v28 -> v29): AttackMessage gains a quantized continuous aim angle (ushort). A wire
-        // layout change is breaking (server + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(29, ProtocolCodec.Version);
+        // SWING-COMMIT-FIX protocol bump (v29 -> v30): AttackMessage gains an authored tick (uint) so the server can
+        // root the swing at the same logical tick the predictor did (killing the swing-then-move rubberband under
+        // latency). A wire layout change is breaking (server + client ship together). Pin the version so an accidental
+        // change is caught.
+        Assert.Equal(30, ProtocolCodec.Version);
     }
 
     [Fact]
     public void AttackMessageRoundTrips()
     {
         // FREEAIM: the attack request round-trips its own sequence + the attack kind + the quantized aim angle.
-        var original = new AttackMessage(4242, AttackKind.MeleeCone, 12345);
+        // SWING-COMMIT-FIX: it also round-trips the authored tick (the server roots the swing at this tick).
+        var original = new AttackMessage(4242, AttackKind.MeleeCone, 12345, 987654);
 
         var decoded = Assert.IsType<AttackMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(4242u, decoded.Sequence);
         Assert.Equal(AttackKind.MeleeCone, decoded.Kind);
         Assert.Equal((ushort)12345, decoded.AimAngle);
+        Assert.Equal(987654u, decoded.AuthoredTick);
     }
 
     [Theory]

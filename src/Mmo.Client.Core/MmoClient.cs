@@ -991,7 +991,29 @@ public sealed class MmoClient : IDisposable
     public uint SendAttack(ushort aimAngle)
     {
         var sequence = ++_attackSeq;
-        Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle), DeliveryMethod.ReliableOrdered);
+
+        // SWING-COMMIT-FIX: stamp the swing with an AUTHORED TICK — the predictor's monotonic-clamped estimate of the
+        // current server tick (the SAME EstimateServerTick the NET3 model-B step-commit path uses, ~line 737). This is
+        // the tick the predictor will root its OWN movement on, and the server will root the attacker's movement at
+        // this SAME authored tick (clamped to a window around its receive tick) instead of its receive tick — so under
+        // latency the two root windows are identical and the predictor never steps where the server rejects (the
+        // swing-then-move rubberband the receive-tick anchor caused). No predictor (a mode with no local prediction)
+        // => authored tick 0; the server still roots authoritatively (clamped up into its past window) and there is no
+        // prediction to disagree with it.
+        var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
+        Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle, authoredTick), DeliveryMethod.ReliableOrdered);
+
+        // SWING-COMMIT (predictor mirror): the local player just committed a swing, so root the predicted movement
+        // IDENTICALLY to the server's WorldEntity.ApplyAttackMovementRoot (driven from GameServer.HandleAttack). We
+        // compute rootTicks from the SAME CombatTuning source the server uses, off the predictor's tick interval
+        // (RootTicksFromTickMs == RootTicks(tickRate) since tickRate = 1000/tickMs), and anchor it on the SAME
+        // authoredTick we just put on the wire (not a re-estimate) — same value, same floor, same anchor as the
+        // server will use. No predictor => nothing to root (no local prediction this mode); the server still roots.
+        if (_predictor is { } predictor)
+        {
+            predictor.ApplyAttackMovementRootAt(authoredTick, CombatTuning.RootTicksFromTickMs(predictor.TickMs));
+        }
+
         return sequence;
     }
 

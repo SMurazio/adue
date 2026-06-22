@@ -420,7 +420,7 @@ public sealed class GameServer
             case AttackMessage attack:
                 if (session.IsAuthenticated)
                 {
-                    HandleAttack(session, attack.Sequence, attack.Kind, attack.AimAngle);
+                    HandleAttack(session, attack.Sequence, attack.Kind, attack.AimAngle, attack.AuthoredTick);
                 }
                 break;
             default:
@@ -1536,7 +1536,7 @@ public sealed class GameServer
     //   4. Apply MeleeConeDamage to each ENEMY whose tile-centre falls in the sector — Dummy/Npc only, NEVER another
     //      Player (no friendly fire) and never the attacker itself. The reduced HP rides the existing 2a public-HP
     //      snapshot field, so the target's overhead bar drops automatically (no dedicated reply). HP may reach 0.
-    private void HandleAttack(ClientSession session, uint sequence, AttackKind kind, ushort aimAngle)
+    private void HandleAttack(ClientSession session, uint sequence, AttackKind kind, ushort aimAngle, uint authoredTick)
     {
         // (1) Own attack cursor dedup — PARALLEL to, but independent of, the movement cursors. A stale or duplicate
         // attack seq is dropped before any cooldown/cone work. The cursor advances even on a later cooldown reject,
@@ -1563,6 +1563,25 @@ public sealed class GameServer
         {
             return;
         }
+
+        // SWING-COMMIT: an ACCEPTED swing briefly ROOTS the attacker's MOVEMENT (a committed swing) by bumping its
+        // next-eligible MOVEMENT tick forward (a FLOOR, never a shorten). Same machinery as the step cooldown, so
+        // the client predictor mirrors it exactly (MmoClient.SendAttack -> LocalPlayerPredictor) using the SAME
+        // CombatTuning.RootTicks math.
+        //
+        // SWING-COMMIT-FIX: anchor the root on the CLIENT's AUTHORED tick (carried on the wire), not on _serverTick
+        // (the RECEIVE tick). Under latency the server receives the attack ~d ticks after the client sent + rooted
+        // its predictor, so a receive-tick anchor ends the server's root LATER than the predictor's → the predictor
+        // steps before the server's root expires → reject → rubberband. Anchoring both sides on the same authored
+        // tick (clamped to a window around _serverTick so a hostile client can't root far in the future/past, exactly
+        // like TryCommitStepAuthored bounds its authored tick) makes the two root windows identical. This MIRRORS the
+        // NET3 authored-tick step commit — same estimator on the client, same clamp bounds on the server.
+        attacker.ApplyAttackMovementRootAuthored(
+            authoredTick,
+            _serverTick,
+            CombatTuning.RootTicks(_options.TickRate),
+            AuthoredTickPastWindow,
+            AuthoredTickFutureLead);
 
         // (3+4) FREEAIM: resolve the geometric sector + apply damage. The whole resolution (the radius/angle test
         // against entity world positions, the grid occupancy query, the friendly-fire gate, and the damage) lives in

@@ -793,6 +793,39 @@ public sealed class LocalPlayerPredictor
         }
     }
 
+    // SWING-COMMIT (predictor mirror — the load-bearing parity): when the LOCAL player commits a swing, ROOT the
+    // predicted movement IDENTICALLY to the server (WorldEntity.ApplyAttackMovementRoot) so the predictor does NOT
+    // step where the server will reject one (the swing-then-move rubberband). The parity is exact by construction:
+    //
+    //   * SAME rootTicks — both sides compute it from CombatTuning (the server via RootTicks(tickRate), here via
+    //     RootTicksFromTickMs(_tickMs)); tickRate == 1000/_tickMs, so the Ceiling(MovementRootMs/...) is the same
+    //     integer. The caller (MmoClient.SendAttack) passes the value it computed via CombatTuning, so even the
+    //     source of the number is shared.
+    //   * SAME max-FLOOR — _nextEligibleTick = max(existing, anchorTick + rootTicks); never shortens a longer
+    //     existing movement cooldown, exactly like the server.
+    //   * SAME anchor — anchorTick is the predictor's monotonic-clamped estimate of the CURRENT server tick (the
+    //     same EstimateTick the step gate runs on), the predictor's view of the tick HandleAttack roots at. A
+    //     swing the player commits "now" roots from the same logical tick the server stamps it on.
+    //
+    // Mirrors SetIntent's arming: if no movement is armed yet (idle), it still sets the gate so a press DURING the
+    // root is held until the root elapses (SetIntent then keeps the later of its ceil-tick and this root tick).
+    //
+    // SWING-COMMIT-FIX: the anchor tick is now passed in EXPLICITLY (the same authored tick the client stamps on the
+    // AttackMessage) rather than re-estimated from `now` here. The whole point of the fix is that the predictor and
+    // the server root the swing at the IDENTICAL authored tick: the client computes one authored tick in SendAttack,
+    // puts it on the wire AND passes it here, so a re-estimate (which could differ by a sub-tick boundary) can't make
+    // the two anchors disagree. The server clamps the same authored tick to a window around its receive tick (so a
+    // hostile client can't root itself far in the future/past); at realistic latency the value is within the window
+    // and both sides land on the same root tick.
+    public void ApplyAttackMovementRootAt(uint anchorTick, uint rootTicks)
+    {
+        var rootUntil = (long)anchorTick + rootTicks;
+        if (!_nextEligibleTick.HasValue || _nextEligibleTick.Value < rootUntil)
+        {
+            _nextEligibleTick = rootUntil;
+        }
+    }
+
     // Updates facing-only from a confirmed snapshot when the position matched (so a server-side turn with no
     // step still rotates the avatar). Cheap and safe — never moves the predicted tile.
     public void ConfirmFacing(Direction8 facing)
