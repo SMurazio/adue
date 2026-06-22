@@ -3081,16 +3081,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_aimWedgeHideAtMs = Time.GetTicksMsec() + AimWedgeFlashMs;
 	}
 
-	// Per-frame: hide the wedge once its flash window elapses. Cheap no-op while already hidden.
+	// Per-frame: keep the lit wedge attached to the local player, then hide it once its flash window elapses.
 	private void UpdateAimWedge()
 	{
-		if (_aimWedge is null || _aimWedgeHideAtMs == 0 || Time.GetTicksMsec() < _aimWedgeHideAtMs)
+		if (_aimWedge is null || _aimWedgeHideAtMs == 0)
 		{
 			return;
 		}
 
-		_aimWedge.Visible = false;
-		_aimWedgeHideAtMs = 0;
+		if (Time.GetTicksMsec() >= _aimWedgeHideAtMs)
+		{
+			_aimWedge.Visible = false;
+			_aimWedgeHideAtMs = 0;
+			return;
+		}
+
+		// SWING-COMMIT: track the local player while the wedge is lit, so a residual in-flight tile step doesn't
+		// leave the telegraph behind the avatar. The aim (the node's Y rotation, set in FlashAimWedge) stays fixed
+		// at the swing direction — only the origin follows the player.
+		if (TryGetLocalRenderPosition(out var px, out var pz))
+		{
+			_aimWedge.Position = new Vector3(px, 0.05f, pz);
+		}
 	}
 
 	// FREEAIM: continuous local facing. Render-only, local-only, NOT replicated — the local player's visual yaws
