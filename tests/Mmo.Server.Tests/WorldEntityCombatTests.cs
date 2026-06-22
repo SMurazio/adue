@@ -220,12 +220,13 @@ public sealed class WorldEntityCombatTests
     [Fact]
     public void AttackMovementRootTickCountMatchesCombatTuning()
     {
-        // The server derives rootTicks from CombatTuning.RootTicks(tickRate) and the predictor from
-        // RootTicksFromTickMs(tickMs). At 20 Hz they must agree and be >= 1 — the parity invariant the live root
-        // depends on. (Pinned here too so a server-side break is caught in the server suite.)
+        // The server derives rootTicks from CombatTuning.RootTicks(tickRate, rootMs) and the predictor from
+        // RootTicksFromTickMs(tickMs, rootMs). At 20 Hz they must agree — the parity invariant the live root depends
+        // on. Tested at an explicit rootMs (the live DEFAULT is now 0 = no root). (Pinned in the server suite too.)
         const int tickRate = 20;
-        var fromRate = CombatTuning.RootTicks(tickRate);
-        var fromTickMs = CombatTuning.RootTicksFromTickMs(1000d / tickRate);
+        const int rootMs = 200;
+        var fromRate = CombatTuning.RootTicks(tickRate, rootMs);
+        var fromTickMs = CombatTuning.RootTicksFromTickMs(1000d / tickRate, rootMs);
         Assert.True(fromRate >= 1);
         Assert.Equal(fromRate, fromTickMs);
         // 200 ms at 50 ms/tick = 4 ticks (Ceiling).

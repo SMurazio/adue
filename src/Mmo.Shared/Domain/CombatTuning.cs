@@ -8,11 +8,11 @@ namespace Mmo.Shared.Domain;
 // driven from MmoClient.SendAttack). Both sides call RootTicks(tickRate) so the rootTicks value can never drift.
 public static class CombatTuning
 {
-    // The movement-root duration of a melee swing, in ms. ~200 ms reads as a committed beat (the attacker can't
-    // start a new step until it elapses) without feeling sticky. This is a FEEL KNOB — the single edit point for
-    // tuning how long a swing roots movement. Distinct from (and shorter than) the ~600 ms attack cooldown, which
-    // is an INDEPENDENT gate on attack cadence (WorldEntity._nextEligibleAttackTick) the root never touches.
-    public const int MovementRootMs = 200;
+    // The movement-root duration of a melee swing, in ms. DEFAULT 0 = no root (the swing does NOT lock movement) —
+    // disabled for now; the mechanism stays and is live-tunable via the F8 combat.rootMs knob (raise it for a
+    // committed beat where the attacker can't start a new step until it elapses). FEEL KNOB. Distinct from the
+    // ~600 ms attack cooldown, which is an INDEPENDENT gate on attack cadence (WorldEntity._nextEligibleAttackTick).
+    public const int MovementRootMs = 0;
 
     // Converts MovementRootMs to an INTEGER number of server ticks for a given tick rate, clamped >= 1 (a swing
     // always roots for at least one tick). Uses Ceiling — the SAME ms->ticks rounding the server uses for the
@@ -27,7 +27,7 @@ public static class CombatTuning
         }
 
         var tickIntervalMs = 1000d / tickRate;
-        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(MovementRootMs / tickIntervalMs));
+        return (uint)System.Math.Max(0, (int)System.Math.Ceiling(MovementRootMs / tickIntervalMs));
     }
 
     // Predictor-side overload: derive rootTicks straight from the tick interval in ms (the predictor knows
@@ -40,7 +40,7 @@ public static class CombatTuning
             return 1u;
         }
 
-        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(MovementRootMs / tickMs));
+        return (uint)System.Math.Max(0, (int)System.Math.Ceiling(MovementRootMs / tickMs));
     }
 
     // COMBAT-TUNING (live): the same ms->ticks conversions, but driven by a LIVE rootMs (the replicated
@@ -57,7 +57,7 @@ public static class CombatTuning
         }
 
         var tickIntervalMs = 1000d / tickRate;
-        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(rootMs / tickIntervalMs));
+        return (uint)System.Math.Max(0, (int)System.Math.Ceiling(rootMs / tickIntervalMs));
     }
 
     public static uint RootTicksFromTickMs(double tickMs, int rootMs)
@@ -67,6 +67,6 @@ public static class CombatTuning
             return 1u;
         }
 
-        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(rootMs / tickMs));
+        return (uint)System.Math.Max(0, (int)System.Math.Ceiling(rootMs / tickMs));
     }
 }

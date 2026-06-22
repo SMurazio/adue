@@ -879,10 +879,13 @@ public sealed class LocalPlayerPredictorTests
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);     // 150 ms
-        var rootTicks = CombatTuning.RootTicks(tickRate);                              // server-side rootTicks
+        // Test the root MECHANISM with an explicit non-zero rootMs: the live DEFAULT is now 0 (no root); what this
+        // test verifies is the mechanism + its server<->predictor parity, independent of the default value.
+        const int rootMs = 200;
+        var rootTicks = CombatTuning.RootTicks(tickRate, rootMs);                       // server-side rootTicks
         // PARITY ANCHOR: the predictor must compute the identical rootTicks off the tick interval. Pin it so a
         // future change to either CombatTuning overload that broke the equality fails here, not just live.
-        Assert.Equal(rootTicks, CombatTuning.RootTicksFromTickMs(tickMs));
+        Assert.Equal(rootTicks, CombatTuning.RootTicksFromTickMs(tickMs, rootMs));
         Assert.True(rootTicks >= 1);
 
         var grid = new TileGrid(64, 64, []);
@@ -969,7 +972,10 @@ public sealed class LocalPlayerPredictorTests
         const double tickMs = 1000d / tickRate;  // 50 ms
         const uint stepCooldownTicks = 3;        // 150 ms
         var stepCadenceMs = MovementCadence.EffectiveStepCadenceMs(150, tickRate);
-        var rootTicks = CombatTuning.RootTicks(tickRate);
+        // Explicit non-zero rootMs: the live default is now 0 (no root); this proves the root mechanism's
+        // authored-tick parity under latency, independent of the default.
+        const int rootMs = 200;
+        var rootTicks = CombatTuning.RootTicks(tickRate, rootMs);
 
         // Server-side authored-tick clamp window (mirrors GameServer.AuthoredTickPastWindow / AuthoredTickFutureLead).
         const uint pastWindow = 64;

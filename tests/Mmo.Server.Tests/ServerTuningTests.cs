@@ -98,14 +98,14 @@ public sealed class ServerTuningTests
         var tuning = new ServerTuning(Options());
 
         Assert.Equal(600, tuning.AttackCooldownMs);
-        Assert.Equal(200, tuning.AttackRootMs);
+        Assert.Equal(0, tuning.AttackRootMs);
         Assert.Equal(45d, tuning.FreeAimHalfAngleDegrees);
         Assert.Equal(1.6d, tuning.FreeAimRadiusTiles);
         Assert.Equal(20, tuning.AttackDamage);
 
         var snapshot = tuning.CombatSnapshot;
         Assert.Equal(600, snapshot.AttackCooldownMs);
-        Assert.Equal(200, snapshot.RootMs);
+        Assert.Equal(0, snapshot.RootMs);
         Assert.Equal(45d, snapshot.HalfAngleDegrees);
         Assert.Equal(1.6d, snapshot.RadiusTiles);
         Assert.Equal(20, snapshot.Damage);
@@ -204,7 +204,8 @@ public sealed class ServerTuningTests
         // The server's AttackRootTicks must equal the shared CombatTuning conversion off the live rootMs — the
         // parity invariant the client predictor mirrors via the replicated rootMs.
         var tuning = new ServerTuning(Options());
-        Assert.Equal(Mmo.Shared.Domain.CombatTuning.RootTicks(20, 200), tuning.AttackRootTicks);
+        // AttackRootTicks == the shared conversion of the LIVE rootMs — whatever the default (now 0 = no root).
+        Assert.Equal(Mmo.Shared.Domain.CombatTuning.RootTicks(20, tuning.AttackRootMs), tuning.AttackRootTicks);
 
         Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackRootMsKey, 350d, out _));
         Assert.Equal(Mmo.Shared.Domain.CombatTuning.RootTicks(20, 350), tuning.AttackRootTicks);

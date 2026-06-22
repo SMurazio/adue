@@ -39,11 +39,19 @@ public sealed class CombatTuningTests
     [Theory]
     [InlineData(0)]
     [InlineData(-50)]
-    [InlineData(1)]
-    public void RootTicksFloorsToAtLeastOne(int rootMs)
+    public void RootTicksIsZeroForNonPositiveRootMs(int rootMs)
     {
-        Assert.True(CombatTuning.RootTicks(20, rootMs) >= 1u);
-        Assert.True(CombatTuning.RootTicksFromTickMs(50d, rootMs) >= 1u);
+        // rootMs 0 (the new default) = NO root; a negative value clamps to 0 the same way.
+        Assert.Equal(0u, CombatTuning.RootTicks(20, rootMs));
+        Assert.Equal(0u, CombatTuning.RootTicksFromTickMs(50d, rootMs));
+    }
+
+    [Fact]
+    public void RootTicksRoundsUpForPositiveRootMs()
+    {
+        // Any positive rootMs still rounds UP to at least one tick (a configured root is never silently 0).
+        Assert.True(CombatTuning.RootTicks(20, 1) >= 1u);
+        Assert.True(CombatTuning.RootTicksFromTickMs(50d, 1) >= 1u);
     }
 
     [Fact]

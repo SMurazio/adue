@@ -3228,10 +3228,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// FREEAIM: red ground material for the aim wedge — unshaded + alpha so it sits flat over any terrain.
 	private static readonly StandardMaterial3D AimWedgeMaterial = MarkerMaterial(new Color(0.95f, 0.15f, 0.15f, 0.45f));
 
-	// How long the wedge stays lit after an attack (ms). SWING-COMMIT: tied to the movement-root window
-	// (CombatTuning.MovementRootMs, ~200 ms) so the telegraph reads as a single COMMITTED beat. (Kept on the shared
-	// default; the live root is short and the cooldown gates re-flashes, so this fixed flash window is fine.)
-	private const ulong AimWedgeFlashMs = (ulong)CombatTuning.MovementRootMs;
+	// How long the wedge stays lit after an attack (ms). A fixed ~250 ms telegraph beat — DECOUPLED from the
+	// movement root (the root default is now 0 = no lock, so the wedge can't borrow that duration anymore). Well
+	// inside the ~600 ms attack cooldown, so each swing's flash clears before the next.
+	private const ulong AimWedgeFlashMs = 250;
 
 	// COMBAT-TUNING: (re)build the flat wedge (pie-slice) mesh from the CURRENT half-angle/radius, authored in the XZ
 	// plane pointing along +X, spanning [-half, +half] out to radius. A triangle fan from the apex (player origin);
