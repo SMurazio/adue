@@ -625,6 +625,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// Gate locally on the SAME attack cooldown the radial shows (and the server enforces): spamming the key or
+		// LMB must not fire a wedge + reset the cooldown indicator on every press. The server stays authoritative on
+		// damage (TryBeginAttack); this keeps the client feel + the radial honest and avoids sending attacks the
+		// server would just reject. A press near the boundary the server later rejects is a harmless wasted swing.
+		if (_client.AttackCooldownRemainingFraction(out _) > 0d)
+		{
+			return;
+		}
+
 		// Aim continuously toward the cursor's ground point. Falls back to the local player's discrete facing only
 		// if the cursor pick fails (no camera / ray miss), so a swing always has a defined aim.
 		var aimRadians = TryGetAimToCursor(out var cursorAim)

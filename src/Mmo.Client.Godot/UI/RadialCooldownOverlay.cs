@@ -22,6 +22,12 @@ public partial class RadialCooldownOverlay : Control
 
     public override void _Ready()
     {
+        // Mask the sweep to the SQUARE slot: the pie-slice is drawn out to the corner radius so it can shade the
+        // whole square, but a circular arc at that radius bulges past the slot edges between corners. ClipContents
+        // clips this Control's drawing to its own rect (the square slot), so the darkening fills the square cleanly
+        // instead of reading as an oversized disc.
+        ClipContents = true;
+
         // Centered whole-second countdown number over the sweep.
         _countdown = new Label
         {
