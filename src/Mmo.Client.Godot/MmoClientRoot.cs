@@ -1634,17 +1634,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 		_worldRoot.AddChild(grid);
 
-		// S112: paint the textured tile floor from the design bitmap (one MultiMesh, one draw call). Visual-only
-		// — additive over the solid ground box (which picking still needs). When it builds, the painted tiles are
-		// the new look so the procedural grid plane is hidden; if textures can't load, BuildFloor returns null and
-		// we keep the grid visible as a graceful fallback.
+		// S112: paint the textured tile floor from the design bitmap. Visual-only — additive over the solid ground
+		// box (which picking still needs). The floor is partitioned into a grid of CHUNK_TILES-square chunks (see
+		// TerrainPainter.BuildFloor) so each chunk frustum-culls independently. When it builds, the painted tiles
+		// are the new look so the procedural grid plane is hidden; if textures can't load, BuildFloor returns null
+		// and we keep the grid visible as a graceful fallback.
 		var paintedFloor = Mmo.Client.Godot.Visuals.TerrainPainter.BuildFloor(_worldRoot, zone.Width, zone.Height);
 		if (paintedFloor is not null)
 		{
 			grid.Visible = false;
 		}
 
-		var wallTiles = new List<TileCoord>();
+		// Walls are chunked on the SAME CHUNK_TILES grid as the floor (TerrainPainter.ChunkTiles): each chunk gets
+		// its own wall MultiMesh under a per-chunk Node3D ("WallChunk_<cx>_<cz>") so its small bounded AABB
+		// frustum-culls independently, instead of one map-spanning MultiMesh that never culls. A blocked tile lands
+		// in exactly one chunk (chunkX = tileX / CHUNK_TILES), so the union is the same wall set, just partitioned.
+		// TODO(streaming): wall chunks are keyed by (cx, cz) like the floor chunks and are individually freeable,
+		// so a follow-up can build/free them by player distance alongside the floor. This pass builds all of them.
+		const int chunkTiles = Mmo.Client.Godot.Visuals.TerrainPainter.ChunkTiles;
+		var wallChunks = new Dictionary<(int cx, int cz), List<TileCoord>>();
 		foreach (var tile in zone.BlockedTiles)
 		{
 			if (!_renderedBlockedTiles.Add(tile))
@@ -1652,11 +1660,23 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				continue;
 			}
 
-			wallTiles.Add(tile);
+			var key = (tile.X / chunkTiles, tile.Y / chunkTiles);
+			if (!wallChunks.TryGetValue(key, out var bucket))
+			{
+				bucket = new List<TileCoord>();
+				wallChunks[key] = bucket;
+			}
+
+			bucket.Add(tile);
 		}
 
-		if (wallTiles.Count > 0)
+		foreach (var ((cx, cz), wallTiles) in wallChunks)
 		{
+			if (wallTiles.Count == 0)
+			{
+				continue;
+			}
+
 			var wallMultiMesh = new MultiMesh
 			{
 				Mesh = _wallMesh,
@@ -1668,13 +1688,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				wallMultiMesh.SetInstanceTransform(i, new Transform3D(Basis.Identity, TileToWorld(wallTiles[i], 0.4f)));
 			}
 
-			var walls = new MultiMeshInstance3D
+			var wallChunk = new Node3D { Name = $"WallChunk_{cx}_{cz}" };
+			wallChunk.AddChild(new MultiMeshInstance3D
 			{
 				Name = "WallTiles",
 				Multimesh = wallMultiMesh,
 				MaterialOverride = _wallMaterial
-			};
-			_wallRoot.AddChild(walls);
+			});
+			_wallRoot.AddChild(wallChunk);
 		}
 
 		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its

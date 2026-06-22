@@ -5,14 +5,26 @@ using Mmo.Shared.Domain;
 namespace Mmo.Client.Godot.Visuals;
 
 // S112: paints the zone floor with the tiling textures, driven by the res://content/maps/terrain.png design
-// bitmap. Client-side VISUAL only — it does not touch movement, collision, snapshots, or the server. It builds
-// ONE MultiMeshInstance3D (one draw call) over a flat 1x1 quad: InstanceCount = Width*Height, a fixed-layer
-// Texture2DArray of the tiles, an unshaded spatial shader that reads the per-instance layer from
-// INSTANCE_CUSTOM.x, and per-instance rotation/flip baked into the transform basis. Built once per zone from
-// BuildZone. If the bitmap or any texture is missing it logs a warning and falls back to all-grass — it never
-// hard-fails.
+// bitmap. Client-side VISUAL only — it does not touch movement, collision, snapshots, or the server. Per texture
+// it builds a MultiMeshInstance3D over a flat 1x1 quad, with per-instance rotation/flip baked into the transform
+// basis and the chosen tile texture as the material albedo. Built once per zone from BuildZone. If the bitmap or
+// any texture is missing it logs a warning and falls back to all-grass — it never hard-fails.
+//
+// CHUNKING (this pass): instead of ONE MultiMesh per texture spanning the WHOLE map (one giant never-culled
+// AABB), the floor is partitioned into a GRID OF SQUARE CHUNKS of CHUNK_TILES per side. Each chunk gets its own
+// Node3D holding its own per-texture MultiMeshInstance3D(s) covering ONLY the tiles in that chunk. Each instance
+// therefore has a SMALL bounded AABB, so Godot frustum-culls whole chunks when they are off-screen. The painted
+// result is identical to the unified version: classification + autotiling run once over the WHOLE map (so a
+// tile's chosen texture/orientation still depends on its true neighbours across chunk seams), only the
+// per-instance partition differs. Every tile belongs to exactly one chunk (chunkX = tileX / CHUNK_TILES), so
+// there are no gaps or double-draws at chunk boundaries.
 public static class TerrainPainter
 {
+    // Square chunk size in tiles. A W×H map yields ceil(W/CHUNK_TILES)×ceil(H/CHUNK_TILES) chunks. Chosen at 32:
+    // big enough that chunk-node/MultiMesh overhead stays small, small enough that each chunk's AABB is a useful
+    // frustum-cull unit. Shared by the floor here and (mirrored) by the wall chunking in MmoClientRoot.BuildZone.
+    public const int ChunkTiles = 32;
+
     // ---- Tunable orientation constants (flagged for live verification) -------------------------------------
     // The terrain.png pixel→tile mapping uses x→east, y→south (matches TileToWorld / minimap). If the painted
     // floor looks mirrored or transposed versus the design, flip these. They are intentionally simple toggles.
@@ -57,6 +69,11 @@ public static class TerrainPainter
     // Build the painted floor under `parent` for a zone of (width x height) tiles. Returns the created node, or
     // null if the tile textures could not be loaded (caller keeps the grid plane visible as a fallback in that
     // case). The design bitmap missing is NOT fatal — that falls back to all-grass and still paints.
+    //
+    // The floor is partitioned into a grid of CHUNK_TILES-square chunks under a single "FloorChunks" root. Each
+    // chunk is a child Node3D ("FloorChunk_<cx>_<cz>") holding that chunk's per-texture MultiMeshInstance3D(s).
+    // Classification + autotiling run ONCE over the whole map (so cross-seam neighbours are honoured); only the
+    // per-instance partitioning is per chunk, so the painted result is byte-identical to the unified version.
     public static Node3D? BuildFloor(Node parent, int width, int height)
     {
         var textures = LoadTileTextures();
@@ -67,16 +84,75 @@ public static class TerrainPainter
             return null;
         }
 
+        // Classify the WHOLE map once. ChooseTile reads 4-neighbours, so partitioning the *build* (below) must not
+        // partition the *classification*: a tile at a chunk edge still sees its true neighbour in the next chunk.
         var cells = ClassifyDesign(width, height);
 
-        // One MultiMesh per texture (9 draw calls, trivial) with a plain unshaded StandardMaterial3D whose albedo
-        // is the imported Texture2D directly — no Texture2DArray, no GetImage/Decompress, no custom shader. This
-        // renders VRAM-compressed imports natively and avoids the fragile INSTANCE_CUSTOM-in-fragment path.
+        // Shared flat quad + flatten basis (see ChooseTile/SideTile comments). One quad mesh reused by every chunk.
         var quad = new QuadMesh { Size = new Vector2(1f, 1f) };
         // Tip the quad flat facing up: it faces +Z and lies in its local XY plane; -90° about X points it +Y.
         // The per-tile in-plane orientation `basis` (rotation about the quad's local Z + optional mirror) is
         // applied FIRST, then this flatten. After flatten: texture U → world +X (east).
         var flatten = new Basis(Vector3.Right, -Mathf.Pi / 2f);
+
+        // One material per texture layer, built ONCE and shared across all chunks (identical look, no per-chunk
+        // material churn). A chunk only references the materials its own tiles use.
+        var materials = new StandardMaterial3D[LayerFiles.Length];
+        for (var layer = 0; layer < materials.Length; layer++)
+        {
+            materials[layer] = new StandardMaterial3D
+            {
+                AlbedoTexture = textures[layer],
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+                TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear,
+            };
+        }
+
+        var root = new Node3D { Name = "FloorChunks" };
+
+        var chunksX = (width + ChunkTiles - 1) / ChunkTiles;   // ceil(W / CHUNK_TILES)
+        var chunksZ = (height + ChunkTiles - 1) / ChunkTiles;  // ceil(H / CHUNK_TILES)
+
+        // TODO(streaming): chunks are keyed by (cx, cz) and each is a self-contained, individually-freeable
+        // Node3D, so a follow-up can build/free chunks by player distance instead of building all up front. This
+        // pass builds ALL chunks (partition + per-chunk frustum culling only). To stream, replace this nested loop
+        // with a "build the chunks near the player, free the far ones" scheduler keyed off the same (cx, cz) grid.
+        for (var cz = 0; cz < chunksZ; cz++)
+        {
+            for (var cx = 0; cx < chunksX; cx++)
+            {
+                var x0 = cx * ChunkTiles;
+                var y0 = cz * ChunkTiles;
+                var x1 = Math.Min(x0 + ChunkTiles, width);   // exclusive
+                var y1 = Math.Min(y0 + ChunkTiles, height);  // exclusive
+
+                var chunk = BuildFloorChunk(cells, width, height, x0, y0, x1, y1, quad, flatten, materials);
+                if (chunk is not null)
+                {
+                    chunk.Name = $"FloorChunk_{cx}_{cz}";
+                    root.AddChild(chunk);
+                }
+            }
+        }
+
+        parent.AddChild(root);
+        return root;
+    }
+
+    // Build one floor chunk covering the half-open tile range [x0,x1) × [y0,y1). Classification (`cells`) is the
+    // WHOLE-map grid so autotiling at the chunk edge still reads the real neighbour in the adjacent chunk. Returns
+    // a Node3D holding one MultiMeshInstance3D per texture layer present in this chunk, or null if the chunk has
+    // no tiles (empty range). Every tile lands in exactly one chunk (x0..x1 are disjoint across chunks), so the
+    // union of all chunks reproduces the full floor with no gaps or overlaps.
+    private static Node3D? BuildFloorChunk(
+        Cell[,] cells, int width, int height, int x0, int y0, int x1, int y1,
+        QuadMesh quad, Basis flatten, StandardMaterial3D[] materials)
+    {
+        if (x0 >= x1 || y0 >= y1)
+        {
+            return null;
+        }
 
         var perLayer = new System.Collections.Generic.List<Transform3D>[LayerFiles.Length];
         for (var i = 0; i < perLayer.Length; i++)
@@ -84,16 +160,16 @@ public static class TerrainPainter
             perLayer[i] = new System.Collections.Generic.List<Transform3D>();
         }
 
-        for (var y = 0; y < height; y++)
+        for (var y = y0; y < y1; y++)
         {
-            for (var x = 0; x < width; x++)
+            for (var x = x0; x < x1; x++)
             {
                 var (layer, basis) = ChooseTile(cells, width, height, x, y);
                 perLayer[layer].Add(new Transform3D(flatten * basis, new Vector3(x, FloorY, y)));
             }
         }
 
-        var root = new Node3D { Name = "TerrainFloor" };
+        var chunk = new Node3D();
         for (var layer = 0; layer < perLayer.Length; layer++)
         {
             var list = perLayer[layer];
@@ -113,24 +189,15 @@ public static class TerrainPainter
                 mm.SetInstanceTransform(i, list[i]);
             }
 
-            var mat = new StandardMaterial3D
-            {
-                AlbedoTexture = textures[layer],
-                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-                TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear,
-            };
-
-            root.AddChild(new MultiMeshInstance3D
+            chunk.AddChild(new MultiMeshInstance3D
             {
                 Name = "TerrainFloor_" + layer,
                 Multimesh = mm,
-                MaterialOverride = mat,
+                MaterialOverride = materials[layer],
             });
         }
 
-        parent.AddChild(root);
-        return root;
+        return chunk;
     }
 
     // Public classification for the minimap: true where the design bitmap says TERRAIN, false for grass. Reuses
