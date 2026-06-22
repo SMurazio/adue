@@ -63,6 +63,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
 	private MeshInstance3D? _predictedTileMarker;
 	private MeshInstance3D? _confirmedTileMarker;
+
+	// COMBAT-S2B: red ground markers flashed on the melee-cone tiles when the local player attacks, so the hit
+	// area is visible (and verifies the cone matches the server's MeleeCone across all 8 facings). Always three
+	// (the cone is MeleeCone.TileCount tiles); shown on attack and hidden after a brief window by UpdateConeMarkers.
+	private MeshInstance3D[]? _coneHitMarkers;
+	private ulong _coneMarkersHideAtMs;
 	private Label? _statusLabel;
 	private PanelContainer? _metricsPanel;
 	private Label? _metricsLabel;
@@ -391,6 +397,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
 		UpdatePredictionTileMarkers();
+		UpdateConeMarkers();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
 		var t4 = Time.GetTicksUsec();
@@ -581,6 +588,35 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		_client.SendAttack();
 		ShowInteractFeedback("Swing!");
+
+		// Flash the melee-cone tiles using the SAME MeleeCone.Resolve the server uses, from the local player's
+		// confirmed tile + facing, so the hit area is visible (and verifiable across facings). Purely cosmetic —
+		// it never gates or predicts damage; the authoritative hit still confirms via the HP snapshot.
+		if (TryGetLocalConeOrigin(out var origin, out var facing))
+		{
+			Span<TileCoord> tiles = stackalloc TileCoord[MeleeCone.TileCount];
+			MeleeCone.Resolve(origin, facing, tiles);
+			FlashConeMarkers(tiles);
+		}
+	}
+
+	// Finds the local player's confirmed tile + facing from the per-frame render states (the IsLocal entry).
+	// Returns false before login / between snapshots so no stale cone is drawn.
+	private bool TryGetLocalConeOrigin(out TileCoord origin, out Direction8 facing)
+	{
+		foreach (var state in _renderStates)
+		{
+			if (state.IsLocal)
+			{
+				origin = state.AuthoritativeTile;
+				facing = state.Facing;
+				return true;
+			}
+		}
+
+		origin = default;
+		facing = Direction8.S;
+		return false;
 	}
 
 	private void TryHarvest()
@@ -2910,6 +2946,72 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_predictedTileMarker.Position = TileToWorld(predictedTile, 0.05f);
 		_confirmedTileMarker.Visible = true;
 		_predictedTileMarker.Visible = true;
+	}
+
+	// COMBAT-S2B: red ground material for the cone hit markers — unshaded + alpha so it sits flat over any terrain.
+	private static readonly StandardMaterial3D ConeHitMarkerMaterial = MarkerMaterial(new Color(0.95f, 0.15f, 0.15f, 0.5f));
+
+	// How long the cone markers stay lit after an attack (ms). Shorter than the ~600ms attack cooldown so each
+	// swing's flash clears before the next.
+	private const ulong ConeMarkerFlashMs = 400;
+
+	// Creates the three cone-hit markers under the world root on first use (idempotent, hidden). No-op pre-zone.
+	private void EnsureConeMarkers()
+	{
+		if (_worldRoot is null || _coneHitMarkers is not null)
+		{
+			return;
+		}
+
+		_coneHitMarkers = new MeshInstance3D[MeleeCone.TileCount];
+		for (var i = 0; i < _coneHitMarkers.Length; i++)
+		{
+			var marker = new MeshInstance3D
+			{
+				Name = $"ConeHitMarker{i}",
+				Mesh = PredictionTileMarkerMesh,
+				MaterialOverride = ConeHitMarkerMaterial,
+				Visible = false
+			};
+			_coneHitMarkers[i] = marker;
+			_worldRoot.AddChild(marker);
+		}
+	}
+
+	// Lights the cone markers on the given tiles for ConeMarkerFlashMs. Called from TryAttack with the same tiles
+	// the server's MeleeCone resolves, so the player sees exactly the hit area.
+	private void FlashConeMarkers(ReadOnlySpan<TileCoord> tiles)
+	{
+		EnsureConeMarkers();
+		if (_coneHitMarkers is null)
+		{
+			return;
+		}
+
+		for (var i = 0; i < _coneHitMarkers.Length; i++)
+		{
+			// Just above the ground (matches the prediction markers) so the squares read clearly over terrain.
+			_coneHitMarkers[i].Position = TileToWorld(tiles[i], 0.05f);
+			_coneHitMarkers[i].Visible = true;
+		}
+
+		_coneMarkersHideAtMs = Time.GetTicksMsec() + ConeMarkerFlashMs;
+	}
+
+	// Per-frame: hide the cone markers once their flash window elapses. Cheap no-op while already hidden.
+	private void UpdateConeMarkers()
+	{
+		if (_coneHitMarkers is null || _coneMarkersHideAtMs == 0 || Time.GetTicksMsec() < _coneMarkersHideAtMs)
+		{
+			return;
+		}
+
+		foreach (var marker in _coneHitMarkers)
+		{
+			marker.Visible = false;
+		}
+
+		_coneMarkersHideAtMs = 0;
 	}
 
 	private static ShaderMaterial CreateGridMaterial()
