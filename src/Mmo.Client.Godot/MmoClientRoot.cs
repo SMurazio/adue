@@ -576,9 +576,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.F11)
 		{
 			var mode = DisplayServer.WindowGetMode();
-			DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.ExclusiveFullscreen
+			DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.Fullscreen
 				? DisplayServer.WindowMode.Windowed
-				: DisplayServer.WindowMode.ExclusiveFullscreen);
+				: DisplayServer.WindowMode.Fullscreen);
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -974,8 +974,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		chatPanel.AnchorBottom = 1f;
 		chatPanel.OffsetLeft = 12f;
 		chatPanel.OffsetRight = 772f;
-		chatPanel.OffsetTop = -220f;
-		chatPanel.OffsetBottom = -50f;
+		// Sits above the chat-input bar (which is at OffsetTop -42). Tall enough for the 8 log lines + the "CHAT"
+		// header (~190px) so the newest line never spills down onto the input bar.
+		chatPanel.OffsetTop = -260f;
+		chatPanel.OffsetBottom = -70f;
 		var chatRows = CreatePanelVBox(chatPanel);
 		_chatLabel = CreateOverlayLabel("Chat", 14);
 		chatRows.AddChild(_chatLabel);
@@ -1003,8 +1005,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		toastPanel.AnchorBottom = 1f;
 		toastPanel.OffsetLeft = -210f;
 		toastPanel.OffsetRight = 210f;
-		toastPanel.OffsetTop = -270f;
-		toastPanel.OffsetBottom = -234f;
+		toastPanel.OffsetTop = -310f;
+		toastPanel.OffsetBottom = -274f;
 		var toastRows = CreatePanelVBox(toastPanel);
 		_toastLabel = CreateOverlayLabel("Toast", 16);
 		_toastLabel.HorizontalAlignment = HorizontalAlignment.Center;
@@ -2947,9 +2949,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	void IControlHost.ToggleFullscreen()
 	{
 		var mode = DisplayServer.WindowGetMode();
-		DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.ExclusiveFullscreen
+		DisplayServer.WindowSetMode(mode == DisplayServer.WindowMode.Fullscreen
 			? DisplayServer.WindowMode.Windowed
-			: DisplayServer.WindowMode.ExclusiveFullscreen);
+			: DisplayServer.WindowMode.Fullscreen);
 	}
 
 	bool IControlHost.TryBeginAutopilot(string pattern, double durationMs, out string error)
