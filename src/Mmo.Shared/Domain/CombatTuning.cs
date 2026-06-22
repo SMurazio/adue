@@ -42,4 +42,31 @@ public static class CombatTuning
 
         return (uint)System.Math.Max(1, (int)System.Math.Ceiling(MovementRootMs / tickMs));
     }
+
+    // COMBAT-TUNING (live): the same ms->ticks conversions, but driven by a LIVE rootMs (the replicated
+    // combat.rootMs knob) instead of the MovementRootMs constant. The combat-tuning panel makes the swing root a
+    // server-authoritative + replicated value; the server computes its rootTicks from the live ServerTuning.RootMs
+    // (RootTicks(tickRate, rootMs)) and the client predictor from the replicated snapshot's RootMs
+    // (RootTicksFromTickMs(tickMs, rootMs)). Both still Ceiling + clamp >= 1, so for rootMs == MovementRootMs they
+    // return EXACTLY the old constant-based values (parity preserved). A negative/zero rootMs floors to 1 tick.
+    public static uint RootTicks(int tickRate, int rootMs)
+    {
+        if (tickRate <= 0)
+        {
+            return 1u;
+        }
+
+        var tickIntervalMs = 1000d / tickRate;
+        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(rootMs / tickIntervalMs));
+    }
+
+    public static uint RootTicksFromTickMs(double tickMs, int rootMs)
+    {
+        if (!(tickMs > 0))
+        {
+            return 1u;
+        }
+
+        return (uint)System.Math.Max(1, (int)System.Math.Ceiling(rootMs / tickMs));
+    }
 }

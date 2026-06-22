@@ -53,20 +53,11 @@ public sealed class GameServer
     private const uint AuthoredTickPastWindow = 64;
     private const uint AuthoredTickFutureLead = 4;
 
-    // COMBAT-S2B / FREEAIM: attack tuning constants. The per-entity attack cooldown (~600 ms — a watchable cadence,
-    // INDEPENDENT of the 150 ms move cooldown) and the melee damage per enemy hit (20 HP). Plain constants for this
-    // stage (no live-tuning knob yet); converted ms->ticks via the configured tick rate at use site.
-    private const int AttackCooldownMs = 600;
-    private const int MeleeConeDamage = 20;
-
-    // FREEAIM FEEL KNOBS. The free-aim melee sector replacing the tile cone: a pie slice of HalfAngle (so the full
-    // arc is 2× this) and Radius tiles, centred on the attacker and pointed along the client's continuous aim. These
-    // are the primary "combat feel" levers for the exploration — widen/narrow the arc, lengthen/shorten the reach.
-    // 45° half-angle = a 90° arc; 1.6-tile radius reaches a hair past the adjacent diagonal (~1.41) without spanning
-    // two full tiles. Centralized here so tuning is one edit; flagged in the review request as the knobs to sweep.
-    private const double FreeAimHalfAngleDegrees = 45d;
-    private const double FreeAimRadiusTiles = 1.6d;
-    private static readonly double FreeAimHalfAngleRadians = FreeAimHalfAngleDegrees * System.Math.PI / 180d;
+    // COMBAT-S2B / FREEAIM / COMBAT-TUNING: the free-aim attack feel-knobs (per-entity attack cooldown, swing-root
+    // duration, sector half-angle + radius, damage per hit) are no longer hard constants here — they now live on the
+    // mutable ServerTuning holder, are LIVE-tunable via the combat.* AdminSetTuning keys, and are REPLICATED to each
+    // client (CombatTuningSnapshot) so the client's wedge/predictor/cooldown-viz match the server's resolution
+    // instead of duplicating their own constants. HandleAttack + FreeAimSectorResolver read _tuning each attack.
 
     // Keepalive safety timeout for held movement intents (~1 s). The client resends its current intent
     // every ~500 ms; if a "moving" session goes silent for longer than this (a wedged-but-connected
@@ -483,6 +474,10 @@ public sealed class GameServer
                         // COMBAT-S1: replicate the player's initial vitals (full 100/100 each by default) so the
                         // HUD bars render real values immediately on login, not the F5 stub.
                         SendPlayerStats(current, entity);
+                        // COMBAT-TUNING: replicate the current combat feel-knobs so the client's free-aim wedge mesh,
+                        // swing-root prediction, and radial cooldown indicator derive from the server's authoritative
+                        // values immediately on login (not stale client constants).
+                        SendCombatTuning(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -1462,6 +1457,13 @@ public sealed class GameServer
             _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(_tuning.InterestRadius);
         }
 
+        // COMBAT-TUNING: a combat.* change must reach every client so the wedge mesh, swing-root prediction, and
+        // radial cooldown viz re-derive from the new authoritative values — broadcast the full replicated snapshot.
+        if (ServerTuningRegistry.IsCombatKey(key))
+        {
+            BroadcastCombatTuning();
+        }
+
         SendSystem(sender, $"tuning: {key} = {ServerTuningRegistry.Format(applied)} (applied live).");
         Log.Info($"{sender.DisplayName} set tuning {key}={ServerTuningRegistry.Format(applied)} (requested {value}).");
     }
@@ -1533,7 +1535,7 @@ public sealed class GameServer
     //      about the attacker's world position — replacing the facing-derived tile cone. The aim is a client-chosen
     //      continuous value the server validates purely by geometry (like the move direction), so it stays
     //      server-authoritative.
-    //   4. Apply MeleeConeDamage to each ENEMY whose tile-centre falls in the sector — Dummy/Npc only, NEVER another
+    //   4. Apply the live combat.damage to each ENEMY whose tile-centre falls in the sector — Dummy/Npc only, NEVER another
     //      Player (no friendly fire) and never the attacker itself. The reduced HP rides the existing 2a public-HP
     //      snapshot field, so the target's overhead bar drops automatically (no dedicated reply). HP may reach 0.
     private void HandleAttack(ClientSession session, uint sequence, AttackKind kind, ushort aimAngle, uint authoredTick)
@@ -1559,7 +1561,9 @@ public sealed class GameServer
         }
 
         // (2) Independent per-entity attack cooldown. A still-cooling attacker is rejected and changes nothing.
-        if (!attacker.TryBeginAttack(_serverTick, AttackCooldownTicks))
+        // COMBAT-TUNING: read the cooldown LIVE from _tuning (combat.attackCooldownMs) so an admin tweak takes effect
+        // on the next attack; the replicated snapshot keeps the client's radial cooldown indicator matching it.
+        if (!attacker.TryBeginAttack(_serverTick, _tuning.AttackCooldownTicks))
         {
             return;
         }
@@ -1576,10 +1580,14 @@ public sealed class GameServer
         // tick (clamped to a window around _serverTick so a hostile client can't root far in the future/past, exactly
         // like TryCommitStepAuthored bounds its authored tick) makes the two root windows identical. This MIRRORS the
         // NET3 authored-tick step commit — same estimator on the client, same clamp bounds on the server.
+        // COMBAT-TUNING: the swing-root duration is now the LIVE combat.rootMs (via _tuning.AttackRootTicks, which
+        // uses the SAME CombatTuning.RootTicks conversion the client predictor mirrors off the replicated rootMs) —
+        // so steady-state both sides root for the identical window. A brief transient mismatch right as rootMs is
+        // tweaked is acceptable for a dev tuning tool (the per-client snapshot lands a frame later).
         attacker.ApplyAttackMovementRootAuthored(
             authoredTick,
             _serverTick,
-            CombatTuning.RootTicks(_options.TickRate),
+            _tuning.AttackRootTicks,
             AuthoredTickPastWindow,
             AuthoredTickFutureLead);
 
@@ -1587,31 +1595,53 @@ public sealed class GameServer
         // against entity world positions, the grid occupancy query, the friendly-fire gate, and the damage) lives in
         // the testable static FreeAimSectorResolver — HandleAttack only owns the cursor dedup + cooldown gate and the
         // aim decode around it.
+        // COMBAT-TUNING: half-angle / radius / damage are read LIVE from _tuning (combat.halfAngleDeg /
+        // combat.radiusTiles / combat.damage) — the SAME values replicated to the client so the drawn wedge equals
+        // the resolved danger area.
         var aimRadians = AimAngle.ToRadians(aimAngle);
+        var damage = _tuning.AttackDamage;
         var hits = FreeAimSectorResolver.ResolveAndDamage(
             _zone.World,
             attacker,
             aimRadians,
-            FreeAimHalfAngleRadians,
-            FreeAimRadiusTiles,
-            MeleeConeDamage,
+            _tuning.FreeAimHalfAngleRadians,
+            _tuning.FreeAimRadiusTiles,
+            damage,
             _attackCandidateScratch);
         if (hits > 0)
         {
-            Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {MeleeConeDamage} each (aim {aimRadians:F2} rad).");
+            Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {damage} each (aim {aimRadians:F2} rad).");
         }
     }
-
-    // COMBAT-S2B: the per-entity attack cooldown in TICKS, derived from the ms constant and the configured tick
-    // rate (>= 1 tick so it always advances). Independent of the movement step cooldown.
-    private uint AttackCooldownTicks =>
-        (uint)Math.Max(1, (int)Math.Ceiling(AttackCooldownMs / (1000d / _options.TickRate)));
 
     // Replicates an entity's authoritative vitals to its OWNER. Owner-only + reliable-ordered, like the inventory
     // snapshot — vitals stay off the hot snapshot path. Sent on login (initial truth) and on every change.
     private void SendPlayerStats(ClientSession session, WorldEntity entity)
     {
         TrySend(session.Peer, new PlayerStatsMessage(entity.Stats), DeliveryMethod.ReliableOrdered);
+    }
+
+    // COMBAT-TUNING: replicate the current combat feel-knobs to one client. Reliable-ordered, like PlayerStats —
+    // sent on login (initial truth) and (via BroadcastCombatTuning) on every combat.* change. The snapshot is the
+    // single source the client mirrors; its wedge/predictor/cooldown all re-derive from it.
+    private void SendCombatTuning(ClientSession session)
+    {
+        TrySend(session.Peer, new CombatTuningMessage(_tuning.CombatSnapshot), DeliveryMethod.ReliableOrdered);
+    }
+
+    // COMBAT-TUNING: push the current combat snapshot to every authenticated client. Called when a combat.* tuning
+    // key changes so all clients re-derive the wedge/predictor/cooldown from the new authoritative values. Combat
+    // tuning is global (not per-entity/AOI-scoped), so every authenticated session gets it regardless of AOI.
+    private void BroadcastCombatTuning()
+    {
+        var message = new CombatTuningMessage(_tuning.CombatSnapshot);
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated)
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
     }
 
     private string FormatWho()

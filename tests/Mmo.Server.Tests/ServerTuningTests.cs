@@ -90,4 +90,123 @@ public sealed class ServerTuningTests
         Assert.False(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.InterestRadiusKey, double.NaN, out _));
         Assert.False(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.InterestRadiusKey, double.PositiveInfinity, out _));
     }
+
+    // COMBAT-TUNING: the combat.* keys are known, seed to the historical defaults, apply, and clamp to bounds.
+    [Fact]
+    public void CombatKeysSeedToHistoricalDefaults()
+    {
+        var tuning = new ServerTuning(Options());
+
+        Assert.Equal(600, tuning.AttackCooldownMs);
+        Assert.Equal(200, tuning.AttackRootMs);
+        Assert.Equal(45d, tuning.FreeAimHalfAngleDegrees);
+        Assert.Equal(1.6d, tuning.FreeAimRadiusTiles);
+        Assert.Equal(20, tuning.AttackDamage);
+
+        var snapshot = tuning.CombatSnapshot;
+        Assert.Equal(600, snapshot.AttackCooldownMs);
+        Assert.Equal(200, snapshot.RootMs);
+        Assert.Equal(45d, snapshot.HalfAngleDegrees);
+        Assert.Equal(1.6d, snapshot.RadiusTiles);
+        Assert.Equal(20, snapshot.Damage);
+    }
+
+    [Fact]
+    public void CombatKeysAreKnownAndFlaggedAsCombat()
+    {
+        foreach (var key in new[]
+                 {
+                     ServerTuningRegistry.AttackCooldownMsKey,
+                     ServerTuningRegistry.AttackRootMsKey,
+                     ServerTuningRegistry.FreeAimHalfAngleDegKey,
+                     ServerTuningRegistry.FreeAimRadiusTilesKey,
+                     ServerTuningRegistry.AttackDamageKey,
+                 })
+        {
+            Assert.True(ServerTuningRegistry.IsKnownKey(key));
+            Assert.True(ServerTuningRegistry.IsCombatKey(key));
+        }
+
+        // A non-combat key is known but not flagged as combat (so it doesn't trigger a combat re-broadcast).
+        Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.InterestRadiusKey));
+        Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.InterestRadiusKey));
+    }
+
+    [Fact]
+    public void CombatKeysApplyWithinBounds()
+    {
+        var tuning = new ServerTuning(Options());
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackCooldownMsKey, 900d, out var cd));
+        Assert.Equal(900d, cd);
+        Assert.Equal(900, tuning.AttackCooldownMs);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackRootMsKey, 120d, out _));
+        Assert.Equal(120, tuning.AttackRootMs);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimHalfAngleDegKey, 60d, out _));
+        Assert.Equal(60d, tuning.FreeAimHalfAngleDegrees);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimRadiusTilesKey, 3.0d, out _));
+        Assert.Equal(3.0d, tuning.FreeAimRadiusTiles);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackDamageKey, 50d, out _));
+        Assert.Equal(50, tuning.AttackDamage);
+    }
+
+    [Fact]
+    public void CombatKeysClampOutOfRangeValues()
+    {
+        var tuning = new ServerTuning(Options());
+
+        // Below-min and above-max each clamp into the registry bounds.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackCooldownMsKey, 0d, out _));
+        Assert.True(tuning.AttackCooldownMs >= 50);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackCooldownMsKey, 1_000_000d, out _));
+        Assert.True(tuning.AttackCooldownMs <= 5000);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackRootMsKey, -100d, out _));
+        Assert.True(tuning.AttackRootMs >= 0);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackRootMsKey, 99_999d, out _));
+        Assert.True(tuning.AttackRootMs <= 2000);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimHalfAngleDegKey, 0d, out _));
+        Assert.True(tuning.FreeAimHalfAngleDegrees >= 1d);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimHalfAngleDegKey, 999d, out _));
+        Assert.True(tuning.FreeAimHalfAngleDegrees <= 180d);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimRadiusTilesKey, 0d, out _));
+        Assert.True(tuning.FreeAimRadiusTiles >= 0.25d);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.FreeAimRadiusTilesKey, 999d, out _));
+        Assert.True(tuning.FreeAimRadiusTiles <= 16d);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackDamageKey, -5d, out _));
+        Assert.True(tuning.AttackDamage >= 0);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackDamageKey, 1_000_000d, out _));
+        Assert.True(tuning.AttackDamage <= 10000);
+    }
+
+    [Fact]
+    public void CombatCooldownTicksTracksLiveValue()
+    {
+        // The derived AttackCooldownTicks reflects a live change (Ceiling at 20 Hz): 600 ms -> 12 ticks; after a
+        // bump to 1000 ms -> 20 ticks. Mirrors the old GameServer.AttackCooldownTicks derivation.
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(12u, tuning.AttackCooldownTicks);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackCooldownMsKey, 1000d, out _));
+        Assert.Equal(20u, tuning.AttackCooldownTicks);
+    }
+
+    [Fact]
+    public void CombatRootTicksMatchesSharedConversion()
+    {
+        // The server's AttackRootTicks must equal the shared CombatTuning conversion off the live rootMs — the
+        // parity invariant the client predictor mirrors via the replicated rootMs.
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(Mmo.Shared.Domain.CombatTuning.RootTicks(20, 200), tuning.AttackRootTicks);
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.AttackRootMsKey, 350d, out _));
+        Assert.Equal(Mmo.Shared.Domain.CombatTuning.RootTicks(20, 350), tuning.AttackRootTicks);
+    }
 }

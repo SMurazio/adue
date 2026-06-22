@@ -42,6 +42,14 @@ public sealed class HudState
     // SlotButtons' _Process (see UI/SlotButton.cs), so this dictionary is only the START value, not ticked here.
     public Dictionary<string, float> Cooldowns { get; } = new();
 
+    // COMBAT-TUNING (radial cooldown): for slots whose cooldown is driven by a REAL, server-authoritative remaining
+    // value (the LMB autoattack slot — fed from MmoClient.AttackCooldownRemainingFraction each frame), this maps the
+    // slot id to the current SWEEP FRACTION in [0,1] (1.0 = just fired, 0.0 = ready). Unlike Cooldowns (a one-shot
+    // START value the SlotButton ticks down locally), this is the AUTHORITATIVE remaining fraction pushed EVERY frame
+    // — the SlotButton renders a radial wedge directly from it and does NOT self-tick, so it tracks the real cooldown
+    // (and a live combat.attackCooldownMs change) exactly. A slot absent from this map uses the local-tick path.
+    public Dictionary<string, float> RadialCooldowns { get; } = new();
+
     // --- Action-bar slot data (S108) ----------------------------------------------------------------------
     // TODO(server): stack counts are stubbed. The two consumable slots (keys "1","2") show a bottom-right stack
     // badge; later slices feed these from the real client item registry (S37-S39). -1 == hide the badge.

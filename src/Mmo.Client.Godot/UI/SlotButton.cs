@@ -23,6 +23,14 @@ public partial class SlotButton : Control
     private ColorRect? _cooldownShade;
     private Label? _cooldownText;
 
+    // COMBAT-TUNING (radial cooldown): an overlay drawn as a pie-slice sweep (a "radial wipe") for slots driven by a
+    // REAL remaining fraction (the LMB autoattack). Added lazily on first ApplyRadial so non-radial slots cost
+    // nothing. Owns its own _Draw; the fraction it draws from is pushed every frame (authoritative), never self-ticked.
+    private RadialCooldownOverlay? _radial;
+    // True while the radial path is driving this slot, so the local-tick _Process cooldown path stays disabled (the
+    // two must not both render). Set in ApplyRadial; the radial overlay alone shows the countdown number then.
+    private bool _radialActive;
+
     // Normal vs selected (amber) frame styles, built programmatically — the frame art is not imported yet, so we
     // use StyleBoxFlat borders; art can replace these by swapping the panel theme override later.
     private StyleBoxFlat? _frameNormal;
@@ -119,8 +127,51 @@ public partial class SlotButton : Control
         }
     }
 
+    // COMBAT-TUNING (radial cooldown): drive this slot's cooldown from a REAL, authoritative remaining fraction
+    // (0..1) pushed EVERY frame, plus the remaining seconds for the centered countdown number. Unlike Apply's local
+    // tick, this neither seeds nor ticks a timer — it renders the pushed fraction directly as a pie-slice sweep, so it
+    // tracks the server cooldown (and a live combat.attackCooldownMs change) exactly. A fraction <= 0 clears the
+    // overlay (ready). Lazily creates the overlay on first use so non-radial slots stay free.
+    public void ApplyRadial(float fraction, float remainingSeconds)
+    {
+        _radialActive = true;
+        // Disable the local-tick overlay (the radial path owns the visuals); guard against both rendering at once.
+        _cooldownRemaining = 0f;
+        if (_cooldownShade is not null)
+        {
+            // The radial overlay draws its own sweep + number; keep the full-rect darken shade hidden.
+            _cooldownShade.Visible = false;
+        }
+
+        if (_radial is null)
+        {
+            _radial = new RadialCooldownOverlay { Name = "RadialCooldown" };
+            // Fill the slot; ignore mouse so clicks pass to the world/slot beneath.
+            _radial.SetAnchorsPreset(LayoutPreset.FullRect);
+            _radial.MouseFilter = MouseFilterEnum.Ignore;
+            AddChild(_radial);
+        }
+
+        // The overlay owns both the pie-slice sweep AND the centered whole-second countdown number.
+        _radial.Set(fraction, remainingSeconds);
+
+        if (_icon is not null)
+        {
+            // Darken the icon while cooling, matching the local-tick path, so the slot reads as "not ready".
+            _icon.Modulate = fraction > 0f ? new Color(0.45f, 0.45f, 0.45f, 1f) : Colors.White;
+        }
+    }
+
     public override void _Process(double delta)
     {
+        // COMBAT-TUNING: when the radial (authoritative-fraction) path drives this slot, skip the local-tick cooldown
+        // entirely — ApplyRadial already pushed the fraction this frame and the RadialCooldownOverlay draws both the
+        // sweep and its own countdown number. The two paths must never render at once.
+        if (_radialActive)
+        {
+            return;
+        }
+
         if (_cooldownRemaining <= 0f)
         {
             if (_cooldownShade is not null && _cooldownShade.Visible)

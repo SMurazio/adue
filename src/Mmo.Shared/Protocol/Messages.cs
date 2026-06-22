@@ -280,6 +280,18 @@ public sealed record PlayerStatsMessage(CharacterStats Stats) : IProtocolMessage
     public MessageType Type => MessageType.PlayerStats;
 }
 
+// COMBAT-TUNING (protocol v31): server->client replication of the live combat feel-knobs. The combat values are
+// server-authoritative (resolved in HandleAttack + FreeAimSectorResolver) and live-tunable via AdminSetTuning
+// (combat.* registry keys); this message ships the CURRENT snapshot so the client's free-aim wedge mesh, swing-root
+// prediction, and radial cooldown indicator all derive from the SAME numbers the server resolves with — killing the
+// earlier client/server constant duplication (where the wedge could disagree with the real danger area). Sent to
+// each client on login (initial truth) and broadcast to all authenticated clients whenever a combat.* key changes.
+// Reliable-ordered, like PlayerStats/MovementSpeedChanged — it changes rarely and must never be lost.
+public sealed record CombatTuningMessage(CombatTuningSnapshot Tuning) : IProtocolMessage
+{
+    public MessageType Type => MessageType.CombatTuning;
+}
+
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntityDespawn;

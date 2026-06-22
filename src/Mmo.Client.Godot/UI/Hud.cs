@@ -304,6 +304,15 @@ public partial class Hud : CanvasLayer
             var selected = slotId == State.SelectedSlot;
             var cooldown = State.Cooldowns.TryGetValue(slotId, out var cd) ? cd : 0f;
             slot.Apply(count, selected, cooldown);
+
+            // COMBAT-TUNING (radial cooldown): a slot present in RadialCooldowns (the LMB autoattack) is driven by a
+            // REAL, authoritative remaining fraction pushed every frame — render its radial sweep + countdown from
+            // that instead of the local-tick path. The seconds for the number come from Cooldowns[slotId] (the LMB
+            // remaining seconds MmoClientRoot writes alongside the fraction).
+            if (State.RadialCooldowns.TryGetValue(slotId, out var fraction))
+            {
+                slot.ApplyRadial(fraction, cooldown);
+            }
         }
 
         // S109: push the same view-model into the minimap (it bakes the static map once, then just moves the marker).

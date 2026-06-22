@@ -182,6 +182,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _statManaEdit;
 	private LineEdit? _statStaminaEdit;
 
+	// ---- COMBAT-TUNING F8 combat-tuning panel -----------------------------------------------------
+	// A dedicated admin-gated panel (F8) for the free-aim COMBAT feel-knobs (attack cooldown, swing-root, sector
+	// half-angle/radius, damage). Each row is a label + LineEdit; Apply sends each via AdminSetTuning on the combat.*
+	// registry keys (the server admin-gates + clamps authoritatively, then BROADCASTS the replicated
+	// CombatTuningSnapshot back — which re-seeds this panel and rebuilds the wedge/predictor/cooldown viz). Same
+	// panel/Apply pattern as F4/F7. Seeded on open (and on every replicated snapshot) from the live combat tuning.
+	private PanelContainer? _combatPanel;
+	private bool _combatPanelVisible;
+	private int _combatPanelSeededVersion = -1;
+	private LineEdit? _combatAttackCooldownMs;
+	private LineEdit? _combatRootMs;
+	private LineEdit? _combatHalfAngleDeg;
+	private LineEdit? _combatRadiusTiles;
+	private LineEdit? _combatDamage;
+
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
 	private long _lastInteractResultSequence;
@@ -446,17 +461,29 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// SendHeldMovement off Input.IsMouseButtonPressed — NOT an event-driven click-a-destination. So the
 		// right mouse button is intentionally not consumed here; the old HandleClickToMove path is retired.
 		// Mouse-wheel zoom: shrink/grow the orthographic camera around the character.
-		if (@event is InputEventMouseButton { Pressed: true } wheel)
+		if (@event is InputEventMouseButton { Pressed: true } mouseButton)
 		{
-			if (wheel.ButtonIndex == MouseButton.WheelUp)
+			if (mouseButton.ButtonIndex == MouseButton.WheelUp)
 			{
 				_cameraSize = Mathf.Clamp(_cameraSize - CameraZoomStep, _cameraSizeMin, _cameraSizeMax);
 				GetViewport().SetInputAsHandled();
 				return;
 			}
-			if (wheel.ButtonIndex == MouseButton.WheelDown)
+			if (mouseButton.ButtonIndex == MouseButton.WheelDown)
 			{
 				_cameraSize = Mathf.Clamp(_cameraSize + CameraZoomStep, _cameraSizeMin, _cameraSizeMax);
+				GetViewport().SetInputAsHandled();
+				return;
+			}
+
+			// COMBAT (LMB attack): LEFT-mouse-down triggers the free-aim melee swing — the same TryAttack path as
+			// Space (server-authoritative; the aim is the player→cursor bearing). This handler is _UnhandledInput, so
+			// any HUD/panel control the cursor is over has already consumed the click (it never reaches here) — the
+			// swing only fires on a click into the 3D world. RIGHT mouse stays the hold-to-move poll (untouched);
+			// LEFT was previously free. Consumed so it doesn't fall through to anything else.
+			if (mouseButton.ButtonIndex == MouseButton.Left)
+			{
+				TryAttack();
 				GetViewport().SetInputAsHandled();
 				return;
 			}
@@ -505,6 +532,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.F7)
 		{
 			ToggleStatPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// F8: admin-only COMBAT-TUNING panel — live-tune the free-aim combat feel-knobs (attack cooldown, swing-root,
+		// sector half-angle/radius, damage). Same admin gating as F4-F7 (panel never shows otherwise). The values are
+		// server-authoritative + replicated, so a change updates the wedge/predictor/cooldown viz on every client.
+		if (key.Keycode == Key.F8)
+		{
+			ToggleCombatPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -923,6 +960,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		BuildVisualPanel(layer);
 		BuildMovementPanel(layer);
 		BuildStatPanel(layer);
+		BuildCombatPanel(layer);
 
 		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
 		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
@@ -1255,6 +1293,40 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		panel.Visible = false;
 		_statPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// COMBAT-TUNING: the admin COMBAT-TUNING panel (F8). Five rows (attack cooldown ms, swing-root ms, sector
+	// half-angle deg, radius tiles, damage) of label + LineEdit; one Apply sends each via AdminSetTuning on the
+	// combat.* keys. The server admin-gates + clamps + broadcasts the replicated snapshot back, which re-seeds the
+	// fields and rebuilds the wedge/predictor/cooldown viz live. Hidden until F8 is pressed by an Admin session.
+	private void BuildCombatPanel(CanvasLayer layer)
+	{
+		// Right of the F4/F7 admin column so the panels can sit side-by-side without overlapping.
+		var panel = CreateOverlayPanel("CombatPanel", new Vector2(866, 154), new Vector2(380, 240));
+		var rows = CreatePanelVBox(panel);
+
+		var title = CreateOverlayLabel("CombatTitle", 15);
+		title.Text = "ADMIN COMBAT TUNING (F8)";
+		rows.AddChild(title);
+
+		var header = CreateOverlayLabel("CombatHeader", 12);
+		header.Text = "— server-authoritative · replicated · sent on Apply —";
+		rows.AddChild(header);
+
+		_combatAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnCombatApplyPressed);
+		_combatRootMs = AddTuningField(rows, "swing root (ms)", OnCombatApplyPressed);
+		_combatHalfAngleDeg = AddTuningField(rows, "half-angle (deg)", OnCombatApplyPressed);
+		_combatRadiusTiles = AddTuningField(rows, "radius (tiles)", OnCombatApplyPressed);
+		_combatDamage = AddTuningField(rows, "damage (hp)", OnCombatApplyPressed);
+
+		var apply = new Button { Name = "CombatApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnCombatApplyPressed;
+		rows.AddChild(apply);
+
+		panel.Visible = false;
+		_combatPanel = panel;
 		layer.AddChild(panel);
 	}
 
@@ -1843,6 +1915,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_hudState.MaxStamina = stats.MaxStamina;
 		}
 
+		// COMBAT-TUNING (radial cooldown): feed the LMB autoattack slot the REAL attack-cooldown remaining — a 0..1
+		// sweep fraction (RadialCooldowns["LMB"]) + the remaining seconds for the countdown number (Cooldowns["LMB"]).
+		// Both come from the client's own last-attack bookkeeping against the replicated combat.attackCooldownMs, so
+		// the indicator tracks the server cadence and reacts live to a tuning tweak. This replaces the stub for the
+		// LMB slot only; the other slots keep their stub/local-tick cooldowns. Written every frame (authoritative).
+		if (_client is { } client)
+		{
+			var fraction = client.AttackCooldownRemainingFraction(out var remainingSeconds);
+			_hudState.RadialCooldowns["LMB"] = (float)fraction;
+			_hudState.Cooldowns["LMB"] = (float)remainingSeconds;
+		}
+
+		// COMBAT-TUNING: keep the free-aim wedge mesh matching the replicated half-angle/radius (rebuilds only on a
+		// snapshot change). Cheap no-op when unchanged; ensures a live combat.halfAngleDeg/radiusTiles tweak updates
+		// the telegraph without a restart even if no swing has occurred since the change.
+		RebuildAimWedgeMeshIfNeeded();
+		// COMBAT-TUNING: if the F8 panel is open and the server broadcast a new snapshot (after an Apply), re-seed its
+		// fields to the authoritative post-clamp values.
+		ReseedCombatFieldsIfChanged();
+
 		// S110: feed the minimap world objects (trees/rocks/resource nodes) from the SAME per-frame render-state
 		// list the 3D world renders from — read-only, AOI-scoped ("current environment"). Rebuilt in place each
 		// refresh (AOI-bounded count) so no new server feed is needed and no allocation churns per frame.
@@ -2151,6 +2243,57 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
+	// COMBAT-TUNING: toggle the F8 combat-tuning panel. Admin-only (a non-admin/pre-login session sees a hint and the
+	// panel never shows). Seeds from the live replicated combat snapshot on open.
+	private void ToggleCombatPanel()
+	{
+		if (_combatPanel is null)
+		{
+			return;
+		}
+
+		if (_client?.Role != ClientRole.Admin)
+		{
+			ShowInteractFeedback("Combat tuning panel requires Admin role.");
+			return;
+		}
+
+		_combatPanelVisible = !_combatPanelVisible;
+		if (_combatPanelVisible)
+		{
+			SeedCombatFields();
+		}
+
+		_combatPanel.Visible = _combatPanelVisible;
+	}
+
+	// COMBAT-TUNING: seed the F8 fields from the live replicated combat snapshot. Re-seeded whenever the snapshot
+	// version changes (a server broadcast after an Apply) so the panel always shows the authoritative post-clamp
+	// values. Until the first snapshot arrives there is nothing to seed (fields stay blank).
+	private void SeedCombatFields()
+	{
+		if (_client?.CombatTuning is { } tuning)
+		{
+			SetField(_combatAttackCooldownMs, tuning.AttackCooldownMs);
+			SetField(_combatRootMs, tuning.RootMs);
+			SetField(_combatHalfAngleDeg, tuning.HalfAngleDegrees);
+			SetField(_combatRadiusTiles, tuning.RadiusTiles);
+			SetField(_combatDamage, tuning.Damage);
+			_combatPanelSeededVersion = _client.CombatTuningVersion;
+		}
+	}
+
+	// COMBAT-TUNING: when the replicated snapshot changes (server broadcast after an Apply) AND the panel is open,
+	// re-seed the fields so they reflect the authoritative post-clamp values. Called each RefreshHud; cheap version
+	// compare. Only re-seeds while open so it never stomps un-applied edits in a closed panel.
+	private void ReseedCombatFieldsIfChanged()
+	{
+		if (_combatPanelVisible && _client is { } client && client.CombatTuningVersion != _combatPanelSeededVersion)
+		{
+			SeedCombatFields();
+		}
+	}
+
 	// Seed the F4 server fields from ServerHello (the server's startup truth). Only called once on first open
 	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
@@ -2255,6 +2398,45 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		ShowInteractFeedback("Vitals sent.");
+	}
+
+	// COMBAT-TUNING F8 apply-all: parse each combat field and send it via AdminSetTuning on its combat.* registry key.
+	// The server admin-gates + clamps each authoritatively, then broadcasts the replicated CombatTuningSnapshot back —
+	// which re-seeds this panel (post-clamp values) and rebuilds the wedge/predictor/cooldown viz live. Invalid/blank
+	// fields are skipped so a typo in one never blocks the others.
+	private void OnCombatApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		if (TryReadField(_combatAttackCooldownMs, out var cooldownMs))
+		{
+			_client.SendAdminSetTuning("combat.attackCooldownMs", cooldownMs);
+		}
+
+		if (TryReadField(_combatRootMs, out var rootMs))
+		{
+			_client.SendAdminSetTuning("combat.rootMs", rootMs);
+		}
+
+		if (TryReadField(_combatHalfAngleDeg, out var halfAngle))
+		{
+			_client.SendAdminSetTuning("combat.halfAngleDeg", halfAngle);
+		}
+
+		if (TryReadField(_combatRadiusTiles, out var radius))
+		{
+			_client.SendAdminSetTuning("combat.radiusTiles", radius);
+		}
+
+		if (TryReadField(_combatDamage, out var damage))
+		{
+			_client.SendAdminSetTuning("combat.damage", damage);
+		}
+
+		ShowInteractFeedback("Combat tuning sent.");
 	}
 
 	// F5 apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server
@@ -2989,31 +3171,33 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_predictedTileMarker.Visible = true;
 	}
 
-	// FREEAIM FEEL KNOBS (client telegraph). MUST match the server's FreeAimSectorResolver knobs (GameServer
-	// FreeAimHalfAngleDegrees / FreeAimRadiusTiles) so the drawn wedge equals the real danger area. Kept here as the
-	// client-side mirror; if the server values change, change these too (a single shared tuning source is a later
-	// nicety — flagged in the review request).
-	private const float FreeAimHalfAngleDegrees = 45f;
-	private const float FreeAimRadiusTiles = 1.6f;
+	// FREEAIM FEEL KNOBS (client telegraph). COMBAT-TUNING: the half-angle/radius the wedge is drawn from are no
+	// longer client constants — they MIRROR the server's REPLICATED CombatTuningSnapshot (combat.halfAngleDeg /
+	// combat.radiusTiles), so the drawn wedge ALWAYS equals the server's real danger area (the earlier "keep these in
+	// sync by hand" duplication is gone). The mesh is rebuilt whenever the replicated snapshot changes
+	// (RebuildAimWedgeMeshIfNeeded, keyed off MmoClient.CombatTuningVersion). These defaults reproduce the historical
+	// look before the first snapshot lands (45°, 1.6 tiles).
+	private float _aimWedgeHalfAngleDegrees = 45f;
+	private float _aimWedgeRadiusTiles = 1.6f;
+	private int _aimWedgeBuiltTuningVersion = -1;
+	private ArrayMesh? _aimWedgeMesh;
 
 	// FREEAIM: red ground material for the aim wedge — unshaded + alpha so it sits flat over any terrain.
 	private static readonly StandardMaterial3D AimWedgeMaterial = MarkerMaterial(new Color(0.95f, 0.15f, 0.15f, 0.45f));
 
 	// How long the wedge stays lit after an attack (ms). SWING-COMMIT: tied to the movement-root window
-	// (CombatTuning.MovementRootMs, ~200 ms) so the telegraph reads as a single COMMITTED beat — the wedge clears
-	// exactly as the attacker is freed to step again — instead of lingering as a stale decal long after the root.
-	// Still well inside the ~600 ms attack cooldown, so each swing's flash clears before the next.
+	// (CombatTuning.MovementRootMs, ~200 ms) so the telegraph reads as a single COMMITTED beat. (Kept on the shared
+	// default; the live root is short and the cooldown gates re-flashes, so this fixed flash window is fine.)
 	private const ulong AimWedgeFlashMs = (ulong)CombatTuning.MovementRootMs;
 
-	// The flat wedge (pie-slice) mesh, authored ONCE in the XZ plane pointing along +X, spanning [-half, +half]
-	// around it out to FreeAimRadiusTiles. A triangle fan from the apex (player origin). The MeshInstance3D is then
-	// yawed about +Y by -aimRadians so +X maps to the world aim bearing (atan2(dz, dx)).
-	private static readonly ArrayMesh AimWedgeMesh = BuildAimWedgeMesh();
-
-	private static ArrayMesh BuildAimWedgeMesh()
+	// COMBAT-TUNING: (re)build the flat wedge (pie-slice) mesh from the CURRENT half-angle/radius, authored in the XZ
+	// plane pointing along +X, spanning [-half, +half] out to radius. A triangle fan from the apex (player origin);
+	// the MeshInstance3D is yawed by -aimRadians so +X maps to the world aim bearing. Cheap (32 verts) and only on a
+	// tuning change, so it never runs on the hot path.
+	private ArrayMesh BuildAimWedgeMesh(float halfAngleDegrees, float radiusTiles)
 	{
 		const int segments = 16;
-		var half = Mathf.DegToRad(FreeAimHalfAngleDegrees);
+		var half = Mathf.DegToRad(halfAngleDegrees);
 		var verts = new Godot.Collections.Array();
 		verts.Resize((int)Mesh.ArrayType.Max);
 
@@ -3025,7 +3209,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			var a = -half + (2f * half * i / segments);
 			// Author in XZ pointing along +X: (cos a, 0, sin a) * radius. Yawing by -aim later rotates +X to the aim.
-			points.Add(new Vector3(Mathf.Cos(a) * FreeAimRadiusTiles, 0f, Mathf.Sin(a) * FreeAimRadiusTiles));
+			points.Add(new Vector3(Mathf.Cos(a) * radiusTiles, 0f, Mathf.Sin(a) * radiusTiles));
 		}
 
 		var vertexArray = new Vector3[segments * 3];
@@ -3044,6 +3228,31 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		return mesh;
 	}
 
+	// COMBAT-TUNING: adopt the replicated half-angle/radius and rebuild the wedge mesh if the snapshot changed since
+	// the last build (or on first build). Called before a flash and from RefreshHud so a live combat.* tweak updates
+	// the telegraph without a restart. No-op when the version is unchanged.
+	private void RebuildAimWedgeMeshIfNeeded()
+	{
+		var version = _client?.CombatTuningVersion ?? 0;
+		if (_aimWedgeMesh is not null && version == _aimWedgeBuiltTuningVersion)
+		{
+			return;
+		}
+
+		if (_client?.CombatTuning is { } tuning)
+		{
+			_aimWedgeHalfAngleDegrees = (float)tuning.HalfAngleDegrees;
+			_aimWedgeRadiusTiles = (float)tuning.RadiusTiles;
+		}
+
+		_aimWedgeMesh = BuildAimWedgeMesh(_aimWedgeHalfAngleDegrees, _aimWedgeRadiusTiles);
+		_aimWedgeBuiltTuningVersion = version;
+		if (_aimWedge is not null)
+		{
+			_aimWedge.Mesh = _aimWedgeMesh;
+		}
+	}
+
 	// Creates the wedge MeshInstance3D under the world root on first use (idempotent, hidden). No-op pre-zone.
 	private void EnsureAimWedge()
 	{
@@ -3052,10 +3261,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		RebuildAimWedgeMeshIfNeeded();
 		_aimWedge = new MeshInstance3D
 		{
 			Name = "AimWedge",
-			Mesh = AimWedgeMesh,
+			Mesh = _aimWedgeMesh,
 			MaterialOverride = AimWedgeMaterial,
 			Visible = false
 		};
@@ -3067,6 +3277,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void FlashAimWedge(Vector3 origin, float aimRadians)
 	{
 		EnsureAimWedge();
+		RebuildAimWedgeMeshIfNeeded();
 		if (_aimWedge is null)
 		{
 			return;

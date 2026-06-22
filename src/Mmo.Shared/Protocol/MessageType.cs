@@ -30,5 +30,9 @@ public enum MessageType : ushort
     InventoryUpdate = 109,
     MovementSpeedChanged = 110,
     // COMBAT-S1: server->owner replication of the local player's vitals (HP/mana/stamina, current+max).
-    PlayerStats = 111
+    PlayerStats = 111,
+    // COMBAT-TUNING (v31): server->client replication of the live combat feel-knobs (attack cooldown, swing-root
+    // duration, sector half-angle/radius, damage). Sent on login + on every admin tuning change so the client's
+    // wedge/predictor/cooldown-viz match the server's resolution. See CombatTuningSnapshot.
+    CombatTuning = 112
 }

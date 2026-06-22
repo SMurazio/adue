@@ -313,13 +313,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirty()
+    public void ProtocolVersionIsThirtyOne()
     {
-        // SWING-COMMIT-FIX protocol bump (v29 -> v30): AttackMessage gains an authored tick (uint) so the server can
-        // root the swing at the same logical tick the predictor did (killing the swing-then-move rubberband under
-        // latency). A wire layout change is breaking (server + client ship together). Pin the version so an accidental
-        // change is caught.
-        Assert.Equal(30, ProtocolCodec.Version);
+        // COMBAT-TUNING protocol bump (v30 -> v31): new server->client CombatTuningMessage replicating the live combat
+        // feel-knobs (attack cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's
+        // wedge/predictor/cooldown viz match the server's authoritative resolution. A new message type is breaking
+        // (server + client ship together). Pin the version so an accidental change is caught.
+        Assert.Equal(31, ProtocolCodec.Version);
     }
 
     [Fact]
@@ -388,6 +388,27 @@ public sealed class ProtocolCodecTests
         var decoded = Assert.IsType<PlayerStatsMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(new CharacterStats(73, 100, 41, 120, 5, 80), decoded.Stats);
+    }
+
+    [Fact]
+    public void CombatTuningRoundTrips()
+    {
+        // COMBAT-TUNING (v31): the five combat feel-knobs replicate intact, including the fractional geometry
+        // (half-angle deg, radius tiles) the panel can nudge.
+        var original = new CombatTuningMessage(new CombatTuningSnapshot(
+            AttackCooldownMs: 750,
+            RootMs: 180,
+            HalfAngleDegrees: 37.5,
+            RadiusTiles: 2.25,
+            Damage: 33));
+
+        var decoded = Assert.IsType<CombatTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(750, decoded.Tuning.AttackCooldownMs);
+        Assert.Equal(180, decoded.Tuning.RootMs);
+        Assert.Equal(37.5, decoded.Tuning.HalfAngleDegrees);
+        Assert.Equal(2.25, decoded.Tuning.RadiusTiles);
+        Assert.Equal(33, decoded.Tuning.Damage);
     }
 
     [Fact]

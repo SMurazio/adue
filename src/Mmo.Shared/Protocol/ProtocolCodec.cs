@@ -15,7 +15,11 @@ public static class ProtocolCodec
     // stamped the swing on — so the server roots the attacker's movement at the SAME logical tick the predictor
     // did (mirroring the NET3 authored-tick step commit), killing the swing-then-move rubberband under latency.
     // Server + client ship together.
-    public const byte Version = 30;
+    // COMBAT-TUNING (v31): new server->client CombatTuningMessage replicating the live combat feel-knobs (attack
+    // cooldown ms, swing-root ms, sector half-angle deg, radius tiles, damage) so the client's wedge/predictor/
+    // cooldown-viz match the server's authoritative resolution. Sent on login + on every combat.* tuning change.
+    // Server + client ship together.
+    public const byte Version = 31;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -146,6 +150,9 @@ public static class ProtocolCodec
             case PlayerStatsMessage value:
                 WriteCharacterStats(writer, value.Stats);
                 break;
+            case CombatTuningMessage value:
+                WriteCombatTuning(writer, value.Tuning);
+                break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
                 writer.Write(value.NetworkId);
@@ -263,6 +270,7 @@ public static class ProtocolCodec
                 reader.ReadUInt16()),
             MessageType.MovementSpeedChanged => new MovementSpeedChangedMessage(reader.ReadUInt32(), reader.ReadUInt16()),
             MessageType.PlayerStats => new PlayerStatsMessage(ReadCharacterStats(reader)),
+            MessageType.CombatTuning => new CombatTuningMessage(ReadCombatTuning(reader)),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
@@ -562,6 +570,28 @@ public static class ProtocolCodec
         writer.Write(stats.MaxMana);
         writer.Write(stats.Stamina);
         writer.Write(stats.MaxStamina);
+    }
+
+    // COMBAT-TUNING (v31): the five combat feel-knobs in a fixed order. Mirrored in ReadCombatTuning. Ints for the
+    // ms/damage knobs, doubles for the geometry (half-angle deg, radius tiles) so the panel can nudge fractional
+    // reach/arc. Rides an owner/all-clients reliable message sent rarely — the few extra bytes are irrelevant.
+    private static void WriteCombatTuning(BinaryWriter writer, CombatTuningSnapshot tuning)
+    {
+        writer.Write(tuning.AttackCooldownMs);
+        writer.Write(tuning.RootMs);
+        writer.Write(tuning.HalfAngleDegrees);
+        writer.Write(tuning.RadiusTiles);
+        writer.Write(tuning.Damage);
+    }
+
+    private static CombatTuningSnapshot ReadCombatTuning(BinaryReader reader)
+    {
+        var attackCooldownMs = reader.ReadInt32();
+        var rootMs = reader.ReadInt32();
+        var halfAngleDeg = reader.ReadDouble();
+        var radiusTiles = reader.ReadDouble();
+        var damage = reader.ReadInt32();
+        return new CombatTuningSnapshot(attackCooldownMs, rootMs, halfAngleDeg, radiusTiles, damage);
     }
 
     private static CharacterStats ReadCharacterStats(BinaryReader reader)

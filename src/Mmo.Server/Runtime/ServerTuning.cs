@@ -1,4 +1,5 @@
 using Mmo.Server.Configuration;
+using Mmo.Shared.Domain;
 
 namespace Mmo.Server.Runtime;
 
@@ -22,6 +23,37 @@ public sealed class ServerTuning
         StepCooldownMs = options.StepCooldownMs;
         InterestRadius = options.InterestRadius;
     }
+
+    // COMBAT-TUNING (live): the free-aim combat feel-knobs, now LIVE-tunable (combat.* registry keys) and replicated
+    // to clients (CombatTuningSnapshot) so the server's resolution and the client's wedge/predictor/cooldown-viz can
+    // never silently drift. Seeded to the former hard-coded constants so default behaviour is byte-for-byte
+    // unchanged; the registry clamps any live change. Read fresh each attack in HandleAttack + FreeAimSectorResolver.
+    //
+    //   AttackCooldownMs — per-entity attack cadence gate (was the GameServer.AttackCooldownMs const, 600).
+    //   AttackRootMs     — how long an accepted swing roots the attacker's MOVEMENT (was CombatTuning.MovementRootMs,
+    //                      200). The client predictor mirrors this via the replicated snapshot for swing-root parity.
+    //   FreeAimHalfAngleDegrees / FreeAimRadiusTiles — the sector geometry (were the GameServer consts 45 / 1.6).
+    //   AttackDamage     — HP per enemy hit (was GameServer.MeleeConeDamage, 20).
+    public int AttackCooldownMs { get; set; } = 600;
+    public int AttackRootMs { get; set; } = CombatTuning.MovementRootMs;
+    public double FreeAimHalfAngleDegrees { get; set; } = 45d;
+    public double FreeAimRadiusTiles { get; set; } = 1.6d;
+    public int AttackDamage { get; set; } = 20;
+
+    public double FreeAimHalfAngleRadians => FreeAimHalfAngleDegrees * System.Math.PI / 180d;
+
+    // Attack cooldown in TICKS, derived exactly like the old GameServer.AttackCooldownTicks (Ceiling, >= 1) so the
+    // default value is unchanged and a live change stays tick-quantised the same way.
+    public uint AttackCooldownTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(AttackCooldownMs / (1000d / _tickRate)));
+
+    // Swing movement-root in TICKS, via the shared CombatTuning conversion off the LIVE AttackRootMs (so the server
+    // and the client predictor compute the identical rootTicks from the same replicated rootMs — the parity point).
+    public uint AttackRootTicks => CombatTuning.RootTicks(_tickRate, AttackRootMs);
+
+    // The current combat knobs as the wire snapshot the server replicates to clients (login + on change).
+    public CombatTuningSnapshot CombatSnapshot =>
+        new(AttackCooldownMs, AttackRootMs, FreeAimHalfAngleDegrees, FreeAimRadiusTiles, AttackDamage);
 
     // Global base step cooldown in ms. PINNED (SPEED1): seeded once from ServerOptions and never changed at
     // runtime — the old move.stepCooldownMs live knob was removed so the base walk speed is a constant 150 ms

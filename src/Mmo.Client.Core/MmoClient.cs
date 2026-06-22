@@ -330,6 +330,23 @@ public sealed class MmoClient : IDisposable
     // confirmed value lands back here.
     public CharacterStats? LocalStats { get; private set; }
 
+    // COMBAT-TUNING: client-side mirror of the server's authoritative combat feel-knobs, last replicated by
+    // CombatTuningMessage (login + on change). Null until the first snapshot arrives (right after login). The Godot
+    // layer reads this read-only to rebuild the free-aim wedge mesh (half-angle/radius), drive the predictor's
+    // swing-root (rootMs), and size the radial cooldown indicator (attackCooldownMs) — so the client never re-derives
+    // combat numbers from its own constants. The server stays authoritative; the panel sends AdminSetTuning and the
+    // confirmed snapshot lands back here. CombatTuningVersion bumps each time it changes so the Godot layer can
+    // cheaply detect "the snapshot changed, rebuild the wedge" without comparing fields.
+    public CombatTuningSnapshot? CombatTuning { get; private set; }
+    public int CombatTuningVersion { get; private set; }
+
+    // COMBAT-TUNING (radial cooldown): the client clock time of the most recent attack we SENT, and the cooldown
+    // duration in effect when we sent it (snapshotted so a mid-cooldown tuning change doesn't retroactively rescale
+    // the in-flight sweep). AttackCooldownRemainingFraction reads these against the live clock. This is a LOCAL
+    // estimate for the HUD indicator only — the server remains authoritative for whether an attack actually resolves.
+    private TimeSpan? _lastAttackSentAt;
+    private double _lastAttackCooldownMs;
+
     // The most recent InteractResult the server sent, with a monotonic counter so a HUD can detect a new
     // result (success or a failure reason like "too_far"/"depleted") without an event subscription. Null
     // until the first interaction completes.
@@ -1003,18 +1020,70 @@ public sealed class MmoClient : IDisposable
         var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
         Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle, authoredTick), DeliveryMethod.ReliableOrdered);
 
+        // COMBAT-TUNING (radial cooldown): record this swing's send time + the cooldown duration in effect now (the
+        // replicated attackCooldownMs, falling back to the shared default before the first snapshot) so the HUD's
+        // radial cooldown indicator on the LMB slot can sweep from now to now+cooldown. Local HUD estimate only —
+        // the server stays authoritative for whether the attack actually resolved.
+        _lastAttackSentAt = _currentTime;
+        _lastAttackCooldownMs = CombatTuning?.AttackCooldownMs ?? DefaultAttackCooldownMs;
+
         // SWING-COMMIT (predictor mirror): the local player just committed a swing, so root the predicted movement
         // IDENTICALLY to the server's WorldEntity.ApplyAttackMovementRoot (driven from GameServer.HandleAttack). We
-        // compute rootTicks from the SAME CombatTuning source the server uses, off the predictor's tick interval
-        // (RootTicksFromTickMs == RootTicks(tickRate) since tickRate = 1000/tickMs), and anchor it on the SAME
-        // authoredTick we just put on the wire (not a re-estimate) — same value, same floor, same anchor as the
-        // server will use. No predictor => nothing to root (no local prediction this mode); the server still roots.
+        // compute rootTicks from the SAME Mmo.Shared.Domain.CombatTuning source the server uses, off the predictor's
+        // tick interval AND the LIVE replicated rootMs (combat.rootMs) — so steady-state both sides root for the
+        // identical window. Falls back to the shared default rootMs before the first snapshot. Anchored on the SAME
+        // authoredTick we put on the wire (not a re-estimate). No predictor => nothing to root; the server still roots.
         if (_predictor is { } predictor)
         {
-            predictor.ApplyAttackMovementRootAt(authoredTick, CombatTuning.RootTicksFromTickMs(predictor.TickMs));
+            var rootMs = CombatTuning?.RootMs ?? Mmo.Shared.Domain.CombatTuning.MovementRootMs;
+            predictor.ApplyAttackMovementRootAt(
+                authoredTick,
+                Mmo.Shared.Domain.CombatTuning.RootTicksFromTickMs(predictor.TickMs, rootMs));
         }
 
         return sequence;
+    }
+
+    // COMBAT-TUNING: the attack-cooldown fallback used before the first replicated CombatTuningSnapshot arrives —
+    // the historical 600 ms constant. Once a snapshot lands, the replicated value drives both the radial cooldown
+    // sweep and (server-side) the actual gate, so this is only the pre-login default.
+    private const double DefaultAttackCooldownMs = 600d;
+
+    // COMBAT-TUNING (radial cooldown): the local estimate of the attack-cooldown sweep fraction in [0,1] — 1.0 right
+    // after a swing, decaying linearly to 0.0 when the cooldown elapses, and 0.0 when no attack is in flight. The HUD
+    // feeds this to the LMB autoattack slot's radial indicator. Pure read-out off the last-sent-attack bookkeeping;
+    // never mutates state. Also returns the remaining seconds (for the countdown number) via `remainingSeconds`.
+    public double AttackCooldownRemainingFraction(out double remainingSeconds)
+    {
+        return ComputeCooldownFraction(_lastAttackSentAt, _lastAttackCooldownMs, _currentTime, out remainingSeconds);
+    }
+
+    // Pure, testable cooldown math: given when the last attack was sent, the cooldown ms in effect then, and the
+    // current clock, returns the remaining fraction in [0,1] and the remaining seconds. No attack / non-positive
+    // cooldown / elapsed cooldown all read as 0 (ready). Extracted static so the fraction is unit-tested without a
+    // live client/socket.
+    internal static double ComputeCooldownFraction(TimeSpan? lastAttackSentAt, double cooldownMs, TimeSpan now, out double remainingSeconds)
+    {
+        remainingSeconds = 0d;
+        if (lastAttackSentAt is not { } sentAt || cooldownMs <= 0d)
+        {
+            return 0d;
+        }
+
+        var elapsedMs = (now - sentAt).TotalMilliseconds;
+        if (elapsedMs < 0d)
+        {
+            elapsedMs = 0d;
+        }
+
+        var remainingMs = cooldownMs - elapsedMs;
+        if (remainingMs <= 0d)
+        {
+            return 0d;
+        }
+
+        remainingSeconds = remainingMs / 1000d;
+        return Math.Clamp(remainingMs / cooldownMs, 0d, 1d);
     }
 
     // S60 admin live-tuning: ask the server to set a tuning key (e.g. "move.stepCooldownMs") to a value.
@@ -1130,6 +1199,13 @@ public sealed class MmoClient : IDisposable
                 break;
             case PlayerStatsMessage stats:
                 LocalStats = stats.Stats;
+                break;
+            case CombatTuningMessage tuning:
+                // COMBAT-TUNING: adopt the replicated combat snapshot and bump the version so the Godot layer
+                // rebuilds the wedge mesh / re-derives the cooldown duration. Pure mirror — no prediction here; the
+                // predictor's swing-root reads the live RootMs at SendAttack time.
+                CombatTuning = tuning.Tuning;
+                CombatTuningVersion++;
                 break;
         }
     }
