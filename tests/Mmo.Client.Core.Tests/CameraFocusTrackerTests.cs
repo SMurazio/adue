@@ -31,7 +31,7 @@ public sealed class CameraFocusTrackerTests
     }
 
     [Fact]
-    public void BlendOfOneFollowsCosmeticExactlyLikeTodaysCamera()
+    public void BlendOfOneFollowsRenderedPositionExactlyLikeTodaysCamera()
     {
         var tracker = new CameraFocusTracker();
         var (x, y) = tracker.Advance(10, 20, 12.5, 22.5, followBlend: 1.0, smoothingPerSecond: 0, deltaSeconds: 0.016, teleportSnapDistance: SnapTiles);

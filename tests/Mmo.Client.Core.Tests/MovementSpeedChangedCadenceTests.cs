@@ -8,10 +8,9 @@ using Xunit;
 namespace Mmo.Client.Core.Tests;
 
 // S106 — a live MovementSpeedChanged (the F6 "Move speed" dropdown -> /speed -> server -> MovementSpeedChanged)
-// must retune the local predictor's cadence so prediction tracks the new speed with no desync. Scoped to
-// UoClientDriven (the only supported movement mode; the other render modes are iced). The predictor attaches on
-// the first move intent (SendMoveIntent -> EnsurePredictor), so the test sends one to establish it before
-// asserting the cadence re-sync.
+// must retune the local predictor's cadence so prediction tracks the new speed with no desync. The predictor is
+// the sole local-player render path; it attaches on the first move intent (SendMoveIntent -> EnsurePredictor), so
+// the test sends one to establish it before asserting the cadence re-sync.
 public sealed class MovementSpeedChangedCadenceTests
 {
     private const uint LocalNetworkId = 1;
@@ -25,7 +24,7 @@ public sealed class MovementSpeedChangedCadenceTests
     [Fact]
     public void SpeedChangeRetunesPredictorCadence()
     {
-        var client = CreateLoggedInClientWithLocalEntity(MovementRenderMode.UoClientDriven, out _);
+        var client = CreateLoggedInClientWithLocalEntity(out _);
         client.SendMoveIntent(false, Direction8.S); // attaches the predictor (EnsurePredictor) at the base cadence.
 
         Assert.Equal(150d, client.LocalPredictorCadenceMsForTests);
@@ -35,7 +34,7 @@ public sealed class MovementSpeedChangedCadenceTests
         Assert.Equal(FasterCadenceMs, client.LocalPredictorCadenceMsForTests);
     }
 
-    private static MmoClient CreateLoggedInClientWithLocalEntity(MovementRenderMode mode, out List<IProtocolMessage> outbound)
+    private static MmoClient CreateLoggedInClientWithLocalEntity(out List<IProtocolMessage> outbound)
     {
         outbound = [];
         var captured = outbound;
@@ -53,7 +52,6 @@ public sealed class MovementSpeedChangedCadenceTests
         client.HandleMessageForTests(new EntitySpawnMessage(
             LocalNetworkId, characterId, EntityKind.Player, "Local", spawn, Direction8.S, StepCooldownMs: BaseStepCooldownMs));
 
-        client.RenderMode = mode;
         return client;
     }
 }

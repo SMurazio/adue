@@ -141,14 +141,11 @@ public sealed class MmoClientDeltadOutReconcileTests
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
         Assert.NotNull(client.Zone);
-        // RENDER1: the standalone server-paced Predicted mode was dropped; UoClientDriven is now the only mode that
-        // routes the local player through the predictor (PredictedLocalTile). These tests exercise the S84
-        // delta'd-out reconcile ROUTING at the MmoClient seam (ApplySnapshot consuming the header RecipientStepSeq
-        // for a local player ABSENT from the payload), which is mode-independent — so pin UoClientDriven explicitly.
-        // NOTE: the per-mode OBSERVABLE differs — server-paced converged the over-prediction DOWN at rest; UO
-        // (client-driven) re-projects the banked commits FORWARD (the server FOLLOWS them) and only collapses on a
-        // genuine reject. The assertions below reflect the UO-correct observable.
-        client.RenderMode = MovementRenderMode.UoClientDriven;
+        // The local player is always routed through the predictor (client-driven UO — the sole render path). These
+        // tests exercise the S84 delta'd-out reconcile ROUTING at the MmoClient seam (ApplySnapshot consuming the
+        // header RecipientStepSeq for a local player ABSENT from the payload). The client (client-driven) re-projects
+        // the banked commits FORWARD (the server FOLLOWS them) and only collapses on a genuine reject; the assertions
+        // below reflect that observable.
         return client;
     }
 }

@@ -4,9 +4,10 @@ using Xunit;
 
 namespace Mmo.Client.Core.Tests;
 
-// UO1 client-driven render mode at the MmoClient seam. Selecting UoClientDriven routes the local player through the
-// predictor (model A) AND (a) sends a MovementModeMessage(true) on enter / (false) on leave, and (b) emits the
-// predicted accepted steps as commits (the server FOLLOWS the client). NET2: those commits now ride the
+// UO1 client-driven render path at the MmoClient seam. The local player is ALWAYS routed through the predictor
+// (model A) — it is the SOLE local-player render path (the former model-B selector was removed). On predictor
+// attach the client (a) sends a MovementModeMessage(true) declaring the session client-driven, and (b) emits the
+// predicted accepted steps as commits (the server FOLLOWS the client). NET2: those commits ride the
 // redundant-unreliable StepCommitBatchMessage (head = the newest committed step of the Poll, plus a window of
 // prior committed steps as deltas) instead of one reliable StepCommitRequest per step. These tests drive real
 // prediction (held intent + Poll) over an open field and assert the emitted batch stream.
@@ -48,18 +49,16 @@ public sealed class MmoClientUoClientDrivenTests
     }
 
     [Fact]
-    public void EnteringUoMode_SendsClientDrivenTrue_LeavingSendsFalse()
+    public void AttachingPredictor_DeclaresClientDriven()
     {
         var client = CreateLoggedInClientWithLocalEntity(new TileCoord(20, 20), out var outbound);
 
-        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
-        var enter = Assert.Single(outbound.OfType<MovementModeMessage>());
-        Assert.True(enter.ClientDriven);
-
-        outbound.Clear();
-        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
-        var leave = Assert.Single(outbound.OfType<MovementModeMessage>());
-        Assert.False(leave.ClientDriven);
+        // The predictor attaches lazily on the first SendMoveIntent (EnsurePredictor); that is where the session is
+        // declared client-driven to the server. The local player is always client-driven now, so the signal is
+        // client-driven=true.
+        client.SendMoveIntent(true, Direction8.E);
+        var declare = Assert.Single(outbound.OfType<MovementModeMessage>());
+        Assert.True(declare.ClientDriven);
     }
 
     [Fact]
@@ -67,11 +66,10 @@ public sealed class MmoClientUoClientDrivenTests
     {
         var spawn = new TileCoord(20, 20);
         var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
-        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
-        outbound.Clear(); // drop the mode-enter message; we only count commits below.
 
         // Hold east and poll across exactly 3 cadence boundaries (t=0, 150, 300 ms) -> 3 accepted predicted steps.
         client.SendMoveIntent(true, Direction8.E);
+        outbound.Clear(); // drop the predictor-attach mode message; we only count commits below.
         client.Poll(TimeSpan.FromMilliseconds(0));
         client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));
         client.Poll(TimeSpan.FromMilliseconds(2 * StepCooldownMs));
@@ -93,8 +91,6 @@ public sealed class MmoClientUoClientDrivenTests
     {
         var spawn = new TileCoord(20, 20);
         var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
-        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
-        outbound.Clear();
 
         client.SendMoveIntent(true, Direction8.E);    // MoveIntent seq N
         client.Poll(TimeSpan.FromMilliseconds(0));     // commit seq N+1
@@ -125,38 +121,18 @@ public sealed class MmoClientUoClientDrivenTests
     }
 
     [Fact]
-    public void NonUoMode_EmitsNoCommitsFromPolling_AndNoModeMessage()
-    {
-        var spawn = new TileCoord(20, 20);
-        var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
-        // RENDER1: CosmeticLead is the only non-UO mode now (Predicted was dropped). It must not stream commits
-        // from Poll, nor send a movement-mode message. (Default boot is UoClientDriven, so pin CosmeticLead first.)
-        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
-        outbound.Clear(); // drop the UO->Cosmetic transition's MovementModeMessage(clientDriven:false).
-
-        client.SendMoveIntent(true, Direction8.E);
-        client.Poll(TimeSpan.FromMilliseconds(0));
-        client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));
-
-        Assert.Empty(outbound.OfType<MovementModeMessage>());
-        Assert.Empty(outbound.OfType<StepCommitRequestMessage>());
-        Assert.Empty(outbound.OfType<StepCommitBatchMessage>());
-    }
-
-    [Fact]
     public void UoMode_StopOnReversalOn_180Flip_SuppressesTheReverseCommitForOneBeat()
     {
-        // UO4 at the client seam: in UoClientDriven with "Stop on reversal" ON, a 180° flip while moving must NOT
-        // emit a reversed commit on the very next beat (the settle) — the server, which follows commits, then does
-        // not step the reverse either. The beat after resumes and emits the new (W) commit.
+        // UO4 at the client seam: with "Stop on reversal" ON, a 180° flip while moving must NOT emit a reversed
+        // commit on the very next beat (the settle) — the server, which follows commits, then does not step the
+        // reverse either. The beat after resumes and emits the new (W) commit.
         var spawn = new TileCoord(20, 20);
         var client = CreateLoggedInClientWithLocalEntity(spawn, out var outbound);
-        client.SetMovementRenderMode(MovementRenderMode.UoClientDriven);
         client.SetStopOnReversal(true);
-        outbound.Clear();
 
         // Travel E for two steps, then flip to W (180°).
         client.SendMoveIntent(true, Direction8.E);
+        outbound.Clear();
         client.Poll(TimeSpan.FromMilliseconds(0));                 // E commit (step to 21,20)
         client.Poll(TimeSpan.FromMilliseconds(StepCooldownMs));    // E commit (step to 22,20)
         Assert.Equal(new TileCoord(22, 20), client.PredictedLocalTile);
@@ -197,12 +173,6 @@ public sealed class MmoClientUoClientDrivenTests
         Assert.Equal(LocalNetworkId, client.LocalNetworkId);
         Assert.Equal(spawn, client.LocalTile);
 
-        // RENDER1: the client now BOOTS into UoClientDriven (the new default). These tests assert the UO ENTER
-        // transition (MovementModeMessage(true) + commit stream), so start each from the non-UO baseline
-        // (CosmeticLead) and clear the transition's outbound so a later SetMovementRenderMode(UoClientDriven) is a
-        // real enter (not a no-op). Mirrors the pre-RENDER1 default and keeps every UO-transition assertion intact.
-        client.SetMovementRenderMode(MovementRenderMode.CosmeticLead);
-        outbound.Clear();
         return client;
     }
 }

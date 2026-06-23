@@ -46,8 +46,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
 	// S95: camera focus blend + temporal smoothing (S102: now live F6 levers). Defaults reproduce TODAY's camera
-	// exactly: blend 1.0 = follow the cosmetic character, smoothing 0 = hard-follow (no glide). The tracker
-	// blends the confirmed tile and cosmetic position and frame-rate-independently smooths a persistent focus
+	// exactly: blend 1.0 = follow the rendered character position, smoothing 0 = hard-follow (no glide). The tracker
+	// blends the confirmed tile and rendered position and frame-rate-independently smooths a persistent focus
 	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
 	private float _cameraFollowBlend = 1.0f;
 	private float _cameraSmoothing = 15f;
@@ -139,41 +139,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _movementPanel;
 	private bool _movementPanelVisible;
 	private bool _movementFieldsSeeded;
-	// Moved from F5: net latency (S93), cosmetic lead distance (S94), camera follow blend + smoothing (S95).
+	// Moved from F5: net latency (S93), camera follow blend + smoothing (S95).
 	private LineEdit? _moveNetLatencyMs;
-	private LineEdit? _moveCosmeticLeadTiles;
 	private LineEdit? _moveCameraFollowBlend;
 	private LineEdit? _moveCameraSmoothing;
 	// New (S102): camera teleport-snap distance (tiles) — exposes the former CameraTeleportSnapTiles const live.
 	private LineEdit? _moveCameraTeleportSnapTiles;
-	// RENDER1: 2-way render-mode selector (CosmeticLead / UoClientDriven) — a cycling button that calls
-	// MmoClient.SetMovementRenderMode.
-	private Button? _renderModeButton;
-	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). ALWAYS shown
-	// (speed is mode-agnostic). Each item carries its multiplier; selecting one sends /speed <mult> live. Populated
-	// once on first open from ServerHello (base cadence + tick rate). _moveSpeedOptions is the parallel option list
-	// (item index -> SpeedOption) so the selection handler can read the multiplier without re-deriving it.
+	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). Each item carries
+	// its multiplier; selecting one sends /speed <mult> live. Populated once on first open from ServerHello (base
+	// cadence + tick rate). _moveSpeedOptions is the parallel option list (item index -> SpeedOption) so the
+	// selection handler can read the multiplier without re-deriving it.
 	private OptionButton? _moveSpeedDropdown;
 	private IReadOnlyList<MovementSpeedOptions.SpeedOption> _moveSpeedOptions = Array.Empty<MovementSpeedOptions.SpeedOption>();
-	// New (S102): model B's S91 snap-to-confirmed-on-release toggle (MmoClient.SetSnapOnRelease).
-	private CheckBox? _snapOnReleaseCheck;
-	// New (S103): model B's commit-step-on-release toggle (MmoClient.SetCommitStepOnRelease) + threshold field
-	// (MmoClient.SetCommitStepThreshold, applied on Apply/Enter).
-	private CheckBox? _commitStepCheck;
-	private LineEdit? _moveCommitThreshold;
-	// UO2: one-line caption under the render-mode button naming what the ACTIVE mode does (self-documenting).
-	private Label? _renderModeCaption;
-	// UO2: the rows that are MODEL-B (CosmeticLead) ONLY — cosmetic lead distance, snap-on-release, commit-step +
-	// its threshold. These are documented "inert otherwise" in MmoClient, so the F6 panel HIDES them in
-	// UoClientDriven. Captured as their owning row containers so visibility toggles the
-	// whole label+control row (not just the input). Re-evaluated on render-mode change and on panel open.
-	private readonly List<Control> _modelBOnlyRows = new();
-	// UO4: the "Stop on reversal" (settle-then-go) toggle, and the rows that are PREDICTOR-mode only (UoClientDriven)
-	// — the stop-on-reversal lever lives in the predictor, so the F6 panel SHOWS it only in that mode and hides it
-	// in CosmeticLead (where it is inert). Re-evaluated on render-mode change and on panel open, alongside the
-	// model-B-only rows.
+	// UO4: the "Stop on reversal" (settle-then-go) toggle. The stop-on-reversal lever lives in the predictor (the
+	// sole local-player render path), so it is always shown on the F6 panel.
 	private CheckBox? _stopOnReversalCheck;
-	private readonly List<Control> _predictorOnlyRows = new();
 
 	// ---- COMBAT-S1 F7 dev-set vitals panel --------------------------------------------------------
 	// A dedicated admin-gated panel (F7) to set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row
@@ -1169,10 +1149,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
-		// RENDER1/ICE1: the LOCAL player's render-mode control USED to live on the F6 movement panel (2-way
-		// CosmeticLead / UoClientDriven button); it is now ICED — the selector isn't built and the client stays in
-		// UoClientDriven. See BuildMovementPanel for the iced note. (Code retained for later un-icing.)
-
 		// S107 HUD scaffold — live debug control (no Apply, no restart, no launch flag, per the live-toggle rule).
 		// Each press cycles the STUBBED HudState (health/resource/portrait/cooldowns) through demo presets so the
 		// HUD states can be exercised without a server. Mutates only stub fields; never touches movement state.
@@ -1192,11 +1168,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// S102: the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (F6). Holds the movement/camera-FEEL levers moved
-	// off F5 (net latency, cosmetic lead distance, camera follow blend + smoothing) plus new ones (3-way render
-	// mode, camera teleport-snap distance, snap-on-release). All applied INSTANTLY client-side (no server round-
-	// trip, no restart) via the same Apply-all / live-toggle pattern as F4/F5. Per-entity move SPEED is the "Move
-	// speed" dropdown here (sends /speed); the GLOBAL base cooldown is a pinned constant (SPEED1), not a knob.
-	// Hidden until F6 is pressed by an Admin session; seeded on first open from the live local values.
+	// off F5 (net latency, camera follow blend + smoothing) plus the camera teleport-snap distance and the
+	// stop-on-reversal toggle. All applied INSTANTLY client-side (no server round-trip, no restart) via the same
+	// Apply-all / live-toggle pattern as F4/F5. Per-entity move SPEED is the "Move speed" dropdown here (sends
+	// /speed); the GLOBAL base cooldown is a pinned constant (SPEED1), not a knob. Hidden until F6 is pressed by an
+	// Admin session; seeded on first open from the live local values.
 	private void BuildMovementPanel(CanvasLayer layer)
 	{
 		// Below the F5 panel (same right column) so all three admin panels can be open without overlapping.
@@ -1210,37 +1186,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var note = CreateOverlayLabel("MovementSpeedNote", 12);
 		note.Text = "— client-local (instant) · speed lives in F4 —";
 		rows.AddChild(note);
-
-		// ICE1 (2026-06-21): the render-mode SELECTOR is iced — UoClientDriven is the supported movement mode, and the
-		// other render modes (CosmeticLead, ...) are unreachable from the UI but KEPT in the codebase for later. We do
-		// NOT build the cycling button (so the client stays in its UoClientDriven default and cannot switch); the
-		// non-UO code path — the MovementRenderMode enum values, MmoClient.SetMovementRenderMode, the LocalPlayerCosmetic
-		// driver, the cadence plumbing, plus OnRenderModeCyclePressed / UpdateRenderModeButtonText / the model-B-only and
-		// predictor-only contextual rows below — is all retained, so un-icing later is just re-exposing this control.
-		// In place of the selector we show a disabled, self-documenting note so the panel reads cleanly.
-		var renderModeRow = new HBoxContainer { Name = "Row_RenderMode" };
-		renderModeRow.AddThemeConstantOverride("separation", 8);
-		var renderModeCaption = CreateOverlayLabel("Cap_RenderMode", 13);
-		renderModeCaption.Text = "Render mode";
-		renderModeCaption.CustomMinimumSize = new Vector2(170, 0);
-		renderModeRow.AddChild(renderModeCaption);
-		var renderModeIced = CreateOverlayLabel("RenderModeIced", 13);
-		renderModeIced.Text = "UO only (others iced)";
-		renderModeIced.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-		renderModeRow.AddChild(renderModeIced);
-		rows.AddChild(renderModeRow);
-		// _renderModeButton intentionally left null (no selector built) — UpdateRenderModeButtonText short-circuits on
-		// null and is a no-op while iced; ApplyRenderModeContext is still driven on panel open (ToggleMovementPanel) so
-		// the model-B-only rows stay hidden in the active UoClientDriven mode.
-
-		// UO2: one-line caption naming what the ACTIVE mode does, so the panel is self-documenting. While iced it always
-		// reflects UoClientDriven (the only reachable mode). Written by ApplyRenderModeContext on panel open.
-		_renderModeCaption = CreateOverlayLabel("RenderModeCaption", 11);
-		rows.AddChild(_renderModeCaption);
-
-		// Drive the contextual caption + row visibility once for the active (UoClientDriven) mode. (Calls
-		// ApplyRenderModeContext via the null-button short-circuit path; harmless while iced.)
-		ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.UoClientDriven);
 
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
 		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
@@ -1262,12 +1207,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Moved off F5 — applied on Apply/Enter:
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
-		// S94: how far model B's cosmetic lead glides ahead of the confirmed tile, in tiles. [0, 1]; 1.0 = current
-		// model B, 0 ≈ no visible lead. Lower values shorten the visible lead (and the release snap).
-		// UO2 model-B-only: register the owning row so it hides outside CosmeticLead.
-		_moveCosmeticLeadTiles = AddTuningField(rows, "Cosmetic lead (tiles)", OnMovementApplyPressed);
-		RegisterModelBOnlyRow(_moveCosmeticLeadTiles);
-		// S95: camera focus blend between the confirmed tile (0) and the cosmetic character (1, default).
+		// S95: camera focus blend between the confirmed tile (0) and the rendered character (1, default).
 		_moveCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnMovementApplyPressed);
 		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow.
 		_moveCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnMovementApplyPressed);
@@ -1275,47 +1215,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// (respawn / zone change) instead of gliding; below it the smoothing glides. Was the const = 4.
 		_moveCameraTeleportSnapTiles = AddTuningField(rows, "Camera teleport-snap (tiles)", OnMovementApplyPressed);
 
-		// S102 new live toggle — flips on click, no Apply needed: model B's S91 snap-to-confirmed-on-release.
-		// ON (default) = current behavior (hard snap to the confirmed tile on keyup). OFF = let the release glide
-		// settle over one cadence (no hard snap). Only affects model B (CosmeticLead); inert otherwise.
-		var snapOnRelease = new CheckBox
-		{
-			Name = "SnapOnRelease",
-			Text = "Snap on release (model B)",
-			ButtonPressed = _client?.SnapOnRelease ?? true
-		};
-		snapOnRelease.AddThemeFontSizeOverride("font_size", 13);
-		snapOnRelease.Toggled += ApplySnapOnRelease;
-		rows.AddChild(snapOnRelease);
-		_snapOnReleaseCheck = snapOnRelease;
-		_modelBOnlyRows.Add(snapOnRelease); // UO2: model-B-only.
-
-		// S103 new live toggle — flips on click, no Apply needed: commit a near-done step on release instead of
-		// snapping back. ON (default) = release past the threshold finishes the step + sends a server-validated
-		// commit (accept stays, reject snaps back). OFF = the S102 release behaviour (snap or soft-settle) always.
-		// Only affects model B (CosmeticLead); inert otherwise.
-		var commitStep = new CheckBox
-		{
-			Name = "CommitStepOnRelease",
-			Text = "Commit step on release (model B)",
-			ButtonPressed = _client?.CommitStepOnRelease ?? true
-		};
-		commitStep.AddThemeFontSizeOverride("font_size", 13);
-		commitStep.Toggled += ApplyCommitStepOnRelease;
-		rows.AddChild(commitStep);
-		_commitStepCheck = commitStep;
-		_modelBOnlyRows.Add(commitStep); // UO2: model-B-only.
-
-		// S103 commit threshold (0..1) — how far the cosmetic lead must have glided onto the next tile at release for
-		// a commit to fire. Default 0.7 ≈ "almost entirely on the next tile". Applied on Apply/Enter; clamped [0,1].
-		// UO2 model-B-only: register the owning row so it hides outside CosmeticLead.
-		_moveCommitThreshold = AddTuningField(rows, "Commit threshold (0..1)", OnMovementApplyPressed);
-		RegisterModelBOnlyRow(_moveCommitThreshold);
-
-		// UO4 new live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
+		// UO4 live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
 		// flip while moving settles to a clean tile stop, then resumes the new direction (kills the left-right
-		// bounce). OFF (default) = the current immediate reverse. Only the PREDICTOR mode (UoClientDriven) reads it;
-		// hidden in CosmeticLead where it is inert.
+		// bounce). OFF (default) = the current immediate reverse. The predictor (the sole local-player render path)
+		// reads it.
 		var stopOnReversal = new CheckBox
 		{
 			Name = "StopOnReversal",
@@ -1326,13 +1229,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		stopOnReversal.Toggled += ApplyStopOnReversal;
 		rows.AddChild(stopOnReversal);
 		_stopOnReversalCheck = stopOnReversal;
-		_predictorOnlyRows.Add(stopOnReversal); // UO4: predictor-modes only.
 
 		// RESYNC1: manual Force Resync button. Calls MmoClient.ForceResync() -> LocalPlayerPredictor.ForceResync(),
 		// which hard-snaps the local prediction (tile, step-seq, render) onto the last server-confirmed position and
 		// clears any stranded in-flight lead. USER-TRIGGERED escape hatch for a loss-induced desync; the same primitive
-		// as the Alt+R hotkey, and the one UO5/NET4 auto-tiers will call. Live, no restart; works in every render mode
-		// (in cosmetic mode it is a harmless snap-to-server).
+		// as the Alt+R hotkey, and the one UO5/NET4 auto-tiers will call. Live, no restart.
 		var forceResync = new Button { Name = "ForceResync", Text = "Force Resync" };
 		forceResync.AddThemeFontSizeOverride("font_size", 14);
 		forceResync.Pressed += () => _client?.ForceResync();
@@ -1414,83 +1315,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(panel);
 	}
 
-	// RENDER1: the render modes in cycle order, with the label shown on the F6 button for each. Trimmed to the two
-	// keepers: CosmeticLead (smooth glide) and UoClientDriven (Ultima-Online-style: instant prediction + the server
-	// FOLLOWS per-step commits — the default boot mode).
-	private static readonly MovementRenderMode[] RenderModeCycle =
-		[MovementRenderMode.CosmeticLead, MovementRenderMode.UoClientDriven];
-
-	// S102 F6 render-mode button: cycle to the next render mode and apply it LIVE. SetMovementRenderMode re-anchors
-	// the newly-active driver from the current render position so the avatar doesn't pop on the switch. No restart.
-	// ICE1: retained for later un-icing but currently UNWIRED — the F6 selector button isn't built, so nothing calls
-	// this. Re-expose it by rebuilding the render-mode button row in BuildMovementPanel and re-wiring Pressed here.
-	private void OnRenderModeCyclePressed()
-	{
-		if (_client is null)
-		{
-			return;
-		}
-
-		var current = _client.RenderMode;
-		var index = Array.IndexOf(RenderModeCycle, current);
-		var next = RenderModeCycle[(index + 1) % RenderModeCycle.Length];
-		_client.SetMovementRenderMode(next);
-		UpdateRenderModeButtonText();
-	}
-
-	// S102: reflect the client's ACTIVE render mode on the F6 button (also called on seed so re-opening is correct).
-	// UO2: also refresh the contextual panel (caption + model-B-only row visibility) so the controls always match
-	// the active mode, both when cycling and when (re-)opening the panel.
-	private void UpdateRenderModeButtonText()
-	{
-		if (_renderModeButton is null)
-		{
-			return;
-		}
-
-		var mode = _client?.RenderMode ?? MovementRenderMode.UoClientDriven;
-		_renderModeButton.Text = mode switch
-		{
-			MovementRenderMode.CosmeticLead => "Cosmetic (smooth glide)",
-			_ => "UO (client-driven)",
-		};
-
-		ApplyRenderModeContext(mode);
-	}
-
-	// UO2/RENDER1: make the F6 panel CONTEXTUAL to the active render mode. The cosmetic-lead distance,
-	// snap-on-release, commit-step toggle, and commit-threshold rows are model-B (CosmeticLead) ONLY — documented
-	// "inert otherwise" in MmoClient — so we HIDE them in UoClientDriven (hide, not grey, for cleanliness; the VBox
-	// just reflows so there are no dead rows). The render-mode button and the shared rows (net latency, camera feel)
-	// stay visible in every mode. Also writes the one-line "what this mode does" caption. UI-only.
-	private void ApplyRenderModeContext(MovementRenderMode mode)
-	{
-		var isModelB = mode == MovementRenderMode.CosmeticLead;
-		foreach (var row in _modelBOnlyRows)
-		{
-			row.Visible = isModelB;
-		}
-
-		// UO4/RENDER1: the stop-on-reversal lever is predictor-only (UoClientDriven). Show it there, hide it in
-		// CosmeticLead where the predictor isn't driving.
-		var isPredictorMode = mode is MovementRenderMode.UoClientDriven;
-		foreach (var row in _predictorOnlyRows)
-		{
-			row.Visible = isPredictorMode;
-		}
-
-		if (_renderModeCaption is not null)
-		{
-			_renderModeCaption.Text = mode switch
-			{
-				MovementRenderMode.CosmeticLead =>
-					"Cosmetic (smooth glide, no banking — best at low latency): confirmed steps drive sim; render glides ahead by the cosmetic lead.",
-				_ =>
-					"UO (client-driven — instant, server follows your steps): instant prediction; the server FOLLOWS your per-step commits.",
-			};
-		}
-	}
-
 	// S106: (re)populate the "Move speed" dropdown from ServerHello's base cadence + tick rate, and preselect the
 	// default walk (1.0x). Built lazily on first panel open (ServerHello has landed by login, so the base cadence is
 	// known). The item index maps 1:1 to _moveSpeedOptions so OnMoveSpeedSelected reads the multiplier directly.
@@ -1529,9 +1353,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// S106: a speed item was picked — set the LOCAL player's per-entity speed live by sending /speed <multiplier>
 	// (the existing chat-command path, like other dev commands). Admin-gated to match the rest of F6 (the server
 	// also admin-gates /speed, so a non-admin send is a server-side no-op; we gate client-side too for clarity). The
-	// server recomputes the effective cadence and replies with MovementSpeedChanged, which retunes BOTH local-player
-	// drivers (predictor + cosmetic) via EntityState.SetStepCooldownMs — so the avatar's glide tracks the new
-	// cadence in every render mode, including a mid-move switch.
+	// server recomputes the effective cadence and replies with MovementSpeedChanged, which retunes the local
+	// predictor via EntityState.SetStepCooldownMs — so the avatar's step rate tracks the new cadence live.
 	private void OnMoveSpeedSelected(long index)
 	{
 		if (_client?.Role != ClientRole.Admin)
@@ -1547,30 +1370,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var option = _moveSpeedOptions[(int)index];
 		_client.SendChat($"/speed {MovementSpeedOptions.FormatSpeedCommandArgument(option.Multiplier)}");
 		ShowInteractFeedback($"Move speed: {option.Label}");
-	}
-
-	// UO2: register a tuning-field ROW (the HBox built by AddTuningField, i.e. the LineEdit's parent) as model-B
-	// only, so ApplyRenderModeContext can hide the whole label+input row outside CosmeticLead.
-	private void RegisterModelBOnlyRow(LineEdit field)
-	{
-		if (field.GetParent() is Control row)
-		{
-			_modelBOnlyRows.Add(row);
-		}
-	}
-
-	// S102 F6 live toggle ("Snap on release (model B)"). Route the flag to the client (and the active cosmetic
-	// driver) immediately — no restart. ON = the S91 hard snap on keyup; OFF = soft settle over one cadence.
-	private void ApplySnapOnRelease(bool enabled)
-	{
-		_client?.SetSnapOnRelease(enabled);
-	}
-
-	// S103 F6 live toggle ("Commit step on release (model B)"). Route the flag to the client (and the active
-	// cosmetic driver) immediately — no restart. ON = commit a near-done step on release; OFF = the S102 release.
-	private void ApplyCommitStepOnRelease(bool enabled)
-	{
-		_client?.SetCommitStepOnRelease(enabled);
 	}
 
 	// UO4 F6 live toggle ("Stop on reversal"). Route the flag to the client (and the active predictor) immediately
@@ -2328,10 +2127,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				SeedMovementFields();
 				_movementFieldsSeeded = true;
 			}
-
-			// UO2: re-evaluate the contextual panel (caption + model-B row visibility) on EVERY open, so it always
-			// matches the live render mode even on re-opens (seeding only runs once). UI-only; no state change.
-			ApplyRenderModeContext(_client?.RenderMode ?? MovementRenderMode.UoClientDriven);
 		}
 
 		_movementPanel.Visible = _movementPanelVisible;
@@ -2453,13 +2248,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// S102: seed the F6 client-local movement/feel fields from the live local values. Only called once on first
-	// open (re-seeding would stomp un-applied edits), mirroring SeedVisualFields. The render-mode button and the
-	// snap-on-release checkbox reflect the live client state directly.
+	// open (re-seeding would stomp un-applied edits), mirroring SeedVisualFields.
 	private void SeedMovementFields()
 	{
 		// Moved from F5 — seed from the live values so re-opening shows the current state.
 		SetField(_moveNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
-		SetField(_moveCosmeticLeadTiles, _client?.CosmeticLeadTiles ?? 1.0d);
 		SetField(_moveCameraFollowBlend, _cameraFollowBlend);
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
 		// New (S102).
@@ -2467,11 +2260,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
 		// default walk. Done here (first open) since ServerHello has landed by login.
 		PopulateMoveSpeedDropdown();
-		UpdateRenderModeButtonText();
-		_snapOnReleaseCheck?.SetPressedNoSignal(_client?.SnapOnRelease ?? true);
-		// S103: seed the commit-step toggle + threshold field from the live client values.
-		_commitStepCheck?.SetPressedNoSignal(_client?.CommitStepOnRelease ?? true);
-		SetField(_moveCommitThreshold, _client?.CommitStepThreshold ?? 0.7d);
 		// UO4: seed the stop-on-reversal toggle from the live client value (default OFF).
 		_stopOnReversalCheck?.SetPressedNoSignal(_client?.StopOnReversal ?? false);
 	}
@@ -2655,9 +2443,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// S102 F6 apply-all: parse every CLIENT-LOCAL MOVEMENT/FEEL field and apply it INSTANTLY in place (no server
-	// round-trip, no restart). Net latency / cosmetic lead route to the client; camera blend/smoothing/teleport-
-	// snap are local _camera* fields the next UpdateCamera reads. The render-mode button and snap-on-release toggle
-	// apply live on click (not here). Invalid fields are skipped so a typo in one never blocks the others.
+	// round-trip, no restart). Net latency routes to the client; camera blend/smoothing/teleport-snap are local
+	// _camera* fields the next UpdateCamera reads. The stop-on-reversal toggle applies live on click (not here).
+	// Invalid fields are skipped so a typo in one never blocks the others.
 	private void OnMovementApplyPressed()
 	{
 		if (_client?.Role != ClientRole.Admin)
@@ -2670,13 +2458,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveNetLatencyMs, out var netLatency))
 		{
 			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
-		}
-
-		// S94: cosmetic lead distance (tiles) for model B. Clamped [0, 1] (the client clamps again); routed to the
-		// active cosmetic driver. Default 1.0 = current model B; lower values shorten the visible lead + release snap.
-		if (TryReadField(_moveCosmeticLeadTiles, out var leadTiles))
-		{
-			_client.SetCosmeticLeadTiles(Mathf.Clamp((float)leadTiles, 0f, 1f));
 		}
 
 		// S95: camera focus blend [0,1] and follow smoothing [0,30 /s]. The next UpdateCamera reads the new values.
@@ -2696,13 +2477,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveCameraTeleportSnapTiles, out var teleportSnap))
 		{
 			_cameraTeleportSnapTiles = Mathf.Clamp((float)teleportSnap, 0.5f, 100f);
-		}
-
-		// S103: commit threshold (0..1) for model B's commit-step-on-release. Clamped [0,1] (the client clamps
-		// again); routed to the active cosmetic driver. Default 0.7.
-		if (TryReadField(_moveCommitThreshold, out var commitThreshold))
-		{
-			_client.SetCommitStepThreshold(Mathf.Clamp((float)commitThreshold, 0f, 1f));
 		}
 
 		ShowInteractFeedback("Movement tuning applied.");

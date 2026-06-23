@@ -267,11 +267,10 @@ public sealed class LocalPlayerPredictor
         RecomputeTickCounts();
     }
 
-    // UO3: declares whether this predictor is driving the UoClientDriven mode (per-step commits the server
-    // follows). The client flips it when entering/leaving UoClientDriven (SetMovementRenderMode / EnsurePredictor),
-    // before/in step with the MovementModeMessage that flips the server's pacing. Only Reconcile reads it (its
-    // at-rest hold-for-banked-commits behaviour); stepping, calibration, and the cosmetic/Predicted paths are
-    // untouched. Default false (server-paced) keeps every existing mode byte-for-byte.
+    // UO3: declares whether this predictor is driving the client-driven mode (per-step commits the server
+    // follows). The client sets it on attach (EnsurePredictor), before/in step with the MovementModeMessage that
+    // flips the server's pacing. Only Reconcile reads it (its at-rest hold-for-banked-commits behaviour); stepping
+    // and calibration are untouched. Default false (server-paced) keeps the pre-attach state byte-for-byte.
     public void SetClientDriven(bool clientDriven)
     {
         _clientDriven = clientDriven;

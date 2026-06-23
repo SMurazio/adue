@@ -4,35 +4,16 @@ using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
 
-// RENDER1: which local-player render model drives the avatar (live F6). Trimmed to the two keepers:
-// UoClientDriven is model A (LocalPlayerPredictor) declared client-driven — instant prediction with the server
-// FOLLOWING the client's per-step commits — and is the DEFAULT. CosmeticLead is model B (LocalPlayerCosmetic with
-// the forward lead ON): a smooth glide with no banked tile, best at low latency. The earlier standalone Predicted
-// (predictor, server-paced) and AcceptDeny (cosmetic driver, lead off) modes were dropped — Predicted was a worse
-// UO (snaps at latency) and AcceptDeny was the rejected no-prediction mode. The predictor + cosmetic drivers are
-// kept; only those two modes + their UI/routing went away. See MmoClient.RenderMode and docs/movement-input-model.md.
-public enum MovementRenderMode
-{
-    // CosmeticLead is model B (LocalPlayerCosmetic, forward lead ON): smooth glide, no banked tile.
-    CosmeticLead = 0,
-    // UoClientDriven (DEFAULT): client-driven (Ultima-Online-style). Routes the local player through the
-    // LocalPlayerPredictor (instant prediction + tick-grid stepping + step-seq reconcile), AND declares the session
-    // client-driven to the server (MovementModeMessage) so the server stops auto-pacing, and emits one
-    // StepCommitRequest per predicted accepted step so the server FOLLOWS the client's per-step requests
-    // (accept/reject). The reject path is the predictor's existing RecipientStepSeq reconcile (snap on divergence).
-    UoClientDriven = 1,
-}
-
 public sealed class MmoClient : IDisposable
 {
-    // RENDER1: which render modes drive the local player through the LocalPlayerPredictor (model A). Only
-    // UoClientDriven does now; CosmeticLead (model B) rides the cosmetic driver. The four predictor routing sites
-    // (Poll Tick, SendMoveIntent SetIntent, EnsurePredictor/ReanchorLocalDriver, and the ApplySnapshot/ToRenderState
-    // render-source selection) all gate on this predicate, so the trim to two modes needed no routing-branch
-    // rewiring — only narrowing the predicate. UoClientDriven layers the per-step commit emission + the mode-signal
-    // on TOP of the predictor path.
-    internal static bool UsesPredictor(MovementRenderMode mode)
-        => mode is MovementRenderMode.UoClientDriven;
+    // The local player is ALWAYS client-driven (Ultima-Online-style): it routes through the LocalPlayerPredictor
+    // (instant prediction + tick-grid stepping + step-seq reconcile), declares the session client-driven to the
+    // server (MovementModeMessage) so the server stops auto-pacing, and emits one StepCommitRequest per predicted
+    // accepted step so the server FOLLOWS the client's per-step requests (accept/reject). The reject path is the
+    // predictor's RecipientStepSeq reconcile (snap on divergence). This is the SOLE local-player render path —
+    // the former model-B "cosmetic lead" driver and its F6 render-mode selector were removed (cleanup/remove-model-b).
+    // See docs/movement-input-model.md. The only no-predictor case is pre-spawn / interpolation-only (predictor
+    // not yet attached), handled by the null-predictor branches below exactly as before.
 
     public const double RemoteInterpolationCadenceMultiplier = 1.3d;
 
@@ -44,13 +25,6 @@ public sealed class MmoClient : IDisposable
     // (1.3) if it still dips, lower if start-of-move feels laggy.
     public const double LocalInterpolationCadenceMultiplier = 1.0d;
     private const uint PlaceholderSnapshotTtl = 60;
-
-    // S103: how many snapshots to wait after a commit send before declaring a reject when the server has shown NO
-    // step activity (RecipientStepSeq never advanced — a pure reject where the server changed nothing). The normal
-    // reject is detected the instant the server processes a step that isn't ours (RecipientStepSeq advances); this
-    // bound only covers the do-nothing reject. ~8 snapshots ≈ a few hundred ms at 20 Hz — long enough that a
-    // legitimate accept (which advances the tile + RecipientStepSeq) is never misread as a reject under LAN jitter.
-    private const int CommitRejectGraceSnapshots = 8;
 
     // UO1: the max accepted steps a single predictor Tick can resolve (mirrors LocalPlayerPredictor.MaxTicksPerCall
     // — the per-call action cap). The per-step commit buffer is sized to this so a laggy multi-step catch-up never
@@ -128,8 +102,8 @@ public sealed class MmoClient : IDisposable
     // cooldown gate would reject all at once → the GodotB speed-up/desync). Sized to ~the loss-recovery depth.
     private const int StepCommitRingCapacity = 8;
     // NET3: each ring entry also carries the commit's AUTHORED server tick (the predictor gate tick the step was
-    // banked on, or — for a model-B release commit — the present estimated server tick). Every batch repeats it as
-    // a tick delta off the head so the server applies each commit at its authored time, not the receive tick.
+    // banked on). Every batch repeats it as a tick delta off the head so the server applies each commit at its
+    // authored time, not the receive tick.
     private readonly (uint Seq, uint Tick, Direction8 Direction)[] _stepCommitRing
         = new (uint, uint, Direction8)[StepCommitRingCapacity];
     private int _stepCommitRingCount;
@@ -174,28 +148,6 @@ public sealed class MmoClient : IDisposable
     // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
     private LocalPlayerPredictor? _predictor;
     private bool _predictionEnabled = true;
-    // RENDER1: the active local-player render model. UoClientDriven (model A, declared client-driven) is now the
-    // DEFAULT — the client boots into UO mode; CosmeticLead (model B) is the F6 alternative. See RenderMode /
-    // SetMovementRenderMode.
-    private MovementRenderMode _renderMode = MovementRenderMode.UoClientDriven;
-
-    // S94: the live-tunable cosmetic lead distance (tiles) for model B, [0.0, 1.0], default 1.0 (= current model B
-    // byte-for-byte). Held at the client level so a value set before the local entity attaches — or after a
-    // respawn re-creates the cosmetic driver — is honoured: AttachCosmetic seeds the freshly-attached driver from
-    // this. SetCosmeticLeadTiles routes it live to the active driver (no restart). Clamped on set.
-    private double _cosmeticLeadTiles = 1.0d;
-
-    // S102: model B's release SNAP-to-confirmed (S91) toggle, default true (= current behavior). Held at the client
-    // level like _cosmeticLeadTiles so a value set before the local entity attaches — or after a respawn re-creates
-    // the cosmetic driver — is honoured (AttachCosmetic seeds the fresh driver from this). SetSnapOnRelease routes it
-    // live to the active driver (no restart). Only model B's release reads it.
-    private bool _snapOnRelease = true;
-
-    // S103 commit-step on release. Client-level levers (re-seeded onto the cosmetic driver on attach, like the
-    // other lead settings): whether a release past the threshold commits the near-done step (default ON) and the
-    // progress threshold (default 0.7).
-    private bool _commitStepOnRelease = true;
-    private double _commitStepThreshold = 0.55d;
 
     // UO4: "stop on reversal" (settle-then-go) lever for the predictor modes. When ON, a ~180° flip of the held
     // direction while moving inserts one clean settle beat before resuming the new direction (kills the left-right
@@ -204,14 +156,6 @@ public sealed class MmoClient : IDisposable
     // it onto the freshly-attached predictor. SetStopOnReversal routes it live (no restart). Default OFF so the
     // current behaviour is unchanged until opted in.
     private bool _stopOnReversal;
-
-    // S103: the in-flight commit's reconciliation state, or null when none is pending. Tracks the committed target
-    // tile, the RecipientStepSeq at send time (the server's accepted-step count then), and a bounded snapshot grace
-    // counter. The cosmetic driver handles the accept render (confirmed tile reaches target) and a diverging confirm
-    // itself; THIS owns the reject-with-no-tile-change case: once the server demonstrably processed the commit
-    // (RecipientStepSeq advanced past the base, OR the grace elapsed) without the tile reaching the target, snap
-    // back. Getting this grace/ordering right is what stops a not-yet-arrived accept being misread as a reject.
-    private PendingCommit? _pendingCommit;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -344,16 +288,9 @@ public sealed class MmoClient : IDisposable
                 predictor.CadenceMs)
             : null;
 
-    // S106: the local-player drivers' live cadences (ms), for tests asserting a live MovementSpeedChanged retunes
-    // BOTH drivers (not just the interpolator). Null when the respective driver isn't attached. The cosmetic
-    // accessor reads the underlying driver directly (NOT EntityState.Cosmetic, which gates on _cosmeticActive) so a
-    // test can assert the cadence is threaded even before the mode activates the cosmetic render.
+    // S106: the local predictor's live cadence (ms), for tests asserting a live MovementSpeedChanged retunes the
+    // predictor (not just the interpolator). Null when no predictor is attached.
     internal double? LocalPredictorCadenceMsForTests => _predictor?.CadenceMs;
-
-    internal double? LocalCosmeticCadenceMsForTests =>
-        LocalNetworkId is { } id && _entities.TryGetValue(id, out var local)
-            ? local.CosmeticCadenceMsForTests
-            : null;
 
     // DIAG1: zeroes the local predictor's reconcile-outcome tallies (Matched / Corrected / Snapped) so the human
     // can reset them just before a loss burst and read fresh counts in the F3 read-out. No-op (safe) when no
@@ -470,57 +407,45 @@ public sealed class MmoClient : IDisposable
         }
 
         // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
-        // re-bases the prediction (A) / advances the confirmed tile (B) before we project the render to "now".
-        if (!UsesPredictor(_renderMode))
+        // re-bases the prediction before we project the render to "now". The local player ALWAYS runs through the
+        // predictor (client-driven UO mode is the sole render path) — tick the predictor AND emit the accepted steps
+        // this call (the multi-step catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy frame). The
+        // server FOLLOWS these: it advances the entity only on accepted commits (the held-intent pacer is disabled
+        // for this session by the MovementModeMessage). NET2: each accepted step mints a FRESH ++_moveSequence on the
+        // SHARED move cursor (the same cursor MoveIntent/MoveInput use) and is recorded in the commit ring; then ONE
+        // redundant-unreliable StepCommitBatch ships the newest step plus a window of prior committed steps, so a
+        // dropped commit recovers from a later packet's window instead of a reliable retransmit batch. Pre-spawn
+        // (no predictor attached yet) this is a no-op.
+        if (_predictor is { } predictor)
         {
-            // RENDER1: CosmeticLead (model B) — tick the cosmetic driver. With the forward lead it glides the render
-            // early toward the held direction.
-            if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
+            Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
+            Span<long> acceptedTicks = stackalloc long[UoCommitBurstCap];
+            predictor.Tick(now, accepted, acceptedTicks, out var acceptedCount);
+            var emit = Math.Min(acceptedCount, accepted.Length);
+            for (var i = 0; i < emit; i++)
             {
-                local.TickCosmetic(now);
+                // NET3: stamp the commit with the SAME gate tick the predictor banked the step on (acceptedTicks)
+                // so the server replays it at its authored time. The tick is a non-negative server tick here (the
+                // gate never fires before the calibrated frame); clamp at 0 defensively before the uint cast.
+                RecordStepCommit(++_moveSequence, (uint)Math.Max(0, acceptedTicks[i]), accepted[i]);
             }
-        }
-        else
-        {
-            // RENDER1: UoClientDriven is the only predictor mode now — tick the predictor AND emit the accepted
-            // steps this call (the multi-step catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy
-            // frame). The server FOLLOWS these: it advances the entity only on accepted commits (the held-intent
-            // pacer is disabled for this session by the MovementModeMessage). NET2: each accepted step mints a FRESH
-            // ++_moveSequence on the SHARED move
-            // cursor (the same cursor MoveIntent/MoveInput use) and is recorded in the commit ring; then ONE
-            // redundant-unreliable StepCommitBatch ships the newest step plus a window of prior committed steps,
-            // so a dropped commit recovers from a later packet's window instead of a reliable retransmit batch.
-            if (_predictor is { } predictor)
+
+            if (emit > 0)
             {
-                Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
-                Span<long> acceptedTicks = stackalloc long[UoCommitBurstCap];
-                predictor.Tick(now, accepted, acceptedTicks, out var acceptedCount);
-                var emit = Math.Min(acceptedCount, accepted.Length);
-                for (var i = 0; i < emit; i++)
-                {
-                    // NET3: stamp the commit with the SAME gate tick the predictor banked the step on (acceptedTicks)
-                    // so the server replays it at its authored time. The tick is a non-negative server tick here (the
-                    // gate never fires before the calibrated frame); clamp at 0 defensively before the uint cast.
-                    RecordStepCommit(++_moveSequence, (uint)Math.Max(0, acceptedTicks[i]), accepted[i]);
-                }
-
-                if (emit > 0)
-                {
-                    SendStepCommitBatch();
-                    // NET5: a fresh batch just covered this cadence — restart the re-send timer so the tail-recovery
-                    // re-send doesn't pile a second packet on top of it.
-                    _resendLastSentAt = now;
-                    _hasResendLastSentAt = true;
-                }
-
-                // NET5: drive the ack-driven tail-recovery re-send (no-op unless a commit is genuinely stranded).
-                DriveAckDrivenResend(predictor, now, emittedFreshThisPoll: emit > 0);
+                SendStepCommitBatch();
+                // NET5: a fresh batch just covered this cadence — restart the re-send timer so the tail-recovery
+                // re-send doesn't pile a second packet on top of it.
+                _resendLastSentAt = now;
+                _hasResendLastSentAt = true;
             }
+
+            // NET5: drive the ack-driven tail-recovery re-send (no-op unless a commit is genuinely stranded).
+            DriveAckDrivenResend(predictor, now, emittedFreshThisPoll: emit > 0);
         }
     }
 
     // NET5: ack-driven re-send of unacked commits (tail-loss recovery) + the bounded ForceResync fallback. Called
-    // every Poll in UoClientDriven mode AFTER the fresh-commit emission. While the prediction LEADS the server's
+    // every Poll AFTER the fresh-commit emission. While the prediction LEADS the server's
     // learned ack (lead = pred - conf > 0) AND that ack is OVERDUE (conf has not advanced for ResendStallGraceMs,
     // i.e. longer than a normal RTT round-trip), re-ship the current commit ring at most once per cadence — the
     // existing redundant-unreliable SendStepCommitBatch, which the server dedups (cursor) and applies at the
@@ -585,54 +510,6 @@ public sealed class MmoClient : IDisposable
         set => _predictionEnabled = value;
     }
 
-    // RENDER1: which local-player render model drives the avatar. UoClientDriven (model A, the default) =
-    // LocalPlayerPredictor (PredictedTile ahead + Reconcile) declared client-driven. CosmeticLead (model B, F6
-    // alternative) = LocalPlayerCosmetic (no banked tile; the render glides early on input and cuts to the confirmed
-    // tile on a disagreeing ack). The mode routes the local-player driver at SendMoveIntent, the per-Poll Tick,
-    // ApplySnapshot, and the ToRenderState render-source selection. See docs/movement-input-model.md.
-    public MovementRenderMode RenderMode
-    {
-        get => _renderMode;
-        set => SetMovementRenderMode(value);
-    }
-
-    // RENDER1: flips the local-player render model LIVE (F6 — no restart). Re-anchors the newly-active driver from
-    // the local entity's current confirmed tile + current render position so the avatar does NOT pop on the
-    // switch, then routes all four touch points to the new mode. UO->Cosmetic seeds the cosmetic driver where the
-    // predictor was showing; Cosmetic->UO re-anchors the predictor (its PredictedTile re-seeds onto the confirmed
-    // tile, its render tween onto the current render position) so there is no jump either way.
-    public void SetMovementRenderMode(MovementRenderMode mode)
-    {
-        if (mode == _renderMode)
-        {
-            return;
-        }
-
-        // UO1: entering or leaving UoClientDriven flips the server-side client-driven flag. Send the one-bit signal
-        // BEFORE re-anchoring so the server stops/starts auto-pacing in step with the client owning/releasing the
-        // per-step commit stream. Only emitted on an actual transition into/out of the mode (no-op for B<->A etc.).
-        var wasUo = _renderMode == MovementRenderMode.UoClientDriven;
-        var nowUo = mode == MovementRenderMode.UoClientDriven;
-        _renderMode = mode;
-        if (nowUo && !wasUo)
-        {
-            SendMovementModeSignal(clientDriven: true);
-        }
-        else if (wasUo && !nowUo)
-        {
-            SendMovementModeSignal(clientDriven: false);
-        }
-
-        // UO3: tell the predictor whether it is now in the client-driven (per-step-commit) mode BEFORE re-anchoring,
-        // so its release/at-rest reconcile holds for banked commits in UO mode and converges-down in the others.
-        _predictor?.SetClientDriven(nowUo);
-
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.ReanchorLocalDriver(mode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
-        }
-    }
-
     // UO1: declares this session's movement model to the server (true = client-driven UO mode, false = server-paced).
     // ReliableOrdered — a lost flag would desync the server's pacing decision (double-step or stall). No-op safe
     // before connect (Send routes to the test sink / queues). Re-sent on (re)login/respawn via EnsurePredictor.
@@ -641,74 +518,8 @@ public sealed class MmoClient : IDisposable
         Send(new MovementModeMessage(clientDriven), DeliveryMethod.ReliableOrdered);
     }
 
-    // S94: the live cosmetic lead distance (tiles) — how far model B glides ahead of the confirmed tile before
-    // holding. [0.0, 1.0]; default 1.0 = current model B. Reflects the value last set (seeded into the F5 field
-    // on panel open). Only model B's render reads it; the value is inert in UoClientDriven.
-    public double CosmeticLeadTiles => _cosmeticLeadTiles;
-
-    // S94: live-tunes the cosmetic lead distance (F5 "Cosmetic lead (tiles)"). Clamped to [0.0, 1.0] (0 ≈ no
-    // visible lead, 1.0 = one full tile / current model B). Routed to the active cosmetic driver immediately (no
-    // restart); stored at the client level too so a value set before the local entity attaches, or after a
-    // respawn re-creates the driver, is re-applied by AttachCosmetic. No-op safe when no cosmetic driver yet.
-    public void SetCosmeticLeadTiles(double tiles)
-    {
-        _cosmeticLeadTiles = Math.Clamp(tiles, 0.0d, 1.0d);
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
-        }
-    }
-
-    // S102: whether model B snaps the render to the confirmed tile on release (S91). Reflects the value last set
-    // (seeded into the F6 toggle on panel open). Inert in UoClientDriven.
-    public bool SnapOnRelease => _snapOnRelease;
-
-    // S102: live-toggles model B's release snap (F6 "Snap on release"). Routed to the active cosmetic driver
-    // immediately (no restart); stored at the client level too so a value set before the local entity attaches, or
-    // after a respawn re-creates the driver, is re-applied by AttachCosmetic. No-op safe when no cosmetic driver yet.
-    public void SetSnapOnRelease(bool snap)
-    {
-        _snapOnRelease = snap;
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.SetSnapOnRelease(snap);
-        }
-    }
-
-    // S103: whether model B commits a near-done step on release (vs snapping back). Reflects the value last set
-    // (seeded into the F6 toggle on panel open). Inert in UoClientDriven.
-    public bool CommitStepOnRelease => _commitStepOnRelease;
-
-    // S103: live-toggles model B's commit-step-on-release (F6). Routed to the active cosmetic driver immediately
-    // (no restart); stored at the client level so a value set before attach / after a respawn is re-applied by
-    // AttachCosmetic. No-op safe when no cosmetic driver yet.
-    public void SetCommitStepOnRelease(bool enabled)
-    {
-        _commitStepOnRelease = enabled;
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.SetCommitStepOnRelease(enabled);
-        }
-    }
-
-    // S103: the commit threshold (0..1) — how far the cosmetic lead must have glided onto the next tile at release
-    // for a commit to fire. Reflects the value last set (seeded into the F6 field on panel open). Clamped [0,1].
-    public double CommitStepThreshold => _commitStepThreshold;
-
-    // S103: live-tunes the commit threshold (F6 "Commit threshold (0..1)"). Clamped [0,1]; routed to the active
-    // cosmetic driver immediately (no restart); stored at the client level so it survives attach/respawn.
-    public void SetCommitStepThreshold(double threshold)
-    {
-        _commitStepThreshold = Math.Clamp(threshold, 0.0d, 1.0d);
-        if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-        {
-            local.SetCommitStepThreshold(_commitStepThreshold);
-        }
-    }
-
     // UO4: whether the predictor settles-then-goes on a ~180° reversal (F6 "Stop on reversal"). Reflects the value
-    // last set (seeded into the F6 toggle on panel open). Only the predictor mode (UoClientDriven) reads it; inert
-    // in the cosmetic mode.
+    // last set (seeded into the F6 toggle on panel open). Read by the predictor (the sole local-player render path).
     public bool StopOnReversal => _stopOnReversal;
 
     // UO4: live-toggles the predictor's stop-on-reversal (settle-then-go) behaviour. Routed to the active predictor
@@ -770,51 +581,10 @@ public sealed class MmoClient : IDisposable
         // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
         // step. Created lazily here once the zone + local entity + cadence are all available.
         EnsurePredictor();
-        if (!UsesPredictor(_renderMode))
-        {
-            // RENDER1: CosmeticLead (model B) — feed the held intent to the cosmetic driver (no tile is banked; it
-            // only records the held direction). Tick glides the render early toward the held direction.
-            if (LocalNetworkId is { } id && _entities.TryGetValue(id, out var local))
-            {
-                // S103: a fresh keydown supersedes any in-flight commit reconciliation — the player resumed moving,
-                // so the cosmetic re-arms a lead and the old pending tracker is moot. (SetCosmeticIntent on a
-                // moving intent leaves the cosmetic's own HasPendingCommit alone, but Tick re-arming the lead makes
-                // it irrelevant; clear our tracker so a later snapshot doesn't snap-back mid-walk.)
-                if (moving)
-                {
-                    _pendingCommit = null;
-                }
-
-                var release = local.SetCosmeticIntent(moving, direction, _currentTime);
-                // S103: a release past the commit threshold returns ShouldCommit — the render is already gliding to
-                // the committed tile (no snap). Send the server-validated commit and start tracking it so the
-                // accept (confirmed tile reaches the target) or reject (tile never advances) reconciles. The commit
-                // rides a FRESH sequence strictly greater than the stop intent's, so the server's shared move-seq
-                // cursor accepts it after the keyup (and a re-ordered duplicate can't fire twice). NET2: it rides
-                // the same redundant-unreliable StepCommitBatch channel as the UO stream (recorded in the ring,
-                // shipped as a batch) so a dropped release-commit is recovered from a later packet's window.
-                if (release.ShouldCommit)
-                {
-                    // NET3: a model-B release commit is a "finish this step NOW" request — it is not banked on a
-                    // predictor gate boundary, so its authored tick is the PRESENT estimated server tick (the
-                    // predictor's calibrated clock). The server applies it at that authored tick like any other
-                    // commit. _predictor is created by EnsurePredictor above in every mode, so it is available here.
-                    var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
-                    RecordStepCommit(++_moveSequence, authoredTick, release.Direction);
-                    SendStepCommitBatch();
-                    _pendingCommit = new PendingCommit
-                    {
-                        Target = release.CommitTarget,
-                        BaseStepSeq = _lastRecipientStepSeq,
-                        SnapshotsWaited = 0,
-                    };
-                }
-            }
-        }
-        else
-        {
-            _predictor?.SetIntent(moving, direction, _currentTime);
-        }
+        // The local player ALWAYS routes through the predictor (client-driven UO mode is the sole render path):
+        // feed it the held intent so the first step on keydown / the stop on keyup is predicted with no round-trip
+        // wait. No-op pre-spawn (predictor not yet attached).
+        _predictor?.SetIntent(moving, direction, _currentTime);
 
         return sequence;
     }
@@ -962,40 +732,17 @@ public sealed class MmoClient : IDisposable
         }
 
         _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTickMs());
-        // UO3: a freshly-attached predictor defaults to server-paced; if the active mode is UoClientDriven (e.g. a
-        // respawn / AOI re-entry while already in UO mode) re-declare the client-driven flag so its release/at-rest
-        // reconcile holds for banked commits, in step with the MovementModeMessage re-sent below.
-        _predictor.SetClientDriven(_renderMode == MovementRenderMode.UoClientDriven);
+        // The local player is ALWAYS client-driven (the sole render path). A freshly-attached predictor defaults to
+        // server-paced, so re-declare the client-driven flag so its release/at-rest reconcile holds for banked
+        // commits, in step with the MovementModeMessage re-sent below.
+        _predictor.SetClientDriven(true);
         // UO4: re-seed the stop-on-reversal lever onto the freshly-attached (or respawn-recreated) predictor so a
-        // value set before attach / after a respawn is honoured (mirrors the cosmetic-lever seeding above).
+        // value set before attach / after a respawn is honoured.
         _predictor.SetStopOnReversal(_stopOnReversal);
-        // RENDER1: attach the parallel cosmetic driver too (idempotent), anchored to the same confirmed tile. It
-        // DRIVES the render in CosmeticLead; in UoClientDriven it is dormant and the predictor owns the render.
-        local.AttachCosmetic(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction);
-        // S94: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current lead-distance
-        // lever value, so a value set before attach / before respawn is honoured (mirrors how cadence is
-        // threaded). Default 1.0 keeps model B byte-for-byte.
-        local.SetCosmeticLeadTiles(_cosmeticLeadTiles);
-        // S102: seed the freshly-attached (or respawn-recreated) cosmetic driver with the current snap-on-release
-        // lever value, mirroring how the lead distance is threaded. Default true keeps model B byte-for-byte.
-        local.SetSnapOnRelease(_snapOnRelease);
-        // S103: seed the commit-step-on-release enable + threshold the same way.
-        local.SetCommitStepOnRelease(_commitStepOnRelease);
-        local.SetCommitStepThreshold(_commitStepThreshold);
-        // If the active mode uses the cosmetic driver (CosmeticLead) and the local entity only just attached (or
-        // respawned), activate + anchor the freshly-attached cosmetic driver so the live mode is honoured without
-        // needing an F6 toggle. ReanchorLocalDriver also sets LeadEnabled from the mode.
-        if (!UsesPredictor(_renderMode))
-        {
-            local.ReanchorLocalDriver(_renderMode, _currentTime, IsWalkableForPrediction, ResolveCadence(local.StepCooldownMs), ResolveTickMs());
-        }
-        else if (_renderMode == MovementRenderMode.UoClientDriven)
-        {
-            // UO1: the local entity just (re)attached — a fresh login / respawn / AOI re-entry. Re-declare the
-            // client-driven mode to the server so a flag lost across that lifecycle event can't leave the server
-            // auto-pacing AND the client committing (double-stepping). ReliableOrdered; harmless if redundant.
-            SendMovementModeSignal(clientDriven: true);
-        }
+        // UO1: the local entity just (re)attached — a fresh login / respawn / AOI re-entry. (Re-)declare the
+        // client-driven mode to the server so a flag lost across that lifecycle event can't leave the server
+        // auto-pacing AND the client committing (double-stepping). ReliableOrdered; harmless if redundant.
+        SendMovementModeSignal(clientDriven: true);
     }
 
     // S81: resolves the server tick interval in ms (1000 / TickRate) — the unit of the predictor's tick-grid
@@ -1014,8 +761,6 @@ public sealed class MmoClient : IDisposable
     {
         LocalNetworkId = null;
         _predictor = null;
-        // S103: drop any in-flight commit tracking — the entity it belonged to is gone (despawn / AOI exit / logout).
-        _pendingCommit = null;
         // COMBAT-S1: drop the cached vitals so a stale prior-session value can't briefly feed the HUD on reconnect
         // (the next login always re-sends PlayerStats). Reset alongside the other local-entity state.
         LocalStats = null;
@@ -1058,13 +803,13 @@ public sealed class MmoClient : IDisposable
         var sequence = ++_attackSeq;
 
         // SWING-COMMIT-FIX: stamp the swing with an AUTHORED TICK — the predictor's monotonic-clamped estimate of the
-        // current server tick (the SAME EstimateServerTick the NET3 model-B step-commit path uses, ~line 737). This is
-        // the tick the predictor will root its OWN movement on, and the server will root the attacker's movement at
-        // this SAME authored tick (clamped to a window around its receive tick) instead of its receive tick — so under
-        // latency the two root windows are identical and the predictor never steps where the server rejects (the
-        // swing-then-move rubberband the receive-tick anchor caused). No predictor (a mode with no local prediction)
-        // => authored tick 0; the server still roots authoritatively (clamped up into its past window) and there is no
-        // prediction to disagree with it.
+        // current server tick (the SAME EstimateServerTick the NET3 step-commit path uses). This is the tick the
+        // predictor will root its OWN movement on, and the server will root the attacker's movement at this SAME
+        // authored tick (clamped to a window around its receive tick) instead of its receive tick — so under latency
+        // the two root windows are identical and the predictor never steps where the server rejects (the
+        // swing-then-move rubberband the receive-tick anchor caused). No predictor (pre-spawn) => authored tick 0;
+        // the server still roots authoritatively (clamped up into its past window) and there is no prediction to
+        // disagree with it.
         var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
         Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle, authoredTick), DeliveryMethod.ReliableOrdered);
 
@@ -1511,66 +1256,7 @@ public sealed class MmoClient : IDisposable
             PruneStalePlaceholders(sequence);
         }
 
-        // S103: resolve an in-flight commit-step against this snapshot. The cosmetic driver's Confirm already moved
-        // the render (accept = flowed onto the committed tile; a diverging confirm = cut to wherever the server put
-        // us), clearing ITS pending flag in those cases. The remaining case THIS owns is the reject-with-no-tile-
-        // change: the server rejected the commit, so the confirmed tile never reaches the target and the render
-        // would otherwise keep gliding there forever. Detect it via the grace below and snap back.
-        ReconcilePendingCommit(serverTick);
-
         _lastAppliedSnapshotSequence = sequence;
-    }
-
-    // S103: drive the commit-step reconciliation after a snapshot was applied. Ordering is the load-bearing part:
-    //   * If the cosmetic driver already cleared its pending flag, the commit RESOLVED this snapshot (accept: the
-    //     confirmed tile reached the target; or a diverging confirm cut to the server's tile). Clear our tracker.
-    //   * Otherwise the commit is still unresolved on the render side. We must NOT snap back just because the tile
-    //     hasn't advanced yet — a not-yet-arrived accept looks identical. So we only declare REJECT once the server
-    //     has demonstrably processed steps since the send (RecipientStepSeq advanced past the base) without the
-    //     tile reaching the target, OR a bounded snapshot grace has elapsed (covers a pure reject where the server
-    //     did nothing, so RecipientStepSeq never moves). On reject, snap the render back to the confirmed tile.
-    private void ReconcilePendingCommit(uint serverTick)
-    {
-        if (_pendingCommit is not { } pending)
-        {
-            return;
-        }
-
-        if (LocalNetworkId is not { } localId || !_entities.TryGetValue(localId, out var local))
-        {
-            _pendingCommit = null;
-            return;
-        }
-
-        var cosmetic = local.Cosmetic;
-        if (cosmetic is null || !cosmetic.HasPendingCommit)
-        {
-            // The cosmetic resolved it (accept, or a diverging confirm). Nothing to snap.
-            _pendingCommit = null;
-            return;
-        }
-
-        // Accept also when the confirmed tile reached the target but the cosmetic missed clearing (belt-and-braces;
-        // normally Confirm clears it). Treat tile==target as accepted regardless.
-        if (local.Tile == pending.Target)
-        {
-            cosmetic.ClearPendingCommit();
-            _pendingCommit = null;
-            return;
-        }
-
-        pending.SnapshotsWaited++;
-        var serverProcessedAStep = _lastRecipientStepSeq != pending.BaseStepSeq;
-        if (serverProcessedAStep || pending.SnapshotsWaited >= CommitRejectGraceSnapshots)
-        {
-            // Reject: the server stepped (or enough grace elapsed) without honouring the commit. Snap the render
-            // back to the confirmed tile (exactly the pre-S103 disagreeing-release behaviour).
-            cosmetic.SnapTo(local.Tile, _currentTime);
-            _pendingCommit = null;
-            return;
-        }
-
-        _pendingCommit = pending;
     }
 
     // A snapshot just applied. Record it as received and ack the highest contiguously-received sequence
@@ -1769,11 +1455,6 @@ public sealed class MmoClient : IDisposable
         // renders confirmed state in the past for jitter smoothing — is bypassed for the local player, the
         // attempt-1 rubber-band fix). Snapshots re-base the predictor instead of confirming the interpolator.
         private LocalPlayerPredictor? _predictor;
-        // S89 model B: the parallel cosmetic-lead driver (non-null only for the local player once attached). It
-        // DRIVES the render only while _cosmeticActive (RenderMode == CosmeticLead); otherwise it is dormant and
-        // the predictor owns the render exactly as today. Reverting S89 removes this field and restores A.
-        private LocalPlayerCosmetic? _cosmetic;
-        private bool _cosmeticActive;
 
         public ClientEntity(
             uint networkId,
@@ -1858,21 +1539,6 @@ public sealed class MmoClient : IDisposable
             Health = health;
             MaxHealth = maxHealth;
             LastSeenSnapshotSequence = snapshotSequence;
-            // S89 model B: the cosmetic driver owns the render. The confirmed tile advances ONLY here (the server
-            // ack). No step-seq / reconcile / replay — Confirm cuts/snaps the render to the confirmed tile. The
-            // predictor is left dormant (re-seeded on a live A<->B switch), so model A is byte-for-byte unchanged
-            // when this branch is not taken.
-            if (_cosmetic is not null && _cosmeticActive)
-            {
-                _cosmetic.Confirm(tile, facing, receivedAt);
-                Facing = _cosmetic.Facing;
-                return new EntityConfirmationDebug(
-                    tile != previousTile,
-                    0,
-                    _cosmetic.CadenceMs,
-                    _cosmetic.RenderPosition);
-            }
-
             if (_predictor is not null)
             {
                 // S81: re-anchor the predictor's wall-clock -> serverTick calibration to this snapshot's
@@ -1918,112 +1584,6 @@ public sealed class MmoClient : IDisposable
             return _predictor;
         }
 
-        // S89: attaches the parallel model-B cosmetic driver (idempotent), anchored to the current confirmed tile
-        // + facing. It is dormant until RenderMode flips to CosmeticLead (ReanchorLocalDriver activates it). The
-        // isWalkable oracle is the SAME one model A uses (cosmetic glide-direction gate; no tile banked).
-        public LocalPlayerCosmetic AttachCosmetic(double cadenceMs, Func<TileCoord, bool> isWalkable)
-        {
-            _cosmetic ??= new LocalPlayerCosmetic(Tile, Facing, cadenceMs, isWalkable);
-            return _cosmetic;
-        }
-
-        // S89: feeds held intent to the cosmetic driver (no tile banked — records the held direction so
-        // TickCosmetic glides the render early). No-op if the cosmetic driver isn't attached yet.
-        // S103: returns the release decision (whether a commit-step should be sent + its target/direction); default
-        // (ShouldCommit=false) when no driver / on a moving intent / on a sub-threshold release.
-        public CosmeticReleaseDecision SetCosmeticIntent(bool moving, Direction8 direction, TimeSpan now)
-        {
-            return _cosmetic?.SetIntent(moving, direction, now) ?? default;
-        }
-
-        // S103: the cosmetic driver, or null if not attached/active. Exposed so MmoClient can drive commit-step
-        // reconciliation (pending state, accept-clear, reject snap-back) against the active driver.
-        public LocalPlayerCosmetic? Cosmetic => _cosmeticActive ? _cosmetic : null;
-
-        // S106: the cosmetic driver's live cadence (ms), or null if the driver isn't attached. Reads the underlying
-        // driver regardless of _cosmeticActive (unlike Cosmetic) so a test can assert SetStepCooldownMs threaded the
-        // new cadence onto it even while the predictor mode is active. Test-only.
-        internal double? CosmeticCadenceMsForTests => _cosmetic?.CadenceMs;
-
-        // S89: advances the cosmetic render to now (the early-lead glide). No-op if not attached.
-        public void TickCosmetic(TimeSpan now)
-        {
-            _cosmetic?.Tick(now);
-        }
-
-        // S94: live-sets the cosmetic lead distance (tiles) on the cosmetic driver. No-op if the driver isn't
-        // attached yet; MmoClient.EnsurePredictor re-seeds the current value when AttachCosmetic creates it.
-        public void SetCosmeticLeadTiles(double tiles)
-        {
-            if (_cosmetic is not null)
-            {
-                _cosmetic.MaxLeadTiles = tiles;
-            }
-        }
-
-        // S102: live-sets model B's release-snap flag on the cosmetic driver. No-op if the driver isn't attached
-        // yet; MmoClient.EnsurePredictor re-seeds the current value when AttachCosmetic creates it.
-        public void SetSnapOnRelease(bool snap)
-        {
-            if (_cosmetic is not null)
-            {
-                _cosmetic.SnapOnRelease = snap;
-            }
-        }
-
-        // S103: live-sets model B's commit-step-on-release enable + threshold on the cosmetic driver. No-op if the
-        // driver isn't attached yet; MmoClient.EnsurePredictor re-seeds the current values when AttachCosmetic
-        // creates it.
-        public void SetCommitStepOnRelease(bool enabled)
-        {
-            if (_cosmetic is not null)
-            {
-                _cosmetic.CommitStepEnabled = enabled;
-            }
-        }
-
-        public void SetCommitStepThreshold(double threshold)
-        {
-            if (_cosmetic is not null)
-            {
-                _cosmetic.CommitThreshold = threshold;
-            }
-        }
-
-        // S89: switches the active local-player render model LIVE, re-anchoring the newly-active driver from the
-        // CURRENT render position so the avatar doesn't pop. A->B seeds the cosmetic driver where the predictor
-        // is showing; B->A re-seeds the predictor (its PredictedTile onto the confirmed tile, its render tween
-        // onto the current render position). The freshly-attached drivers are created if missing.
-        public void ReanchorLocalDriver(MovementRenderMode mode, TimeSpan now, Func<TileCoord, bool> isWalkable, double cadenceMs, double tickMs)
-        {
-            if (!UsesPredictor(mode))
-            {
-                // RENDER1: CosmeticLead (model B) is the only cosmetic-driver mode now; LeadEnabled is always ON
-                // here (B leads + snaps on release).
-                var renderSource = _cosmetic is not null && _cosmeticActive
-                    ? _cosmetic.RenderPosition
-                    : _predictor is not null ? _predictor.RenderPosition : _interpolator.RenderPosition;
-                AttachCosmetic(cadenceMs, isWalkable);
-                _cosmetic!.LeadEnabled = mode == MovementRenderMode.CosmeticLead;
-                _cosmetic!.ReanchorTo(Tile, Facing, renderSource, now);
-                _cosmeticActive = true;
-            }
-            else
-            {
-                var currentRender = _cosmetic is not null ? _cosmetic.RenderPosition : _interpolator.RenderPosition;
-                _cosmeticActive = false;
-                if (_predictor is not null)
-                {
-                    // Re-anchor model A onto the confirmed tile + current render position so resuming prediction
-                    // doesn't jump (Reconcile re-bases the predicted tile; the snap-distance is 0 so the render
-                    // tween settles onto the current position).
-                    _predictor.Reconcile(Tile, _predictor.PredictedStepSeq, now);
-                    _predictor.Sample(now);
-                    _ = currentRender;
-                }
-            }
-        }
-
         // S81: live-sets the predictor's server tick interval (ServerHello TickRate). No-op if no predictor.
         public void SetPredictorTickMs(double tickMs)
         {
@@ -2047,13 +1607,6 @@ public sealed class MmoClient : IDisposable
             // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
             // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
             _predictor?.SetCadence(cadenceMs);
-            // S106: re-sync the parallel cosmetic driver too. A live MovementSpeedChanged (the F6 "Move speed"
-            // dropdown) must retune BOTH local-player drivers, not just the predictor: in CosmeticLead the cosmetic
-            // driver owns the render, and without this its glide/confirm tweens keep running at the OLD cadence after
-            // a speed change — a mid-move desync (the avatar glides at the wrong rate until the next mode/respawn
-            // re-creates the driver). Mirrors _predictor.SetCadence above; no-op when the cosmetic driver isn't
-            // attached. Re-arms the next glide/confirm tween at the new cadence in every mode that rides it.
-            _cosmetic?.SetCadence(cadenceMs);
         }
 
         public ReplicatedEntity ToSnapshot()
@@ -2065,16 +1618,10 @@ public sealed class MmoClient : IDisposable
         {
             // S53: the local predicted player renders from the predictor's OWN present-time tween (snappy, no
             // playout delay). Everything else (remote players, resources) keeps the buffered interpolator.
-            // S89: in CosmeticLead mode the local player renders from the cosmetic driver instead (no banked
-            // tile; glides early on input). Render-source selection only — Tile stays confirmed in both modes.
+            // Render-source selection only — Tile stays confirmed.
             RenderPosition position;
             Direction8 facing;
-            if (_cosmetic is not null && _cosmeticActive)
-            {
-                position = _cosmetic.Sample(now);
-                facing = _cosmetic.Facing;
-            }
-            else if (_predictor is not null)
+            if (_predictor is not null)
             {
                 position = _predictor.Sample(now);
                 // S59: render the predictor's LIVE facing for the local entity, so a predicted turn (no tile
@@ -2095,16 +1642,6 @@ public sealed class MmoClient : IDisposable
         int QueueDepth,
         double EffectiveCadenceMs,
         RenderPosition RenderPosition);
-
-    // S103: a commit-step in flight. Target = the committed tile; BaseStepSeq = RecipientStepSeq at send time;
-    // SnapshotsWaited = how many snapshots have been applied since the send (the bounded grace). Mutable struct held
-    // as a nullable field (single in-flight commit at a time — one keyup commits at most one step).
-    private struct PendingCommit
-    {
-        public TileCoord Target;
-        public uint BaseStepSeq;
-        public int SnapshotsWaited;
-    }
 
     private sealed class PendingSnapshot
     {
