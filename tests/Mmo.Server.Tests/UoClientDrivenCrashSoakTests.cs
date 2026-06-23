@@ -11,7 +11,7 @@ using Xunit;
 namespace Mmo.Server.Tests;
 
 // CRASH1 regression: the live server "seems to be crashing" during UoClientDriven play. The 120c/30s stress gate
-// is clean but runs the DEFAULT CosmeticLead path and NEVER exercises the UO-mode server code (the per-step
+// is clean but runs the DEFAULT (held-intent) movement path and NEVER exercises the UO-mode server code (the per-step
 // StepCommitRequest stream, the MovementMode toggle, the client-driven held-intent skip). This soak drives a REAL
 // GameServer over loopback through exactly the UO-mode surfaces the prime suspects flag, and asserts the server
 // loop never faults (RunAsync stays running, the runtime-fault count stays 0) and that a fresh client can still

@@ -1960,7 +1960,7 @@ public sealed class GameServer
         }
     }
 
-    // S103 commit-step on release. A client whose model-B cosmetic render glided past its commit threshold onto the
+    // S103 commit-step on release. A client whose cosmetic render glided past its commit threshold onto the
     // next tile at key-release asks the server to finish that one step early (instead of snapping back). Validate
     // the sequence (on the dedicated commit cursor, NET6 — so a stale/duplicate commit can't fire twice and a commit
     // never resurrects a stopped intent), resolve the entity, then attempt a single server-validated commit step

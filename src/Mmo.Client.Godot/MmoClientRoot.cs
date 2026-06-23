@@ -78,29 +78,38 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _metricsLabel;
 	private Label? _chatLabel;
 	private LineEdit? _chatInput;
-	private PanelContainer? _perfPanel;
+	// Perf HUD readout + frame-time graph — now hosted on the consolidated debug panel's Perf tab (no standalone
+	// _perfPanel any more); F3 opens the panel on that tab.
 	private Label? _perfLabel;
 	private FrameTimeGraph? _perfGraph;
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
-	// ---- S60 / S65 admin live-tuning panels --------------------------------------------------------
-	// F4 toggles the SERVER tuning panel (aoi.interestRadius — rides
-	// AdminSetTuning to the server, which admin-gates + clamps). F5 (S65) toggles the CLIENT-LOCAL VISUAL panel
-	// (camera zoom range, rock/tree/plant model scale, label pixel-size/height — applied instantly to local
-	// state/nodes, no server round-trip). Both are admin-only dev tools, not shipped UI — built once, shown only
-	// for an Admin session. Splitting them keeps the server knobs unmistakable from the render knobs.
-	private PanelContainer? _tuningPanel;
-	private bool _tuningPanelVisible;
-	private bool _tuningFieldsSeeded;
+	// ---- CONSOLIDATED debug/tuning panel ----------------------------------------------------------
+	// One tabbed panel (TabContainer) under a SINGLE hotkey — backtick/tilde (~ / Key.Quoteleft) toggles it.
+	// It absorbed the six former F-key surfaces (F3 perf HUD, F4 server tuning, F5 visual, F6 movement/feel, F7
+	// vitals, F8 combat) as thematic TABS: Perf / Visual / Movement / Combat / Server / Vitals. F3 still works as
+	// a shortcut — it opens the panel directly on the Perf tab (muscle memory). Admin gating is preserved: the
+	// Perf tab is the old non-admin F3 overlay (always available); the other five tabs (the old F4–F8 admin
+	// panels) are added only for an Admin session. Built once in BuildDebugPanel; seeded lazily per-tab on first
+	// open (the same Seed* helpers as before), and re-seeded for the combat tab on each replicated snapshot.
+	private PanelContainer? _debugPanel;
+	private TabContainer? _debugTabs;
+	private bool _debugPanelVisible;
+	private bool _debugFieldsSeeded;
+	// The admin-only tabs (Visual/Movement/Combat/Server/Vitals) are built lazily on the first Admin open — the role
+	// is unknown at construction (before login). This guards that one-time build.
+	private bool _adminTabsBuilt;
+	// FXAA/MSAA live anti-aliasing controls (Visual tab). FXAA defaults ON (mirrors the _Ready ScreenSpaceAA seed);
+	// the MSAA dropdown drives GetViewport().Msaa3D. Both applied live at runtime — no restart.
+	private CheckBox? _fxaaCheck;
+	private OptionButton? _msaaDropdown;
+
 	// SPEED1: the move.stepCooldownMs field was removed — the base step cooldown is now a pinned constant
-	// (150 ms), not a live knob. aoi.interestRadius is the only remaining F4 server field.
+	// (150 ms), not a live knob. aoi.interestRadius is the only remaining Server-tab field.
 	private LineEdit? _tuneInterestRadius;
 
-	// F5 visual panel (S65).
-	private PanelContainer? _visualPanel;
-	private bool _visualPanelVisible;
-	private bool _visualFieldsSeeded;
+	// Visual-tab fields (was F5).
 	private LineEdit? _tuneCameraZoomMin;
 	private LineEdit? _tuneCameraZoomMax;
 	private LineEdit? _tuneRockScale;
@@ -131,15 +140,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// the wall/bounds raster keys off this; the per-frame player marker does not re-bake.
 	private int _minimapGeneration;
 
-	// ---- S102 F6 movement / feel panel ------------------------------------------------------------
-	// A dedicated admin-gated panel (F6) for the movement/camera-FEEL levers, moved off the F5 visual panel so the
-	// render knobs and the feel knobs are unmistakable. All live (no restart); seeded from the current values on
-	// open. Per-entity SPEED is the F6 "Move speed" dropdown (sends /speed); the GLOBAL base cooldown is a pinned
-	// constant (SPEED1) — there is no longer a global move-speed server knob.
-	private PanelContainer? _movementPanel;
-	private bool _movementPanelVisible;
-	private bool _movementFieldsSeeded;
-	// Moved from F5: net latency (S93), camera follow blend + smoothing (S95).
+	// ---- Movement / feel tab (was F6) -------------------------------------------------------------
+	// The movement/camera-FEEL levers. All live (no restart); seeded from the current values on first open.
+	// Per-entity SPEED is the "Move speed" dropdown (sends /speed); the GLOBAL base cooldown is a pinned constant
+	// (SPEED1) — there is no longer a global move-speed server knob.
+	// Moved from the visual surface: net latency (S93), camera follow blend + smoothing (S95).
 	private LineEdit? _moveNetLatencyMs;
 	private LineEdit? _moveCameraFollowBlend;
 	private LineEdit? _moveCameraSmoothing;
@@ -155,25 +160,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// sole local-player render path), so it is always shown on the F6 panel.
 	private CheckBox? _stopOnReversalCheck;
 
-	// ---- COMBAT-S1 F7 dev-set vitals panel --------------------------------------------------------
-	// A dedicated admin-gated panel (F7) to set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row
-	// is a label + LineEdit; Apply sends the three current values to the server via AdminSetStat (the server admin-
-	// gates + clamps authoritatively, then replicates the result back via PlayerStatsMessage so the bars track it).
-	// Same panel/Apply pattern as F4. Seeded on open from the live replicated stats. Set so the bars move min/max.
-	private PanelContainer? _statPanel;
-	private bool _statPanelVisible;
+	// ---- Vitals tab (was F7) ----------------------------------------------------------------------
+	// Set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row is a label + LineEdit; Apply sends the
+	// three current values to the server via AdminSetStat (the server admin-gates + clamps authoritatively, then
+	// replicates the result back via PlayerStatsMessage so the bars track it). Re-seeded from the live replicated
+	// stats on each open. Set so the bars move min/max.
 	private LineEdit? _statHealthEdit;
 	private LineEdit? _statManaEdit;
 	private LineEdit? _statStaminaEdit;
 
-	// ---- COMBAT-TUNING F8 combat-tuning panel -----------------------------------------------------
-	// A dedicated admin-gated panel (F8) for the free-aim COMBAT feel-knobs (attack cooldown, swing-root, sector
-	// half-angle/radius, damage). Each row is a label + LineEdit; Apply sends each via AdminSetTuning on the combat.*
-	// registry keys (the server admin-gates + clamps authoritatively, then BROADCASTS the replicated
-	// CombatTuningSnapshot back — which re-seeds this panel and rebuilds the wedge/predictor/cooldown viz). Same
-	// panel/Apply pattern as F4/F7. Seeded on open (and on every replicated snapshot) from the live combat tuning.
-	private PanelContainer? _combatPanel;
-	private bool _combatPanelVisible;
+	// ---- Combat tab (was F8) ----------------------------------------------------------------------
+	// The free-aim COMBAT feel-knobs (attack cooldown, swing-root, sector half-angle/radius, damage). Each row is a
+	// label + LineEdit; Apply sends each via AdminSetTuning on the combat.* registry keys (the server admin-gates +
+	// clamps authoritatively, then BROADCASTS the replicated CombatTuningSnapshot back — which re-seeds these fields
+	// and rebuilds the wedge/predictor/cooldown viz). Seeded on open (and on every replicated snapshot).
 	private int _combatPanelSeededVersion = -1;
 	private LineEdit? _combatAttackCooldownMs;
 	private LineEdit? _combatRootMs;
@@ -210,9 +210,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private int _lastGc2;
 	private bool _zoneBuilt;
 	private bool _sentStartupChat;
-	// One state for the whole dev/monitoring HUD (perf panel + server-metrics panel + status-panel
-	// diagnostics). Hidden by default so the launch screen is clean; F3 (and the debug-control
-	// `client_toggle_perf`) flips the entire set together.
+	// Tracks the dev/monitoring HUD (perf HUD readout + server-metrics panel + status-panel diagnostics). Kept in
+	// sync with the consolidated debug panel's visibility (SetDebugPanelVisible): the perf HUD + graph live on the
+	// Perf tab, the metrics panel is the right-side overlay, and the status diagnostics key off this. Hidden by
+	// default so the launch screen is clean; ~ / F3 / the debug-control `client_toggle_perf` drive it.
 	private bool _debugOverlayVisible;
 
 	// Debug control channel (T2). Null unless MMO_DEBUG_CONTROL_PORT is set; absent => zero behavior change.
@@ -337,9 +338,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// FXAA on by default. The Compatibility renderer (we left Forward+ for its shader-compile hitches, commit
 		// 66c232a) ships with NO anti-aliasing, so geometry edges crawl/shimmer as the camera moves — a subtle
 		// "stutter" the timing-clean frame-log can't see. FXAA is the screen-space AA Compatibility supports (TAA is
-		// Forward+-only). Runtime-applied so project.godot isn't re-dirtied; the consolidated debug panel will own the
-		// live on/off + an MSAA option (MSAA is sharper for edge-crawl if FXAA's blur is too soft).
+		// Forward+-only). Runtime-applied so project.godot isn't re-dirtied. The consolidated debug panel's Visual tab
+		// now owns the live on/off (this checkbox reflects + drives it) + an MSAA option (MSAA is sharper for
+		// edge-crawl if FXAA's blur is too soft). Seed the checkbox to match this default-ON state.
 		GetViewport().ScreenSpaceAA = Viewport.ScreenSpaceAAEnum.Fxaa;
+		_fxaaCheck?.SetPressedNoSignal(true);
 		_client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
 		_client.Connect();
 		GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
@@ -485,54 +488,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		if (key.Keycode == Key.F3)
+		// F1: toggle the consolidated debug/tuning panel. The SINGLE hotkey that replaced the six former F-key
+		// surfaces (F3–F8 are gone); it shows whichever tab was last active (Perf on the first open). Non-admins
+		// get only the Perf tab (the other tabs aren't built for a non-admin session). OpenDebugPanelOnPerfTab is
+		// retained for the client_toggle_perf control-channel command.
+		if (key.Keycode == Key.F1)
 		{
-			ToggleDebugOverlay();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// F4: admin-only SERVER tuning panel (S60). Ignored for non-admins (panel never shows). Not consumed
-		// while typing in chat so 'F4' can't be swallowed mid-message — but F4 isn't a text key anyway.
-		if (key.Keycode == Key.F4)
-		{
-			ToggleTuningPanel();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// F5: admin-only CLIENT-LOCAL VISUAL tuning panel (S65 — camera zoom + model scales + label sizes).
-		if (key.Keycode == Key.F5)
-		{
-			ToggleVisualPanel();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// F6: admin-only CLIENT-LOCAL MOVEMENT/FEEL tuning panel (S102 — render mode, cosmetic lead, net latency,
-		// camera blend/smoothing/teleport-snap, snap-on-release). Movement SPEED stays in F4 (server tuning).
-		if (key.Keycode == Key.F6)
-		{
-			ToggleMovementPanel();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// F7: admin-only COMBAT-S1 dev-set vitals panel — set the local player's current HP/mana/stamina live so
-		// the HUD bars can be watched tracking min/max. Same admin gating as F4/F5/F6 (panel never shows otherwise).
-		if (key.Keycode == Key.F7)
-		{
-			ToggleStatPanel();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// F8: admin-only COMBAT-TUNING panel — live-tune the free-aim combat feel-knobs (attack cooldown, swing-root,
-		// sector half-angle/radius, damage). Same admin gating as F4-F7 (panel never shows otherwise). The values are
-		// server-authoritative + replicated, so a change updates the wedge/predictor/cooldown viz on every client.
-		if (key.Keycode == Key.F8)
-		{
-			ToggleCombatPanel();
+			ToggleDebugPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -968,16 +930,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chatLabel = CreateOverlayLabel("Chat", 14);
 		chatRows.AddChild(_chatLabel);
 
-		_perfPanel = CreateOverlayPanel("PerfPanel", new Vector2(12, 154), new Vector2(460, 304));
-		var perfRows = CreatePanelVBox(_perfPanel);
-		_perfLabel = CreateOverlayLabel("PerfHud", 13);
-		_perfGraph = new FrameTimeGraph
-		{
-			Name = "PerfFrameGraph",
-			CustomMinimumSize = new Vector2(436, 78)
-		};
-		perfRows.AddChild(_perfLabel);
-		perfRows.AddChild(_perfGraph);
+		// The perf HUD readout (_perfLabel) + FrameTimeGraph (_perfGraph) now live on the consolidated debug
+		// panel's Perf tab (BuildDebugPanel) instead of a standalone overlay panel — see that method.
 
 		// S111: the old top-right text inventory panel (S39) was REPLACED by the toggleable Inventory window
 		// (UI/InventoryWindow, mounted on the Hud CanvasLayer). The same owner-only InventoryUpdate data now
@@ -1020,90 +974,77 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chatInput.TextSubmitted += OnChatSubmitted;
 		inputMargin.AddChild(_chatInput);
 
-		BuildTuningPanel(layer);
-		BuildVisualPanel(layer);
-		BuildMovementPanel(layer);
-		BuildStatPanel(layer);
-		BuildCombatPanel(layer);
+		BuildDebugPanel(layer);
 
-		// Dev/monitoring overlays start hidden — F3 (ToggleDebugOverlay) reveals them together. The
-		// status panel stays visible but shows only a minimal always-on line until the overlay is on.
-		_perfPanel.Visible = false;
+		// Dev/monitoring overlays start hidden — ~ (or F3 → Perf tab) reveals the debug panel; the server-metrics
+		// panel rides _debugOverlayVisible with it. The status panel stays visible but shows only a minimal
+		// always-on line until the overlay is on.
 		metricsPanel.Visible = false;
 
 		layer.AddChild(statusPanel);
 		layer.AddChild(metricsPanel);
 		layer.AddChild(chatPanel);
-		layer.AddChild(_perfPanel);
 		layer.AddChild(toastPanel);
 		layer.AddChild(inputPanel);
 	}
 
-	// S60/S65: the admin SERVER tuning panel (F4). Centered-left, hidden until F4 is pressed by an Admin session.
-	// Each row is a label + a LineEdit; one Apply button at the bottom sends every server field at once via
-	// AdminSetTuning (the server admin-gates + clamps authoritatively). Client-local VISUAL knobs moved to the
-	// F5 panel (S65). Fields are seeded on first open from ServerHello / last-applied.
-	private void BuildTuningPanel(CanvasLayer layer)
+	// The CONSOLIDATED debug/tuning panel. One TabContainer under a SINGLE hotkey (~) replaces the six former
+	// F-key surfaces, thematically grouped into tabs: Perf / Visual / Movement / Combat / Server / Vitals. Every
+	// control migrated VERBATIM from the old Build* methods — same labels, same names, same Apply*/handler wiring,
+	// same live behavior — so this is a pure re-home, not a logic change. Admin gating is preserved: the Perf tab
+	// (the old non-admin F3 overlay) is always added; the other five tabs (old admin-only F4–F8) are added ONLY
+	// for an Admin session, so a non-admin simply never sees them. Built once here; seeded lazily on first open.
+	private void BuildDebugPanel(CanvasLayer layer)
 	{
-		// Center-left, below the status panel and to the right of the perf HUD so F3 + F4 panels don't overlap.
-		var panel = CreateOverlayPanel("TuningPanel", new Vector2(490, 154), new Vector2(360, 250));
-		var rows = CreatePanelVBox(panel);
+		var panel = CreateOverlayPanel("DebugPanel", new Vector2(490, 154), new Vector2(470, 470));
+		var margin = CreatePanelMargin(panel);
 
-		var title = CreateOverlayLabel("TuningTitle", 15);
-		title.Text = "ADMIN SERVER TUNING (F4)";
-		rows.AddChild(title);
+		var tabs = new TabContainer { Name = "DebugTabs", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		tabs.AddThemeFontSizeOverride("font_size", 14);
+		margin.AddChild(tabs);
+		_debugTabs = tabs;
 
-		var serverHeader = CreateOverlayLabel("TuningServerHeader", 12);
-		serverHeader.Text = "— server (sent on Apply) —";
-		rows.AddChild(serverHeader);
-		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius", OnTuningApplyPressed);
+		// Perf tab — the old non-admin F3 overlay: the perf HUD readout (_perfLabel) + the FrameTimeGraph (_perfGraph),
+		// plus the two perf-diagnostic toggles (uncap-fps, frame-log CSV). Always added (admin and non-admin).
+		BuildPerfTab(tabs);
 
-		var apply = new Button { Name = "TuningApply", Text = "Apply" };
-		apply.AddThemeFontSizeOverride("font_size", 14);
-		apply.Pressed += OnTuningApplyPressed;
-		rows.AddChild(apply);
+		// The remaining tabs were the admin-only F4–F8 panels. They are built LAZILY on first open (EnsureAdminTabsBuilt)
+		// rather than here, because at construction time (_Ready, before Connect/login) the role is not yet known — the
+		// old per-panel code likewise gated at toggle time. A non-admin never triggers the build, so it sees only Perf.
 
 		panel.Visible = false;
-		_tuningPanel = panel;
+		_debugPanel = panel;
 		layer.AddChild(panel);
 	}
 
-	// S65: the admin CLIENT-LOCAL VISUAL tuning panel (F5). Same row/Apply pattern as F4, but every field is
-	// applied INSTANTLY client-side (no server round-trip): camera zoom range, rock/tree/plant model scale, and
-	// the name-label pixel-size/height. Hidden until F5 is pressed by an Admin session; seeded on first open
-	// from live local state (the consts/_tuning values currently in effect).
-	private void BuildVisualPanel(CanvasLayer layer)
+	// One tab page: a ScrollContainer (so a long tab scrolls) wrapping a VBox of rows. The page Control's Name is
+	// the TAB TITLE shown on the tab bar. Returns the VBox the caller fills with the migrated rows.
+	private static VBoxContainer AddDebugTab(TabContainer tabs, string title)
 	{
-		// To the right of the F4 panel so the two admin panels can be open side-by-side without overlapping.
-		var panel = CreateOverlayPanel("VisualPanel", new Vector2(860, 154), new Vector2(360, 360));
-		var rows = CreatePanelVBox(panel);
+		var scroll = new ScrollContainer { Name = title, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		var rows = new VBoxContainer { Name = "Rows", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		rows.AddThemeConstantOverride("separation", 2);
+		scroll.AddChild(rows);
+		tabs.AddChild(scroll);
+		return rows;
+	}
 
-		var title = CreateOverlayLabel("VisualTitle", 15);
-		title.Text = "ADMIN VISUAL TUNING (F5)";
-		rows.AddChild(title);
+	// Perf tab (was the non-admin F3 perf HUD): the perf readout label + the frame-time graph + the two perf
+	// diagnostic toggles (uncap-fps, frame-log CSV). Always present regardless of role.
+	private void BuildPerfTab(TabContainer tabs)
+	{
+		var rows = AddDebugTab(tabs, "Perf");
 
-		var localHeader = CreateOverlayLabel("VisualLocalHeader", 12);
-		localHeader.Text = "— client-local (instant) —";
-		rows.AddChild(localHeader);
-		_tuneCameraZoomMin = AddTuningField(rows, "camera.zoomMin", OnVisualApplyPressed);
-		_tuneCameraZoomMax = AddTuningField(rows, "camera.zoomMax", OnVisualApplyPressed);
-		_tuneRockScale = AddTuningField(rows, "rock.modelScale", OnVisualApplyPressed);
-		_tuneTreeScale = AddTuningField(rows, "tree.modelScale", OnVisualApplyPressed);
-		_tunePlantScale = AddTuningField(rows, "plant.modelScale", OnVisualApplyPressed);
-		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
-		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
-		// S102: the movement/camera-FEEL levers (net latency, cosmetic lead, camera blend/smoothing) moved to the
-		// dedicated F6 panel (BuildMovementPanel). F5 keeps the pure VISUAL knobs (scales, labels, Cato, debug).
-		// S99: live Cato sprite placement. Applied INSTANTLY client-side on Apply/Enter (no respawn): pushed onto
-		// every active Cato visual via the renderer. Scale (px size) 2× the S96 first-guess by default; the Y/X
-		// offsets centre the cat body on the tile (the frame centre sits above the cat, wand extending up-right).
-		_tuneCatoPixelSize = AddTuningField(rows, "Cato scale (px size)", OnVisualApplyPressed);
-		_tuneCatoYOffset = AddTuningField(rows, "Cato Y offset", OnVisualApplyPressed);
-		_tuneCatoXOffset = AddTuningField(rows, "Cato X offset", OnVisualApplyPressed);
-		// S101: toward-camera depth — slides Cato along the ground-projected camera direction (1,0,1)/√2,
-		// positive = toward the camera. Live-applied like the other Cato fields (no respawn).
-		_tuneCatoDepth = AddTuningField(rows, "Cato depth (toward cam)", OnVisualApplyPressed);
+		_perfLabel = CreateOverlayLabel("PerfHud", 13);
+		_perfGraph = new FrameTimeGraph
+		{
+			Name = "PerfFrameGraph",
+			CustomMinimumSize = new Vector2(436, 78)
+		};
+		rows.AddChild(_perfLabel);
+		rows.AddChild(_perfGraph);
 
+		// Perf diagnostics (moved here from the old F5 visual panel — they are perf knobs, not render knobs).
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
 		uncapFps.AddThemeFontSizeOverride("font_size", 13);
@@ -1119,6 +1060,86 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		frameCsv.Toggled += ApplyFrameCsvDump;
 		rows.AddChild(frameCsv);
 		_frameCsvCheck = frameCsv;
+	}
+
+	// Lazily build the admin-only tabs (the old F4–F8 panels) the first time an Admin opens the panel: Visual /
+	// Movement / Combat / Server / Vitals. Built once (idempotent via _adminTabsBuilt) and only for an Admin session,
+	// so a non-admin never gets them (sees only Perf) — mirroring the old toggle-time admin gating. Every row is
+	// migrated verbatim from the old Build* method.
+	private void EnsureAdminTabsBuilt()
+	{
+		if (_adminTabsBuilt || _debugTabs is null || _client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		BuildVisualTab(_debugTabs);
+		BuildMovementTab(_debugTabs);
+		BuildCombatTab(_debugTabs);
+		BuildServerTab(_debugTabs);
+		BuildVitalsTab(_debugTabs);
+		_adminTabsBuilt = true;
+	}
+
+	// Visual tab (was F5): camera zoom range, rock/tree/plant model scale, label pixel-size/height, the live Cato
+	// placement fields, the debug-facing-box / Cato-sprite / prediction-tiles toggles, the HUD stub cycler, and the
+	// NEW anti-aliasing controls (FXAA on/off + an MSAA dropdown). All applied INSTANTLY client-side on Apply (the
+	// fields) or on click (the toggles) — same as the old F5 panel. (The uncap-fps + frame-log toggles moved to the
+	// Perf tab; the movement/feel levers are on the Movement tab.)
+	private void BuildVisualTab(TabContainer tabs)
+	{
+		var rows = AddDebugTab(tabs, "Visual");
+
+		var localHeader = CreateOverlayLabel("VisualLocalHeader", 12);
+		localHeader.Text = "— client-local (instant) —";
+		rows.AddChild(localHeader);
+		_tuneCameraZoomMin = AddTuningField(rows, "camera.zoomMin", OnVisualApplyPressed);
+		_tuneCameraZoomMax = AddTuningField(rows, "camera.zoomMax", OnVisualApplyPressed);
+		_tuneRockScale = AddTuningField(rows, "rock.modelScale", OnVisualApplyPressed);
+		_tuneTreeScale = AddTuningField(rows, "tree.modelScale", OnVisualApplyPressed);
+		_tunePlantScale = AddTuningField(rows, "plant.modelScale", OnVisualApplyPressed);
+		_tuneLabelPixelSize = AddTuningField(rows, "label.pixelSize", OnVisualApplyPressed);
+		_tuneLabelHeight = AddTuningField(rows, "label.height", OnVisualApplyPressed);
+		// S99: live Cato sprite placement. Applied INSTANTLY client-side on Apply/Enter (no respawn): pushed onto
+		// every active Cato visual via the renderer. Scale (px size) 2× the S96 first-guess by default; the Y/X
+		// offsets centre the cat body on the tile (the frame centre sits above the cat, wand extending up-right).
+		_tuneCatoPixelSize = AddTuningField(rows, "Cato scale (px size)", OnVisualApplyPressed);
+		_tuneCatoYOffset = AddTuningField(rows, "Cato Y offset", OnVisualApplyPressed);
+		_tuneCatoXOffset = AddTuningField(rows, "Cato X offset", OnVisualApplyPressed);
+		// S101: toward-camera depth — slides Cato along the ground-projected camera direction (1,0,1)/√2,
+		// positive = toward the camera. Live-applied like the other Cato fields (no respawn).
+		_tuneCatoDepth = AddTuningField(rows, "Cato depth (toward cam)", OnVisualApplyPressed);
+
+		// NEW anti-aliasing controls (live, no restart). FXAA on/off mirrors + drives GetViewport().ScreenSpaceAA
+		// (defaults ON, seeded in _Ready). The MSAA dropdown drives GetViewport().Msaa3D (Disabled/2x/4x/8x). Both
+		// flip on click — no Apply needed.
+		var aaHeader = CreateOverlayLabel("VisualAaHeader", 12);
+		aaHeader.Text = "— anti-aliasing (instant) —";
+		rows.AddChild(aaHeader);
+
+		var fxaa = new CheckBox { Name = "Fxaa", Text = "FXAA (screen-space AA)", ButtonPressed = GetViewport().ScreenSpaceAA == Viewport.ScreenSpaceAAEnum.Fxaa };
+		fxaa.AddThemeFontSizeOverride("font_size", 13);
+		fxaa.Toggled += ApplyFxaa;
+		rows.AddChild(fxaa);
+		_fxaaCheck = fxaa;
+
+		var msaaRow = new HBoxContainer { Name = "Row_Msaa" };
+		msaaRow.AddThemeConstantOverride("separation", 8);
+		var msaaCaption = CreateOverlayLabel("Cap_Msaa", 13);
+		msaaCaption.Text = "MSAA (3D)";
+		msaaCaption.CustomMinimumSize = new Vector2(170, 0);
+		msaaRow.AddChild(msaaCaption);
+		_msaaDropdown = new OptionButton { Name = "MsaaDropdown", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		_msaaDropdown.AddThemeFontSizeOverride("font_size", 13);
+		// Item indices map to the Viewport.Msaa values in ApplyMsaaSelected. Disabled is the live default.
+		_msaaDropdown.AddItem("Disabled", 0);
+		_msaaDropdown.AddItem("2x", 1);
+		_msaaDropdown.AddItem("4x", 2);
+		_msaaDropdown.AddItem("8x", 3);
+		_msaaDropdown.Select(MsaaIndexFor(GetViewport().Msaa3D));
+		_msaaDropdown.ItemSelected += ApplyMsaaSelected;
+		msaaRow.AddChild(_msaaDropdown);
+		rows.AddChild(msaaRow);
 
 		// S73 live debug toggle — flips on click, no Apply needed: render every Player (local + remote) as a
 		// plain box + facing arrow instead of the character model, so facing + per-step movement are legible
@@ -1161,30 +1182,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnVisualApplyPressed;
 		rows.AddChild(apply);
-
-		panel.Visible = false;
-		_visualPanel = panel;
-		layer.AddChild(panel);
 	}
 
-	// S102: the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (F6). Holds the movement/camera-FEEL levers moved
-	// off F5 (net latency, camera follow blend + smoothing) plus the camera teleport-snap distance and the
-	// stop-on-reversal toggle. All applied INSTANTLY client-side (no server round-trip, no restart) via the same
-	// Apply-all / live-toggle pattern as F4/F5. Per-entity move SPEED is the "Move speed" dropdown here (sends
-	// /speed); the GLOBAL base cooldown is a pinned constant (SPEED1), not a knob. Hidden until F6 is pressed by an
-	// Admin session; seeded on first open from the live local values.
-	private void BuildMovementPanel(CanvasLayer layer)
+	// Movement tab (was F6): the movement/camera-FEEL levers — Move speed dropdown, net latency, camera follow
+	// blend + smoothing + teleport-snap, the stop-on-reversal toggle, and the Force Resync button. All live (no
+	// restart) via the same Apply-all / live-toggle pattern. Verbatim from the old F6 panel.
+	private void BuildMovementTab(TabContainer tabs)
 	{
-		// Below the F5 panel (same right column) so all three admin panels can be open without overlapping.
-		var panel = CreateOverlayPanel("MovementPanel", new Vector2(860, 524), new Vector2(360, 320));
-		var rows = CreatePanelVBox(panel);
-
-		var title = CreateOverlayLabel("MovementTitle", 15);
-		title.Text = "ADMIN MOVEMENT / FEEL (F6)";
-		rows.AddChild(title);
+		var rows = AddDebugTab(tabs, "Movement");
 
 		var note = CreateOverlayLabel("MovementSpeedNote", 12);
-		note.Text = "— client-local (instant) · speed lives in F4 —";
+		note.Text = "— client-local (instant) —";
 		rows.AddChild(note);
 
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
@@ -1204,7 +1212,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		speedRow.AddChild(_moveSpeedDropdown);
 		rows.AddChild(speedRow);
 
-		// Moved off F5 — applied on Apply/Enter:
+		// Applied on Apply/Enter:
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
 		// S95: camera focus blend between the confirmed tile (0) and the rendered character (1, default).
@@ -1243,57 +1251,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnMovementApplyPressed;
 		rows.AddChild(apply);
-
-		panel.Visible = false;
-		_movementPanel = panel;
-		layer.AddChild(panel);
 	}
 
-	// COMBAT-S1: the admin dev-set VITALS panel (F7). Three rows (HP/mana/stamina) of label + LineEdit; one Apply
-	// sends each current value to the server via AdminSetStat (server admin-gates + clamps, then replicates the
-	// authoritative result back via PlayerStatsMessage so the bars track min/max). Same row/Apply pattern as F4.
-	// Hidden until F7 is pressed by an Admin session; seeded on first open from the live replicated stats.
-	private void BuildStatPanel(CanvasLayer layer)
+	// Combat tab (was F8): the free-aim combat feel-knobs (attack cooldown ms, swing-root ms, sector half-angle deg,
+	// radius tiles, damage). Apply sends each via AdminSetTuning on the combat.* keys; the server clamps + broadcasts
+	// the replicated snapshot back, which re-seeds the fields + rebuilds the wedge/predictor/cooldown viz. Verbatim.
+	private void BuildCombatTab(TabContainer tabs)
 	{
-		// Below the F4 server-tuning panel (same left column) so it doesn't overlap the other admin panels.
-		var panel = CreateOverlayPanel("StatPanel", new Vector2(490, 430), new Vector2(360, 200));
-		var rows = CreatePanelVBox(panel);
-
-		var title = CreateOverlayLabel("StatTitle", 15);
-		title.Text = "ADMIN DEV-SET VITALS (F7)";
-		rows.AddChild(title);
-
-		var header = CreateOverlayLabel("StatHeader", 12);
-		header.Text = "— local player · current value · sent on Apply —";
-		rows.AddChild(header);
-
-		_statHealthEdit = AddTuningField(rows, "hp (current)", OnStatApplyPressed);
-		_statManaEdit = AddTuningField(rows, "mana (current)", OnStatApplyPressed);
-		_statStaminaEdit = AddTuningField(rows, "stamina (current)", OnStatApplyPressed);
-
-		var apply = new Button { Name = "StatApply", Text = "Apply" };
-		apply.AddThemeFontSizeOverride("font_size", 14);
-		apply.Pressed += OnStatApplyPressed;
-		rows.AddChild(apply);
-
-		panel.Visible = false;
-		_statPanel = panel;
-		layer.AddChild(panel);
-	}
-
-	// COMBAT-TUNING: the admin COMBAT-TUNING panel (F8). Five rows (attack cooldown ms, swing-root ms, sector
-	// half-angle deg, radius tiles, damage) of label + LineEdit; one Apply sends each via AdminSetTuning on the
-	// combat.* keys. The server admin-gates + clamps + broadcasts the replicated snapshot back, which re-seeds the
-	// fields and rebuilds the wedge/predictor/cooldown viz live. Hidden until F8 is pressed by an Admin session.
-	private void BuildCombatPanel(CanvasLayer layer)
-	{
-		// Right of the F4/F7 admin column so the panels can sit side-by-side without overlapping.
-		var panel = CreateOverlayPanel("CombatPanel", new Vector2(866, 154), new Vector2(380, 240));
-		var rows = CreatePanelVBox(panel);
-
-		var title = CreateOverlayLabel("CombatTitle", 15);
-		title.Text = "ADMIN COMBAT TUNING (F8)";
-		rows.AddChild(title);
+		var rows = AddDebugTab(tabs, "Combat");
 
 		var header = CreateOverlayLabel("CombatHeader", 12);
 		header.Text = "— server-authoritative · replicated · sent on Apply —";
@@ -1309,10 +1274,43 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnCombatApplyPressed;
 		rows.AddChild(apply);
+	}
 
-		panel.Visible = false;
-		_combatPanel = panel;
-		layer.AddChild(panel);
+	// Server tab (was F4): the server-side tuning knobs — aoi.interestRadius. Apply sends every server field via
+	// AdminSetTuning (the server admin-gates + clamps authoritatively). Verbatim from the old F4 panel.
+	private void BuildServerTab(TabContainer tabs)
+	{
+		var rows = AddDebugTab(tabs, "Server");
+
+		var serverHeader = CreateOverlayLabel("TuningServerHeader", 12);
+		serverHeader.Text = "— server (sent on Apply) —";
+		rows.AddChild(serverHeader);
+		_tuneInterestRadius = AddTuningField(rows, "aoi.interestRadius", OnTuningApplyPressed);
+
+		var apply = new Button { Name = "TuningApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnTuningApplyPressed;
+		rows.AddChild(apply);
+	}
+
+	// Vitals tab (was F7): set the local player's current HP/mana/stamina live. Apply sends each via AdminSetStat
+	// (the server admin-gates + clamps, then replicates the result back so the bars track it). Verbatim from F7.
+	private void BuildVitalsTab(TabContainer tabs)
+	{
+		var rows = AddDebugTab(tabs, "Vitals");
+
+		var header = CreateOverlayLabel("StatHeader", 12);
+		header.Text = "— local player · current value · sent on Apply —";
+		rows.AddChild(header);
+
+		_statHealthEdit = AddTuningField(rows, "hp (current)", OnStatApplyPressed);
+		_statManaEdit = AddTuningField(rows, "mana (current)", OnStatApplyPressed);
+		_statStaminaEdit = AddTuningField(rows, "stamina (current)", OnStatApplyPressed);
+
+		var apply = new Button { Name = "StatApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnStatApplyPressed;
+		rows.AddChild(apply);
 	}
 
 	// S106: (re)populate the "Move speed" dropdown from ServerHello's base cadence + tick rate, and preselect the
@@ -1379,8 +1377,45 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_client?.SetStopOnReversal(enabled);
 	}
 
-	// Live vsync / fps toggle, shared by the F5 checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
-	// (perf testing — watch the true fps in the F3 HUD); capped = vsync on. Engine.MaxFps stays 0 either way;
+	// Live FXAA toggle (Visual tab "FXAA" checkbox). Flips GetViewport().ScreenSpaceAA between Fxaa (on) and
+	// Disabled (off) at runtime — no restart. Defaults ON (seeded in _Ready + reflected by the checkbox). FXAA is
+	// the screen-space AA the Compatibility renderer supports; it composes independently of the MSAA 3D option.
+	private void ApplyFxaa(bool enabled)
+	{
+		GetViewport().ScreenSpaceAA = enabled
+			? Viewport.ScreenSpaceAAEnum.Fxaa
+			: Viewport.ScreenSpaceAAEnum.Disabled;
+	}
+
+	// Live MSAA toggle (Visual tab "MSAA" dropdown). Maps the item index to a Viewport.Msaa level and applies it to
+	// GetViewport().Msaa3D at runtime — no restart. Disabled (0) is the default; 2x/4x/8x trade fill cost for sharper
+	// edges (an alternative to FXAA's blur for edge-crawl). Independent of the FXAA checkbox.
+	private void ApplyMsaaSelected(long index)
+	{
+		GetViewport().Msaa3D = index switch
+		{
+			1 => Viewport.Msaa.Msaa2X,
+			2 => Viewport.Msaa.Msaa4X,
+			3 => Viewport.Msaa.Msaa8X,
+			_ => Viewport.Msaa.Disabled,
+		};
+	}
+
+	// Maps a live Viewport.Msaa level back to the MSAA dropdown's item index, so the dropdown seeds to the current
+	// state on build (Disabled by default).
+	private static int MsaaIndexFor(Viewport.Msaa msaa)
+	{
+		return msaa switch
+		{
+			Viewport.Msaa.Msaa2X => 1,
+			Viewport.Msaa.Msaa4X => 2,
+			Viewport.Msaa.Msaa8X => 3,
+			_ => 0,
+		};
+	}
+
+	// Live vsync / fps toggle, shared by the Perf-tab checkbox and MMO_UNCAP_FPS. Uncapped = vsync off + no fps cap
+	// (perf testing — watch the true fps in the perf HUD); capped = vsync on. Engine.MaxFps stays 0 either way;
 	// vsync does the capping, so re-enabling it re-caps to the monitor refresh.
 	private void ApplyFpsUncap(bool uncapped)
 	{
@@ -1785,7 +1820,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				SetTextIfChanged(_statusLabel,
 					$"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
 					$"{server}\n" +
-					"WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F3 toggles the debug HUD." +
+					"WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F1 toggles the debug panel." +
 					movementDebug);
 			}
 			else
@@ -1793,7 +1828,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				// Clean default: one minimal line — who you are, connection state, and the key hints.
 				SetTextIfChanged(_statusLabel,
 					$"{PlayerName}  {_client.State}\n" +
-					"WASD to move. Enter/T to chat. E to harvest. F3 for the debug HUD.");
+					"WASD to move. Enter/T to chat. E to harvest. F1 for the debug panel.");
 			}
 		}
 
@@ -2032,133 +2067,96 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 	}
 
-	// F3 / client_toggle_perf: flips the whole dev/monitoring HUD (perf panel + server-metrics panel +
-	// status-panel diagnostics) as one unit. Hidden by default for a clean launch screen.
-	private void ToggleDebugOverlay()
+	// ~ / client_toggle_perf: toggle the consolidated debug/tuning panel as one unit. Seeding mirrors the old
+	// per-panel behavior — the once-only tabs (Server/Visual/Movement) seed on first open; the re-every-open tabs
+	// (Vitals/Combat) seed on each open so they show the current authoritative values. _debugOverlayVisible tracks
+	// the panel so the perf HUD readout, the server-metrics panel, and the status-panel diagnostics follow it (the
+	// perf HUD + graph live on the Perf tab; the metrics panel is the right-side overlay). Hidden by default for a
+	// clean launch screen. Admin-only tabs simply don't exist for a non-admin, so a non-admin sees only the Perf tab.
+	private void ToggleDebugPanel()
 	{
-		_debugOverlayVisible = !_debugOverlayVisible;
-		if (_perfPanel is not null)
+		if (_debugPanel is null)
 		{
-			_perfPanel.Visible = _debugOverlayVisible;
+			return;
 		}
 
+		SetDebugPanelVisible(!_debugPanelVisible);
+	}
+
+	// F3 shortcut: open (or keep open) the consolidated panel on the Perf tab — preserves the old F3 muscle memory.
+	private void OpenDebugPanelOnPerfTab()
+	{
+		if (_debugPanel is null)
+		{
+			return;
+		}
+
+		// The Perf tab is always index 0 (built first for every role).
+		if (_debugTabs is not null && _debugTabs.GetTabCount() > 0)
+		{
+			_debugTabs.CurrentTab = 0;
+		}
+
+		if (!_debugPanelVisible)
+		{
+			SetDebugPanelVisible(true);
+		}
+	}
+
+	// Shared show/hide for the consolidated panel. Seeds on open (once-only vs. every-open per the old panels),
+	// keeps _debugOverlayVisible + the metrics panel in sync, and forces an immediate overlay repaint so the toggle
+	// feels instant instead of waiting up to ~0.1s for the next throttle window.
+	private void SetDebugPanelVisible(bool visible)
+	{
+		_debugPanelVisible = visible;
+		if (visible)
+		{
+			// Build the admin tabs on first Admin open (role is unknown at construction), then seed.
+			EnsureAdminTabsBuilt();
+
+			if (!_debugFieldsSeeded)
+			{
+				SeedDebugFieldsOnce();
+				_debugFieldsSeeded = true;
+			}
+
+			// Re-seed the every-open admin tabs (Vitals/Combat) so they reflect the current authoritative values
+			// (these change server-side, so showing the latest truth on each open is the right default).
+			if (_client?.Role == ClientRole.Admin)
+			{
+				SeedStatFields();
+				SeedCombatFields();
+			}
+		}
+
+		_debugPanel!.Visible = visible;
+		_debugOverlayVisible = visible;
 		if (_metricsPanel is not null)
 		{
-			_metricsPanel.Visible = _debugOverlayVisible;
+			_metricsPanel.Visible = visible;
 		}
 
-		// Force the next overlay pass to repaint the perf HUD and the status panel immediately so the
-		// toggle feels instant instead of waiting up to ~0.1s for the next throttle window.
 		_nextPerfHudAt = 0;
 		_nextOverlayAt = 0;
 	}
 
-	// F4: toggle the admin SERVER tuning panel (S60). Admin-only — for a non-admin (or pre-login) session the
-	// panel never shows. Fields are seeded with current known values on first open of an authenticated admin
-	// session so the human sees real starting points (server params reflect ServerHello).
-	private void ToggleTuningPanel()
+	// First-open seeding for the once-only tabs (mirrors the old F4/F5/F6 "seed on first open" behavior — re-seeding
+	// would stomp values the human typed but hasn't applied). The Perf tab has nothing to seed. Admin-only tabs are
+	// only built for an Admin session, so guard their seeds on the role (the field refs are null otherwise).
+	private void SeedDebugFieldsOnce()
 	{
-		if (_tuningPanel is null)
-		{
-			return;
-		}
-
 		if (_client?.Role != ClientRole.Admin)
 		{
-			// Non-admin: keep it hidden and give a quiet hint rather than silently doing nothing.
-			ShowInteractFeedback("Tuning panel requires Admin role.");
 			return;
 		}
 
-		_tuningPanelVisible = !_tuningPanelVisible;
-		if (_tuningPanelVisible && !_tuningFieldsSeeded)
-		{
-			SeedTuningFields();
-			_tuningFieldsSeeded = true;
-		}
-
-		_tuningPanel.Visible = _tuningPanelVisible;
+		SeedTuningFields();
+		SeedVisualFields();
+		SeedMovementFields();
 	}
 
-	// F5: toggle the admin CLIENT-LOCAL VISUAL tuning panel (S65). Same admin gating as F4 for now — these are
-	// dev knobs; the human can decide later whether a visual-only panel should be ungated.
-	private void ToggleVisualPanel()
-	{
-		if (_visualPanel is null)
-		{
-			return;
-		}
-
-		if (_client?.Role != ClientRole.Admin)
-		{
-			ShowInteractFeedback("Visual panel requires Admin role.");
-			return;
-		}
-
-		_visualPanelVisible = !_visualPanelVisible;
-		if (_visualPanelVisible && !_visualFieldsSeeded)
-		{
-			SeedVisualFields();
-			_visualFieldsSeeded = true;
-		}
-
-		_visualPanel.Visible = _visualPanelVisible;
-	}
-
-	// F6: toggle the admin CLIENT-LOCAL MOVEMENT / FEEL tuning panel (S102). Same admin gating as F4/F5.
-	private void ToggleMovementPanel()
-	{
-		if (_movementPanel is null)
-		{
-			return;
-		}
-
-		if (_client?.Role != ClientRole.Admin)
-		{
-			ShowInteractFeedback("Movement panel requires Admin role.");
-			return;
-		}
-
-		_movementPanelVisible = !_movementPanelVisible;
-		if (_movementPanelVisible)
-		{
-			if (!_movementFieldsSeeded)
-			{
-				SeedMovementFields();
-				_movementFieldsSeeded = true;
-			}
-		}
-
-		_movementPanel.Visible = _movementPanelVisible;
-	}
-
-	// F7: toggle the COMBAT-S1 admin dev-set vitals panel. Same admin gating as F4/F5/F6. Re-seeded from the live
-	// replicated stats on EVERY open so the fields reflect the current authoritative values (not stale edits) — the
-	// values change server-side (dev-set / later damage), so showing the latest truth on open is the right default.
-	private void ToggleStatPanel()
-	{
-		if (_statPanel is null)
-		{
-			return;
-		}
-
-		if (_client?.Role != ClientRole.Admin)
-		{
-			ShowInteractFeedback("Vitals panel requires Admin role.");
-			return;
-		}
-
-		_statPanelVisible = !_statPanelVisible;
-		if (_statPanelVisible)
-		{
-			SeedStatFields();
-		}
-
-		_statPanel.Visible = _statPanelVisible;
-	}
-
-	// COMBAT-S1: seed the F7 fields from the live replicated vitals (PlayerStatsMessage). Until the first stats
-	// arrive the local player has no replicated vitals, so the fields are left blank.
+	// Seed the Vitals fields from the live replicated vitals (PlayerStatsMessage). Until the first stats arrive the
+	// local player has no replicated vitals, so the fields are left blank.
 	private void SeedStatFields()
 	{
 		if (_client?.LocalStats is { } stats)
@@ -2167,30 +2165,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			SetField(_statManaEdit, stats.Mana);
 			SetField(_statStaminaEdit, stats.Stamina);
 		}
-	}
-
-	// COMBAT-TUNING: toggle the F8 combat-tuning panel. Admin-only (a non-admin/pre-login session sees a hint and the
-	// panel never shows). Seeds from the live replicated combat snapshot on open.
-	private void ToggleCombatPanel()
-	{
-		if (_combatPanel is null)
-		{
-			return;
-		}
-
-		if (_client?.Role != ClientRole.Admin)
-		{
-			ShowInteractFeedback("Combat tuning panel requires Admin role.");
-			return;
-		}
-
-		_combatPanelVisible = !_combatPanelVisible;
-		if (_combatPanelVisible)
-		{
-			SeedCombatFields();
-		}
-
-		_combatPanel.Visible = _combatPanelVisible;
 	}
 
 	// COMBAT-TUNING: seed the F8 fields from the live replicated combat snapshot. Re-seeded whenever the snapshot
@@ -2214,13 +2188,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// compare. Only re-seeds while open so it never stomps un-applied edits in a closed panel.
 	private void ReseedCombatFieldsIfChanged()
 	{
-		if (_combatPanelVisible && _client is { } client && client.CombatTuningVersion != _combatPanelSeededVersion)
+		if (_debugPanelVisible && _client is { } client && client.CombatTuningVersion != _combatPanelSeededVersion)
 		{
 			SeedCombatFields();
 		}
 	}
 
-	// Seed the F4 server fields from ServerHello (the server's startup truth). Only called once on first open
+	// Seed the Server-tab fields from ServerHello (the server's startup truth). Only called once on first open
 	// (re-seeding would stomp values the human has typed but not yet applied).
 	private void SeedTuningFields()
 	{
@@ -2229,7 +2203,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneInterestRadius, serverRadius);
 	}
 
-	// Seed the F5 client-local visual fields from the live local state/_tuning. Only called once on first open.
+	// Seed the Visual-tab client-local fields from the live local state/_tuning. Only called once on first open.
 	private void SeedVisualFields()
 	{
 		SetField(_tuneCameraZoomMin, _cameraSizeMin);
@@ -2247,11 +2221,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_tuneCatoDepth, _tuning.CatoDepth);
 	}
 
-	// S102: seed the F6 client-local movement/feel fields from the live local values. Only called once on first
-	// open (re-seeding would stomp un-applied edits), mirroring SeedVisualFields.
+	// S102: seed the Movement-tab client-local movement/feel fields from the live local values. Only called once on
+	// first open (re-seeding would stomp un-applied edits), mirroring SeedVisualFields.
 	private void SeedMovementFields()
 	{
-		// Moved from F5 — seed from the live values so re-opening shows the current state.
+		// Seed from the live values so re-opening shows the current state.
 		SetField(_moveNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
 		SetField(_moveCameraFollowBlend, _cameraFollowBlend);
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
@@ -2272,7 +2246,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// F4 apply-all: parse every SERVER field and send it via AdminSetTuning (the server admin-gates + clamps
+	// Server-tab apply-all: parse every SERVER field and send it via AdminSetTuning (the server admin-gates + clamps
 	// authoritatively). Invalid (unparseable) fields are skipped so a typo in one never blocks the others.
 	private void OnTuningApplyPressed()
 	{
@@ -2291,7 +2265,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ShowInteractFeedback("Server tuning applied.");
 	}
 
-	// COMBAT-S1 F7 apply: parse each vitals field and send its CURRENT value to the server via AdminSetStat (stat
+	// Vitals-tab apply (COMBAT-S1): parse each vitals field and send its CURRENT value to the server via AdminSetStat (stat
 	// byte 0=HP, 1=mana, 2=stamina; the server admin-gates + clamps to [0,max] and replicates the result back so
 	// the bars track it). Invalid/blank fields are skipped so a typo in one never blocks the others.
 	private void OnStatApplyPressed()
@@ -2319,7 +2293,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ShowInteractFeedback("Vitals sent.");
 	}
 
-	// COMBAT-TUNING F8 apply-all: parse each combat field and send it via AdminSetTuning on its combat.* registry key.
+	// Combat-tab apply-all (COMBAT-TUNING): parse each combat field and send it via AdminSetTuning on its combat.* registry key.
 	// The server admin-gates + clamps each authoritatively, then broadcasts the replicated CombatTuningSnapshot back —
 	// which re-seeds this panel (post-clamp values) and rebuilds the wedge/predictor/cooldown viz live. Invalid/blank
 	// fields are skipped so a typo in one never blocks the others.
@@ -2358,7 +2332,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ShowInteractFeedback("Combat tuning sent.");
 	}
 
-	// F5 apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server
+	// Visual-tab apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server
 	// round-trip). Camera zoom range is clamped sane and the live _cameraSize re-clamped into it; model scales
 	// and label sizes are mirrored into _tuning and pushed onto existing visuals so the change is visible
 	// without a respawn. Invalid fields are skipped so a typo in one never blocks the others.
@@ -2442,7 +2416,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ShowInteractFeedback("Visual tuning applied.");
 	}
 
-	// S102 F6 apply-all: parse every CLIENT-LOCAL MOVEMENT/FEEL field and apply it INSTANTLY in place (no server
+	// Movement-tab apply-all (S102): parse every CLIENT-LOCAL MOVEMENT/FEEL field and apply it INSTANTLY in place (no server
 	// round-trip, no restart). Net latency routes to the client; camera blend/smoothing/teleport-snap are local
 	// _camera* fields the next UpdateCamera reads. The stop-on-reversal toggle applies live on click (not here).
 	// Invalid fields are skipped so a typo in one never blocks the others.
@@ -2507,7 +2481,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		_nextPerfHudAt = now.TotalSeconds + 0.1d;
 		_perfText.Clear();
-		_perfText.AppendLine("PERF HUD (F3)");
+		_perfText.AppendLine("PERF HUD (F1 — Perf tab)");
 		AppendPerfRow("fps", Performance.GetMonitor(Performance.Monitor.TimeFps));
 		AppendPerfRow("frame ms last/max", _lastFrameMs, _maxFrameMs);
 		AppendPerfRow("process/physics ms",
@@ -2721,9 +2695,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	void IControlHost.TogglePerfHud()
 	{
-		// The wire-facing name stays TogglePerfHud (debug-control protocol / client_toggle_perf), but it
-		// now flips the whole unified debug overlay, matching F3.
-		ToggleDebugOverlay();
+		// The wire-facing name stays TogglePerfHud (debug-control protocol / client_toggle_perf), but it now flips
+		// the consolidated debug panel. When turning it ON, select the Perf tab (the old perf HUD) so the toggle
+		// matches the channel's intent; turning it OFF just hides the panel.
+		if (_debugPanelVisible)
+		{
+			SetDebugPanelVisible(false);
+		}
+		else
+		{
+			OpenDebugPanelOnPerfTab();
+		}
 	}
 
 	void IControlHost.ToggleFullscreen()

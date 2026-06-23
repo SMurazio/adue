@@ -25,7 +25,8 @@ public sealed class GodotClientProjectTests
         var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
         var graph = File.ReadAllText(FindGodotSource("FrameTimeGraph.cs"));
 
-        Assert.Contains("Key.F3", root);
+        // The perf HUD now lives on the consolidated debug panel's Perf tab (the default tab, reached by the F1
+        // toggle). Assert the HUD content itself is present.
         Assert.Contains("PerfHud", root);
         Assert.Contains("FrameTimeGraph", root);
         Assert.Contains("Performance.GetMonitor(Performance.Monitor.TimeFps)", root);
@@ -39,11 +40,69 @@ public sealed class GodotClientProjectTests
         Assert.Contains("Performance.GetMonitor(Performance.Monitor.ObjectNodeCount)", root);
         Assert.Contains("GC.GetTotalMemory(false)", root);
         Assert.Contains("_nextPerfHudAt = now.TotalSeconds + 0.1d;", root);
-        // Interpolation queue depth / cadence is surfaced in the F3 HUD (no env flag needed).
+        // Interpolation queue depth / cadence is surfaced in the perf HUD (no env flag needed).
         Assert.Contains("interp q=", root);
         Assert.Contains("SampleCount = 120", graph);
         Assert.Contains("DrawLine", graph);
         Assert.Contains("QueueRedraw", graph);
+    }
+
+    [Fact]
+    public void GodotClientConsolidatesDebugSurfacesIntoOneTabbedPanel()
+    {
+        var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
+
+        // SINGLE hotkey: F1 toggles the consolidated panel (matched as "Key.F1)" so it doesn't collide with the
+        // F11 fullscreen handler). The six former debug/tuning F-key handlers (F3–F8) are gone.
+        Assert.Contains("Key.F1)", root);
+        Assert.Contains("ToggleDebugPanel", root);
+        Assert.Contains("OpenDebugPanelOnPerfTab", root);
+        Assert.DoesNotContain("Key.F3", root);
+        Assert.DoesNotContain("Key.F4", root);
+        Assert.DoesNotContain("Key.F5", root);
+        Assert.DoesNotContain("Key.F6", root);
+        Assert.DoesNotContain("Key.F7", root);
+        Assert.DoesNotContain("Key.F8", root);
+
+        // Built as a TabContainer with the six thematic tabs (the page Control's Name is the tab title).
+        Assert.Contains("new TabContainer", root);
+        Assert.Contains("AddDebugTab(tabs, \"Perf\")", root);
+        Assert.Contains("AddDebugTab(tabs, \"Visual\")", root);
+        Assert.Contains("AddDebugTab(tabs, \"Movement\")", root);
+        Assert.Contains("AddDebugTab(tabs, \"Combat\")", root);
+        Assert.Contains("AddDebugTab(tabs, \"Server\")", root);
+        Assert.Contains("AddDebugTab(tabs, \"Vitals\")", root);
+
+        // Admin gating maps to tabs: only the Perf tab is built unconditionally; the rest are built lazily on the
+        // first Admin open (the role is unknown at construction), so a non-admin only ever sees Perf.
+        Assert.Contains("BuildPerfTab(tabs)", root);
+        Assert.Contains("EnsureAdminTabsBuilt", root);
+        Assert.Contains("_client?.Role != ClientRole.Admin", root);
+
+        // Every migrated control's Apply/handler wiring is still present (a sample across the tabs).
+        Assert.Contains("OnTuningApplyPressed", root);   // Server tab
+        Assert.Contains("OnVisualApplyPressed", root);   // Visual tab
+        Assert.Contains("OnMovementApplyPressed", root); // Movement tab
+        Assert.Contains("OnCombatApplyPressed", root);   // Combat tab
+        Assert.Contains("OnStatApplyPressed", root);     // Vitals tab
+        Assert.Contains("ApplyFpsUncap", root);          // Perf tab toggle
+        Assert.Contains("ApplyFrameCsvDump", root);      // Perf tab toggle
+    }
+
+    [Fact]
+    public void GodotClientHasLiveAntiAliasingControls()
+    {
+        var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
+
+        // FXAA defaults ON (seeded in _Ready) and is now a live Visual-tab checkbox driving ScreenSpaceAA; the MSAA
+        // dropdown drives Msaa3D across Disabled/2x/4x/8x. Both applied live at runtime (no restart).
+        Assert.Contains("GetViewport().ScreenSpaceAA = Viewport.ScreenSpaceAAEnum.Fxaa", root);
+        Assert.Contains("ApplyFxaa", root);
+        Assert.Contains("ApplyMsaaSelected", root);
+        Assert.Contains("Viewport.Msaa.Msaa2X", root);
+        Assert.Contains("Viewport.Msaa.Msaa4X", root);
+        Assert.Contains("Viewport.Msaa.Msaa8X", root);
+        Assert.Contains("GetViewport().Msaa3D", root);
     }
 
     [Fact]
