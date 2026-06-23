@@ -78,28 +78,34 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _metricsLabel;
 	private Label? _chatLabel;
 	private LineEdit? _chatInput;
-	// Perf HUD readout + frame-time graph — now hosted on the consolidated debug panel's Perf tab (no standalone
-	// _perfPanel any more); F3 opens the panel on that tab.
+	// Perf HUD readout + frame-time graph — a STANDALONE glanceable overlay (the old F3 perf HUD), separate from the
+	// F1 tuning panel and toggled by F3 (and the client_toggle_perf control-channel command). Available to EVERYONE
+	// (it was the non-admin overlay). _perfPanel hosts the readout label + the FrameTimeGraph + the uncap-fps/frame-log
+	// toggles; its visibility drives _debugOverlayVisible (perf HUD readout + metrics panel + full status diag follow it).
 	private Label? _perfLabel;
+	private PanelContainer? _perfPanel;
+	private bool _perfPanelVisible;
 	private FrameTimeGraph? _perfGraph;
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
-	// ---- CONSOLIDATED debug/tuning panel ----------------------------------------------------------
-	// One tabbed panel (TabContainer) under a SINGLE hotkey — backtick/tilde (~ / Key.Quoteleft) toggles it.
-	// It absorbed the six former F-key surfaces (F3 perf HUD, F4 server tuning, F5 visual, F6 movement/feel, F7
-	// vitals, F8 combat) as thematic TABS: Perf / Visual / Movement / Combat / Server / Vitals. F3 still works as
-	// a shortcut — it opens the panel directly on the Perf tab (muscle memory). Admin gating is preserved: the
-	// Perf tab is the old non-admin F3 overlay (always available); the other five tabs (the old F4–F8 admin
-	// panels) are added only for an Admin session. Built once in BuildDebugPanel; seeded lazily per-tab on first
-	// open (the same Seed* helpers as before), and re-seeded for the combat tab on each replicated snapshot.
+	// ---- F1 tuning panel (TabContainer) -----------------------------------------------------------
+	// One DRAGGABLE tabbed panel under F1 holding the FIVE admin tuning surfaces (the old F4–F8 F-key panels) as
+	// thematic TABS: Visual / Movement / Combat / Server / Vitals. The whole panel is ADMIN-ONLY — every tab was an
+	// admin surface, so a non-admin pressing F1 gets nothing (the tabs are never built and the panel never shows).
+	// Built once in BuildDebugPanel; the tabs are seeded lazily on first Admin open (the same Seed* helpers as
+	// before), and re-seeded for the combat/vitals tabs on each open / replicated snapshot. (Perf is NOT here — it
+	// is the standalone F3 overlay above.)
 	private PanelContainer? _debugPanel;
 	private TabContainer? _debugTabs;
 	private bool _debugPanelVisible;
 	private bool _debugFieldsSeeded;
-	// The admin-only tabs (Visual/Movement/Combat/Server/Vitals) are built lazily on the first Admin open — the role
+	// The five tuning tabs (Visual/Movement/Combat/Server/Vitals) are built lazily on the first Admin open — the role
 	// is unknown at construction (before login). This guards that one-time build.
 	private bool _adminTabsBuilt;
+	// Drag state for the movable F1 panel: the header Control reports button-down + relative motion via _GuiInput,
+	// and we reposition the panel (clamped on-screen). _debugPanelDragging is true between button-down and button-up.
+	private bool _debugPanelDragging;
 	// FXAA/MSAA live anti-aliasing controls (Visual tab). FXAA defaults ON (mirrors the _Ready ScreenSpaceAA seed);
 	// the MSAA dropdown drives GetViewport().Msaa3D. Both applied live at runtime — no restart.
 	private CheckBox? _fxaaCheck;
@@ -211,9 +217,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _zoneBuilt;
 	private bool _sentStartupChat;
 	// Tracks the dev/monitoring HUD (perf HUD readout + server-metrics panel + status-panel diagnostics). Kept in
-	// sync with the consolidated debug panel's visibility (SetDebugPanelVisible): the perf HUD + graph live on the
-	// Perf tab, the metrics panel is the right-side overlay, and the status diagnostics key off this. Hidden by
-	// default so the launch screen is clean; ~ / F3 / the debug-control `client_toggle_perf` drive it.
+	// sync with the STANDALONE F3 perf overlay's visibility (SetPerfPanelVisible): the perf HUD + graph live on that
+	// overlay, the metrics panel is the right-side overlay, and the status diagnostics key off this. Hidden by
+	// default so the launch screen is clean; F3 / the debug-control `client_toggle_perf` drive it.
 	private bool _debugOverlayVisible;
 
 	// Debug control channel (T2). Null unless MMO_DEBUG_CONTROL_PORT is set; absent => zero behavior change.
@@ -338,7 +344,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// FXAA on by default. The Compatibility renderer (we left Forward+ for its shader-compile hitches, commit
 		// 66c232a) ships with NO anti-aliasing, so geometry edges crawl/shimmer as the camera moves — a subtle
 		// "stutter" the timing-clean frame-log can't see. FXAA is the screen-space AA Compatibility supports (TAA is
-		// Forward+-only). Runtime-applied so project.godot isn't re-dirtied. The consolidated debug panel's Visual tab
+		// Forward+-only). Runtime-applied so project.godot isn't re-dirtied. The F1 tuning panel's Visual tab
 		// now owns the live on/off (this checkbox reflects + drives it) + an MSAA option (MSAA is sharper for
 		// edge-crawl if FXAA's blur is too soft). Seed the checkbox to match this default-ON state.
 		GetViewport().ScreenSpaceAA = Viewport.ScreenSpaceAAEnum.Fxaa;
@@ -488,13 +494,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// F1: toggle the consolidated debug/tuning panel. The SINGLE hotkey that replaced the six former F-key
-		// surfaces (F3–F8 are gone); it shows whichever tab was last active (Perf on the first open). Non-admins
-		// get only the Perf tab (the other tabs aren't built for a non-admin session). OpenDebugPanelOnPerfTab is
-		// retained for the client_toggle_perf control-channel command.
+		// F1: toggle the ADMIN tuning panel (the five-tab TabContainer: Visual/Movement/Combat/Server/Vitals).
+		// Admin-only — a non-admin press is a no-op (the tabs are never built, ToggleDebugPanel short-circuits).
 		if (key.Keycode == Key.F1)
 		{
 			ToggleDebugPanel();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// F3: toggle the standalone PERF HUD overlay (the old F3 perf overlay — glanceable while playing). For
+		// EVERYONE (it was the non-admin overlay). OpenDebugPanelOnPerfTab / TogglePerfPanel back the
+		// client_toggle_perf control-channel command.
+		if (key.Keycode == Key.F3)
+		{
+			TogglePerfPanel();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -930,8 +944,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chatLabel = CreateOverlayLabel("Chat", 14);
 		chatRows.AddChild(_chatLabel);
 
-		// The perf HUD readout (_perfLabel) + FrameTimeGraph (_perfGraph) now live on the consolidated debug
-		// panel's Perf tab (BuildDebugPanel) instead of a standalone overlay panel — see that method.
+		// The perf HUD readout (_perfLabel) + FrameTimeGraph (_perfGraph) + the perf-diagnostic toggles live on the
+		// STANDALONE F3 perf overlay (BuildPerfPanel) — separate from the F1 tuning panel. See that method.
 
 		// S111: the old top-right text inventory panel (S39) was REPLACED by the toggleable Inventory window
 		// (UI/InventoryWindow, mounted on the Hud CanvasLayer). The same owner-only InventoryUpdate data now
@@ -974,11 +988,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chatInput.TextSubmitted += OnChatSubmitted;
 		inputMargin.AddChild(_chatInput);
 
+		BuildPerfPanel(layer);
 		BuildDebugPanel(layer);
 
-		// Dev/monitoring overlays start hidden — ~ (or F3 → Perf tab) reveals the debug panel; the server-metrics
-		// panel rides _debugOverlayVisible with it. The status panel stays visible but shows only a minimal
-		// always-on line until the overlay is on.
+		// Dev/monitoring overlays start hidden — F3 reveals the perf overlay; the server-metrics panel rides
+		// _debugOverlayVisible with it. The status panel stays visible but shows only a minimal always-on line until
+		// the perf overlay is on. F1 reveals the admin tuning panel (independent of _debugOverlayVisible).
 		metricsPanel.Visible = false;
 
 		layer.AddChild(statusPanel);
@@ -988,52 +1003,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(inputPanel);
 	}
 
-	// The CONSOLIDATED debug/tuning panel. One TabContainer under a SINGLE hotkey (~) replaces the six former
-	// F-key surfaces, thematically grouped into tabs: Perf / Visual / Movement / Combat / Server / Vitals. Every
-	// control migrated VERBATIM from the old Build* methods — same labels, same names, same Apply*/handler wiring,
-	// same live behavior — so this is a pure re-home, not a logic change. Admin gating is preserved: the Perf tab
-	// (the old non-admin F3 overlay) is always added; the other five tabs (old admin-only F4–F8) are added ONLY
-	// for an Admin session, so a non-admin simply never sees them. Built once here; seeded lazily on first open.
-	private void BuildDebugPanel(CanvasLayer layer)
+	// The STANDALONE F3 perf overlay (restored from before the panel consolidation): a glanceable HUD you watch
+	// WHILE playing — the perf readout label (_perfLabel) + the frame-time graph (_perfGraph) + the two perf
+	// diagnostic toggles (uncap-fps, frame-log CSV). Available to EVERYONE (it was the non-admin overlay). Its own
+	// PanelContainer, NOT a tab on the F1 tuning panel and NOT draggable. Toggled by F3 / client_toggle_perf.
+	private void BuildPerfPanel(CanvasLayer layer)
 	{
-		var panel = CreateOverlayPanel("DebugPanel", new Vector2(490, 154), new Vector2(470, 470));
-		var margin = CreatePanelMargin(panel);
-
-		var tabs = new TabContainer { Name = "DebugTabs", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		tabs.AddThemeFontSizeOverride("font_size", 14);
-		margin.AddChild(tabs);
-		_debugTabs = tabs;
-
-		// Perf tab — the old non-admin F3 overlay: the perf HUD readout (_perfLabel) + the FrameTimeGraph (_perfGraph),
-		// plus the two perf-diagnostic toggles (uncap-fps, frame-log CSV). Always added (admin and non-admin).
-		BuildPerfTab(tabs);
-
-		// The remaining tabs were the admin-only F4–F8 panels. They are built LAZILY on first open (EnsureAdminTabsBuilt)
-		// rather than here, because at construction time (_Ready, before Connect/login) the role is not yet known — the
-		// old per-panel code likewise gated at toggle time. A non-admin never triggers the build, so it sees only Perf.
-
-		panel.Visible = false;
-		_debugPanel = panel;
-		layer.AddChild(panel);
-	}
-
-	// One tab page: a ScrollContainer (so a long tab scrolls) wrapping a VBox of rows. The page Control's Name is
-	// the TAB TITLE shown on the tab bar. Returns the VBox the caller fills with the migrated rows.
-	private static VBoxContainer AddDebugTab(TabContainer tabs, string title)
-	{
-		var scroll = new ScrollContainer { Name = title, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		var rows = new VBoxContainer { Name = "Rows", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		rows.AddThemeConstantOverride("separation", 2);
-		scroll.AddChild(rows);
-		tabs.AddChild(scroll);
-		return rows;
-	}
-
-	// Perf tab (was the non-admin F3 perf HUD): the perf readout label + the frame-time graph + the two perf
-	// diagnostic toggles (uncap-fps, frame-log CSV). Always present regardless of role.
-	private void BuildPerfTab(TabContainer tabs)
-	{
-		var rows = AddDebugTab(tabs, "Perf");
+		var panel = CreateOverlayPanel("PerfPanel", new Vector2(490, 154), new Vector2(470, 240));
+		var rows = CreatePanelVBox(panel);
 
 		_perfLabel = CreateOverlayLabel("PerfHud", 13);
 		_perfGraph = new FrameTimeGraph
@@ -1044,7 +1021,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(_perfLabel);
 		rows.AddChild(_perfGraph);
 
-		// Perf diagnostics (moved here from the old F5 visual panel — they are perf knobs, not render knobs).
+		// Perf diagnostics (perf knobs, not render knobs — they live with the perf HUD).
 		// Live display toggle — flips on click, no Apply needed: vsync off / fps uncapped for perf testing.
 		var uncapFps = new CheckBox { Name = "UncapFps", Text = "Uncap FPS (vsync off)", ButtonPressed = _fpsUncapped };
 		uncapFps.AddThemeFontSizeOverride("font_size", 13);
@@ -1060,12 +1037,103 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		frameCsv.Toggled += ApplyFrameCsvDump;
 		rows.AddChild(frameCsv);
 		_frameCsvCheck = frameCsv;
+
+		panel.Visible = false;
+		_perfPanel = panel;
+		layer.AddChild(panel);
 	}
 
-	// Lazily build the admin-only tabs (the old F4–F8 panels) the first time an Admin opens the panel: Visual /
-	// Movement / Combat / Server / Vitals. Built once (idempotent via _adminTabsBuilt) and only for an Admin session,
-	// so a non-admin never gets them (sees only Perf) — mirroring the old toggle-time admin gating. Every row is
-	// migrated verbatim from the old Build* method.
+	// The F1 ADMIN tuning panel. One TabContainer holding the five tuning surfaces (the old F4–F8 F-key panels) as
+	// thematic tabs: Visual / Movement / Combat / Server / Vitals. Every control migrated VERBATIM from the old
+	// Build* methods — same labels, names, Apply*/handler wiring, live behavior. The whole panel is ADMIN-ONLY (all
+	// five tabs were admin surfaces): the tabs are built lazily on the first Admin open and SetDebugPanelVisible
+	// short-circuits for a non-admin, so a non-admin F1 press does nothing. The panel is MOVABLE via a header
+	// drag-handle and is sized large (860×680) to comfortably show the busiest tab. Built once here; seeded lazily.
+	private void BuildDebugPanel(CanvasLayer layer)
+	{
+		var panel = CreateOverlayPanel("DebugPanel", new Vector2(360, 80), new Vector2(860, 680));
+		// The panel content (header + tabs) fills the panel; the TabContainer + each tab's ScrollContainer expand to
+		// fill the larger size so the busiest tab's controls have room.
+		var outer = new VBoxContainer { Name = "Outer", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill, SizeFlagsVertical = Control.SizeFlags.ExpandFill };
+		outer.AddThemeConstantOverride("separation", 4);
+		var margin = CreatePanelMargin(panel);
+		margin.AddChild(outer);
+
+		// Drag handle: a "Debug" header bar at the top. Mouse drag on it repositions the whole panel (clamped
+		// on-screen) — standard in-game-panel drag. Wired via _GuiInput on the header Control (OnDebugHeaderGuiInput).
+		var header = new PanelContainer { Name = "DebugHeader", MouseFilter = Control.MouseFilterEnum.Stop };
+		var headerStyle = new StyleBoxFlat { BgColor = new Color(0.10f, 0.16f, 0.20f, 0.85f) };
+		headerStyle.SetCornerRadiusAll(4);
+		headerStyle.SetContentMarginAll(4);
+		header.AddThemeStyleboxOverride("panel", headerStyle);
+		var headerLabel = CreateOverlayLabel("DebugHeaderLabel", 14);
+		headerLabel.Text = "Debug — drag to move";
+		headerLabel.MouseFilter = Control.MouseFilterEnum.Ignore;
+		header.AddChild(headerLabel);
+		header.GuiInput += OnDebugHeaderGuiInput;
+		outer.AddChild(header);
+
+		var tabs = new TabContainer { Name = "DebugTabs", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill, SizeFlagsVertical = Control.SizeFlags.ExpandFill };
+		tabs.AddThemeFontSizeOverride("font_size", 14);
+		outer.AddChild(tabs);
+		_debugTabs = tabs;
+
+		// The five tuning tabs (the old admin-only F4–F8 panels) are built LAZILY on first Admin open
+		// (EnsureAdminTabsBuilt) — at construction (_Ready, before login) the role is unknown. A non-admin never
+		// triggers the build (and SetDebugPanelVisible short-circuits), so a non-admin never sees the panel.
+
+		panel.Visible = false;
+		_debugPanel = panel;
+		layer.AddChild(panel);
+	}
+
+	// Header drag-handle input: on left button-down begin dragging; on motion while dragging, slide the panel by the
+	// mouse delta and clamp it fully on-screen; on button-up end the drag. Repositions only the F1 panel (the F3 perf
+	// overlay is not movable).
+	private void OnDebugHeaderGuiInput(InputEvent @event)
+	{
+		if (_debugPanel is null)
+		{
+			return;
+		}
+
+		if (@event is InputEventMouseButton { ButtonIndex: MouseButton.Left } mb)
+		{
+			_debugPanelDragging = mb.Pressed;
+			return;
+		}
+
+		if (@event is InputEventMouseMotion motion && _debugPanelDragging)
+		{
+			var viewport = GetViewport().GetVisibleRect().Size;
+			var size = _debugPanel.Size;
+			var pos = _debugPanel.Position + motion.Relative;
+			// Clamp so the panel stays fully on-screen (top-left within [0, viewport - size]).
+			var maxX = Mathf.Max(0f, viewport.X - size.X);
+			var maxY = Mathf.Max(0f, viewport.Y - size.Y);
+			pos.X = Mathf.Clamp(pos.X, 0f, maxX);
+			pos.Y = Mathf.Clamp(pos.Y, 0f, maxY);
+			_debugPanel.Position = pos;
+		}
+	}
+
+	// One tab page: a ScrollContainer (so a long tab scrolls) wrapping a VBox of rows. The page Control's Name is
+	// the TAB TITLE shown on the tab bar. The ScrollContainer expands to fill the (large) TabContainer. Returns the
+	// VBox the caller fills with the migrated rows.
+	private static VBoxContainer AddDebugTab(TabContainer tabs, string title)
+	{
+		var scroll = new ScrollContainer { Name = title, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill, SizeFlagsVertical = Control.SizeFlags.ExpandFill };
+		var rows = new VBoxContainer { Name = "Rows", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		rows.AddThemeConstantOverride("separation", 2);
+		scroll.AddChild(rows);
+		tabs.AddChild(scroll);
+		return rows;
+	}
+
+	// Lazily build the five admin tuning tabs (the old F4–F8 panels) the first time an Admin opens the F1 panel:
+	// Visual / Movement / Combat / Server / Vitals. Built once (idempotent via _adminTabsBuilt) and only for an Admin
+	// session — a non-admin never gets them (and never sees the panel). Every row is migrated verbatim from the old
+	// Build* method.
 	private void EnsureAdminTabsBuilt()
 	{
 		if (_adminTabsBuilt || _debugTabs is null || _client?.Role != ClientRole.Admin)
@@ -1084,8 +1152,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// Visual tab (was F5): camera zoom range, rock/tree/plant model scale, label pixel-size/height, the live Cato
 	// placement fields, the debug-facing-box / Cato-sprite / prediction-tiles toggles, the HUD stub cycler, and the
 	// NEW anti-aliasing controls (FXAA on/off + an MSAA dropdown). All applied INSTANTLY client-side on Apply (the
-	// fields) or on click (the toggles) — same as the old F5 panel. (The uncap-fps + frame-log toggles moved to the
-	// Perf tab; the movement/feel levers are on the Movement tab.)
+	// fields) or on click (the toggles) — same as the old F5 panel. (The uncap-fps + frame-log toggles live on the
+	// standalone F3 perf overlay; the movement/feel levers are on the Movement tab.)
 	private void BuildVisualTab(TabContainer tabs)
 	{
 		var rows = AddDebugTab(tabs, "Visual");
@@ -1820,7 +1888,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				SetTextIfChanged(_statusLabel,
 					$"STATE {PlayerName}  {_client.State}  role={_client.Role}  visible={_client.EntityCount}  local={localTile}\n" +
 					$"{server}\n" +
-					"WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F1 toggles the debug panel." +
+					"WASD is screen-relative. W=up, D=right, S+D=down-right. Enter/T opens chat. F3 = perf HUD, F1 = tuning panel (admin)." +
 					movementDebug);
 			}
 			else
@@ -1828,7 +1896,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				// Clean default: one minimal line — who you are, connection state, and the key hints.
 				SetTextIfChanged(_statusLabel,
 					$"{PlayerName}  {_client.State}\n" +
-					"WASD to move. Enter/T to chat. E to harvest. F1 for the debug panel.");
+					"WASD to move. Enter/T to chat. E to harvest. F3 = perf HUD, F1 = tuning panel.");
 			}
 		}
 
@@ -2067,12 +2135,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 	}
 
-	// ~ / client_toggle_perf: toggle the consolidated debug/tuning panel as one unit. Seeding mirrors the old
-	// per-panel behavior — the once-only tabs (Server/Visual/Movement) seed on first open; the re-every-open tabs
-	// (Vitals/Combat) seed on each open so they show the current authoritative values. _debugOverlayVisible tracks
-	// the panel so the perf HUD readout, the server-metrics panel, and the status-panel diagnostics follow it (the
-	// perf HUD + graph live on the Perf tab; the metrics panel is the right-side overlay). Hidden by default for a
-	// clean launch screen. Admin-only tabs simply don't exist for a non-admin, so a non-admin sees only the Perf tab.
+	// F1: toggle the ADMIN tuning panel. ADMIN-ONLY — a non-admin press is a no-op (SetDebugPanelVisible
+	// short-circuits when the role isn't Admin, so the panel never shows and nothing is built).
 	private void ToggleDebugPanel()
 	{
 		if (_debugPanel is null)
@@ -2083,53 +2147,39 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetDebugPanelVisible(!_debugPanelVisible);
 	}
 
-	// F3 shortcut: open (or keep open) the consolidated panel on the Perf tab — preserves the old F3 muscle memory.
-	private void OpenDebugPanelOnPerfTab()
+	// F3 / client_toggle_perf: toggle the standalone perf overlay.
+	private void TogglePerfPanel()
 	{
-		if (_debugPanel is null)
+		if (_perfPanel is null)
 		{
 			return;
 		}
 
-		// The Perf tab is always index 0 (built first for every role).
-		if (_debugTabs is not null && _debugTabs.GetTabCount() > 0)
+		SetPerfPanelVisible(!_perfPanelVisible);
+	}
+
+	// Kept for the client_toggle_perf control-channel command — now opens (or keeps open) the standalone F3 perf
+	// overlay (it used to open the consolidated panel on the Perf tab; the perf surface is its own panel again).
+	private void OpenDebugPanelOnPerfTab()
+	{
+		if (_perfPanel is null)
 		{
-			_debugTabs.CurrentTab = 0;
+			return;
 		}
 
-		if (!_debugPanelVisible)
+		if (!_perfPanelVisible)
 		{
-			SetDebugPanelVisible(true);
+			SetPerfPanelVisible(true);
 		}
 	}
 
-	// Shared show/hide for the consolidated panel. Seeds on open (once-only vs. every-open per the old panels),
-	// keeps _debugOverlayVisible + the metrics panel in sync, and forces an immediate overlay repaint so the toggle
-	// feels instant instead of waiting up to ~0.1s for the next throttle window.
-	private void SetDebugPanelVisible(bool visible)
+	// Show/hide the standalone perf overlay. It drives _debugOverlayVisible so the perf HUD readout, the server
+	// metrics panel, and the full status-panel diagnostics follow it (as they did when perf was the non-admin
+	// overlay). Forces an immediate repaint so the toggle feels instant.
+	private void SetPerfPanelVisible(bool visible)
 	{
-		_debugPanelVisible = visible;
-		if (visible)
-		{
-			// Build the admin tabs on first Admin open (role is unknown at construction), then seed.
-			EnsureAdminTabsBuilt();
-
-			if (!_debugFieldsSeeded)
-			{
-				SeedDebugFieldsOnce();
-				_debugFieldsSeeded = true;
-			}
-
-			// Re-seed the every-open admin tabs (Vitals/Combat) so they reflect the current authoritative values
-			// (these change server-side, so showing the latest truth on each open is the right default).
-			if (_client?.Role == ClientRole.Admin)
-			{
-				SeedStatFields();
-				SeedCombatFields();
-			}
-		}
-
-		_debugPanel!.Visible = visible;
+		_perfPanelVisible = visible;
+		_perfPanel!.Visible = visible;
 		_debugOverlayVisible = visible;
 		if (_metricsPanel is not null)
 		{
@@ -2140,9 +2190,42 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_nextOverlayAt = 0;
 	}
 
+	// Shared show/hide for the F1 admin tuning panel. ADMIN-ONLY: a non-admin request to open is dropped (the tabs
+	// are never built and the panel never shows). Seeds on open (once-only vs. every-open per the old panels) and
+	// forces an immediate overlay repaint so the toggle feels instant.
+	private void SetDebugPanelVisible(bool visible)
+	{
+		// Admin-only panel: a non-admin gets nothing (no session → don't open, nothing to show).
+		if (visible && _client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		_debugPanelVisible = visible;
+		if (visible)
+		{
+			// Build the tuning tabs on first Admin open (role is unknown at construction), then seed.
+			EnsureAdminTabsBuilt();
+
+			if (!_debugFieldsSeeded)
+			{
+				SeedDebugFieldsOnce();
+				_debugFieldsSeeded = true;
+			}
+
+			// Re-seed the every-open tabs (Vitals/Combat) so they reflect the current authoritative values
+			// (these change server-side, so showing the latest truth on each open is the right default).
+			SeedStatFields();
+			SeedCombatFields();
+		}
+
+		_debugPanel!.Visible = visible;
+		_nextOverlayAt = 0;
+	}
+
 	// First-open seeding for the once-only tabs (mirrors the old F4/F5/F6 "seed on first open" behavior — re-seeding
-	// would stomp values the human typed but hasn't applied). The Perf tab has nothing to seed. Admin-only tabs are
-	// only built for an Admin session, so guard their seeds on the role (the field refs are null otherwise).
+	// would stomp values the human typed but hasn't applied). The panel is admin-only, but keep the role guard so the
+	// field refs are never dereferenced before the tabs are built.
 	private void SeedDebugFieldsOnce()
 	{
 		if (_client?.Role != ClientRole.Admin)
@@ -2481,7 +2564,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		_nextPerfHudAt = now.TotalSeconds + 0.1d;
 		_perfText.Clear();
-		_perfText.AppendLine("PERF HUD (F1 — Perf tab)");
+		_perfText.AppendLine("PERF HUD (F3)");
 		AppendPerfRow("fps", Performance.GetMonitor(Performance.Monitor.TimeFps));
 		AppendPerfRow("frame ms last/max", _lastFrameMs, _maxFrameMs);
 		AppendPerfRow("process/physics ms",
@@ -2695,17 +2778,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	void IControlHost.TogglePerfHud()
 	{
-		// The wire-facing name stays TogglePerfHud (debug-control protocol / client_toggle_perf), but it now flips
-		// the consolidated debug panel. When turning it ON, select the Perf tab (the old perf HUD) so the toggle
-		// matches the channel's intent; turning it OFF just hides the panel.
-		if (_debugPanelVisible)
-		{
-			SetDebugPanelVisible(false);
-		}
-		else
-		{
-			OpenDebugPanelOnPerfTab();
-		}
+		// The wire-facing name stays TogglePerfHud (debug-control protocol / client_toggle_perf); it now flips the
+		// standalone F3 perf overlay (the perf surface is its own panel again, not a tab on the F1 tuning panel).
+		TogglePerfPanel();
 	}
 
 	void IControlHost.ToggleFullscreen()
