@@ -50,11 +50,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// blends the confirmed tile and rendered position and frame-rate-independently smooths a persistent focus
 	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
 	private float _cameraFollowBlend = 1.0f;
-	// STUTTER FIX: 0 = hard-follow the (already smooth) rendered character — the documented S95 default (the comment
-	// above). The 15 it had drifted to ran an exponential focus chase (focus += (target-focus)*t) that moves fast
-	// when behind and slow when close = an "accelerate to catch up" the player FELT but the player-render frame-log
-	// couldn't show (it logs the avatar, not the camera). Live-tunable via the F1 Movement tab.
-	private float _cameraSmoothing = 0f;
+	// STUTTER FIX: a LOW smoothing (user-preferred 3). The 15 it had drifted to ran an exponential focus chase
+	// (focus += (target-focus)*t) that moves fast when behind / slow when close = the "accelerate to catch up" the
+	// player felt but the player-render frame-log couldn't show (it logs the avatar, not the camera). 0 = hard-follow
+	// the (already smooth) character; 3 adds a touch of glide without the catch-up. NOTE: at a FIXED rate the lag =
+	// move-speed / rate, so faster speeds trail more — auto-scaling the rate with speed would hold the lag constant.
+	// Live-tunable via the F1 Movement tab.
+	private float _cameraSmoothing = 3f;
 	// CAMERA-EXPERIMENT: when true the camera targets the DISCRETE predicted tile instead of the smooth character
 	// render (live F1 Movement toggle). Default off = follow the character. Pairs with smoothing > 0 to glide.
 	private bool _cameraTrackPredictedTile;
