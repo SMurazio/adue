@@ -77,8 +77,10 @@ public sealed class EntityVisualFactory
             VisualArchetype.Player => PlayerVisual.LoadModelScene() is null ? null : new PlayerVisual(),
             VisualArchetype.DebugFacingBox => new DebugFacingBoxVisual(),
             VisualArchetype.CatoSprite => CatoSpriteVisual.LoadFrames() is null ? null : new CatoSpriteVisual(),
-            VisualArchetype.Rock => ModelVisual.CreateRock(state),
-            VisualArchetype.Tree => ModelVisual.CreateTree(),
+            // DEBUG-CUBES: Rock/Tree render as the plain resource box (debug cube) instead of the GLB models.
+            // BoxVisual keys _isResource off state.Kind == Resource, so they stay green/depleted-aware cubes.
+            VisualArchetype.Rock => new BoxVisual(),
+            VisualArchetype.Tree => new BoxVisual(),
             VisualArchetype.Portal => ModelVisual.CreatePortal(),
             VisualArchetype.HouseSprite => SpriteVisual.LoadTexture() is null ? null : new SpriteVisual(),
             _ => new BoxVisual()
