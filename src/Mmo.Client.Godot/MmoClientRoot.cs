@@ -50,7 +50,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// blends the confirmed tile and rendered position and frame-rate-independently smooths a persistent focus
 	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
 	private float _cameraFollowBlend = 1.0f;
-	private float _cameraSmoothing = 15f;
+	// STUTTER FIX: 0 = hard-follow the (already smooth) rendered character — the documented S95 default (the comment
+	// above). The 15 it had drifted to ran an exponential focus chase (focus += (target-focus)*t) that moves fast
+	// when behind and slow when close = an "accelerate to catch up" the player FELT but the player-render frame-log
+	// couldn't show (it logs the avatar, not the camera). Live-tunable via the F1 Movement tab.
+	private float _cameraSmoothing = 0f;
+	// CAMERA-EXPERIMENT: when true the camera targets the DISCRETE predicted tile instead of the smooth character
+	// render (live F1 Movement toggle). Default off = follow the character. Pairs with smoothing > 0 to glide.
+	private bool _cameraTrackPredictedTile;
 	// S95 default 4 tiles. S102: now a live F6 field (was a const) feeding CameraFocusTracker.Advance's
 	// teleport-snap threshold — beyond this jump the camera hard-snaps (respawn/zone change) instead of gliding.
 	private float _cameraTeleportSnapTiles = 4f;
@@ -1306,6 +1313,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(stopOnReversal);
 		_stopOnReversalCheck = stopOnReversal;
 
+		// CAMERA-EXPERIMENT live toggle — flips on click, no Apply: the camera targets the DISCRETE predicted tile
+		// instead of the smooth character render. Pair with "Camera smoothing" > 0 to glide the tile-to-tile jumps
+		// (smoothing 0 makes it hard-jump per step). OFF (default) = follow the character.
+		var trackPredictedTile = new CheckBox
+		{
+			Name = "CameraTrackPredictedTile",
+			Text = "Camera: track predicted tile",
+			ButtonPressed = _cameraTrackPredictedTile
+		};
+		trackPredictedTile.AddThemeFontSizeOverride("font_size", 13);
+		trackPredictedTile.Toggled += ApplyCameraTrackPredictedTile;
+		rows.AddChild(trackPredictedTile);
+
 		// RESYNC1: manual Force Resync button. Calls MmoClient.ForceResync() -> LocalPlayerPredictor.ForceResync(),
 		// which hard-snaps the local prediction (tile, step-seq, render) onto the last server-confirmed position and
 		// clears any stranded in-flight lead. USER-TRIGGERED escape hatch for a loss-induced desync; the same primitive
@@ -1443,6 +1463,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplyStopOnReversal(bool enabled)
 	{
 		_client?.SetStopOnReversal(enabled);
+	}
+
+	// CAMERA-EXPERIMENT live toggle ("Camera: track predicted tile"). Flips the camera target between the discrete
+	// predicted tile and the smooth character render (read in UpdateCamera). Client-local; no restart.
+	private void ApplyCameraTrackPredictedTile(bool enabled)
+	{
+		_cameraTrackPredictedTile = enabled;
 	}
 
 	// Live FXAA toggle (Visual tab "FXAA" checkbox). Flips GetViewport().ScreenSpaceAA between Fxaa (on) and
@@ -1830,15 +1857,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var localState = local.Value;
-		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally
-		// smoothed (frame-rate independent). Defaults (blend 1.0, smoothing 0) reproduce the old hard-follow of
-		// the cosmetic position exactly. The tracker snaps on the first frame and on teleports so the camera
-		// never glides from the origin or across the map.
+		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally smoothed
+		// (frame-rate independent). Defaults (blend 1.0, smoothing 0) = hard-follow the rendered character.
+		// CAMERA-EXPERIMENT (F1 Movement "track predicted tile"): target the DISCRETE predicted tile instead of the
+		// character render — both inputs become the predicted tile so the blend is moot. Needs smoothing > 0 to glide
+		// the tile-to-tile jumps. The tracker snaps on the first frame and on teleports.
+		double tileX = localState.AuthoritativeTile.X, tileY = localState.AuthoritativeTile.Y;
+		double cosX = localState.Position.X, cosY = localState.Position.Y;
+		if (_cameraTrackPredictedTile && _client?.PredictedLocalTile is { } predTile)
+		{
+			tileX = predTile.X;
+			tileY = predTile.Y;
+			cosX = predTile.X;
+			cosY = predTile.Y;
+		}
 		var (focusX, focusY) = _cameraFocus.Advance(
-			localState.AuthoritativeTile.X,
-			localState.AuthoritativeTile.Y,
-			localState.Position.X,
-			localState.Position.Y,
+			tileX, tileY, cosX, cosY,
 			_cameraFollowBlend,
 			_cameraSmoothing,
 			_lastFrameDelta,
