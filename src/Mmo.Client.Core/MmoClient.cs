@@ -318,6 +318,32 @@ public sealed class MmoClient : IDisposable
         }
     }
 
+    // RENDER-VELOCITY DIAG: a per-frame snapshot of the local predictor's internals for the F5 frame-log, so a
+    // live capture can correlate a render-velocity jump (renderX/frameDelta) to its TRIGGER — a predicted-tile
+    // re-projection (PredictedX/Y jumping >1 tile in one frame) or a reconcile catch-up (ReconcileCorrected/Snapped
+    // ticking up). Null when no predictor is attached (pre-spawn / interpolation-only). Measurement only — it reads
+    // the predictor and mutates nothing.
+    public readonly record struct LocalPredictorFrameDiag(
+        int PredictedX,
+        int PredictedY,
+        uint PredictedStepSeq,
+        uint ReconcileMatched,
+        uint ReconcileCorrected,
+        uint ReconcileSnapped,
+        double CadenceMs);
+
+    public LocalPredictorFrameDiag? LocalPredictorFrameDiagnostics =>
+        _predictor is { } predictor
+            ? new LocalPredictorFrameDiag(
+                predictor.PredictedTile.X,
+                predictor.PredictedTile.Y,
+                predictor.PredictedStepSeq,
+                predictor.ReconcileMatched,
+                predictor.ReconcileCorrected,
+                predictor.ReconcileSnapped,
+                predictor.CadenceMs)
+            : null;
+
     // S106: the local-player drivers' live cadences (ms), for tests asserting a live MovementSpeedChanged retunes
     // BOTH drivers (not just the interpolator). Null when the respective driver isn't attached. The cosmetic
     // accessor reads the underlying driver directly (NOT EntityState.Cosmetic, which gates on _cosmeticActive) so a

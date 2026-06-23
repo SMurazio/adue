@@ -3122,7 +3122,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			{
 				AutoFlush = false
 			};
-			_frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2,localRenderX,localRenderY,confirmedX,confirmedY,divergence,frameDelta");
+			_frameCsv.WriteLine("elapsedSec,frameMs,pollMs,renderStateMs,entitiesMs,cameraMs,overlayMs,gc0,gc1,gc2,localRenderX,localRenderY,confirmedX,confirmedY,divergence,frameDelta,predX,predY,stepSeq,recMatched,recCorrected,recSnapped,cadenceMs");
 			_frameCsv.Flush();
 			_frameCsvRowsSinceFlush = 0;
 			_frameCsvGc0 = GC.CollectionCount(0);
@@ -3162,8 +3162,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var divergence = _hasLocalRender && _hasConfirmed ? _renderDivergence.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
 		var frameDelta = _hasLocalRender ? _renderFrameDelta.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
 
+		// RENDER-VELOCITY DIAG: the local predictor's internals this frame so a velocity jump (renderX/frameDelta)
+		// can be pinned to its trigger — a predicted-tile RE-PROJECTION (predX/predY jump >1 in a frame) or a
+		// reconcile CATCH-UP (recCorrected/recSnapped tick up). Counts are cumulative; analysis reads the deltas.
+		// Blank when no predictor is attached (pre-spawn / interpolation-only).
+		string predX = string.Empty, predY = string.Empty, stepSeq = string.Empty,
+			recMatched = string.Empty, recCorrected = string.Empty, recSnapped = string.Empty, cadenceMs = string.Empty;
+		if (_client?.LocalPredictorFrameDiagnostics is { } diag)
+		{
+			predX = diag.PredictedX.ToString(CultureInfo.InvariantCulture);
+			predY = diag.PredictedY.ToString(CultureInfo.InvariantCulture);
+			stepSeq = diag.PredictedStepSeq.ToString(CultureInfo.InvariantCulture);
+			recMatched = diag.ReconcileMatched.ToString(CultureInfo.InvariantCulture);
+			recCorrected = diag.ReconcileCorrected.ToString(CultureInfo.InvariantCulture);
+			recSnapped = diag.ReconcileSnapped.ToString(CultureInfo.InvariantCulture);
+			cadenceMs = diag.CadenceMs.ToString("0.###", CultureInfo.InvariantCulture);
+		}
+
 		var row = string.Create(CultureInfo.InvariantCulture,
-			$"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2},{renderX},{renderY},{confX},{confY},{divergence},{frameDelta}");
+			$"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2},{renderX},{renderY},{confX},{confY},{divergence},{frameDelta},{predX},{predY},{stepSeq},{recMatched},{recCorrected},{recSnapped},{cadenceMs}");
 		try
 		{
 			_frameCsv.WriteLine(row);
