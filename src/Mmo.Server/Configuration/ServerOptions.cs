@@ -58,7 +58,9 @@ public sealed record ServerOptions(
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
             ReadInt("MMO_WORLD_WIDTH_TILES", 128),
             ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
-            ReadInt("MMO_STEP_COOLDOWN_MS", 150),
+            // Base walk cadence. Default 250ms (the "0.6x" / 4.0-tiles-per-sec feel) — the speed everyone starts at;
+            // the F1 Movement /speed dropdown brackets faster/slower around it. Override with MMO_STEP_COOLDOWN_MS.
+            ReadInt("MMO_STEP_COOLDOWN_MS", 250),
             ReadInt("MMO_PERSISTENCE_CHECKPOINT_SECONDS", 15),
             ReadFloat("MMO_INTEREST_RADIUS", 30f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
