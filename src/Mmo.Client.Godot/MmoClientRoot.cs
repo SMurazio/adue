@@ -354,6 +354,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			ApplyFpsUncap(true);
 			_uncapFpsCheck?.SetPressedNoSignal(true);
 		}
+		// FXAA on by default. The Compatibility renderer (we left Forward+ for its shader-compile hitches, commit
+		// 66c232a) ships with NO anti-aliasing, so geometry edges crawl/shimmer as the camera moves — a subtle
+		// "stutter" the timing-clean frame-log can't see. FXAA is the screen-space AA Compatibility supports (TAA is
+		// Forward+-only). Runtime-applied so project.godot isn't re-dirtied; the consolidated debug panel will own the
+		// live on/off + an MSAA option (MSAA is sharper for edge-crawl if FXAA's blur is too soft).
+		GetViewport().ScreenSpaceAA = Viewport.ScreenSpaceAAEnum.Fxaa;
 		_client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
 		_client.Connect();
 		GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
