@@ -176,6 +176,22 @@ public sealed class WorldEntity
         return true;
     }
 
+    // LIVING-ENEMIES P2: turn this entity to face `direction` WITHOUT moving (used when a monster attacks a target
+    // in place — it should look at its victim). Returns true iff Facing actually changed, bumping StateRevision so
+    // the new facing rides the snapshot delta and the client flips the sprite. A no-op (already facing that way)
+    // changes nothing and does not spam a delta. Distinct from a step (which also faces, but moves a tile).
+    public bool TrySetFacing(Direction8 direction)
+    {
+        if (Facing == direction)
+        {
+            return false;
+        }
+
+        Facing = direction;
+        StateRevision++;
+        return true;
+    }
+
     // COMBAT-S2B: the attack-cooldown gate, INDEPENDENT of the movement cooldown. Returns true and arms the attack
     // cooldown (next eligible = serverTick + attackCooldownTicks) iff this entity is off its attack cooldown at
     // serverTick; returns false WITHOUT mutating anything if it is still inside the window (the attack is rejected,

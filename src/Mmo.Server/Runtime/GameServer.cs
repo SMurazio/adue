@@ -95,6 +95,10 @@ public sealed class GameServer
     // can emit one AOI-gated cosmetic DamageEventMessage per real hit without allocating per attack. Single-threaded
     // tick/handler path, so reuse across attacks is safe.
     private readonly List<FreeAimSectorResolver.DamagedVictim> _damagedVictimScratch = [];
+    // LIVING-ENEMIES P2: reused candidate buffer for a monster's throttled aggro scan (players in the cells around
+    // the monster, then filtered to alive players within aggroRadius). Single-threaded tick loop (StepMonsterAi runs
+    // in TickCore, not concurrently with the snapshot pass), so reusing one buffer across all monsters is safe.
+    private readonly List<WorldEntity> _monsterAggroScratch = [];
     private readonly List<VisibleEntity> _visibleCandidateScratch = [];
     private readonly List<WorldEntity> _visibleEntityScratch = [];
     private readonly HashSet<uint> _visibleNetworkIdScratch = [];
@@ -156,7 +160,10 @@ public sealed class GameServer
         _monsterAi = new MonsterRoamAi(
             options.MapSeed,
             _zone.IsWalkable,
-            (entity, direction, tick, cooldownTicks) => _zone.TryStep(entity, direction, tick, cooldownTicks));
+            (entity, direction, tick, cooldownTicks) => _zone.TryStep(entity, direction, tick, cooldownTicks),
+            FindMonsterAggroTarget,
+            TryResolveMonsterTarget,
+            ApplyMonsterAttack);
         ScatterResourceNodes();
         SpawnDummies();
         _netManager = new NetManager(_listener)
@@ -1490,7 +1497,8 @@ public sealed class GameServer
     // shows an overhead HP bar and is hittable (MeleeConeResolver.IsAttackableEnemy now includes Monster). The
     // server then idles it near home and occasionally strolls it within the leash. It spawns on the caller's own
     // tile (always walkable — the caller stands there); replication + client interpolation render it as a moving
-    // cube for free. No aggro/chase/attack/death this phase.
+    // cube for free. LIVING-ENEMIES P2: it now also AGGROS the nearest player in range, CHASES (leashed to home),
+    // and ATTACKS when adjacent (the player TAKES damage — HP floors at 0, no death/respawn yet).
     private void HandleMonsterCommand(ClientSession sender)
     {
         if (!TryGetSessionEntity(sender, out var actor))
@@ -1502,11 +1510,11 @@ public sealed class GameServer
         // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
         var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, "Monster", actor.Tile, Direction8.S);
         // Register with the roam AI: the spawn tile is the leash home; start Idle with an initial randomized pause.
-        _monsterAi.Register(monster, _serverTick, _tuning.PauseMinTicks, _tuning.PauseMaxTicks);
+        _monsterAi.Register(monster, _serverTick, _tuning.PauseMinTicks, _tuning.PauseMaxTicks, _tuning.MonsterAggroScanIntervalTicks);
 
         SendSystem(
             sender,
-            $"monster: spawned at {monster.Tile.X},{monster.Tile.Y} (home), roamRadius={_tuning.RoamRadius}, pause={_tuning.PauseMinMs}-{_tuning.PauseMaxMs}ms.");
+            $"monster: spawned at {monster.Tile.X},{monster.Tile.Y} (home), roamRadius={_tuning.RoamRadius}, pause={_tuning.PauseMinMs}-{_tuning.PauseMaxMs}ms, aggro={_tuning.AggroRadius}, leash={_tuning.ChaseLeash}, atk={_tuning.MonsterAttackDamage}/{_tuning.MonsterAttackCooldownMs}ms.");
         Log.Info($"{sender.DisplayName} spawned a monster at {monster.Tile} (home).");
     }
 
@@ -2030,9 +2038,20 @@ public sealed class GameServer
             return;
         }
 
-        var roamRadius = _tuning.RoamRadius;
-        var pauseMinTicks = _tuning.PauseMinTicks;
-        var pauseMaxTicks = _tuning.PauseMaxTicks;
+        // Snapshot the live tunables ONCE per pass (read from _tuning so a monster.* admin retune takes effect on the
+        // next tick). LIVING-ENEMIES P2: aggro/chase/attack knobs ride alongside the P1 roam knobs; de-aggro range and
+        // the aggro-scan cadence are DERIVED in ServerTuning (hysteresis + perf throttle coupled to their sources).
+        var tunables = new MonsterRoamAi.Tunables(
+            RoamRadius: _tuning.RoamRadius,
+            PauseMinTicks: _tuning.PauseMinTicks,
+            PauseMaxTicks: _tuning.PauseMaxTicks,
+            AggroRadius: _tuning.AggroRadius,
+            DeaggroRadius: _tuning.MonsterDeaggroRadius,
+            ChaseLeash: _tuning.ChaseLeash,
+            AttackRange: _tuning.AttackRange,
+            AttackDamage: _tuning.MonsterAttackDamage,
+            AttackCooldownTicks: _tuning.MonsterAttackCooldownTicks,
+            AggroScanIntervalTicks: _tuning.MonsterAggroScanIntervalTicks);
 
         foreach (var entity in _zone.World.Entities)
         {
@@ -2045,10 +2064,124 @@ public sealed class GameServer
                 entity,
                 _serverTick,
                 EffectiveStepCooldownTicks(entity),
-                roamRadius,
-                pauseMinTicks,
-                pauseMaxTicks);
+                tunables);
         }
+    }
+
+    // LIVING-ENEMIES P2: the AI's aggro-scan callback — find the NEAREST ALIVE PLAYER within `aggroRadius` (Chebyshev)
+    // of `monster`, via the SAME spatial index the combat resolver uses (GatherInterestCandidates), so occupancy can
+    // never diverge from AOI/replication. Players only (never another monster/dummy/resource), and only alive ones
+    // (Health > 0 — a downed player at 0 HP is not a fresh aggro target; an already-chasing monster keeps attacking it
+    // via the resolve path, but a NEW acquisition skips it). Returns the closest by Chebyshev distance, ties broken by
+    // the smaller entity id for determinism. THROTTLED by the AI (it only calls this every ~0.5 s per monster), so the
+    // per-tick scan the P1 review flagged is avoided.
+    private bool FindMonsterAggroTarget(WorldEntity monster, int aggroRadius, out ulong targetId, out TileCoord targetTile)
+    {
+        _zone.World.GatherInterestCandidates(monster.Tile, aggroRadius, _monsterAggroScratch);
+
+        var bestDist = int.MaxValue;
+        WorldEntity? best = null;
+        foreach (var candidate in _monsterAggroScratch)
+        {
+            if (candidate.Kind != EntityKind.Player || candidate.Stats.Health <= 0)
+            {
+                continue;
+            }
+
+            var dist = Math.Max(
+                Math.Abs(candidate.Tile.X - monster.Tile.X),
+                Math.Abs(candidate.Tile.Y - monster.Tile.Y));
+            if (dist > aggroRadius)
+            {
+                continue;
+            }
+
+            if (dist < bestDist || (dist == bestDist && (best is null || candidate.Id < best.Id)))
+            {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+
+        if (best is null)
+        {
+            targetId = 0;
+            targetTile = default;
+            return false;
+        }
+
+        targetId = best.Id;
+        targetTile = best.Tile;
+        return true;
+    }
+
+    // LIVING-ENEMIES P2: the AI's target-resolve callback — look up a chased target's CURRENT tile + alive flag so the
+    // chase re-reads the player's live position each step and detects target-lost (despawn / logout) for de-aggro.
+    // Returns false if the entity no longer exists at all; `alive` is its Health > 0 (a player whose HP hit 0 is still
+    // resolvable but not alive → the AI de-aggros and returns home, since there is no death/respawn this phase).
+    private bool TryResolveMonsterTarget(ulong targetId, out TileCoord targetTile, out bool alive)
+    {
+        if (_zone.World.TryGet(targetId, out var target) && target.Kind == EntityKind.Player)
+        {
+            targetTile = target.Tile;
+            alive = target.Stats.Health > 0;
+            return true;
+        }
+
+        targetTile = default;
+        alive = false;
+        return false;
+    }
+
+    // LIVING-ENEMIES P2: the AI's attack callback — the monster faces its target and deals `attackDamage` to the
+    // PLAYER through the SAME ApplyDamage + DamageEventMessage path a player's attack uses (no combat fork). The AI
+    // owns the WHEN (adjacency + the monster's own attack cooldown); this owns the HOW. The damage number is broadcast
+    // to the victim AND nearby viewers — the victim is the PLAYER, NOT the attacker, so it is NOT excluded (it has no
+    // client-side prediction of incoming damage, unlike its own outgoing swings). HP floors at 0 in ApplyDamage; a
+    // 0-HP player simply takes a no-op clamp on further hits (no death/respawn — Phase 3+).
+    private void ApplyMonsterAttack(WorldEntity monster, ulong targetId, int attackDamage)
+    {
+        if (!_zone.World.TryGet(targetId, out var target))
+        {
+            return;
+        }
+
+        // Face the victim (turn-in-place, no move) so the attack reads on the client; bumps StateRevision to replicate.
+        // Sign-of-delta → the 8-direction facing (the same greedy mapping the chase step uses); same-tile leaves
+        // facing unchanged (can't happen — the AI only attacks at Chebyshev >= 1, but guard anyway).
+        if (TileDeltaToFacing(monster.Tile, target.Tile) is { } facing)
+        {
+            monster.TrySetFacing(facing);
+        }
+
+        // Authoritative damage rides the snapshot HP field (the HUD bar falls). A real change floats a number; a hit
+        // on an already-0-HP player is a no-op (no number, no spam). Broadcast to ALL viewers incl. the victim.
+        if (target.ApplyDamage(attackDamage))
+        {
+            BroadcastDamageEvent(target, attackDamage);
+            Log.Info($"Monster {monster.NetworkId} hit {target.DisplayName} for {attackDamage} (hp now {target.Stats.Health}).");
+        }
+    }
+
+    // LIVING-ENEMIES P2: the 8-direction facing from `from` toward `to` by the SIGN of each axis delta (the same
+    // greedy mapping MonsterRoamAi uses to step). Null only when the two tiles coincide (no facing). Server-local so
+    // the server doesn't depend on the client's CursorHeading.
+    private static Direction8? TileDeltaToFacing(TileCoord from, TileCoord to)
+    {
+        var sx = Math.Sign(to.X - from.X);
+        var sy = Math.Sign(to.Y - from.Y);
+        return (sx, sy) switch
+        {
+            (0, -1) => Direction8.N,
+            (1, -1) => Direction8.NE,
+            (1, 0) => Direction8.E,
+            (1, 1) => Direction8.SE,
+            (0, 1) => Direction8.S,
+            (-1, 1) => Direction8.SW,
+            (-1, 0) => Direction8.W,
+            (-1, -1) => Direction8.NW,
+            _ => null,
+        };
     }
 
     // S103 commit-step on release. A client whose cosmetic render glided past its commit threshold onto the

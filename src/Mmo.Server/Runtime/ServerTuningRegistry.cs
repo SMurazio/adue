@@ -35,6 +35,15 @@ public static class ServerTuningRegistry
     public const string MonsterPauseMinMsKey = "monster.pauseMinMs";
     public const string MonsterPauseMaxMsKey = "monster.pauseMaxMs";
 
+    // LIVING-ENEMIES P2 (live): the monster aggro/chase/attack knobs an admin may retune live. Server-only AI params
+    // (no client mirror), same as the P1 roam keys. De-aggro range and the aggro-scan cadence are DERIVED in
+    // ServerTuning (not live keys) so the hysteresis margin and the throttle stay coupled to their source values.
+    public const string MonsterAggroRadiusKey = "monster.aggroRadius";
+    public const string MonsterChaseLeashKey = "monster.chaseLeash";
+    public const string MonsterAttackRangeKey = "monster.attackRange";
+    public const string MonsterAttackDamageKey = "monster.attackDamage";
+    public const string MonsterAttackCooldownMsKey = "monster.attackCooldownMs";
+
     // Sane upper bound for a live AOI radius. The startup options only require > 0; here a live max guards
     // against an admin typo turning every AOI query into a near-world scan and stalling the tick loop.
     private const float MinInterestRadius = 1f;
@@ -66,6 +75,24 @@ public static class ServerTuningRegistry
     private const int MaxRoamRadius = 32;
     private const int MinPauseMs = 0;
     private const int MaxPauseMs = 60000;
+
+    // LIVING-ENEMIES P2 clamps. Wide enough to tune feel, tight enough a typo can't break the AI:
+    //  aggro radius 1..64 tiles (1 = must be adjacent to notice; 64 = a wide leash-sense, still bounded by the AOI);
+    //  chase leash 1..128 tiles (how far from home a chase may pull before it gives up — kept above a typical aggro
+    //    radius so a chase is meaningful, but bounded so a runaway can't wander the whole map);
+    //  attack range 1..4 tiles (1 = melee-adjacent; >1 = a short reach — never a cross-map snipe);
+    //  attack damage 0..10000 HP (0 = a harmless "tickle" for testing up to an instakill, mirroring combat.damage);
+    //  attack cooldown 100..10000 ms (a watchable cadence; never sub-tick-trivial, never a multi-second freeze).
+    private const int MinAggroRadius = 1;
+    private const int MaxAggroRadius = 64;
+    private const int MinChaseLeash = 1;
+    private const int MaxChaseLeash = 128;
+    private const int MinAttackRange = 1;
+    private const int MaxAttackRange = 4;
+    private const int MinMonsterAttackDamage = 0;
+    private const int MaxMonsterAttackDamage = 10000;
+    private const int MinMonsterAttackCooldownMs = 100;
+    private const int MaxMonsterAttackCooldownMs = 10000;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -154,6 +181,41 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case MonsterAggroRadiusKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinAggroRadius, MaxAggroRadius);
+                tuning.AggroRadius = clamped;
+                applied = clamped;
+                return true;
+            }
+            case MonsterChaseLeashKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinChaseLeash, MaxChaseLeash);
+                tuning.ChaseLeash = clamped;
+                applied = clamped;
+                return true;
+            }
+            case MonsterAttackRangeKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinAttackRange, MaxAttackRange);
+                tuning.AttackRange = clamped;
+                applied = clamped;
+                return true;
+            }
+            case MonsterAttackDamageKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinMonsterAttackDamage, MaxMonsterAttackDamage);
+                tuning.MonsterAttackDamage = clamped;
+                applied = clamped;
+                return true;
+            }
+            case MonsterAttackCooldownMsKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinMonsterAttackCooldownMs, MaxMonsterAttackCooldownMs);
+                tuning.MonsterAttackCooldownMs = clamped;
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
@@ -161,6 +223,8 @@ public static class ServerTuningRegistry
 
     public static bool IsKnownKey(string key) =>
         key is InterestRadiusKey or MonsterRoamRadiusKey or MonsterPauseMinMsKey or MonsterPauseMaxMsKey
+            or MonsterAggroRadiusKey or MonsterChaseLeashKey or MonsterAttackRangeKey
+            or MonsterAttackDamageKey or MonsterAttackCooldownMsKey
         || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated
