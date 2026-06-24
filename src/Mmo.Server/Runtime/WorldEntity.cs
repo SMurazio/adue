@@ -105,6 +105,21 @@ public sealed class WorldEntity
     // re-replicates on a real change.
     public CharacterStats Stats { get; private set; } = CharacterStats.Default;
 
+    // LIVING-ENEMIES P2-POLISH: set this entity's MAX health AND fill current to it (spawn-at-full), bumping
+    // StateRevision so the new HP rides the snapshot. Used to give a monster its per-TYPE MaxHealth at spawn (the
+    // default is 100/100). A non-positive max is ignored. Distinct from TrySetStatCurrent (which only moves current
+    // within the existing max) — this moves the MAX. Mana/stamina are left at the CharacterStats default.
+    public void SetMaxHealthFull(int maxHealth)
+    {
+        if (maxHealth <= 0)
+        {
+            return;
+        }
+
+        Stats = Stats with { MaxHealth = maxHealth, Health = maxHealth };
+        StateRevision++;
+    }
+
     // Sets the CURRENT value of one vital, clamping into [0, max] for that vital. Returns true if the stored
     // value actually changed (so the caller only re-replicates a real change), false otherwise. The dev-set
     // window drives this through the admin-gated server command; later damage/heal/regen will too.

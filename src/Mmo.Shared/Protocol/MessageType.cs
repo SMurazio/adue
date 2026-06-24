@@ -39,5 +39,13 @@ public enum MessageType : ushort
     // AOI-gated to viewers that can see the victim, so the client floats a "-N" number above it. Presentation only;
     // the authoritative HP still rides the snapshot. Sent UNRELIABLE (a dropped number is harmless). See
     // DamageEventMessage.
-    DamageEvent = 113
+    DamageEvent = 113,
+    // LIVING-ENEMIES P2-POLISH (v33): server->client replication of the per-monster-TYPE tuning (one entry per named
+    // template — slime now). Sent on login + whenever a per-type tuning key changes, so the F1 "Monster" tab can list
+    // the types and show + edit the authoritative live values. See MonsterTuningSnapshot.
+    MonsterTuning = 114,
+    // LIVING-ENEMIES P2-POLISH (v33): server->viewer replication of a monster's leash HOME tile, so the client can
+    // paint a RED floor tile there (the de-aggro anchor becomes visible). Sent once when the monster enters a viewer's
+    // AOI (alongside its EntitySpawn). Per-monster + reliable; cleared client-side on the monster's despawn.
+    MonsterHome = 115
 }

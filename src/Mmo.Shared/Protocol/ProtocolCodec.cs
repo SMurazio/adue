@@ -22,7 +22,12 @@ public static class ProtocolCodec
     // COMBAT-QOL (v32): new server->client DamageEventMessage (victim NetworkId + Amount damage + new Health),
     // AOI-gated to the victim's viewers, so the client floats a "-N" number over the entity. Cosmetic only; sent
     // unreliable. Server + client ship together.
-    public const byte Version = 32;
+    // LIVING-ENEMIES P2-POLISH (v33): new server->client MonsterTuningMessage replicating the per-monster-TYPE tuning
+    // (one entry per named template — slime now) so the F1 "Monster" tab can list the types and show + edit the live
+    // values. Sent on login + on every per-type tuning change. Server + client ship together.
+    public const byte Version = 33;
+
+    private const int MaxMonsterTypes = 256;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -161,6 +166,13 @@ public static class ProtocolCodec
                 writer.Write(value.Amount);
                 writer.Write(value.Health);
                 break;
+            case MonsterTuningMessage value:
+                WriteMonsterTuning(writer, value.Tuning);
+                break;
+            case MonsterHomeMessage value:
+                writer.Write(value.NetworkId);
+                WriteTile(writer, value.HomeTile);
+                break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
                 writer.Write(value.NetworkId);
@@ -280,6 +292,8 @@ public static class ProtocolCodec
             MessageType.PlayerStats => new PlayerStatsMessage(ReadCharacterStats(reader)),
             MessageType.CombatTuning => new CombatTuningMessage(ReadCombatTuning(reader)),
             MessageType.DamageEvent => new DamageEventMessage(reader.ReadUInt32(), reader.ReadInt32(), reader.ReadUInt16()),
+            MessageType.MonsterTuning => new MonsterTuningMessage(ReadMonsterTuning(reader)),
+            MessageType.MonsterHome => new MonsterHomeMessage(reader.ReadUInt32(), ReadTile(reader)),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
@@ -591,6 +605,66 @@ public static class ProtocolCodec
         writer.Write(tuning.HalfAngleDegrees);
         writer.Write(tuning.RadiusTiles);
         writer.Write(tuning.Damage);
+    }
+
+    // LIVING-ENEMIES P2-POLISH (v33): the per-monster-TYPE tuning — a count-prefixed list of per-type entries, each
+    // its stable id + display name + the ms/tile feel-values in a fixed order. Mirrored in ReadMonsterTuning. Rides a
+    // rare reliable all-clients message (login + on change), so the bytes are irrelevant.
+    private static void WriteMonsterTuning(BinaryWriter writer, MonsterTuningSnapshot tuning)
+    {
+        var types = tuning.Types;
+        if (types.Count > MaxMonsterTypes)
+        {
+            throw new ProtocolException($"Monster tuning has too many types: {types.Count}.");
+        }
+
+        writer.Write((ushort)types.Count);
+        foreach (var t in types)
+        {
+            WriteString(writer, t.Id);
+            WriteString(writer, t.DisplayName);
+            writer.Write(t.MaxHealth);
+            writer.Write(t.MoveSpeedMultiplier);
+            writer.Write(t.RoamRadius);
+            writer.Write(t.PauseMinMs);
+            writer.Write(t.PauseMaxMs);
+            writer.Write(t.AggroRadius);
+            writer.Write(t.ChaseLeash);
+            writer.Write(t.AttackRange);
+            writer.Write(t.AttackDamage);
+            writer.Write(t.AttackCooldownMs);
+        }
+    }
+
+    private static MonsterTuningSnapshot ReadMonsterTuning(BinaryReader reader)
+    {
+        var count = reader.ReadUInt16();
+        if (count > MaxMonsterTypes)
+        {
+            throw new ProtocolException($"Monster tuning has too many types: {count}.");
+        }
+
+        var types = new List<MonsterTypeSnapshot>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var id = ReadString(reader);
+            var displayName = ReadString(reader);
+            var maxHealth = reader.ReadInt32();
+            var moveSpeed = reader.ReadDouble();
+            var roamRadius = reader.ReadInt32();
+            var pauseMinMs = reader.ReadInt32();
+            var pauseMaxMs = reader.ReadInt32();
+            var aggroRadius = reader.ReadInt32();
+            var chaseLeash = reader.ReadInt32();
+            var attackRange = reader.ReadInt32();
+            var attackDamage = reader.ReadInt32();
+            var attackCooldownMs = reader.ReadInt32();
+            types.Add(new MonsterTypeSnapshot(
+                id, displayName, maxHealth, moveSpeed, roamRadius, pauseMinMs, pauseMaxMs,
+                aggroRadius, chaseLeash, attackRange, attackDamage, attackCooldownMs));
+        }
+
+        return new MonsterTuningSnapshot(types);
     }
 
     private static CombatTuningSnapshot ReadCombatTuning(BinaryReader reader)

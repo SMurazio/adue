@@ -325,6 +325,21 @@ public sealed class MmoClient : IDisposable
     public CombatTuningSnapshot? CombatTuning { get; private set; }
     public int CombatTuningVersion { get; private set; }
 
+    // LIVING-ENEMIES P2-POLISH: client-side mirror of the server's per-monster-TYPE tuning, last replicated by
+    // MonsterTuningMessage (login + on change). Null until the first snapshot arrives. The F1 Monster tab reads this
+    // read-only to list the types (dropdown) and seed the per-type fields; the server stays authoritative (the panel
+    // sends AdminSetTuning on "<typeId>.<field>" keys and the confirmed snapshot lands back here). MonsterTuningVersion
+    // bumps each change so the Godot layer can cheaply detect "re-seed the panel" like CombatTuningVersion.
+    public MonsterTuningSnapshot? MonsterTuning { get; private set; }
+    public int MonsterTuningVersion { get; private set; }
+
+    // LIVING-ENEMIES P2-POLISH: per-monster leash HOME tiles, from MonsterHomeMessage (sent when a monster enters AOI).
+    // The Godot layer reads this read-only to paint a RED floor tile at each known monster's home so the de-aggro
+    // anchor is visible. An entry is added on the message and dropped when the monster despawns.
+    private readonly Dictionary<uint, TileCoord> _monsterHomes = [];
+
+    public IReadOnlyDictionary<uint, TileCoord> MonsterHomes => _monsterHomes;
+
     // COMBAT-TUNING (radial cooldown): the client clock time of the most recent attack we SENT, and the cooldown
     // duration in effect when we sent it (snapshotted so a mid-cooldown tuning change doesn't retroactively rescale
     // the in-flight sweep). AttackCooldownRemainingFraction reads these against the live clock. This is a LOCAL
@@ -969,6 +984,7 @@ public sealed class MmoClient : IDisposable
                 break;
             case EntityDespawnMessage despawn:
                 _entities.Remove(despawn.NetworkId);
+                _monsterHomes.Remove(despawn.NetworkId);
                 if (LocalNetworkId == despawn.NetworkId)
                 {
                     ClearLocalEntity();
@@ -999,6 +1015,16 @@ public sealed class MmoClient : IDisposable
                 // predictor's swing-root reads the live RootMs at SendAttack time.
                 CombatTuning = tuning.Tuning;
                 CombatTuningVersion++;
+                break;
+            case MonsterTuningMessage monsterTuning:
+                // LIVING-ENEMIES P2-POLISH: adopt the replicated per-type tuning and bump the version so the F1 Monster
+                // tab re-seeds. Pure mirror — the client runs no monster simulation; this only feeds the admin panel.
+                MonsterTuning = monsterTuning.Tuning;
+                MonsterTuningVersion++;
+                break;
+            case MonsterHomeMessage monsterHome:
+                // LIVING-ENEMIES P2-POLISH: remember the monster's leash home so the renderer can paint a red tile.
+                _monsterHomes[monsterHome.NetworkId] = monsterHome.HomeTile;
                 break;
             case DamageEventMessage damage:
                 // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the
@@ -1245,6 +1271,7 @@ public sealed class MmoClient : IDisposable
             foreach (var networkId in _staleEntityScratch)
             {
                 _entities.Remove(networkId);
+                _monsterHomes.Remove(networkId);
                 if (LocalNetworkId == networkId)
                 {
                     ClearLocalEntity();
@@ -1256,7 +1283,43 @@ public sealed class MmoClient : IDisposable
             PruneStalePlaceholders(sequence);
         }
 
+        // LIVING-ENEMIES P2-POLISH (HUD HP fix): keep LocalStats.Health in sync with the local player's AUTHORITATIVE
+        // per-frame SNAPSHOT HP (the same value the overhead bar reads). PlayerStatsMessage only carries the local
+        // vitals on login / a stat-change — it is NOT re-sent when a monster hits the player, so LocalStats.Health was
+        // stale and the HUD bar didn't fall while the overhead bar did. The snapshot HP IS re-sent on every hit, so
+        // mirroring it here makes the HUD's current HP track damage live; MaxHealth/mana/stamina still come from
+        // PlayerStatsMessage. Done after the snapshot is fully applied so the local entity's Health is the latest.
+        SyncLocalStatsHealthFromSnapshot();
+
         _lastAppliedSnapshotSequence = sequence;
+    }
+
+    // LIVING-ENEMIES P2-POLISH (HUD HP fix): mirror the local player's snapshot Health into LocalStats.Health so the
+    // HUD bar reflects damage taken (the snapshot is the authoritative per-frame HP; PlayerStatsMessage is not re-sent
+    // on a hit). No-op until both the vitals (PlayerStats, gives MaxHealth/mana/stamina) and the local entity exist.
+    // Only the CURRENT Health is overwritten — Max/mana/stamina are preserved from PlayerStatsMessage. Clamped into
+    // the known max so a transient out-of-range snapshot can't push current above max.
+    private void SyncLocalStatsHealthFromSnapshot()
+    {
+        if (LocalStats is not { } stats
+            || !LocalNetworkId.HasValue
+            || !_entities.TryGetValue(LocalNetworkId.Value, out var local))
+        {
+            return;
+        }
+
+        // Guard: a local entity created from a bare snapshot before its real spawn may carry 0/0 HP; only adopt a
+        // genuine replicated value (MaxHealth > 0) so we never zero the HUD from a placeholder.
+        if (local.MaxHealth == 0)
+        {
+            return;
+        }
+
+        var snapshotHealth = local.Health;
+        if (stats.Health != snapshotHealth)
+        {
+            LocalStats = stats.WithHealth(snapshotHealth);
+        }
     }
 
     // A snapshot just applied. Record it as received and ack the highest contiguously-received sequence

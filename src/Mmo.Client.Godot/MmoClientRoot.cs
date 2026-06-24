@@ -77,6 +77,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private MeshInstance3D? _predictedTileMarker;
 	private MeshInstance3D? _confirmedTileMarker;
 
+	// LIVING-ENEMIES P2-POLISH: one flat RED ground marker per known monster HOME (leash/de-aggro anchor), keyed by
+	// the monster's network id, parented under _worldRoot. Synced each _Process frame from MmoClient.MonsterHomes:
+	// a marker is created when a monster's home arrives and freed when the monster despawns (its home drops). Makes
+	// the otherwise-invisible leash home legible ("why did it give up" becomes visible). Sets up the P3 spawner.
+	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _monsterHomeMarkers = new();
+	private readonly System.Collections.Generic.List<uint> _monsterHomeStaleScratch = new();
+
 	// FREEAIM: a flat WEDGE (pie-slice) mesh flashed on the ground from the local player, oriented along the aim,
 	// showing the free-aim sector's danger area (half-angle + radius matching the server). One MeshInstance3D under
 	// the world root; positioned + yawed on attack and hidden after a brief window by UpdateAimWedge.
@@ -195,6 +202,23 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _combatHalfAngleDeg;
 	private LineEdit? _combatRadiusTiles;
 	private LineEdit? _combatDamage;
+
+	// LIVING-ENEMIES P2-POLISH: the F1 "Monster" tab — a per-TYPE dropdown + the selected type's tuning fields. Edits
+	// THAT type's live (replicated) values via AdminSetTuning on "<typeId>.<field>" keys; the server clamps +
+	// broadcasts the MonsterTuningSnapshot back, which re-seeds these fields (mirroring the Combat tab pattern).
+	private int _monsterPanelSeededVersion = -1;
+	private int _monsterSelectedTypeIndex;
+	private OptionButton? _monsterTypeDropdown;
+	private LineEdit? _monsterMaxHealth;
+	private LineEdit? _monsterMoveSpeed;
+	private LineEdit? _monsterRoamRadius;
+	private LineEdit? _monsterAggroRadius;
+	private LineEdit? _monsterChaseLeash;
+	private LineEdit? _monsterAttackRange;
+	private LineEdit? _monsterAttackDamage;
+	private LineEdit? _monsterAttackCooldownMs;
+	private LineEdit? _monsterPauseMinMs;
+	private LineEdit? _monsterPauseMaxMs;
 
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
@@ -421,6 +445,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
 		UpdatePredictionTileMarkers();
+		UpdateMonsterHomeMarkers();
 		UpdateAimWedge();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
@@ -1153,6 +1178,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		BuildVisualTab(_debugTabs);
 		BuildMovementTab(_debugTabs);
 		BuildCombatTab(_debugTabs);
+		BuildMonsterTab(_debugTabs);
 		BuildServerTab(_debugTabs);
 		BuildVitalsTab(_debugTabs);
 		_adminTabsBuilt = true;
@@ -1363,6 +1389,49 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var apply = new Button { Name = "CombatApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnCombatApplyPressed;
+		rows.AddChild(apply);
+	}
+
+	// LIVING-ENEMIES P2-POLISH: the "Monster" tab. A per-TYPE dropdown at the top (just "Slime" now) + the selected
+	// type's tuning fields below. Apply sends each via AdminSetTuning on "<typeId>.<field>" keys (e.g. slime.roamRadius);
+	// the server admin-gates + clamps + broadcasts the MonsterTuningSnapshot back, which re-seeds the fields. The
+	// dropdown is populated + the fields seeded from MmoClient.MonsterTuning (the replicated per-type values).
+	private void BuildMonsterTab(TabContainer tabs)
+	{
+		var rows = AddDebugTab(tabs, "Monster");
+
+		var header = CreateOverlayLabel("MonsterHeader", 12);
+		header.Text = "— server-authoritative · per-type · sent on Apply —";
+		rows.AddChild(header);
+
+		// The type dropdown. Selecting a type re-seeds the fields below from that type's replicated values.
+		var typeRow = new HBoxContainer { Name = "Row_MonsterType" };
+		typeRow.AddThemeConstantOverride("separation", 8);
+		var typeCaption = CreateOverlayLabel("Cap_MonsterType", 13);
+		typeCaption.Text = "type";
+		typeCaption.CustomMinimumSize = new Vector2(170, 0);
+		typeRow.AddChild(typeCaption);
+		_monsterTypeDropdown = new OptionButton { Name = "MonsterTypeDropdown", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+		_monsterTypeDropdown.AddThemeFontSizeOverride("font_size", 13);
+		_monsterTypeDropdown.ItemSelected += OnMonsterTypeSelected;
+		typeRow.AddChild(_monsterTypeDropdown);
+		rows.AddChild(typeRow);
+
+		// The selected type's fields. Labels match the per-type field meaning; Apply maps each to a "<typeId>.<field>".
+		_monsterMaxHealth = AddTuningField(rows, "hp (max)", OnMonsterApplyPressed);
+		_monsterMoveSpeed = AddTuningField(rows, "move speed (x)", OnMonsterApplyPressed);
+		_monsterRoamRadius = AddTuningField(rows, "roam radius", OnMonsterApplyPressed);
+		_monsterAggroRadius = AddTuningField(rows, "aggro radius", OnMonsterApplyPressed);
+		_monsterChaseLeash = AddTuningField(rows, "chase leash", OnMonsterApplyPressed);
+		_monsterAttackRange = AddTuningField(rows, "attack range", OnMonsterApplyPressed);
+		_monsterAttackDamage = AddTuningField(rows, "attack damage", OnMonsterApplyPressed);
+		_monsterAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnMonsterApplyPressed);
+		_monsterPauseMinMs = AddTuningField(rows, "pause min (ms)", OnMonsterApplyPressed);
+		_monsterPauseMaxMs = AddTuningField(rows, "pause max (ms)", OnMonsterApplyPressed);
+
+		var apply = new Button { Name = "MonsterApply", Text = "Apply" };
+		apply.AddThemeFontSizeOverride("font_size", 14);
+		apply.Pressed += OnMonsterApplyPressed;
 		rows.AddChild(apply);
 	}
 
@@ -2003,6 +2072,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// COMBAT-TUNING: if the F8 panel is open and the server broadcast a new snapshot (after an Apply), re-seed its
 		// fields to the authoritative post-clamp values.
 		ReseedCombatFieldsIfChanged();
+		// LIVING-ENEMIES P2-POLISH: keep the Monster tab in sync with the replicated per-type snapshot the same way.
+		ReseedMonsterFieldsIfChanged();
 
 		// S110: feed the minimap world objects (trees/rocks/resource nodes) from the SAME per-frame render-state
 		// list the 3D world renders from — read-only, AOI-scoped ("current environment"). Rebuilt in place each
@@ -2253,6 +2324,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			// (these change server-side, so showing the latest truth on each open is the right default).
 			SeedStatFields();
 			SeedCombatFields();
+			SeedMonsterFields();
 		}
 
 		_debugPanel!.Visible = visible;
@@ -2310,6 +2382,55 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_debugPanelVisible && _client is { } client && client.CombatTuningVersion != _combatPanelSeededVersion)
 		{
 			SeedCombatFields();
+		}
+	}
+
+	// LIVING-ENEMIES P2-POLISH: (re)populate the Monster-tab dropdown from the replicated per-type tuning and seed the
+	// fields from the SELECTED type's values. Re-seeded whenever the snapshot version changes (a server broadcast after
+	// an Apply) so the panel shows the authoritative post-clamp values. Until the first snapshot arrives there is
+	// nothing to seed (fields stay blank, dropdown empty).
+	private void SeedMonsterFields()
+	{
+		if (_monsterTypeDropdown is null || _client?.MonsterTuning is not { } tuning || tuning.Types.Count == 0)
+		{
+			return;
+		}
+
+		// Rebuild the dropdown items if the type set changed (count differs) — cheap, and the type set is tiny + rarely
+		// changes. Preserve the current selection where possible.
+		if (_monsterTypeDropdown.ItemCount != tuning.Types.Count)
+		{
+			_monsterTypeDropdown.Clear();
+			for (var i = 0; i < tuning.Types.Count; i++)
+			{
+				_monsterTypeDropdown.AddItem(tuning.Types[i].DisplayName, i);
+			}
+		}
+
+		_monsterSelectedTypeIndex = Math.Clamp(_monsterSelectedTypeIndex, 0, tuning.Types.Count - 1);
+		_monsterTypeDropdown.Select(_monsterSelectedTypeIndex);
+
+		var t = tuning.Types[_monsterSelectedTypeIndex];
+		SetField(_monsterMaxHealth, t.MaxHealth);
+		SetField(_monsterMoveSpeed, t.MoveSpeedMultiplier);
+		SetField(_monsterRoamRadius, t.RoamRadius);
+		SetField(_monsterAggroRadius, t.AggroRadius);
+		SetField(_monsterChaseLeash, t.ChaseLeash);
+		SetField(_monsterAttackRange, t.AttackRange);
+		SetField(_monsterAttackDamage, t.AttackDamage);
+		SetField(_monsterAttackCooldownMs, t.AttackCooldownMs);
+		SetField(_monsterPauseMinMs, t.PauseMinMs);
+		SetField(_monsterPauseMaxMs, t.PauseMaxMs);
+		_monsterPanelSeededVersion = _client.MonsterTuningVersion;
+	}
+
+	// LIVING-ENEMIES P2-POLISH: re-seed the Monster tab when the replicated snapshot changes AND the panel is open
+	// (mirrors ReseedCombatFieldsIfChanged). Only while open so it never stomps un-applied edits in a closed panel.
+	private void ReseedMonsterFieldsIfChanged()
+	{
+		if (_debugPanelVisible && _client is { } client && client.MonsterTuningVersion != _monsterPanelSeededVersion)
+		{
+			SeedMonsterFields();
 		}
 	}
 
@@ -2449,6 +2570,62 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		ShowInteractFeedback("Combat tuning sent.");
+	}
+
+	// LIVING-ENEMIES P2-POLISH: a monster type was picked in the dropdown — remember the index and re-seed the fields
+	// from THAT type's replicated values. (Admin-only panel; the dropdown is only built for an admin.)
+	private void OnMonsterTypeSelected(long index)
+	{
+		_monsterSelectedTypeIndex = (int)index;
+		SeedMonsterFields();
+	}
+
+	// Monster-tab apply-all: parse each field and send it via AdminSetTuning on the SELECTED type's "<typeId>.<field>"
+	// key (e.g. slime.roamRadius). The server admin-gates + clamps each authoritatively, then broadcasts the replicated
+	// MonsterTuningSnapshot back — which re-seeds this panel (post-clamp values). Invalid/blank fields are skipped so a
+	// typo in one never blocks the others. No-op if there is no replicated type to target yet.
+	private void OnMonsterApplyPressed()
+	{
+		if (_client?.Role != ClientRole.Admin || !TryGetSelectedMonsterTypeId(out var typeId))
+		{
+			return;
+		}
+
+		SendMonsterField(typeId, "maxHealth", _monsterMaxHealth);
+		SendMonsterField(typeId, "moveSpeed", _monsterMoveSpeed);
+		SendMonsterField(typeId, "roamRadius", _monsterRoamRadius);
+		SendMonsterField(typeId, "aggroRadius", _monsterAggroRadius);
+		SendMonsterField(typeId, "chaseLeash", _monsterChaseLeash);
+		SendMonsterField(typeId, "attackRange", _monsterAttackRange);
+		SendMonsterField(typeId, "attackDamage", _monsterAttackDamage);
+		SendMonsterField(typeId, "attackCooldownMs", _monsterAttackCooldownMs);
+		SendMonsterField(typeId, "pauseMinMs", _monsterPauseMinMs);
+		SendMonsterField(typeId, "pauseMaxMs", _monsterPauseMaxMs);
+
+		ShowInteractFeedback($"Monster tuning sent ({typeId}).");
+	}
+
+	// Sends one per-type field via AdminSetTuning on "<typeId>.<field>" iff the field parses. Skips a blank/invalid one.
+	private void SendMonsterField(string typeId, string field, LineEdit? edit)
+	{
+		if (TryReadField(edit, out var value))
+		{
+			_client?.SendAdminSetTuning($"{typeId}.{field}", value);
+		}
+	}
+
+	// Resolves the dropdown selection to a replicated type id. False if no replicated tuning / no types yet.
+	private bool TryGetSelectedMonsterTypeId(out string typeId)
+	{
+		typeId = "";
+		if (_client?.MonsterTuning is not { } tuning || tuning.Types.Count == 0)
+		{
+			return false;
+		}
+
+		var index = Math.Clamp(_monsterSelectedTypeIndex, 0, tuning.Types.Count - 1);
+		typeId = tuning.Types[index].Id;
+		return true;
 	}
 
 	// Visual-tab apply-all (S65): parse every CLIENT-LOCAL VISUAL field and apply it INSTANTLY in place (no server
@@ -3112,6 +3289,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private static readonly StandardMaterial3D PredictedTileMarkerMaterial = MarkerMaterial(new Color(0.20f, 0.95f, 0.25f, 0.55f));
 	private static readonly StandardMaterial3D ConfirmedTileMarkerMaterial = MarkerMaterial(new Color(0.95f, 0.10f, 0.80f, 0.55f));
 
+	// LIVING-ENEMIES P2-POLISH: the shared flat quad + RED material for the monster-home markers. Full-tile (0.96) so
+	// a home reads as "this tile", red + semi-transparent + unshaded so it sits flat and legible over any terrain.
+	private static readonly PlaneMesh MonsterHomeMarkerMesh = new() { Size = new Vector2(0.96f, 0.96f) };
+	private static readonly StandardMaterial3D MonsterHomeMarkerMaterial = MarkerMaterial(new Color(0.90f, 0.12f, 0.12f, 0.55f));
+
 	private static StandardMaterial3D MarkerMaterial(Color color)
 	{
 		return new StandardMaterial3D
@@ -3184,6 +3366,60 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_predictedTileMarker.Position = TileToWorld(predictedTile, 0.05f);
 		_confirmedTileMarker.Visible = true;
 		_predictedTileMarker.Visible = true;
+	}
+
+	// LIVING-ENEMIES P2-POLISH: sync the RED monster-home markers to the client's known monster homes each frame. A
+	// marker is created when a new home appears (a monster entered AOI) and freed when its home is gone (the monster
+	// despawned / left AOI, dropping the home client-side). Cheap: the set is tiny (a handful of monsters) and only
+	// diffs against the live MonsterHomes dictionary — no per-frame allocation in the steady state. Always on (no
+	// toggle) — the leash anchor is gameplay-legibility, not a debug overlay. No-op until the world root exists.
+	private void UpdateMonsterHomeMarkers()
+	{
+		if (_worldRoot is null || _client is null)
+		{
+			return;
+		}
+
+		var homes = _client.MonsterHomes;
+
+		// Drop markers whose monster home is gone.
+		if (_monsterHomeMarkers.Count > 0)
+		{
+			_monsterHomeStaleScratch.Clear();
+			foreach (var id in _monsterHomeMarkers.Keys)
+			{
+				if (!homes.ContainsKey(id))
+				{
+					_monsterHomeStaleScratch.Add(id);
+				}
+			}
+
+			foreach (var id in _monsterHomeStaleScratch)
+			{
+				_monsterHomeMarkers[id].QueueFree();
+				_monsterHomeMarkers.Remove(id);
+			}
+		}
+
+		// Add/position a marker per known home (home is fixed for a monster's life, so positioning once on create is
+		// enough — but re-setting it is a cheap idempotent assignment that also handles a future moving home for free).
+		foreach (var (networkId, homeTile) in homes)
+		{
+			if (!_monsterHomeMarkers.TryGetValue(networkId, out var marker))
+			{
+				marker = new MeshInstance3D
+				{
+					Name = $"MonsterHome_{networkId}",
+					Mesh = MonsterHomeMarkerMesh,
+					MaterialOverride = MonsterHomeMarkerMaterial,
+				};
+				_worldRoot.AddChild(marker);
+				_monsterHomeMarkers[networkId] = marker;
+			}
+
+			// A hair above the ground (below the prediction markers' 0.04 so those still win any overlap z-fight).
+			marker.Position = TileToWorld(homeTile, 0.03f);
+		}
 	}
 
 	// FREEAIM FEEL KNOBS (client telegraph). COMBAT-TUNING: the half-angle/radius the wedge is drawn from are no

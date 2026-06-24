@@ -325,6 +325,61 @@ public sealed class MmoClientProtocolTests
         Assert.Equal(0f, renders[2].HealthFraction);
     }
 
+    // LIVING-ENEMIES P2-POLISH item 1 (HUD HP fix): the local player's snapshot HP (the authoritative per-frame value
+    // the overhead bar reads) syncs into LocalStats.Health so the HUD bar falls when the player takes damage. The
+    // PlayerStatsMessage that seeds LocalStats is NOT re-sent on a hit; only the snapshot HP changes. MaxHealth + mana
+    // + stamina stay from PlayerStatsMessage.
+    [Fact]
+    public void LocalSnapshotHealthSyncsIntoLocalStats()
+    {
+        using var client = CreateClient(out _);
+        var characterId = Guid.NewGuid();
+
+        client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
+        // Login vitals (gives MaxHealth + mana + stamina). Full HP at first.
+        client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(100, 100, 60, 120, 30, 80)));
+        // A snapshot carrying the local player at full HP (MaxHealth>0 so the sync is armed).
+        client.HandleMessageForTests(Snapshot(2, isComplete: true,
+            new EntityStateSnapshot(9, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 100, MaxHealth: 100)));
+        Assert.Equal(100, client.LocalStats!.Value.Health);
+
+        // A monster hits the player: ONLY the snapshot HP drops (no new PlayerStatsMessage). The HUD's current HP
+        // (LocalStats.Health) must follow it down.
+        client.HandleMessageForTests(Snapshot(3, isComplete: true,
+            new EntityStateSnapshot(9, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 73, MaxHealth: 100)));
+
+        Assert.Equal(73, client.LocalStats!.Value.Health);
+        // Max + mana + stamina preserved from PlayerStatsMessage.
+        Assert.Equal(100, client.LocalStats!.Value.MaxHealth);
+        Assert.Equal(60, client.LocalStats!.Value.Mana);
+        Assert.Equal(30, client.LocalStats!.Value.Stamina);
+    }
+
+    // LIVING-ENEMIES P2-POLISH: the per-monster-TYPE tuning mirror + the monster home (red-tile anchor) tracking.
+    [Fact]
+    public void MonsterTuningAndHomeAreMirrored()
+    {
+        using var client = CreateClient(out _);
+
+        Assert.Null(client.MonsterTuning);
+        client.HandleMessageForTests(new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
+        {
+            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000),
+        })));
+        Assert.NotNull(client.MonsterTuning);
+        Assert.Equal("slime", client.MonsterTuning!.Value.Types[0].Id);
+        Assert.Equal(1, client.MonsterTuningVersion);
+
+        client.HandleMessageForTests(new MonsterHomeMessage(42, new TileCoord(8, 9)));
+        Assert.True(client.MonsterHomes.TryGetValue(42, out var home));
+        Assert.Equal(new TileCoord(8, 9), home);
+
+        // The home marker is dropped when the monster despawns.
+        client.HandleMessageForTests(new EntityDespawnMessage(5, 42));
+        Assert.False(client.MonsterHomes.ContainsKey(42));
+    }
+
     private static WorldSnapshotMessage Snapshot(uint sequence, bool isComplete, params EntityStateSnapshot[] entities)
     {
         return new WorldSnapshotMessage(10, sequence, entities.Length, isComplete, 0, 1, entities);

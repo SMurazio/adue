@@ -48,6 +48,41 @@ public sealed class ProtocolCodecTests
         Assert.Equal(Direction8.NE, entity.Facing);
     }
 
+    // LIVING-ENEMIES P2-POLISH (v33): the per-monster-TYPE tuning snapshot round-trips (count-prefixed list of
+    // per-type entries, each id + display name + the ms/tile values).
+    [Fact]
+    public void MonsterTuningRoundTrips()
+    {
+        var original = new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
+        {
+            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000),
+            new MonsterTypeSnapshot("ogre", "Ogre", 250, 0.6, 3, 1000, 4000, 8, 20, 1, 25, 1500),
+        }));
+
+        var decoded = Assert.IsType<MonsterTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(2, decoded.Tuning.Types.Count);
+        Assert.Equal("slime", decoded.Tuning.Types[0].Id);
+        Assert.Equal("Slime", decoded.Tuning.Types[0].DisplayName);
+        Assert.Equal(0.8, decoded.Tuning.Types[0].MoveSpeedMultiplier, 6);
+        Assert.Equal(100, decoded.Tuning.Types[0].MaxHealth);
+        Assert.Equal("ogre", decoded.Tuning.Types[1].Id);
+        Assert.Equal(250, decoded.Tuning.Types[1].MaxHealth);
+        Assert.Equal(25, decoded.Tuning.Types[1].AttackDamage);
+    }
+
+    // LIVING-ENEMIES P2-POLISH (v33): the per-monster leash-home message round-trips (network id + home tile).
+    [Fact]
+    public void MonsterHomeRoundTrips()
+    {
+        var original = new MonsterHomeMessage(4242, new TileCoord(13, -7));
+
+        var decoded = Assert.IsType<MonsterHomeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4242u, decoded.NetworkId);
+        Assert.Equal(new TileCoord(13, -7), decoded.HomeTile);
+    }
+
     [Fact]
     public void InteractRequestRoundTrips()
     {
@@ -313,12 +348,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyTwo()
+    public void ProtocolVersionIsThirtyThree()
     {
-        // COMBAT-QOL protocol bump (v31 -> v32): new server->client DamageEventMessage (AOI-gated cosmetic damage
-        // numbers). A new message type is breaking (server + client ship together). Pin the version so an accidental
-        // change is caught.
-        Assert.Equal(32, ProtocolCodec.Version);
+        // LIVING-ENEMIES P2-POLISH protocol bump (v32 -> v33): new server->client MonsterTuningMessage (per-type
+        // tuning for the F1 Monster tab) + MonsterHomeMessage (the red leash-anchor tile). New message types are
+        // breaking (server + client ship together). Pin the version so an accidental change is caught.
+        Assert.Equal(33, ProtocolCodec.Version);
     }
 
     [Fact]

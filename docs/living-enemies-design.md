@@ -47,6 +47,45 @@ a first-class design goal, not an optimization to bolt on later.
   the dormancy gate.
 - **Aggro throttle.** The target scan is throttled (not per-tick) — done in P2.
 
-## Tuning (server-only, live via `ServerTuningRegistry`)
-`monster.roamRadius`, `pauseMinMs`, `pauseMaxMs` (P1); `aggroRadius`, `chaseLeash`, `attackCooldownMs`,
-`attackDamage`, `attackRange` (P2).
+## Monster TYPES (named templates) — P2-polish
+A monster TYPE is a named server-side template (`MonsterType`) with its OWN stats + AI tuning:
+`maxHealth`, `moveSpeedMultiplier`, `roamRadius`, `pauseMin/MaxMs`, `aggroRadius`, `chaseLeash`,
+`attackRange`, `attackDamage`, `attackCooldownMs`. The registry (`MonsterTypeRegistry`) owns the table of
+types + the live-tuning apply/clamp + the tick-quantisation. Today there is ONE type: id `slime`,
+display `Slime`. A spawned monster (`/monster <name>`, default `slime`) remembers its type; `StepMonsterAi`
+reads that type's `Tunables` + its `SpeedMultiplier` each tick (no global block anymore).
+
+- **Slower than the player (outrunnable).** `slime.moveSpeed` defaults to **0.8** — the slime's effective
+  step cooldown is derived from its `SpeedMultiplier` via the existing per-entity `EffectiveStepCooldown`
+  path (~312 ms vs the player's 250 ms base), so you can outrun the dumb ones.
+- **`/monster <name>`** spawns that type at the caller's tile (= the leash home). No name → `slime`; an
+  unknown name → an error listing the available type ids.
+
+## Tuning — per-TYPE, live + replicated (P2-polish)
+The former GLOBAL `monster.*` keys were REPLACED by PER-TYPE keys of the form `<typeId>.<field>`, e.g.
+`slime.roamRadius`, `slime.aggroRadius`, `slime.moveSpeed`, `slime.maxHealth`. They are live-tunable via the
+existing `AdminSetTuning` path (owned by `MonsterTypeRegistry`, not `ServerTuningRegistry`) AND **replicated**
+to clients via `MonsterTuningSnapshot` (protocol v33) so the F1 **Monster tab** (a per-type dropdown + the
+selected type's fields) can show + edit the authoritative live values — mirroring the combat.* tab.
+De-aggro range (×1.5 aggro hysteresis) and the aggro-scan cadence (~0.5 s) stay DERIVED.
+
+## Visible spawner anchor (P2-polish)
+Each monster's leash HOME tile is replicated to viewers (`MonsterHomeMessage`, sent once when the monster
+enters AOI) and painted as a **RED floor tile** on the client, so the leash/de-aggro anchor is legible. This
+is just the visible anchor for now; the P3 spawner entity will own it.
+
+## Known gaps / future polish
+- **Attacks are NOT telegraphed.** A monster attack is an instant hit on its cooldown — no wind-up, no
+  swing animation, no on-ground danger indicator before the damage lands. There is nothing to dodge/react
+  to; the player just sees the number + the HP drop. A telegraph (wind-up tick + a brief ground/▲ indicator
+  before the hit resolves) is a combat-FEEL item for a later polish phase.
+
+## De-aggro conditions (why a monster drops a target)
+A Chasing monster returns home (`Returning` → `Idle`) when ANY of:
+- **Target lost or dead** — the target despawned/logged out, or its HP hit 0 (no death/respawn this phase,
+  so a downed player is dropped).
+- **Target beyond the de-aggro range** — Chebyshev distance to the target exceeds `~1.5× aggroRadius` (the
+  hysteresis margin, so it doesn't drop the instant the target steps one tile past the acquire radius).
+- **Pulled beyond `chaseLeash` from home** — the monster's Chebyshev distance from its HOME exceeds the
+  type's `chaseLeash`, regardless of how close the target still is (the hard leash bound).
+- (Also: a no-progress watchdog bails a chase wedged against a wall corner — see `MonsterRoamAi`.)

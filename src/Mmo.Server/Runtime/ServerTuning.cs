@@ -83,60 +83,7 @@ public sealed class ServerTuning
     public uint StepCooldownTicks =>
         (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / _tickRate)));
 
-    // LIVING-ENEMIES P1 (live): the leashed-roam feel-knobs for EntityKind.Monster, live-tunable via the
-    // monster.* AdminSetTuning keys (clamped by ServerTuningRegistry) so an admin can dial roam range and
-    // stroll cadence at runtime. Read fresh each AI pass by GameServer.StepMonsterAi / the MonsterRoamAi step.
-    // These are SERVER-ONLY AI parameters (the client just interpolates the resulting tile-steps), so unlike
-    // the combat.* knobs they have NO replicated client snapshot — there is nothing client-side to keep in sync.
-    //
-    //   RoamRadius   — Chebyshev tiles from a monster's home anchor it may wander within (the leash). Default 4.
-    //   PauseMinMs   — minimum Idle pause between strolls (ms). Default 2000.
-    //   PauseMaxMs   — maximum Idle pause between strolls (ms). Default 5000. (Registry keeps Max >= Min.)
-    public int RoamRadius { get; set; } = 4;
-    public int PauseMinMs { get; set; } = 2000;
-    public int PauseMaxMs { get; set; } = 5000;
-
-    // LIVING-ENEMIES P2 (live): the aggro/chase/attack feel-knobs for EntityKind.Monster, live-tunable via the
-    // monster.* AdminSetTuning keys (clamped by ServerTuningRegistry). SERVER-ONLY AI params (no client mirror) —
-    // read fresh each AI pass by GameServer.StepMonsterAi → MonsterRoamAi.StepMonster.
-    //
-    //   AggroRadius      — Chebyshev tiles within which a monster acquires the nearest alive player. Default 6.
-    //   ChaseLeash       — max Chebyshev tiles from HOME a monster may be pulled before it drops aggro and returns.
-    //                      A chase MAY leave RoamRadius (intended) but is hard-bounded by this. Default 12.
-    //   AttackRange      — Chebyshev adjacency at which the monster attacks (1 = the 8 surrounding tiles). Default 1.
-    //   AttackDamage     — HP the monster deals the player per hit. Default 10.
-    //   AttackCooldownMs — the monster's OWN per-monster attack cadence (ms), independent of its move cooldown.
-    //                      Default 1000.
-    // De-aggro range is DERIVED (×1.5 of AggroRadius) so it always sits a margin beyond the acquire range (hysteresis
-    // — a monster doesn't drop a target the instant it steps one tile past the acquire radius). Aggro scan cadence is
-    // DERIVED (~0.5 s) so the per-tick scan the P1 review flagged is throttled.
-    public int AggroRadius { get; set; } = 6;
-    public int ChaseLeash { get; set; } = 12;
-    public int AttackRange { get; set; } = 1;
-    public int MonsterAttackDamage { get; set; } = 10;
-    public int MonsterAttackCooldownMs { get; set; } = 1000;
-
-    // Derived de-aggro range: 1.5× the acquire radius (ceil, and at least AggroRadius+1 so it is always strictly
-    // beyond acquire even at small radii) — the hysteresis margin a target must exit before the monster drops it.
-    public int MonsterDeaggroRadius =>
-        Math.Max(AggroRadius + 1, (int)Math.Ceiling(AggroRadius * 1.5));
-
-    // Monster attack cooldown in TICKS, derived like the combat AttackCooldownTicks (Ceiling, >= 1) so a live change
-    // stays tick-quantised and a small ms value still gates at least one tick.
-    public uint MonsterAttackCooldownTicks =>
-        (uint)Math.Max(1, (int)Math.Ceiling(MonsterAttackCooldownMs / (1000d / _tickRate)));
-
-    // How often (in ticks) a monster re-runs its aggro scan — ~0.5 s, floored at 1. THROTTLES the spatial-index scan
-    // (the P1 review flagged a per-tick scan as a perf risk); MonsterRoamAi also staggers the first scan per entity.
-    public uint MonsterAggroScanIntervalTicks =>
-        (uint)Math.Max(1, (int)Math.Round(_tickRate * 0.5d, MidpointRounding.AwayFromZero));
-
-    // Roam pause bounds in TICKS, derived off the tick rate (Round, floored at 1) so the wall-clock pause is
-    // independent of the configured tick rate and a small ms value still pauses at least one tick. The AI picks a
-    // uniform random pause in [PauseMinTicks, PauseMaxTicks]; MonsterRoamAi re-floors Max>=Min defensively too.
-    public uint PauseMinTicks =>
-        (uint)Math.Max(1, (int)Math.Round(PauseMinMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
-
-    public uint PauseMaxTicks =>
-        (uint)Math.Max((int)PauseMinTicks, (int)Math.Round(PauseMaxMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
+    // LIVING-ENEMIES P2-POLISH: the monster AI tuning (P1 roam + P2 aggro/chase/attack) moved OUT of here into the
+    // per-TYPE MonsterTypeRegistry (a named template per monster kind — slime now), which owns the live-tunable +
+    // REPLICATED per-type values and their tick-quantisation. ServerTuning no longer holds any monster.* knob.
 }

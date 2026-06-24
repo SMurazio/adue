@@ -122,6 +122,16 @@ public sealed class GameServer
     // StepHeldMovementIntents), paced off the step cooldown — so a monster never steps every tick.
     private readonly MonsterRoamAi _monsterAi;
 
+    // LIVING-ENEMIES P2-POLISH: the table of monster TYPES (named templates — slime now) + their live-tunable,
+    // replicated per-type tuning. Replaces the former single global monster.* tuning block: a spawned monster
+    // remembers its type (via _monsterTypeOf), and StepMonsterAi reads that type's Tunables + SpeedMultiplier each
+    // tick. Tick-rate-fixed at construction (for the tick-quantised pause/cooldown derivations).
+    private readonly MonsterTypeRegistry _monsterTypes;
+
+    // Per-monster type membership (entity id -> its type). Set on spawn, cleared on despawn (Forget). The AI step
+    // reads it to build that monster's Tunables from the live per-type values. Tiny (a handful of monsters).
+    private readonly Dictionary<ulong, MonsterType> _monsterTypeOf = [];
+
     // Half-extent (in tiles) of the cell neighborhood an AOI query must examine. The grid returns every
     // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
     // the exact set. It MUST cover the interest EXIT radius (interest radius + hysteresis), so a
@@ -164,6 +174,9 @@ public sealed class GameServer
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
+        // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
+        // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
+        _monsterTypes = new MonsterTypeRegistry(options.TickRate);
         ScatterResourceNodes();
         SpawnDummies();
         _netManager = new NetManager(_listener)
@@ -502,6 +515,9 @@ public sealed class GameServer
                         // swing-root prediction, and radial cooldown indicator derive from the server's authoritative
                         // values immediately on login (not stale client constants).
                         SendCombatTuning(current);
+                        // LIVING-ENEMIES P2-POLISH: replicate the per-monster-TYPE tuning so an admin's F1 Monster tab
+                        // can list the types (dropdown) and show + edit the live values immediately on login.
+                        SendMonsterTuning(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -947,6 +963,14 @@ public sealed class GameServer
                 EffectiveStepCooldownMs(entity));
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
+
+            // LIVING-ENEMIES P2-POLISH: a monster entering this viewer's AOI also gets its leash HOME tile, so the
+            // client can paint a RED floor tile there (the de-aggro anchor becomes visible). Sent once alongside the
+            // spawn; the home is fixed for the monster's life so no per-tick cost. Skipped if the AI has no home yet.
+            if (entity.Kind == EntityKind.Monster && _monsterAi.TryGetHome(entity.Id, out var home))
+            {
+                TrySend(recipient.Peer, new MonsterHomeMessage(entity.NetworkId, home), DeliveryMethod.ReliableOrdered);
+            }
         }
     }
 
@@ -1364,7 +1388,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster, /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -1405,7 +1429,7 @@ public sealed class GameServer
                 HandleSpeedCommand(sender, parts);
                 break;
             case "monster":
-                HandleMonsterCommand(sender);
+                HandleMonsterCommand(sender, parts);
                 break;
             default:
                 SendSystem(sender, $"unknown command: /{command}. Try /help.");
@@ -1499,7 +1523,7 @@ public sealed class GameServer
     // tile (always walkable — the caller stands there); replication + client interpolation render it as a moving
     // cube for free. LIVING-ENEMIES P2: it now also AGGROS the nearest player in range, CHASES (leashed to home),
     // and ATTACKS when adjacent (the player TAKES damage — HP floors at 0, no death/respawn yet).
-    private void HandleMonsterCommand(ClientSession sender)
+    private void HandleMonsterCommand(ClientSession sender, string[] parts)
     {
         if (!TryGetSessionEntity(sender, out var actor))
         {
@@ -1507,15 +1531,42 @@ public sealed class GameServer
             return;
         }
 
-        // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
-        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, "Monster", actor.Tile, Direction8.S);
-        // Register with the roam AI: the spawn tile is the leash home; start Idle with an initial randomized pause.
-        _monsterAi.Register(monster, _serverTick, _tuning.PauseMinTicks, _tuning.PauseMaxTicks, _tuning.MonsterAggroScanIntervalTicks);
+        // LIVING-ENEMIES P2-POLISH: /monster <name> spawns that TYPE; /monster with no name defaults to the only type
+        // (slime). An unknown name is a clear error listing the available names (so a typo is obvious, not silent).
+        MonsterType type;
+        if (parts.Length >= 2)
+        {
+            if (!_monsterTypes.TryGet(parts[1], out type))
+            {
+                var names = string.Join(", ", _monsterTypes.Types.Select(t => t.Id));
+                SendSystem(sender, $"monster: unknown type '{parts[1]}'. Available: {names}.");
+                return;
+            }
+        }
+        else
+        {
+            type = _monsterTypes.Default;
+        }
 
+        // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
+        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, type.DisplayName, actor.Tile, Direction8.S);
+        // LIVING-ENEMIES P2-POLISH: the monster takes its TYPE's stats/AI tuning. MaxHealth (spawn at full) + the
+        // move-speed multiplier (which feeds the existing EffectiveStepCooldown path so the monster steps on its OWN
+        // type-derived cadence — slower than the player by default, outrunnable). Remember the type for the AI step.
+        monster.SetMaxHealthFull(type.MaxHealth);
+        monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
+        _monsterTypeOf[monster.Id] = type;
+
+        // Register with the roam AI: the spawn tile is the leash home; start Idle with an initial randomized pause,
+        // tick-quantised off THIS type's pause bounds.
+        var tunables = _monsterTypes.BuildTunables(type);
+        _monsterAi.Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
+
+        var effectiveMs = EffectiveStepCooldownMs(monster);
         SendSystem(
             sender,
-            $"monster: spawned at {monster.Tile.X},{monster.Tile.Y} (home), roamRadius={_tuning.RoamRadius}, pause={_tuning.PauseMinMs}-{_tuning.PauseMaxMs}ms, aggro={_tuning.AggroRadius}, leash={_tuning.ChaseLeash}, atk={_tuning.MonsterAttackDamage}/{_tuning.MonsterAttackCooldownMs}ms.");
-        Log.Info($"{sender.DisplayName} spawned a monster at {monster.Tile} (home).");
+            $"monster: spawned {type.DisplayName} at {monster.Tile.X},{monster.Tile.Y} (home), hp={type.MaxHealth}, step={effectiveMs}ms, roamRadius={type.RoamRadius}, aggro={type.AggroRadius}, leash={type.ChaseLeash}, atk={type.AttackDamage}/{type.AttackCooldownMs}ms.");
+        Log.Info($"{sender.DisplayName} spawned a {type.DisplayName} at {monster.Tile} (home, type={type.Id}).");
     }
 
     // S60 live-tuning handler. ADMIN-GATED (the same role check as /speed and /metrics): a non-admin
@@ -1528,6 +1579,17 @@ public sealed class GameServer
         if (sender.Role != ClientRole.Admin)
         {
             Log.Warn($"Denied AdminSetTuning from non-admin {sender.DisplayName}: {key}={value}.");
+            return;
+        }
+
+        // LIVING-ENEMIES P2-POLISH: per-monster-TYPE keys ("<typeId>.<field>", e.g. slime.roamRadius) are owned by the
+        // monster-type registry (the per-type tuning replaced the former global monster.* block). Try it first; on a
+        // hit, broadcast the replicated per-type snapshot so the F1 Monster tab re-seeds to the post-clamp values.
+        if (_monsterTypes.TryApply(key, value, out var monsterApplied))
+        {
+            BroadcastMonsterTuning();
+            SendSystem(sender, $"tuning: {key} = {ServerTuningRegistry.Format(monsterApplied)} (applied live).");
+            Log.Info($"{sender.DisplayName} set tuning {key}={ServerTuningRegistry.Format(monsterApplied)} (requested {value}).");
             return;
         }
 
@@ -1771,6 +1833,28 @@ public sealed class GameServer
     private void BroadcastCombatTuning()
     {
         var message = new CombatTuningMessage(_tuning.CombatSnapshot);
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated)
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // LIVING-ENEMIES P2-POLISH: replicate the per-monster-TYPE tuning to one client (login initial truth). Reliable-
+    // ordered, like SendCombatTuning. The client mirrors it so the F1 Monster tab shows + edits the live values.
+    private void SendMonsterTuning(ClientSession session)
+    {
+        TrySend(session.Peer, new MonsterTuningMessage(_monsterTypes.BuildSnapshot()), DeliveryMethod.ReliableOrdered);
+    }
+
+    // LIVING-ENEMIES P2-POLISH: push the current per-type tuning to every authenticated client. Called when a
+    // "<typeId>.<field>" key changes so any open F1 Monster tab re-seeds to the post-clamp values. Global (not
+    // AOI-scoped), like BroadcastCombatTuning — every authenticated session gets it.
+    private void BroadcastMonsterTuning()
+    {
+        var message = new MonsterTuningMessage(_monsterTypes.BuildSnapshot());
         foreach (var session in _sessions.Values)
         {
             if (session.IsAuthenticated)
@@ -2038,21 +2122,10 @@ public sealed class GameServer
             return;
         }
 
-        // Snapshot the live tunables ONCE per pass (read from _tuning so a monster.* admin retune takes effect on the
-        // next tick). LIVING-ENEMIES P2: aggro/chase/attack knobs ride alongside the P1 roam knobs; de-aggro range and
-        // the aggro-scan cadence are DERIVED in ServerTuning (hysteresis + perf throttle coupled to their sources).
-        var tunables = new MonsterRoamAi.Tunables(
-            RoamRadius: _tuning.RoamRadius,
-            PauseMinTicks: _tuning.PauseMinTicks,
-            PauseMaxTicks: _tuning.PauseMaxTicks,
-            AggroRadius: _tuning.AggroRadius,
-            DeaggroRadius: _tuning.MonsterDeaggroRadius,
-            ChaseLeash: _tuning.ChaseLeash,
-            AttackRange: _tuning.AttackRange,
-            AttackDamage: _tuning.MonsterAttackDamage,
-            AttackCooldownTicks: _tuning.MonsterAttackCooldownTicks,
-            AggroScanIntervalTicks: _tuning.MonsterAggroScanIntervalTicks);
-
+        // LIVING-ENEMIES P2-POLISH: each monster's Tunables come from ITS TYPE (read fresh from the live per-type
+        // values so a "<typeId>.*" admin retune takes effect on the next tick), not a single global block. The
+        // tick-quantised pause/cooldown/scan + the derived de-aggro hysteresis are computed by the type registry.
+        // De-aggro range and the aggro-scan cadence stay DERIVED (coupled to their source values).
         foreach (var entity in _zone.World.Entities)
         {
             if (entity.Kind != EntityKind.Monster)
@@ -2060,11 +2133,17 @@ public sealed class GameServer
                 continue;
             }
 
+            // Resolve the monster's type (falls back to the default if somehow untracked — e.g. a legacy spawn).
+            if (!_monsterTypeOf.TryGetValue(entity.Id, out var type))
+            {
+                type = _monsterTypes.Default;
+            }
+
             _monsterAi.StepMonster(
                 entity,
                 _serverTick,
                 EffectiveStepCooldownTicks(entity),
-                tunables);
+                _monsterTypes.BuildTunables(type));
         }
     }
 

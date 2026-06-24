@@ -305,6 +305,28 @@ public sealed record DamageEventMessage(uint NetworkId, int Amount, ushort Healt
     public MessageType Type => MessageType.DamageEvent;
 }
 
+// LIVING-ENEMIES P2-POLISH (protocol v33): server->client replication of the per-monster-TYPE tuning. The monster AI
+// tuning is server-authoritative + live-tunable via AdminSetTuning on the per-type "<typeId>.<field>" keys; this
+// ships the CURRENT per-type values so the F1 "Monster" tab can list the types and show + edit the authoritative
+// numbers (mirroring CombatTuningMessage). Sent to each client on login (initial truth) and broadcast to all
+// authenticated clients whenever a per-type key changes. Reliable-ordered, like CombatTuning — rare and must not be
+// lost. The client derives NO simulation from it; it exists purely for the admin tuning panel.
+public sealed record MonsterTuningMessage(MonsterTuningSnapshot Tuning) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MonsterTuning;
+}
+
+// LIVING-ENEMIES P2-POLISH (protocol v33): server->viewer replication of a MONSTER's leash HOME tile — the de-aggro
+// anchor the monster returns to. Sent once when the monster enters a viewer's AOI (right after its EntitySpawn) so the
+// client can paint a RED floor tile there, making the otherwise-invisible leash home legible ("why did it give up"
+// becomes visible). NetworkId is the monster's; HomeTile is fixed for the monster's life (P1/P2 — the home never
+// moves), so a single message suffices and there is no per-tick cost. Reliable-ordered like EntitySpawn; the client
+// drops the marker when the monster despawns. (Sets up the P3 spawner entity, but for now it is just the anchor.)
+public sealed record MonsterHomeMessage(uint NetworkId, TileCoord HomeTile) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MonsterHome;
+}
+
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntityDespawn;
