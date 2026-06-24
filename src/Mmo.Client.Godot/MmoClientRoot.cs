@@ -627,6 +627,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// LIVESPEED-DESYNC P2: F loots all while the corpse loot window is open (and chat isn't focused) — the same
+		// intent as the "Loot All [F]" footer button. F is otherwise unbound (F1/F3/F11 are distinct keycodes; E
+		// harvests, Space attacks), so this only acts when a corpse window is up and never disturbs other bindings.
+		if (key.Keycode == Key.F && _chatInput?.HasFocus() != true && _hud?.Loot is { IsOpen: true } lootAllWindow)
+		{
+			lootAllWindow.RaiseLootAllRequested();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		// E = harvest. Only when not typing in chat (otherwise 'e' would both type and harvest). Targets
 		// the nearest adjacent available resource node; the server re-validates adjacency authoritatively.
 		if (key.Keycode == Key.E && _chatInput?.HasFocus() != true)

@@ -2074,6 +2074,15 @@ public sealed class GameServer
         if (_monsterTypes.TryApply(key, value, out var monsterApplied))
         {
             BroadcastMonsterTuning();
+            // LIVESPEED-DESYNC: the AI paces a monster off its TYPE's LIVE MoveSpeedMultiplier each tick, but the
+            // monster ENTITY's SpeedMultiplier (the source of EntitySpawn / MovementSpeedChanged cadence the client
+            // interpolates at) is copied only once at spawn. Editing "<typeId>.moveSpeed" therefore re-paced the
+            // server AI while the client kept interpolating at the stale spawn cadence → a growing desync. Re-push the
+            // edited type's MoveSpeedMultiplier onto every already-spawned monster of that type and re-broadcast the
+            // cadence (reusing the player /speed path), so AI ticks, entity SpeedMultiplier, and client interpolation
+            // stay in lockstep on a live edit. Re-applying an unchanged multiplier is a no-op and broadcasts nothing,
+            // so this safely runs after ANY of the type's edits, not just moveSpeed.
+            PropagateMonsterTypeSpeedToSpawned(key);
             SendSystem(sender, $"tuning: {key} = {ServerTuningRegistry.Format(monsterApplied)} (applied live).");
             Log.Info($"{sender.DisplayName} set tuning {key}={ServerTuningRegistry.Format(monsterApplied)} (requested {value}).");
             return;
@@ -2126,6 +2135,48 @@ public sealed class GameServer
             if (IsEntityInInterest(viewerEntity, entity, session, _tuning.InterestRadius))
             {
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // LIVESPEED-DESYNC: after a per-type tuning edit ("<typeId>.<field>"), re-sync the edited type's already-spawned
+    // monsters so their ENTITY SpeedMultiplier (the EntitySpawn / MovementSpeedChanged cadence source the client
+    // interpolates at) matches the type's LIVE MoveSpeedMultiplier the AI now paces off (StepMonsterAi reads it fresh
+    // each tick via EffectiveStepCooldownTicksFor). Without this the AI re-paced while clients kept interpolating at
+    // the stale spawn cadence → the "VERY desynced" slime. We resolve the edited type from the key, then for each
+    // spawned monster OF THAT TYPE re-apply the multiplier and, only when it actually changed, re-broadcast the new
+    // effective cadence via the SAME player /speed path (so the client re-quantises its interpolation identically).
+    // TrySetSpeedMultiplier is a no-op + returns false when unchanged, so a non-moveSpeed edit costs only the walk.
+    private void PropagateMonsterTypeSpeedToSpawned(string key)
+    {
+        var dot = key.IndexOf('.');
+        if (dot <= 0 || dot >= key.Length - 1)
+        {
+            return;
+        }
+
+        if (!_monsterTypes.TryGet(key[..dot], out var editedType))
+        {
+            return;
+        }
+
+        foreach (var entity in _zone.World.Entities)
+        {
+            if (entity.Kind != EntityKind.Monster)
+            {
+                continue;
+            }
+
+            // Compare by reference: _monsterTypeOf stores the SAME MonsterType instance the registry mutates in place,
+            // so == is exact identity with the just-edited type (no id re-parse needed).
+            if (!_monsterTypeOf.TryGetValue(entity.Id, out var type) || !ReferenceEquals(type, editedType))
+            {
+                continue;
+            }
+
+            if (entity.TrySetSpeedMultiplier(editedType.MoveSpeedMultiplier))
+            {
+                BroadcastMovementSpeedChanged(entity, EffectiveStepCooldownMs(entity));
             }
         }
     }

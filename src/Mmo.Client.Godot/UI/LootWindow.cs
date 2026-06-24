@@ -8,7 +8,7 @@ namespace Mmo.Client.Godot.UI;
 
 // LOOT P4c: the corpse loot window. Opens when the player interacts with a corpse (the server replies with the
 // corpse's contents) and lists each rolled stack as a row — rarity-coloured name + quantity + a per-row "Take"
-// button — plus a "Loot all" button and a close X. PRESENTATION ONLY, mirroring InventoryWindow: it reads the
+// button — plus a "Loot All [F]" button (F hotkey while open) and a close X. PRESENTATION ONLY, mirroring InventoryWindow: it reads the
 // client-side mirror (MmoClient.CorpseLoot, version-guarded) handed in via SetContents, and raises events for the
 // take / loot-all / close intents; MmoClientRoot translates those into the MmoClient.SendLootItem/SendLootAll/
 // SendCloseLoot calls. It never touches the protocol, the registry, or the corpse state directly.
@@ -173,6 +173,19 @@ public partial class LootWindow : Control
         HideWindow();
     }
 
+    // Public loot-all intent — the SAME path as the "Loot All [F]" footer button, exposed so the F hotkey
+    // (routed from MmoClientRoot while the window is open) loots all without reaching into the button. No-op
+    // when the list is empty (the footer button is Disabled then too), so a stray F can't fire a pointless send.
+    public void RaiseLootAllRequested()
+    {
+        if (_lootAllButton is { Disabled: true })
+        {
+            return;
+        }
+
+        LootAllRequested?.Invoke();
+    }
+
     private void RenderRows(IReadOnlyList<CorpseLootRow> rows)
     {
         if (_list is null)
@@ -309,11 +322,12 @@ public partial class LootWindow : Control
         _emptyHint.AddThemeColorOverride("font_color", new Color(0.65f, 0.68f, 0.78f));
         outer.AddChild(_emptyHint);
 
-        // "Loot all" footer button.
+        // "Loot All [F]" footer button — the [F] advertises the F hotkey wired in MmoClientRoot (F loots all while
+        // this window is open), same intent as clicking the button.
         _lootAllButton = new Button
         {
             Name = "LootAll",
-            Text = "Loot all",
+            Text = "Loot All [F]",
             CustomMinimumSize = new Vector2(0, 36),
         };
         _lootAllButton.Pressed += () => LootAllRequested?.Invoke();
