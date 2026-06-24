@@ -57,6 +57,23 @@ public sealed class ItemRegistryTests
     }
 
     [Fact]
+    public void ResourcesDefaultToCommonRarityAndLootMatsCarryTheirTier()
+    {
+        // LOOT P4a: pre-existing gather staples have no authored rarity => default Common.
+        foreach (var key in new[] { "wood", "stone", "fiber" })
+        {
+            Assert.True(ItemRegistry.Default.TryGet(key, out var def));
+            Assert.Equal(Rarity.Common, def.Rarity);
+        }
+
+        // The added loot mats carry their authored tiers (drives the P4c loot-window colour).
+        Assert.Equal(Rarity.Common, ItemRegistry.Default.Get("slime_gel").Rarity);
+        Assert.Equal(Rarity.Rare, ItemRegistry.Default.Get("arcane_dust").Rarity);
+        Assert.Equal(Rarity.Epic, ItemRegistry.Default.Get("crystal_shard").Rarity);
+        Assert.Equal(Rarity.Legendary, ItemRegistry.Default.Get("slime_core").Rarity);
+    }
+
+    [Fact]
     public void ItemStackReservesInstanceIdSeamUnusedByDefault()
     {
         var stack = new ItemStack("wood", 5);

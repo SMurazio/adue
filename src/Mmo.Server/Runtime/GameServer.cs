@@ -128,6 +128,16 @@ public sealed class GameServer
     // tick. Tick-rate-fixed at construction (for the tick-quantised pause/cooldown derivations).
     private readonly MonsterTypeRegistry _monsterTypes;
 
+    // LOOT P4a: the shared loot-table store (slime_loot + the nested rare_material_pool). KillMonster resolves
+    // the dead monster's type -> LootTableId -> table and rolls it. P4a only LOGS the rolled stacks (P4b spawns
+    // the corpse that holds them); nothing is delivered to any inventory here.
+    private readonly LootTableRegistry _lootTables = LootTableRegistry.CreateDefault(ItemRegistry.Default);
+
+    // LOOT P4a: the seeded RNG for loot rolls, off the map seed (mixed with a constant so it isn't lockstep
+    // with the roam AI's same-seed stream). Single-threaded tick loop => no lock needed. Deterministic for a
+    // given world; the headless tests roll their OWN seeded Random so they don't depend on this stream.
+    private readonly Random _lootRng;
+
     // Per-monster type membership (entity id -> its type). Set on spawn; REMOVED on death (LIVING-ENEMIES P3 —
     // KillMonster calls _monsterTypeOf.Remove + _monsterAi.Forget, fixing the former add-only leak flagged in
     // todo/monster-types-followups.md). The AI step reads it to build that monster's Tunables from the live per-type
@@ -192,6 +202,8 @@ public sealed class GameServer
         // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
         // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
         _monsterTypes = new MonsterTypeRegistry(options.TickRate);
+        // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
+        _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
         SpawnDummies();
         _netManager = new NetManager(_listener)
@@ -1690,6 +1702,14 @@ public sealed class GameServer
             _networkIds.Return(removed.NetworkId);
         }
 
+        // LOOT P4a: roll this monster's loot BEFORE the type membership is removed below. Resolve type ->
+        // LootTableId -> table, roll the seeded RNG, and (P4a only) LOG the rolled stacks. P4b will spawn a
+        // corpse at the death tile holding these; nothing is delivered to any inventory here yet.
+        if (_monsterTypeOf.TryGetValue(monsterId, out var deadType))
+        {
+            RollAndLogLoot(deadType, removed?.NetworkId, monster.Tile.X, monster.Tile.Y);
+        }
+
         // Clean up AI + type membership (fixes the former add-only leak — see todo/monster-types-followups.md P2/P3).
         _monsterAi.Forget(monsterId);
         _monsterTypeOf.Remove(monsterId);
@@ -1701,6 +1721,40 @@ public sealed class GameServer
             spawner.NotifyMonsterDied(monsterId, _serverTick, respawnTicks);
             Log.Info($"Monster {removed?.NetworkId} (spawner #{spawner.SpawnerId}) died; respawn in {respawnTicks} ticks.");
         }
+    }
+
+    // LOOT P4a: roll the dead monster's loot table and LOG the rolled stacks. This is the P4a placeholder —
+    // the rolled stacks are NOT delivered to any inventory and no corpse is spawned. P4b consumes this exact
+    // structured roll (List<ItemStack>) to populate the corpse it spawns at the death tile. Empty LootTableId
+    // (or an unknown id) => no loot; we skip the log entirely so a no-loot type is silent.
+    private void RollAndLogLoot(MonsterType type, uint? networkId, int tileX, int tileY)
+    {
+        if (string.IsNullOrEmpty(type.LootTableId))
+        {
+            return;
+        }
+
+        var stacks = _lootTables.Roll(type.LootTableId, _lootRng);
+        if (stacks.Count == 0)
+        {
+            Log.Info($"[LOOT P4a placeholder] {type.Id} #{networkId} dropped nothing (table '{type.LootTableId}'). " +
+                     "P4b will spawn a corpse holding the rolled stacks.");
+            return;
+        }
+
+        var summary = new StringBuilder();
+        for (var i = 0; i < stacks.Count; i++)
+        {
+            if (i > 0)
+            {
+                summary.Append(", ");
+            }
+
+            summary.Append(stacks[i].TemplateKey).Append(" x").Append(stacks[i].Quantity);
+        }
+
+        Log.Info($"[LOOT P4a placeholder] {type.Id} #{networkId} at ({tileX},{tileY}) rolled: {summary}. " +
+                 "P4b will spawn a corpse holding these (no inventory delivery yet).");
     }
 
     // LIVING-ENEMIES P3: per-tick spawner respawn pass. For each spawner whose respawn delay has elapsed, spawn a fresh

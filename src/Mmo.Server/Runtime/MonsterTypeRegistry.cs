@@ -69,7 +69,9 @@ public sealed class MonsterTypeRegistry
     {
         _tickRate = tickRate;
         // Seed the one type today. A new type is one Add() + its non-default values.
-        Add(new MonsterType(DefaultTypeId, "Slime"));
+        // LOOT P4a: the slime rolls the "slime_loot" table on death (gel floor + the shared rare tail +
+        // its signature core). Static content; the LootTableRegistry owns the table definition.
+        Add(new MonsterType(DefaultTypeId, "Slime") { LootTableId = "slime_loot" });
     }
 
     private void Add(MonsterType type)

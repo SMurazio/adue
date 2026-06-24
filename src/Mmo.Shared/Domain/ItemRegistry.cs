@@ -7,9 +7,20 @@ public sealed class ItemRegistry
 {
     public static readonly ItemRegistry Default = new(
     [
+        // Gather-loop staples (S37). No rarity concept existed before LOOT P4a, so these default to Common.
         new ItemDefinition("wood", "Wood", MaxStack: 99, ItemCategory.Resource),
         new ItemDefinition("stone", "Stone", MaxStack: 99, ItemCategory.Resource),
         new ItemDefinition("fiber", "Fiber", MaxStack: 99, ItemCategory.Resource),
+
+        // LOOT P4a: monster-drop materials. The existing set is thin (only gather staples), so a small
+        // rare tail is added here as REAL resource ids the loot tables reference. These are crafting mats
+        // (the future crafting sink) — no gear yet. Rarities set so the loot window (P4c) can colour them.
+        // "slime_gel" is the slime's common floor mat; "arcane_dust"/"crystal_shard" form the shared rare
+        // pool; "slime_core" is the slime's signature chase drop.
+        new ItemDefinition("slime_gel", "Slime Gel", MaxStack: 99, ItemCategory.Resource, Rarity.Common),
+        new ItemDefinition("arcane_dust", "Arcane Dust", MaxStack: 99, ItemCategory.Resource, Rarity.Rare),
+        new ItemDefinition("crystal_shard", "Crystal Shard", MaxStack: 99, ItemCategory.Resource, Rarity.Epic),
+        new ItemDefinition("slime_core", "Slime Core", MaxStack: 99, ItemCategory.Resource, Rarity.Legendary),
     ]);
 
     private readonly Dictionary<string, ItemDefinition> _byKey;

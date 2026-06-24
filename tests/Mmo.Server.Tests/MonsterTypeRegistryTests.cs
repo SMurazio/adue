@@ -40,6 +40,9 @@ public sealed class MonsterTypeRegistryTests
         // The NEW slower-than-player default: < 1.0 so the player (base 1.0) outruns it.
         Assert.True(slime.MoveSpeedMultiplier < 1.0);
         Assert.Equal(0.8, slime.MoveSpeedMultiplier, 3);
+
+        // LOOT P4a: the slime references the "slime_loot" table (static seed data; not live-tunable).
+        Assert.Equal("slime_loot", slime.LootTableId);
     }
 
     [Fact]

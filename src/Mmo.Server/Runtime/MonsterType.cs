@@ -52,4 +52,11 @@ public sealed class MonsterType
     // full-HP one at the spawner tile. Default 5000 ms (~5 s). Live-tunable via the "<typeId>.respawnMs" key on the
     // F1 Monster tab; read live by the spawner at death time.
     public int RespawnMs { get; set; } = 5000;
+
+    // LOOT P4a: the LootTableRegistry id this type rolls on death. Empty string = no loot (the explicit
+    // "this type drops nothing" sentinel — distinct from an unknown id). STATIC seed data for now: it is
+    // NOT live-tunable or replicated, unlike the AI knobs above, because it is content authored once, not a
+    // feel dial an admin retunes mid-session. (If later loot wants live retuning — e.g. an event drop boost
+    // — promote it to a per-type key like the others; flagged in the P4a review-request.)
+    public string LootTableId { get; set; } = string.Empty;
 }
