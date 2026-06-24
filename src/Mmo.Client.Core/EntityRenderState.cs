@@ -19,7 +19,11 @@ public readonly record struct EntityRenderState(
     bool IsLocal,
     bool Depleted = false,
     ushort Health = 0,
-    ushort MaxHealth = 0)
+    ushort MaxHealth = 0,
+    // MONSTER-HOP: the vertical bounce offset (world units) for a hopping monster's render — 0 for everything
+    // else (players/NPCs/resources glide flat). The Godot wrapper adds this to the visual's world Y so the slime
+    // arcs up-and-down as it hops tile-to-tile. Purely cosmetic: never affects AuthoritativeTile or targeting.
+    double HopHeight = 0d)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

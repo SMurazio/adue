@@ -180,6 +180,15 @@ public sealed class MmoClient : IDisposable
     // remote entity immediately. Local-player path (predictor) is UNTOUCHED — this only moves the REMOTE buffer.
     private double _remoteInterpolationBufferOverrideMs = -1d;
 
+    // MONSTER-HOP: the LIVE hop duration (ms) every monster's hop interpolator uses — how long the tile-to-tile
+    // hop+arc takes. Kept clearly shorter than the step cadence (~150ms default at the 150ms cadence) so a monster
+    // visibly settles on its tile between hops rather than gliding continuously. Mirrors the remote-buffer knob:
+    // SetMonsterHopDurationMs re-pushes it onto every current AND future monster hop interpolator live (no restart).
+    // The hop HEIGHT is a fixed sensible constant (MonsterHopInterpolator.DefaultHopHeight); a second knob can drive
+    // it if the human wants — flagged in the review request.
+    public const double DefaultMonsterHopDurationMs = 160d;
+    private double _monsterHopDurationMs = DefaultMonsterHopDurationMs;
+
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
     {
@@ -1485,6 +1494,10 @@ public sealed class MmoClient : IDisposable
             return existing;
         }
 
+        // MONSTER-HOP: ClientEntity attaches a hop driver iff this is a Monster (now, or later via UpdateMetadata when
+        // a Player placeholder is revealed as a Monster). It still constructs a TileInterpolator for a uniform shape
+        // (and so a never-monster entity keeps the existing path verbatim). Pass the live hop duration so a hop driver
+        // created now or lazily uses the current knob value.
         var entity = new ClientEntity(
             networkId,
             characterId,
@@ -1494,6 +1507,7 @@ public sealed class MmoClient : IDisposable
             facing,
             isLocal,
             CreateInterpolator(tile, isLocal, effectiveCooldown),
+            _monsterHopDurationMs,
             effectiveCooldown);
         _entities[networkId] = entity;
         if (isLocal)
@@ -1571,6 +1585,21 @@ public sealed class MmoClient : IDisposable
         RefreshInterpolatorCadence();
     }
 
+    // MONSTER-HOP: the live hop duration (ms) shown by the F1 Movement-tab "Monster hop duration" field on open.
+    public double MonsterHopDurationMs => _monsterHopDurationMs;
+
+    // MONSTER-HOP: live-set the monster hop duration (ms), applied to every CURRENT monster's hop interpolator
+    // immediately (no restart) and to all future ones. Clamped to a sane debug range (1ms..1000ms). Mirrors how
+    // SetRemoteInterpolationBufferMs re-pushes onto every entity. Players/NPCs/resources are untouched.
+    public void SetMonsterHopDurationMs(double hopDurationMs)
+    {
+        _monsterHopDurationMs = Math.Clamp(hopDurationMs, 1d, 1000d);
+        foreach (var entity in _entities.Values)
+        {
+            entity.SetHopDurationMs(_monsterHopDurationMs);
+        }
+    }
+
     // Recomputes every entity's tween cadence. Each entity keeps its OWN advertised cooldown if it has one
     // (per-entity speed, S51) and only falls back to the ServerHello global when it doesn't — so a global
     // refresh (e.g. ServerHello arriving) never clobbers a per-entity cadence.
@@ -1645,6 +1674,16 @@ public sealed class MmoClient : IDisposable
     private sealed class ClientEntity
     {
         private readonly TileInterpolator _interpolator;
+
+        // MONSTER-HOP: non-null only for EntityKind.Monster. When present it REPLACES the buffered _interpolator as
+        // the render driver: the monster rests on its latest confirmed tile and hops (with a vertical arc) to a new
+        // tile when one arrives, so it sits on its authoritative server tile (no buffered-past lag → combat lands).
+        // Players/NPCs/resources keep _interpolator; the local player keeps the predictor. Mutable (not readonly):
+        // a snapshot can create an entity as a Player PLACEHOLDER before the EntitySpawn reveals it is a Monster, so
+        // UpdateMetadata lazily attaches the hop driver the moment Kind first becomes Monster (anchored on the tile
+        // the placeholder's interpolator currently rests on, so the hand-off doesn't snap).
+        private MonsterHopInterpolator? _hop;
+        private double _hopDurationMs;
         // S53: non-null only for the local player while prediction is active. When present, the predictor
         // OWNS the render position via its own present-time step-tween (the buffered _interpolator — which
         // renders confirmed state in the past for jitter smoothing — is bypassed for the local player, the
@@ -1660,6 +1699,7 @@ public sealed class MmoClient : IDisposable
             Direction8 facing,
             bool isLocal,
             TileInterpolator interpolator,
+            double hopDurationMs,
             ushort? stepCooldownMs)
         {
             NetworkId = networkId;
@@ -1670,6 +1710,15 @@ public sealed class MmoClient : IDisposable
             Facing = facing;
             IsLocal = isLocal;
             _interpolator = interpolator;
+            _hopDurationMs = hopDurationMs;
+            // MONSTER-HOP: attach the hop driver up-front when this entity is already known to be a Monster at
+            // construction (the EntitySpawn path). The snapshot-placeholder path constructs as Player and attaches
+            // the hop lazily in UpdateMetadata once the real Monster kind arrives.
+            if (kind == EntityKind.Monster)
+            {
+                _hop = new MonsterHopInterpolator(tile, hopDurationMs);
+            }
+
             StepCooldownMs = stepCooldownMs;
         }
 
@@ -1719,6 +1768,13 @@ public sealed class MmoClient : IDisposable
             Kind = kind;
             DisplayName = displayName;
             IsLocal = isLocal || IsLocal;
+            // MONSTER-HOP: a snapshot placeholder (created as Player) revealed as a Monster by EntitySpawn — attach
+            // the hop driver now, anchored on the confirmed authoritative tile (Tile) so it rests on its server
+            // position immediately (the monster-hop design point). Idempotent (only when not already attached).
+            if (kind == EntityKind.Monster && _hop is null)
+            {
+                _hop = new MonsterHopInterpolator(Tile, _hopDurationMs);
+            }
         }
 
         public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
@@ -1761,6 +1817,18 @@ public sealed class MmoClient : IDisposable
             }
 
             Facing = facing;
+            // MONSTER-HOP: a monster confirms onto the hop driver (rest-on-latest-tile + arc), never the buffered
+            // interpolator — so it tracks its authoritative tile with no playout delay. Everything else interpolates.
+            if (_hop is not null)
+            {
+                _hop.Confirm(tile, receivedAt);
+                return new EntityConfirmationDebug(
+                    tile != previousTile,
+                    _hop.IsHopping ? 1 : 0,
+                    _hop.HopDurationMs,
+                    _hop.RenderPosition);
+            }
+
             _interpolator.Confirm(tile, receivedAt);
             return new EntityConfirmationDebug(
                 tile != previousTile,
@@ -1790,6 +1858,14 @@ public sealed class MmoClient : IDisposable
             _interpolator.UpdateCadence(stepDurationMs, interpolationDelayMs);
         }
 
+        // MONSTER-HOP: live-set this entity's hop duration. Stored so a hop driver attached later (placeholder ->
+        // Monster reveal) uses the latest value; applied immediately to the live hop interpolator when present.
+        public void SetHopDurationMs(double hopDurationMs)
+        {
+            _hopDurationMs = hopDurationMs;
+            _hop?.SetHopDurationMs(hopDurationMs);
+        }
+
         // Applies a per-entity cadence (from EntitySpawn / MovementSpeedChanged). stepCooldownMs null clears
         // the override (the entity reverts to the global cadence the caller resolved). cadenceMs is the
         // already-resolved tween step duration; interpolationDelayMs is the already-resolved playout buffer
@@ -1816,6 +1892,7 @@ public sealed class MmoClient : IDisposable
             // Render-source selection only — Tile stays confirmed.
             RenderPosition position;
             Direction8 facing;
+            var hopHeight = 0d;
             if (_predictor is not null)
             {
                 position = _predictor.Sample(now);
@@ -1823,12 +1900,21 @@ public sealed class MmoClient : IDisposable
                 // move) rotates the avatar immediately instead of waiting for the next snapshot to sync Facing.
                 facing = _predictor.Facing;
             }
+            else if (_hop is not null)
+            {
+                // MONSTER-HOP: the monster renders from its hop driver — rests on the latest confirmed tile and
+                // arcs to the next tile when it changes. The vertical arc rides EntityRenderState.HopHeight; the
+                // ground position sits on the authoritative tile at rest. Facing tracks the confirmed facing.
+                position = _hop.Sample(now);
+                hopHeight = _hop.VerticalOffset;
+                facing = Facing;
+            }
             else
             {
                 position = _interpolator.Sample(now);
                 facing = Facing;
             }
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted, Health, MaxHealth);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted, Health, MaxHealth, hopHeight);
         }
     }
 
