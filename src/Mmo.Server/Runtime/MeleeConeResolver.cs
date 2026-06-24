@@ -56,10 +56,20 @@ public static class MeleeConeResolver
         return hits;
     }
 
-    // An attack damages enemies only — the target dummy and NPCs. Other Players are never damaged (no friendly fire
-    // this stage); resource nodes / stat-less entities are not combatants. The single friendly-fire gate, so a
-    // future PvP toggle changes only here.
+    // An attack damages enemies only — the target dummy, NPCs, and (LIVING-ENEMIES P1) roaming Monsters. Other
+    // Players are never damaged (no friendly fire this stage); resource nodes / stat-less entities are not
+    // combatants. The single friendly-fire gate, so a future PvP toggle changes only here.
     public static bool IsAttackableEnemy(WorldEntity entity)
+    {
+        return entity.Kind is EntityKind.Dummy or EntityKind.Npc or EntityKind.Monster;
+    }
+
+    // LIVING-ENEMIES P1: which enemies HEAL BACK via the heavy HP-regen loop (RegenEnemies). The stationary test
+    // targets (Dummy/Npc) regen so they stay permanent practice dummies; a roaming Monster does NOT — its HP just
+    // depletes and stays (death/respawn is a later phase). DISTINCT from IsAttackableEnemy on purpose: a Monster
+    // is attackable but not self-healing. Adding Monster to IsAttackableEnemy must NOT make it regen, so the regen
+    // loop gates on this narrower set.
+    public static bool IsRegeneratingEnemy(WorldEntity entity)
     {
         return entity.Kind is EntityKind.Dummy or EntityKind.Npc;
     }

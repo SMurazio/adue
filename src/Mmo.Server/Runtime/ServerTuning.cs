@@ -82,4 +82,26 @@ public sealed class ServerTuning
     // stay tick-quantised identically to the startup value (default value byte-for-byte unchanged).
     public uint StepCooldownTicks =>
         (uint)Math.Max(1, (int)Math.Ceiling(StepCooldownMs / (1000d / _tickRate)));
+
+    // LIVING-ENEMIES P1 (live): the leashed-roam feel-knobs for EntityKind.Monster, live-tunable via the
+    // monster.* AdminSetTuning keys (clamped by ServerTuningRegistry) so an admin can dial roam range and
+    // stroll cadence at runtime. Read fresh each AI pass by GameServer.StepMonsterAi / the MonsterRoamAi step.
+    // These are SERVER-ONLY AI parameters (the client just interpolates the resulting tile-steps), so unlike
+    // the combat.* knobs they have NO replicated client snapshot — there is nothing client-side to keep in sync.
+    //
+    //   RoamRadius   — Chebyshev tiles from a monster's home anchor it may wander within (the leash). Default 4.
+    //   PauseMinMs   — minimum Idle pause between strolls (ms). Default 2000.
+    //   PauseMaxMs   — maximum Idle pause between strolls (ms). Default 5000. (Registry keeps Max >= Min.)
+    public int RoamRadius { get; set; } = 4;
+    public int PauseMinMs { get; set; } = 2000;
+    public int PauseMaxMs { get; set; } = 5000;
+
+    // Roam pause bounds in TICKS, derived off the tick rate (Round, floored at 1) so the wall-clock pause is
+    // independent of the configured tick rate and a small ms value still pauses at least one tick. The AI picks a
+    // uniform random pause in [PauseMinTicks, PauseMaxTicks]; MonsterRoamAi re-floors Max>=Min defensively too.
+    public uint PauseMinTicks =>
+        (uint)Math.Max(1, (int)Math.Round(PauseMinMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
+
+    public uint PauseMaxTicks =>
+        (uint)Math.Max((int)PauseMinTicks, (int)Math.Round(PauseMaxMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
 }

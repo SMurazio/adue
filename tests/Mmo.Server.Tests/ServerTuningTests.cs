@@ -198,6 +198,73 @@ public sealed class ServerTuningTests
         Assert.Equal(20u, tuning.AttackCooldownTicks);
     }
 
+    // LIVING-ENEMIES P1: the monster.* roam knobs seed to defaults, are known (but NOT combat keys, so no combat
+    // re-broadcast), apply, clamp, and keep the pause min/max range non-inverted.
+    [Fact]
+    public void MonsterKeysSeedToDefaults()
+    {
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(4, tuning.RoamRadius);
+        Assert.Equal(2000, tuning.PauseMinMs);
+        Assert.Equal(5000, tuning.PauseMaxMs);
+    }
+
+    [Fact]
+    public void MonsterKeysAreKnownButNotCombat()
+    {
+        foreach (var key in new[]
+                 {
+                     ServerTuningRegistry.MonsterRoamRadiusKey,
+                     ServerTuningRegistry.MonsterPauseMinMsKey,
+                     ServerTuningRegistry.MonsterPauseMaxMsKey,
+                 })
+        {
+            Assert.True(ServerTuningRegistry.IsKnownKey(key));
+            Assert.False(ServerTuningRegistry.IsCombatKey(key)); // server-only AI knob: no client re-broadcast.
+        }
+    }
+
+    [Fact]
+    public void MonsterKeysApplyAndClamp()
+    {
+        var tuning = new ServerTuning(Options());
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterRoamRadiusKey, 6d, out var r));
+        Assert.Equal(6d, r);
+        Assert.Equal(6, tuning.RoamRadius);
+
+        // Clamp roam radius to [1, 32].
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterRoamRadiusKey, 0d, out _));
+        Assert.True(tuning.RoamRadius >= 1);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterRoamRadiusKey, 999d, out _));
+        Assert.True(tuning.RoamRadius <= 32);
+
+        // Clamp pauses to [0, 60000].
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterPauseMinMsKey, -10d, out _));
+        Assert.True(tuning.PauseMinMs >= 0);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterPauseMaxMsKey, 999_999d, out _));
+        Assert.True(tuning.PauseMaxMs <= 60000);
+    }
+
+    [Fact]
+    public void MonsterPauseRangeStaysNonInverted()
+    {
+        var tuning = new ServerTuning(Options()); // defaults: min 2000, max 5000.
+
+        // Raising min ABOVE the current max raises max to match (so the random range [min,max] is never inverted).
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterPauseMinMsKey, 8000d, out _));
+        Assert.Equal(8000, tuning.PauseMinMs);
+        Assert.True(tuning.PauseMaxMs >= tuning.PauseMinMs);
+
+        // Lowering max BELOW the current min lowers min to match.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.MonsterPauseMaxMsKey, 1000d, out _));
+        Assert.Equal(1000, tuning.PauseMaxMs);
+        Assert.True(tuning.PauseMinMs <= tuning.PauseMaxMs);
+
+        // The derived tick bounds also stay non-inverted.
+        Assert.True(tuning.PauseMaxTicks >= tuning.PauseMinTicks);
+    }
+
     [Fact]
     public void CombatRootTicksMatchesSharedConversion()
     {

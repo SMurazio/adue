@@ -650,13 +650,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var localId = _client.LocalNetworkId;
 		foreach (var state in _renderStates)
 		{
-			// No friendly fire: only Dummy/Npc are damageable; never the local player / self.
+			// No friendly fire: only Dummy/Npc/Monster are damageable; never the local player / self.
 			if (state.IsLocal || state.NetworkId == localId)
 			{
 				continue;
 			}
 
-			if (state.Kind is not (EntityKind.Dummy or EntityKind.Npc))
+			if (state.Kind is not (EntityKind.Dummy or EntityKind.Npc or EntityKind.Monster))
 			{
 				continue;
 			}

@@ -111,6 +111,13 @@ public sealed class GameServer
     // tracked here.
     private readonly ResourceRespawnSchedule _resourceRespawns = new();
 
+    // LIVING-ENEMIES P1: the server-side leashed-roam brain for EntityKind.Monster. Owns every monster's per-AI
+    // state + a seeded PRNG (seeded off the map seed so a given world's roaming is reproducible in tests/repro
+    // runs), and steps each monster through the SAME Zone.TryStep path players use. Constructed after _zone since
+    // it closes over _zone.IsWalkable / _zone.TryStep. Stepped each tick by StepMonsterAi (a sibling pass to
+    // StepHeldMovementIntents), paced off the step cooldown — so a monster never steps every tick.
+    private readonly MonsterRoamAi _monsterAi;
+
     // Half-extent (in tiles) of the cell neighborhood an AOI query must examine. The grid returns every
     // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
     // the exact set. It MUST cover the interest EXIT radius (interest radius + hysteresis), so a
@@ -144,6 +151,12 @@ public sealed class GameServer
             TerrainGenerator.CurrentGenVersion,
             options.SpawnDistribution,
             ResolveEntityGridCellSize(options.InterestRadius));
+        // LIVING-ENEMIES P1: seed the monster roam AI off the map seed so a given world replays the same roaming
+        // (deterministic for repro/tests); it steps monsters through _zone's walkability + tile-step path.
+        _monsterAi = new MonsterRoamAi(
+            options.MapSeed,
+            _zone.IsWalkable,
+            (entity, direction, tick, cooldownTicks) => _zone.TryStep(entity, direction, tick, cooldownTicks));
         ScatterResourceNodes();
         SpawnDummies();
         _netManager = new NetManager(_listener)
@@ -576,6 +589,9 @@ public sealed class GameServer
         using (tickBudget.Measure(TickBudgetCategory.Movement))
         {
             StepHeldMovementIntents();
+            // LIVING-ENEMIES P1: a sibling movement pass that steps each roaming Monster off the step cooldown
+            // (same tile-step path as players), so monsters idle near home and occasionally stroll within a leash.
+            StepMonsterAi();
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -1014,9 +1030,12 @@ public sealed class GameServer
         return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted, health, maxHealth);
     }
 
-    // Which entity kinds expose a public HP bar. Players and dummies carry CharacterStats that drive the
-    // overhead bar; resources and anything else do not (they replicate 0/0 and the client hides the bar).
-    private static bool HasPublicHealth(EntityKind kind) => kind is EntityKind.Player or EntityKind.Dummy;
+    // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry
+    // CharacterStats that drive the overhead bar; resources and anything else do not (they replicate 0/0 and the
+    // client hides the bar — the client gate is purely MaxHealth>0, so adding Monster here is the only touch
+    // needed to show its bar).
+    private static bool HasPublicHealth(EntityKind kind) =>
+        kind is EntityKind.Player or EntityKind.Dummy or EntityKind.Monster;
 
     private static ushort ToHealthWire(int value) => (ushort)Math.Clamp(value, 0, ushort.MaxValue);
 
@@ -1161,7 +1180,10 @@ public sealed class GameServer
 
         foreach (var entity in _zone.World.Entities)
         {
-            if (MeleeConeResolver.IsAttackableEnemy(entity))
+            // LIVING-ENEMIES P1: regen the STATIONARY targets only (Dummy/Npc), NOT roaming Monsters — a Monster
+            // is attackable but does not heal back this phase (its HP depletes and stays). Gate on the narrower
+            // IsRegeneratingEnemy, not IsAttackableEnemy (which now also includes Monster).
+            if (MeleeConeResolver.IsRegeneratingEnemy(entity))
             {
                 entity.TryRegenHealth(perTick);
             }
@@ -1335,7 +1357,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster, /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -1374,6 +1396,9 @@ public sealed class GameServer
                 break;
             case "speed":
                 HandleSpeedCommand(sender, parts);
+                break;
+            case "monster":
+                HandleMonsterCommand(sender);
                 break;
             default:
                 SendSystem(sender, $"unknown command: /{command}. Try /help.");
@@ -1457,6 +1482,32 @@ public sealed class GameServer
             $"speed: multiplier={entity.SpeedMultiplier:0.###}, effective step cooldown={effectiveMs}ms"
                 + (changed ? "." : " (unchanged)."));
         Log.Info($"{sender.DisplayName} set speed multiplier {entity.SpeedMultiplier:0.###} (cooldown={effectiveMs}ms).");
+    }
+
+    // LIVING-ENEMIES P1: admin dev command /monster — spawns an EntityKind.Monster at the CALLER's current tile
+    // (mirroring the SpawnDummies setup but at the sender, like a "/dummy here"), records that tile as the
+    // monster's leash HOME, and registers it with the roam AI. The monster carries CharacterStats (full HP) so it
+    // shows an overhead HP bar and is hittable (MeleeConeResolver.IsAttackableEnemy now includes Monster). The
+    // server then idles it near home and occasionally strolls it within the leash. It spawns on the caller's own
+    // tile (always walkable — the caller stands there); replication + client interpolation render it as a moving
+    // cube for free. No aggro/chase/attack/death this phase.
+    private void HandleMonsterCommand(ClientSession sender)
+    {
+        if (!TryGetSessionEntity(sender, out var actor))
+        {
+            SendSystem(sender, "monster: no controllable entity.");
+            return;
+        }
+
+        // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
+        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, "Monster", actor.Tile, Direction8.S);
+        // Register with the roam AI: the spawn tile is the leash home; start Idle with an initial randomized pause.
+        _monsterAi.Register(monster, _serverTick, _tuning.PauseMinTicks, _tuning.PauseMaxTicks);
+
+        SendSystem(
+            sender,
+            $"monster: spawned at {monster.Tile.X},{monster.Tile.Y} (home), roamRadius={_tuning.RoamRadius}, pause={_tuning.PauseMinMs}-{_tuning.PauseMaxMs}ms.");
+        Log.Info($"{sender.DisplayName} spawned a monster at {monster.Tile} (home).");
     }
 
     // S60 live-tuning handler. ADMIN-GATED (the same role check as /speed and /metrics): a non-admin
@@ -1957,6 +2008,46 @@ public sealed class GameServer
             {
                 _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
             }
+        }
+    }
+
+    // LIVING-ENEMIES P1: the per-tick monster AI pass (sibling to StepHeldMovementIntents). For each Monster
+    // entity, the MonsterRoamAi advances its Idle↔Roaming state machine and, when Roaming, takes ONE greedy
+    // tile-step toward its leashed destination through Zone.TryStep — the SAME path players use, so facing /
+    // StepSequence / AOI migration / replication / client interpolation all happen for free. The TryStep cooldown
+    // gate paces the monster to one tile per step cooldown (it is fed each tick but only steps on cadence), and
+    // the AI's pause timers keep it Idle (still) most of the time. Roam radius + pause bounds are read fresh from
+    // the live _tuning each tick so a monster.* admin retune takes effect immediately. Monsters move at the base
+    // step cadence (SpeedMultiplier 1.0 → EffectiveStepCooldownTicks).
+    //
+    // Iterates the live entity collection directly (no per-tick allocation); the count is tiny. TryStep mutates a
+    // monster's Tile and migrates its spatial-grid bucket but never adds/removes a dictionary entry, so iterating
+    // Entities while stepping is safe — same as RegenEnemies.
+    private void StepMonsterAi()
+    {
+        if (_monsterAi.TrackedCount == 0)
+        {
+            return;
+        }
+
+        var roamRadius = _tuning.RoamRadius;
+        var pauseMinTicks = _tuning.PauseMinTicks;
+        var pauseMaxTicks = _tuning.PauseMaxTicks;
+
+        foreach (var entity in _zone.World.Entities)
+        {
+            if (entity.Kind != EntityKind.Monster)
+            {
+                continue;
+            }
+
+            _monsterAi.StepMonster(
+                entity,
+                _serverTick,
+                EffectiveStepCooldownTicks(entity),
+                roamRadius,
+                pauseMinTicks,
+                pauseMaxTicks);
         }
     }
 

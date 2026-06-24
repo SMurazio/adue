@@ -28,6 +28,13 @@ public static class ServerTuningRegistry
     public const string FreeAimRadiusTilesKey = "combat.radiusTiles";
     public const string AttackDamageKey = "combat.damage";
 
+    // LIVING-ENEMIES P1 (live): the monster leashed-roam knobs an admin may retune live. Server-only AI params —
+    // they are NOT replicated (no client mirror), so a change applies on the next AI pass with no re-broadcast.
+    // Adding each was one entry here + one field on ServerTuning (no client field), the documented surface.
+    public const string MonsterRoamRadiusKey = "monster.roamRadius";
+    public const string MonsterPauseMinMsKey = "monster.pauseMinMs";
+    public const string MonsterPauseMaxMsKey = "monster.pauseMaxMs";
+
     // Sane upper bound for a live AOI radius. The startup options only require > 0; here a live max guards
     // against an admin typo turning every AOI query into a near-world scan and stalling the tick loop.
     private const float MinInterestRadius = 1f;
@@ -49,6 +56,16 @@ public static class ServerTuningRegistry
     private const double MaxRadiusTiles = 16d;
     private const int MinAttackDamage = 0;
     private const int MaxAttackDamage = 10000;
+
+    // LIVING-ENEMIES P1 clamps. Wide enough to tune feel, tight enough a typo can't break the AI:
+    //  roam radius 1..32 tiles (1 = barely shuffles in place; 32 = a wide wander, still bounded by the AOI/world);
+    //  pause min/max 0..60000 ms (0 = near-continuous strolling; 60 s = a long idle). The Min/Max ORDERING is
+    //  enforced on apply (setting Min above the current Max raises Max to match, and vice-versa) so the random
+    //  pause range [min, max] is never inverted; MonsterRoamAi also re-floors Max>=Min defensively.
+    private const int MinRoamRadius = 1;
+    private const int MaxRoamRadius = 32;
+    private const int MinPauseMs = 0;
+    private const int MaxPauseMs = 60000;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -104,12 +121,47 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case MonsterRoamRadiusKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinRoamRadius, MaxRoamRadius);
+                tuning.RoamRadius = clamped;
+                applied = clamped;
+                return true;
+            }
+            case MonsterPauseMinMsKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinPauseMs, MaxPauseMs);
+                tuning.PauseMinMs = clamped;
+                // Keep the range non-inverted: a min above the current max raises the max to match.
+                if (tuning.PauseMaxMs < clamped)
+                {
+                    tuning.PauseMaxMs = clamped;
+                }
+
+                applied = clamped;
+                return true;
+            }
+            case MonsterPauseMaxMsKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinPauseMs, MaxPauseMs);
+                tuning.PauseMaxMs = clamped;
+                // Keep the range non-inverted: a max below the current min lowers the min to match.
+                if (tuning.PauseMinMs > clamped)
+                {
+                    tuning.PauseMinMs = clamped;
+                }
+
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
     }
 
-    public static bool IsKnownKey(string key) => key is InterestRadiusKey || IsCombatKey(key);
+    public static bool IsKnownKey(string key) =>
+        key is InterestRadiusKey or MonsterRoamRadiusKey or MonsterPauseMinMsKey or MonsterPauseMaxMsKey
+        || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated
     // CombatTuningSnapshot to all clients when (and only when) one of these changes, so the wedge/predictor/viz stay
