@@ -74,6 +74,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
 	private bool _showSpawnerTiles;
+	// F1 Visual "Server positions" toggle — default OFF. Debug viz of every REMOTE entity's AUTHORITATIVE server
+	// tile (the latest-snapshot tile it interpolates TOWARD), as distinct from its smoothed render body — so the
+	// human can SEE the interpolation gap (e.g. a marker leading a moving slime). The remote-entity analogue of
+	// the local player's "Prediction tiles". Flipped by ApplyServerPositions; read by UpdateServerPositionMarkers.
+	private bool _showServerPositions;
 	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
 	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
 	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
@@ -86,6 +91,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// monster), the red tile stays put across the monster's death/respawn — the de-aggro anchor stays legible.
 	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _monsterHomeMarkers = new();
 	private readonly System.Collections.Generic.List<uint> _monsterHomeStaleScratch = new();
+
+	// DEBUG-SERVER-POSITIONS: one flat CYAN ground marker per REMOTE entity (keyed by network id), parented under
+	// _worldRoot, painted at that entity's AuthoritativeTile (its latest-snapshot server tile). Synced each _Process
+	// frame from _renderStates while the F1 "Server positions" toggle is on: a marker is created when a remote entity
+	// is first seen, repositioned every frame (so it tracks the server tile and visibly LEADS the interpolated body
+	// under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The local player is
+	// excluded — it already has the "Prediction tiles" markers.
+	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _serverPositionMarkers = new();
+	private readonly System.Collections.Generic.List<uint> _serverPositionStaleScratch = new();
+	private readonly System.Collections.Generic.HashSet<uint> _serverPositionSeenScratch = new();
 
 	// FREEAIM: a flat WEDGE (pie-slice) mesh flashed on the ground from the local player, oriented along the aim,
 	// showing the free-aim sector's danger area (half-angle + radius matching the server). One MeshInstance3D under
@@ -462,6 +477,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateCamera();
 		UpdatePredictionTileMarkers();
 		UpdateMonsterHomeMarkers();
+		UpdateServerPositionMarkers();
 		UpdateAimWedge();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
@@ -1304,6 +1320,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		spawnerTiles.Toggled += ApplySpawnerTiles;
 		rows.AddChild(spawnerTiles);
 
+		// Server positions: debug viz of every REMOTE entity's authoritative server tile (cyan tiles), default off —
+		// like prediction/spawner tiles. The remote-entity analogue of "Prediction tiles": shows the interpolation
+		// gap between where the server says an entity (e.g. a slime) is and where its body is rendered.
+		var serverPositions = new CheckBox { Name = "ServerPositions", Text = "Server positions", ButtonPressed = _showServerPositions };
+		serverPositions.AddThemeFontSizeOverride("font_size", 13);
+		serverPositions.Toggled += ApplyServerPositions;
+		rows.AddChild(serverPositions);
+
 		// S107 HUD scaffold — live debug control (no Apply, no restart, no launch flag, per the live-toggle rule).
 		// Each press cycles the STUBBED HudState (health/resource/portrait/cooldowns) through demo presets so the
 		// HUD states can be exercised without a server. Mutates only stub fields; never touches movement state.
@@ -1668,6 +1692,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplySpawnerTiles(bool enabled)
 	{
 		_showSpawnerTiles = enabled;
+	}
+
+	// F1 Visual "Server positions" live toggle — show/hide the cyan remote-entity server-tile debug markers (default
+	// off). The rendering is gated in UpdateServerPositionMarkers (which frees the markers next frame when off); this
+	// just flips the flag.
+	private void ApplyServerPositions(bool enabled)
+	{
+		_showServerPositions = enabled;
 	}
 
 	// S79 live debug toggle (F5 "Prediction tiles"). Flip the shared flag and ensure the two ground markers
@@ -3367,6 +3399,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private static readonly PlaneMesh MonsterHomeMarkerMesh = new() { Size = new Vector2(0.96f, 0.96f) };
 	private static readonly StandardMaterial3D MonsterHomeMarkerMaterial = MarkerMaterial(new Color(0.90f, 0.12f, 0.12f, 0.55f));
 
+	// DEBUG-SERVER-POSITIONS: the shared flat quad + CYAN material for the remote-entity server-tile markers.
+	// A deliberately DISTINCT colour from the prediction markers (green/magenta) and the spawner anchors (red) so
+	// the server tile reads as its own thing; slightly inset (0.85) so it stays legible inside the entity's body.
+	private static readonly PlaneMesh ServerPositionMarkerMesh = new() { Size = new Vector2(0.85f, 0.85f) };
+	private static readonly StandardMaterial3D ServerPositionMarkerMaterial = MarkerMaterial(new Color(0.10f, 0.85f, 0.95f, 0.55f));
+
 	private static StandardMaterial3D MarkerMaterial(Color color)
 	{
 		return new StandardMaterial3D
@@ -3511,6 +3549,86 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 			// A hair above the ground (below the prediction markers' 0.04 so those still win any overlap z-fight).
 			marker.Position = TileToWorld(spawnerTile, 0.03f);
+		}
+	}
+
+	// DEBUG-SERVER-POSITIONS: sync the CYAN server-tile markers to every REMOTE entity's authoritative tile each
+	// frame. Mirrors UpdateMonsterHomeMarkers (per-id pooled flat markers) but keyed by network id and driven by
+	// _renderStates (refreshed in SampleRenderStates) instead of SpawnerMarkers. A marker is created when a remote
+	// entity is first seen and freed when its entity despawns / leaves AOI or the toggle is off. Unlike the fixed
+	// spawner anchors, the tile is RE-POSITIONED every frame: the marker tracks AuthoritativeTile (the latest
+	// snapshot tile) while the body smooths toward it, so under movement the marker visibly LEADS the body — that
+	// gap IS the interpolation lag the human wants to see. The local player is excluded (IsLocal): it already has
+	// the "Prediction tiles" markers. No-op until the world root exists.
+	private void UpdateServerPositionMarkers()
+	{
+		if (_worldRoot is null)
+		{
+			return;
+		}
+
+		// F1 Visual "Server positions" toggle (default OFF). When off, free any shown markers and skip — the cyan
+		// markers only appear when the toggle is on.
+		if (!_showServerPositions)
+		{
+			if (_serverPositionMarkers.Count > 0)
+			{
+				foreach (var marker in _serverPositionMarkers.Values)
+				{
+					marker.QueueFree();
+				}
+
+				_serverPositionMarkers.Clear();
+			}
+
+			return;
+		}
+
+		// Add/position a marker per REMOTE entity at its authoritative server tile; track which ids we saw this
+		// frame so departed entities can be freed below.
+		_serverPositionSeenScratch.Clear();
+		foreach (var state in _renderStates)
+		{
+			if (state.IsLocal)
+			{
+				continue;
+			}
+
+			_serverPositionSeenScratch.Add(state.NetworkId);
+			if (!_serverPositionMarkers.TryGetValue(state.NetworkId, out var marker))
+			{
+				marker = new MeshInstance3D
+				{
+					Name = $"ServerPos_{state.NetworkId}",
+					Mesh = ServerPositionMarkerMesh,
+					MaterialOverride = ServerPositionMarkerMaterial,
+				};
+				_worldRoot.AddChild(marker);
+				_serverPositionMarkers[state.NetworkId] = marker;
+			}
+
+			// A hair above the spawner anchors (0.03) and prediction markers (0.04/0.05) so the server tile wins the
+			// overlap z-fight and stays readable on top.
+			marker.Position = TileToWorld(state.AuthoritativeTile, 0.06f);
+		}
+
+		// Drop markers whose entity is gone this frame (despawned / left AOI).
+		if (_serverPositionMarkers.Count > 0)
+		{
+			_serverPositionStaleScratch.Clear();
+			foreach (var id in _serverPositionMarkers.Keys)
+			{
+				if (!_serverPositionSeenScratch.Contains(id))
+				{
+					_serverPositionStaleScratch.Add(id);
+				}
+			}
+
+			foreach (var id in _serverPositionStaleScratch)
+			{
+				_serverPositionMarkers[id].QueueFree();
+				_serverPositionMarkers.Remove(id);
+			}
 		}
 	}
 
