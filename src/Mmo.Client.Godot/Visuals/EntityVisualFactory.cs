@@ -37,6 +37,12 @@ public sealed class EntityVisualFactory
                 : useCatoSprite ? VisualArchetype.CatoSprite : VisualArchetype.Player;
         }
 
+        // LOOT P4b: a dropped corpse renders as the distinct ground sack (BoxVisual's Corpse path), not a capsule.
+        if (state.Kind == EntityKind.Corpse)
+        {
+            return VisualArchetype.Corpse;
+        }
+
         if (state.Kind == EntityKind.Resource)
         {
             return state.DisplayName switch
@@ -83,6 +89,9 @@ public sealed class EntityVisualFactory
             VisualArchetype.Tree => new BoxVisual(),
             VisualArchetype.Portal => ModelVisual.CreatePortal(),
             VisualArchetype.HouseSprite => SpriteVisual.LoadTexture() is null ? null : new SpriteVisual(),
+            // LOOT P4b: the corpse sack is a BoxVisual variant (it keys off EntityKind.Corpse internally for the
+            // distinct low dark mesh), so it shares the pooled-box machinery and never needs an asset load.
+            VisualArchetype.Corpse => new BoxVisual(),
             _ => new BoxVisual()
         };
     }

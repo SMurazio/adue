@@ -2254,6 +2254,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			"inventory_full" => "Inventory is full.",
 			"rate_limited" => "Harvesting too fast.",
 			"not_resource" => "That can't be harvested.",
+			// LOOT P4b: corpse loot rejected because the interactor didn't earn the kill (not in eligibleLooters).
+			"not_eligible" => "You can't loot this — you didn't earn it.",
 			"no_target" => "No target.",
 			"no_actor" => "No character.",
 			"no_inventory" => "No inventory.",

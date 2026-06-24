@@ -21,5 +21,9 @@ public enum VisualArchetype
     Tree,
     Portal,
     HouseSprite,
+    // LOOT P4b: a dropped lootable corpse (EntityKind.Corpse). Rendered by BoxVisual as a small dark mound/sack on
+    // the ground (distinct from a player capsule / resource box at a glance) so a kill leaves a visible, walk-up-and-
+    // interact corpse. No art yet — a coloured low box. Pooled separately so a parked corpse never reuses a player.
+    Corpse,
     Box
 }

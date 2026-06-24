@@ -19,3 +19,9 @@ exercised, but not directly asserted). Add both when touching the loot tests in 
 `LootTableTests` rare-tail check is ±0.0015 around 0.004 (~±37%): it catches gross errors (2×, inversion) but
 would pass a subtle ~30% bias. Fine for a foundation gate; tighten with more rolls if precise calibration ever
 matters.
+
+## 4. (P4b nit) No GameServer-level integration test for the loot wiring
+The corpse/ledger LOGIC is exhaustively pure-tested, but the live GameServer WIRING — `HandleAttack` ledger hook,
+`KillMonster`→`RollAndSpawnCorpse`, `HandleCorpseLoot`, `DecayCorpses` — has no headless integration test (no
+codebase precedent for an attack-to-death GameServer harness). The P4b reviewer traced it line-by-line + the human
+live-verifies. If a GameServer-level test harness ever lands, add a kill→corpse→loot→despawn + decay integration test.

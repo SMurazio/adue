@@ -115,6 +115,10 @@ public sealed class GameServer
     // tracked here.
     private readonly ResourceRespawnSchedule _resourceRespawns = new();
 
+    // LOOT P4b: reusable buffer of corpse entity ids due to decay this tick (collected, then despawned outside the
+    // dictionary enumeration so we don't mutate _corpses while iterating it). Cleared each pass; no per-tick alloc.
+    private readonly List<ulong> _corpseDecayScratch = [];
+
     // LIVING-ENEMIES P1: the server-side leashed-roam brain for EntityKind.Monster. Owns every monster's per-AI
     // state + a seeded PRNG (seeded off the map seed so a given world's roaming is reproducible in tests/repro
     // runs), and steps each monster through the SAME Zone.TryStep path players use. Constructed after _zone since
@@ -137,6 +141,16 @@ public sealed class GameServer
     // with the roam AI's same-seed stream). Single-threaded tick loop => no lock needed. Deterministic for a
     // given world; the headless tests roll their OWN seeded Random so they don't depend on this stream.
     private readonly Random _lootRng;
+
+    // LOOT P4b: the contribution ledger (group-loot groundwork). As players damage a monster, HandleAttack records
+    // the damaging player's durable CharacterId here; on death KillMonster snapshots the contributor set onto the
+    // corpse's eligibleLooters and forgets the entry. Solo => the eligible set is just the killer. Pure + tiny.
+    private readonly ContributionLedger _contributionLedger = new();
+
+    // LOOT P4b: the live corpses' server-side loot payloads, keyed by the Corpse WorldEntity's ENTITY id (stable for
+    // the corpse's life; the network id can be reused after despawn). KillMonster adds one; the interact loot-all and
+    // the decay pass remove + despawn. The contents stay SERVER-SIDE (never replicated) this phase. Tiny.
+    private readonly Dictionary<ulong, Corpse> _corpses = [];
 
     // Per-monster type membership (entity id -> its type). Set on spawn; REMOVED on death (LIVING-ENEMIES P3 —
     // KillMonster calls _monsterTypeOf.Remove + _monsterAi.Forget, fixing the former add-only leak flagged in
@@ -668,6 +682,8 @@ public sealed class GameServer
             // whose downed window elapsed. Both poll tiny sets (spawners / sessions) and no-op when nothing is due.
             RespawnMonsters();
             RespawnPlayers();
+            // LOOT P4b: despawn any corpse whose decay deadline has arrived (unlooted corpses don't linger forever).
+            DecayCorpses();
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
@@ -1348,6 +1364,14 @@ public sealed class GameServer
             return;
         }
 
+        // LOOT P4b: interacting with a CORPSE is the loot path (eligibility-gated loot-all), NOT a resource harvest.
+        // Route it before the resource check so a corpse isn't rejected as "not_resource".
+        if (target.Kind == EntityKind.Corpse)
+        {
+            HandleCorpseLoot(session, actor, target);
+            return;
+        }
+
         if (target.Resource is null)
         {
             SendInteractResult(session, false, "not_resource");
@@ -1387,6 +1411,91 @@ public sealed class GameServer
         _resourceRespawns.Schedule(target);
         SendInteractResult(session, true, "");
         SendInventoryUpdate(session, [new ItemStack(definition.YieldItemKey, actor.Inventory.QuantityOf(definition.YieldItemKey))]);
+    }
+
+    // LOOT P4b: loot-all a CORPSE the actor walked up to. Gates: adjacency (like a harvest), the actor must be in the
+    // corpse's eligibleLooters (the contribution ledger's contributors — solo = the killer), and the actor must have
+    // an inventory. On success it transfers EVERY stack into the actor's inventory via Inventory.TryAdd (honouring
+    // stack caps), leaves any un-added remainder IN the corpse (a full/partial inventory is graceful — nothing
+    // vanishes), pushes the inventory delta + a "Looted: ..." feedback toast, and despawns the corpse iff it is now
+    // empty. A non-eligible actor is rejected ("not_eligible") with the loot untouched.
+    private void HandleCorpseLoot(ClientSession session, WorldEntity actor, WorldEntity corpseEntity)
+    {
+        if (!_corpses.TryGetValue(corpseEntity.Id, out var corpse))
+        {
+            // The entity is a corpse kind but has no live loot payload (already looted/decayed this tick, or a stale
+            // target). Treat as gone rather than as a resource.
+            SendInteractResult(session, false, "no_target");
+            return;
+        }
+
+        if (!IsAdjacent(actor.Tile, corpseEntity.Tile))
+        {
+            SendInteractResult(session, false, "too_far");
+            return;
+        }
+
+        if (actor.CharacterId is not { } looterId || !corpse.IsEligible(looterId))
+        {
+            // Not a contributor to the kill (or a non-durable actor with no character id): rejected, loot untouched.
+            SendInteractResult(session, false, "not_eligible");
+            return;
+        }
+
+        if (actor.Inventory is null)
+        {
+            SendInteractResult(session, false, "no_inventory");
+            return;
+        }
+
+        var result = corpse.TryLootAll(actor.Inventory);
+        if (!result.Looted)
+        {
+            // Nothing fit (inventory full for every stack): the corpse keeps all its loot. Distinct reason so the
+            // client can message "your bags are full" rather than a generic failure.
+            SendInteractResult(session, false, "inventory_full");
+            return;
+        }
+
+        // Report the post-transfer authoritative totals for the templates that changed, so the owner's inventory view
+        // reconciles (same shape as the harvest delta).
+        var changed = new List<ItemStack>(result.Transferred.Count);
+        foreach (var moved in result.Transferred)
+        {
+            changed.Add(new ItemStack(moved.TemplateKey, actor.Inventory.QuantityOf(moved.TemplateKey)));
+        }
+
+        SendInteractResult(session, true, "");
+        SendInventoryUpdate(session, changed);
+        SendSystem(session, $"Looted: {FormatLootSummary(result.Transferred)}.");
+
+        // Despawn the corpse once it is empty (the AOI pass turns the world removal into an EntityDespawn). A corpse
+        // with a leftover remainder (the actor's bags filled mid-transfer) STAYS so they can return with space.
+        if (result.CorpseEmptied)
+        {
+            DespawnCorpse(corpseEntity.Id);
+        }
+    }
+
+    // LOOT P4b: formats a looted-stacks list into a human "2x Slime Gel, 1x Arcane Dust" toast, using the item
+    // registry's display names (falling back to the raw key for an unknown template — defensive only).
+    private string FormatLootSummary(IReadOnlyList<ItemStack> stacks)
+    {
+        var summary = new StringBuilder();
+        for (var i = 0; i < stacks.Count; i++)
+        {
+            if (i > 0)
+            {
+                summary.Append(", ");
+            }
+
+            var name = _itemRegistry.TryGet(stacks[i].TemplateKey, out var definition)
+                ? definition.DisplayName
+                : stacks[i].TemplateKey;
+            summary.Append(stacks[i].Quantity).Append("x ").Append(name);
+        }
+
+        return summary.ToString();
     }
 
     // Resolves a target network id to a world entity the requester can actually see (AOI is the security
@@ -1695,6 +1804,7 @@ public sealed class GameServer
     private void KillMonster(WorldEntity monster)
     {
         var monsterId = monster.Id;
+        var deathTile = monster.Tile;
 
         // Remove from the world (also unhooks the spatial index). Returning the network id frees it for reuse.
         if (_zone.Despawn(monsterId, out var removed))
@@ -1702,13 +1812,18 @@ public sealed class GameServer
             _networkIds.Return(removed.NetworkId);
         }
 
-        // LOOT P4a: roll this monster's loot BEFORE the type membership is removed below. Resolve type ->
-        // LootTableId -> table, roll the seeded RNG, and (P4a only) LOG the rolled stacks. P4b will spawn a
-        // corpse at the death tile holding these; nothing is delivered to any inventory here yet.
+        // LOOT P4b: roll this monster's loot and spawn a CORPSE at the death tile holding it, tagged with the
+        // eligible-looter set (the contribution ledger's contributors) + the loot mode + a decay deadline. Done
+        // BEFORE the type/ledger cleanup below (it reads the type's LootTableId + the ledger). Nothing is delivered
+        // to any inventory here — a player loots the corpse by interacting with it.
         if (_monsterTypeOf.TryGetValue(monsterId, out var deadType))
         {
-            RollAndLogLoot(deadType, removed?.NetworkId, monster.Tile.X, monster.Tile.Y);
+            RollAndSpawnCorpse(deadType, monsterId, deathTile);
         }
+
+        // LOOT P4b: forget this monster's contribution ledger entry (snapshotted onto the corpse above) so the
+        // ledger is cleaned up with the monster and never leaks — alongside the AI/type cleanup below.
+        _contributionLedger.Forget(monsterId);
 
         // Clean up AI + type membership (fixes the former add-only leak — see todo/monster-types-followups.md P2/P3).
         _monsterAi.Forget(monsterId);
@@ -1723,11 +1838,12 @@ public sealed class GameServer
         }
     }
 
-    // LOOT P4a: roll the dead monster's loot table and LOG the rolled stacks. This is the P4a placeholder —
-    // the rolled stacks are NOT delivered to any inventory and no corpse is spawned. P4b consumes this exact
-    // structured roll (List<ItemStack>) to populate the corpse it spawns at the death tile. Empty LootTableId
-    // (or an unknown id) => no loot; we skip the log entirely so a no-loot type is silent.
-    private void RollAndLogLoot(MonsterType type, uint? networkId, int tileX, int tileY)
+    // LOOT P4b: roll the dead monster's loot table and, if it yielded anything, spawn a replicated Corpse entity at
+    // the death tile holding the rolled stacks SERVER-SIDE. The corpse is tagged with the eligible-looter set (the
+    // contribution ledger's contributors — solo = the killer), the loot mode (FfaAmongEligible default), and a decay
+    // deadline (now + the live corpse-decay duration). An empty LootTableId or a roll that dropped nothing spawns NO
+    // corpse (a no-loot kill is silent), so corpses only appear where there is something to take.
+    private void RollAndSpawnCorpse(MonsterType type, ulong monsterId, TileCoord deathTile)
     {
         if (string.IsNullOrEmpty(type.LootTableId))
         {
@@ -1737,24 +1853,66 @@ public sealed class GameServer
         var stacks = _lootTables.Roll(type.LootTableId, _lootRng);
         if (stacks.Count == 0)
         {
-            Log.Info($"[LOOT P4a placeholder] {type.Id} #{networkId} dropped nothing (table '{type.LootTableId}'). " +
-                     "P4b will spawn a corpse holding the rolled stacks.");
             return;
         }
 
-        var summary = new StringBuilder();
-        for (var i = 0; i < stacks.Count; i++)
-        {
-            if (i > 0)
-            {
-                summary.Append(", ");
-            }
+        // The eligible-looter set = the contributors recorded as they damaged the monster (solo = just the killer).
+        var eligible = _contributionLedger.Contributors(monsterId);
 
-            summary.Append(stacks[i].TemplateKey).Append(" x").Append(stacks[i].Quantity);
+        // The death tile is where the monster stood (always walkable — it occupied it), so the corpse spawns there.
+        // It is a transient world entity of EntityKind.Corpse, so it AOI-replicates + renders + is interactable
+        // through the existing paths with no new replication fork. DisplayName drives the client's visual choice
+        // (falls back to the Box archetype for a non-Player/Resource kind today).
+        var corpseEntity = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Corpse, "Corpse", deathTile, Direction8.S);
+        var decayAtTick = _serverTick + _tuning.CorpseDecayTicks;
+        var corpse = new Corpse(corpseEntity.Id, stacks, eligible, LootMode.FfaAmongEligible, decayAtTick);
+        _corpses[corpseEntity.Id] = corpse;
+
+        Log.Info($"[LOOT P4b] {type.Id} died at {deathTile}; spawned corpse #{corpseEntity.NetworkId} holding " +
+                 $"{corpse.Contents.Count} stack(s), eligible={eligible.Count}, decay@{decayAtTick}.");
+    }
+
+    // LOOT P4b: per-tick decay pass. Despawns any corpse whose decay deadline has arrived even if it still holds
+    // unlooted loot (UO-style). Removing the entity from the world makes the AOI pass send EntityDespawn to viewers
+    // (the SAME exit path a looted/forgotten entity uses) and frees the network id. Polls the tiny corpse set; no-op
+    // when empty. The decay duration is a live-tunable global (loot.corpseDecayMs).
+    private void DecayCorpses()
+    {
+        if (_corpses.Count == 0)
+        {
+            return;
         }
 
-        Log.Info($"[LOOT P4a placeholder] {type.Id} #{networkId} at ({tileX},{tileY}) rolled: {summary}. " +
-                 "P4b will spawn a corpse holding these (no inventory delivery yet).");
+        _corpseDecayScratch.Clear();
+        foreach (var corpse in _corpses.Values)
+        {
+            if (corpse.IsDecayed(_serverTick))
+            {
+                _corpseDecayScratch.Add(corpse.EntityId);
+            }
+        }
+
+        foreach (var corpseId in _corpseDecayScratch)
+        {
+            DespawnCorpse(corpseId);
+            Log.Info($"[LOOT P4b] corpse (entity {corpseId}) decayed unlooted; despawned.");
+        }
+    }
+
+    // LOOT P4b: removes a corpse's world entity + its server-side loot payload, freeing the network id. The AOI pass
+    // turns the world removal into an EntityDespawn for viewers. Shared by the loot-all-empties path and the decay
+    // pass. Idempotent-ish: a missing corpse id is a no-op.
+    private void DespawnCorpse(ulong corpseEntityId)
+    {
+        if (!_corpses.Remove(corpseEntityId))
+        {
+            return;
+        }
+
+        if (_zone.Despawn(corpseEntityId, out var removed))
+        {
+            _networkIds.Return(removed.NetworkId);
+        }
     }
 
     // LIVING-ENEMIES P3: per-tick spawner respawn pass. For each spawner whose respawn delay has elapsed, spawn a fresh
@@ -1977,6 +2135,15 @@ public sealed class GameServer
             foreach (var damaged in _damagedVictimScratch)
             {
                 BroadcastDamageEvent(damaged.Victim, damaged.Amount, session);
+
+                // LOOT P4b: record this attacker as a contributor to each MONSTER it damaged (the eligibility
+                // groundwork). Keyed by the monster's entity id + the attacker's durable CharacterId, so on death the
+                // contributor set becomes the corpse's eligibleLooters. Only monsters yield loot, so only they are
+                // ledgered; a Dummy/Npc hit is ignored here.
+                if (damaged.Victim.Kind == EntityKind.Monster && attacker.CharacterId is { } contributorId)
+                {
+                    _contributionLedger.RecordDamage(damaged.Victim.Id, contributorId, damaged.Amount);
+                }
             }
 
             Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {damage} each (aim {aimRadians:F2} rad).");

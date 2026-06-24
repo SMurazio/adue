@@ -32,6 +32,11 @@ public static class ServerTuningRegistry
     // spawn with full HP. Distinct from the per-TYPE monster respawn (slime.respawnMs, owned by MonsterTypeRegistry).
     public const string PlayerRespawnMsKey = "player.respawnMs";
 
+    // LOOT P4b: the GLOBAL corpse decay duration (ms) — how long a dropped corpse lingers before it decays + despawns
+    // even if unlooted. Live-tunable; applies to the NEXT corpse spawned (an existing corpse keeps its stamped
+    // deadline). Bounded so a typo can't make corpses vanish instantly or linger for an hour.
+    public const string CorpseDecayMsKey = "loot.corpseDecayMs";
+
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys (P1 roam + P2 aggro/chase/attack) were
     // REPLACED by PER-TYPE keys ("<typeId>.<field>", e.g. slime.roamRadius) owned by MonsterTypeRegistry, which also
     // REPLICATES them to clients (MonsterTuningSnapshot) for the F1 Monster tab. The per-type keys are applied via a
@@ -62,6 +67,10 @@ public static class ServerTuningRegistry
     // minutes).
     private const int MinPlayerRespawnMs = 0;
     private const int MaxPlayerRespawnMs = 60000;
+    // LOOT P4b corpse decay 1 s .. 30 min (1000..1800000). Floor at 1 s so a corpse is always lootable for at least
+    // a moment; ceil at 30 min so a typo can't strand corpses cluttering the world forever.
+    private const int MinCorpseDecayMs = 1000;
+    private const int MaxCorpseDecayMs = 1800000;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -124,13 +133,20 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case CorpseDecayMsKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinCorpseDecayMs, MaxCorpseDecayMs);
+                tuning.CorpseDecayMs = clamped;
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
     }
 
     public static bool IsKnownKey(string key) =>
-        key is InterestRadiusKey or PlayerRespawnMsKey || IsCombatKey(key);
+        key is InterestRadiusKey or PlayerRespawnMsKey or CorpseDecayMsKey || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated
     // CombatTuningSnapshot to all clients when (and only when) one of these changes, so the wedge/predictor/viz stay

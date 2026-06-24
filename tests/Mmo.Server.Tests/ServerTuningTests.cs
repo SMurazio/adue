@@ -134,6 +134,30 @@ public sealed class ServerTuningTests
         // LIVING-ENEMIES P3: the global player respawn delay is a known, non-combat key.
         Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.PlayerRespawnMsKey));
         Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.PlayerRespawnMsKey));
+
+        // LOOT P4b: the corpse decay duration is a known, non-combat key.
+        Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.CorpseDecayMsKey));
+        Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.CorpseDecayMsKey));
+    }
+
+    // LOOT P4b: the corpse decay duration applies, clamps to [1000, 1800000] ms, and derives a tick count.
+    [Fact]
+    public void CorpseDecayDurationAppliesAndClamps()
+    {
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(180000, tuning.CorpseDecayMs); // default ~3 min.
+        Assert.Equal(3600u, tuning.CorpseDecayTicks); // 180000 ms / 50 ms = 3600 ticks at 20 Hz.
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.CorpseDecayMsKey, 60000d, out var applied));
+        Assert.Equal(60000d, applied);
+        Assert.Equal(60000, tuning.CorpseDecayMs);
+        Assert.Equal(1200u, tuning.CorpseDecayTicks);
+
+        // Clamps below-min (instant-vanish) up to the 1 s floor, and a wild value down to the 30 min ceiling.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.CorpseDecayMsKey, 0d, out var floored));
+        Assert.Equal(1000d, floored);
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.CorpseDecayMsKey, 9_999_999d, out var ceiled));
+        Assert.Equal(1800000d, ceiled);
     }
 
     // LIVING-ENEMIES P3: the player respawn delay applies, clamps to [0, 60000] ms, and derives a tick count.

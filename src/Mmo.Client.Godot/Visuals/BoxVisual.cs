@@ -15,6 +15,10 @@ public sealed partial class BoxVisual : EntityVisual
     // unmistakable from a player capsule at a glance (same values as the pre-refactor consts).
     private static readonly CapsuleMesh EntityMesh = new() { Radius = 0.28f, Height = 0.9f };
     private static readonly BoxMesh ResourceMesh = new() { Size = new Vector3(0.7f, 0.7f, 0.7f) };
+    // LOOT P4b: a corpse is a flat, low loot sack hugging the ground — clearly NOT a standing capsule. Dark
+    // greyish-brown so it reads as a dropped bag at a glance.
+    private static readonly BoxMesh CorpseMesh = new() { Size = new Vector3(0.6f, 0.3f, 0.6f) };
+    private static readonly StandardMaterial3D CorpseMaterial = Material(new Color(0.40f, 0.28f, 0.18f));
     private static readonly StandardMaterial3D LocalEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
     private static readonly StandardMaterial3D RemoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
     // Available = lush green; depleted = dim grey (also hidden when depleted, but the material keeps it
@@ -24,9 +28,13 @@ public sealed partial class BoxVisual : EntityVisual
 
     private MeshInstance3D _body = null!;
 
-    protected override float LabelHeight => _isResource ? 1.3f : 0.9f;
+    protected override float LabelHeight => _isResource ? 1.3f : (_isCorpse ? 0.6f : 0.9f);
 
     private bool _isResource;
+
+    // LOOT P4b: this box is rendering a dropped corpse (the low loot-sack mesh). Distinct from _isResource so the
+    // depleted-availability logic (resource-only) never touches it, and it picks the corpse mesh/material.
+    private bool _isCorpse;
 
     protected override void BuildChildren()
     {
@@ -37,10 +45,11 @@ public sealed partial class BoxVisual : EntityVisual
     protected override void OnAcquire(EntityRenderState state)
     {
         _isResource = state.Kind == EntityKind.Resource;
-        _body.Mesh = _isResource ? ResourceMesh : EntityMesh;
+        _isCorpse = state.Kind == EntityKind.Corpse;
+        _body.Mesh = _isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh);
         // S65: the "Plant" resource box is live-tunable via VisualTuning.PlantModelScale (default 1.0 = native
         // 0.7³). Re-applied on every (re)acquire so a pooled box reflects the current F5 panel scale. Players /
-        // NPCs (capsule) keep unit scale — the knob is plant-only.
+        // NPCs (capsule) and corpses keep unit scale — the knob is plant-only.
         _body.Scale = _isResource ? new Vector3(Tuning.PlantModelScale, Tuning.PlantModelScale, Tuning.PlantModelScale) : Vector3.One;
         ApplyMaterial(state);
         _body.Visible = !(_isResource && state.Depleted);
@@ -73,7 +82,7 @@ public sealed partial class BoxVisual : EntityVisual
     {
         _body.MaterialOverride = _isResource
             ? (state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial)
-            : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial);
+            : (_isCorpse ? CorpseMaterial : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial));
     }
 
     private static StandardMaterial3D Material(Color color)

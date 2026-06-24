@@ -88,6 +88,17 @@ public sealed class ServerTuning
     public uint PlayerRespawnTicks =>
         (uint)Math.Max(0, (int)Math.Round(PlayerRespawnMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
 
+    // LOOT P4b: how long a dropped CORPSE lingers before it decays + despawns even if unlooted (UO-style ~minutes).
+    // A single GLOBAL knob, live-tunable via the "loot.corpseDecayMs" key. Default ~3 min. Read at corpse-spawn time
+    // (the death tick + this many ticks becomes the corpse's decay deadline), so a live retune applies to the NEXT
+    // corpse — an already-spawned corpse keeps the deadline it was stamped with.
+    public int CorpseDecayMs { get; set; } = 180000;
+
+    // Corpse decay duration in TICKS (Round, floored at 1 so a corpse always lasts at least one tick). Stamped onto a
+    // corpse at spawn as (serverTick + this).
+    public uint CorpseDecayTicks =>
+        (uint)Math.Max(1, (int)Math.Round(CorpseDecayMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
+
     // Base step cooldown in TICKS, derived exactly like ServerOptions.StepCooldownTicks so live changes
     // stay tick-quantised identically to the startup value (default value byte-for-byte unchanged).
     public uint StepCooldownTicks =>

@@ -82,6 +82,32 @@ public sealed class HarvestTargetingTests
         Assert.Equal(15u, tieTarget);
     }
 
+    // LOOT P4b: the interact/harvest key also targets an adjacent corpse (loot it through the same path).
+    [Fact]
+    public void PicksAdjacentCorpse()
+    {
+        var entities = new[]
+        {
+            Corpse(20, 6, 5), // adjacent
+        };
+
+        var found = HarvestTargeting.TryFindNearestHarvestable(entities, new TileCoord(5, 5), out var target);
+
+        Assert.True(found);
+        Assert.Equal(20u, target);
+    }
+
+    [Fact]
+    public void IgnoresNonAdjacentCorpse()
+    {
+        var entities = new[]
+        {
+            Corpse(20, 9, 5), // 4 tiles away
+        };
+
+        Assert.False(HarvestTargeting.TryFindNearestHarvestable(entities, new TileCoord(5, 5), out _));
+    }
+
     private static EntityRenderState Resource(uint networkId, int x, int y, bool depleted)
     {
         return new EntityRenderState(
@@ -94,5 +120,18 @@ public sealed class HarvestTargetingTests
             Direction8.S,
             IsLocal: false,
             Depleted: depleted);
+    }
+
+    private static EntityRenderState Corpse(uint networkId, int x, int y)
+    {
+        return new EntityRenderState(
+            networkId,
+            Guid.Empty,
+            EntityKind.Corpse,
+            "Corpse",
+            default,
+            new TileCoord(x, y),
+            Direction8.S,
+            IsLocal: false);
     }
 }

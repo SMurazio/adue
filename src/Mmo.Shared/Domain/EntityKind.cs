@@ -23,4 +23,17 @@ public enum EntityKind : byte
     // Wire note: EntityKind rides the spawn message as a single byte, so adding a value is wire-compatible —
     // no protocol VERSION bump (client + server ship together). The codec validates the byte range on decode.
     Monster = 5,
+
+    // LOOT P4b: a dropped CORPSE left on the death tile of a killed monster. A replicated transient world entity
+    // (so it AOI-replicates + renders + interacts through the SAME paths players/monsters/resources use — no new
+    // replication fork). It holds the rolled loot, the eligible-looter set, a loot-mode, and a decay deadline
+    // SERVER-SIDE only (the client never receives the contents this phase — P4c adds the loot-window replication).
+    // It is stationary, non-attackable (NOT swept up by combat — IsAttackableEnemy excludes it), and despawns on
+    // loot-all OR decay. Renders on the client through the existing Box archetype fallback (non-Player/Resource →
+    // Box) like the Dummy/Monster, so no new visual archetype is strictly required (a distinct "Corpse" archetype
+    // can be added later for art).
+    //
+    // Wire note: same as Monster — a new EntityKind byte is wire-compatible (client + server ship together), so no
+    // protocol VERSION bump. The spawn message already carries Kind as a byte.
+    Corpse = 6,
 }
