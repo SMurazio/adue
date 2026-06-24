@@ -15,7 +15,22 @@ public sealed class MmoClient : IDisposable
     // See docs/movement-input-model.md. The only no-predictor case is pre-spawn / interpolation-only (predictor
     // not yet attached), handled by the null-predictor branches below exactly as before.
 
-    public const double RemoteInterpolationCadenceMultiplier = 1.3d;
+    // remote-interp-tighten Part A: the remote jitter buffer was 1.3 * cadence (~1.3 tiles of steady-state lag) —
+    // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
+    // absorb network ARRIVAL JITTER, not a full step. The jitter that matters is network (snapshots land on ~50ms
+    // tick boundaries), NOT cadence-scaled, so the floor is a FIXED ms (one snapshot interval) rather than a pure
+    // cadence multiple. The effective remote delay is now max(RemoteInterpolationCadenceMultiplier * cadence,
+    // RemoteInterpolationMinBufferMs): at the 150ms default cadence that is max(75, 50) = 75ms — about half a tile
+    // of lag instead of ~1.3 tiles, while still keeping >= one snapshot interval buffered so TryStartNextStep
+    // reliably has the next tile ready under normal arrival jitter (no stalls/stutter). Lower bound is the fixed
+    // floor; the multiplier carries the rest for slower (longer-cadence) entities. Live-overridable via
+    // SetRemoteInterpolationBufferMs (the F1 Movement-tab "Remote interp buffer" knob); -1 = use this computed default.
+    public const double RemoteInterpolationCadenceMultiplier = 0.5d;
+
+    // remote-interp-tighten Part A: the FIXED minimum remote jitter buffer (ms) — ~one 20Hz snapshot interval.
+    // This is the floor of the computed remote delay so the buffer always absorbs at least one snapshot-arrival
+    // gap regardless of cadence; the network jitter it guards against is fixed-ms, not cadence-scaled.
+    public const double RemoteInterpolationMinBufferMs = 50d;
 
     // Local playout buffer so the local player's tween isn't starved by snapshot tick-boundary jitter
     // (server confirms tiles on ~50ms tick boundaries). delay=0 starved (q stuck at 1); 0.5x (~75ms)
@@ -156,6 +171,14 @@ public sealed class MmoClient : IDisposable
     // it onto the freshly-attached predictor. SetStopOnReversal routes it live (no restart). Default OFF so the
     // current behaviour is unchanged until opted in.
     private bool _stopOnReversal;
+
+    // remote-interp-tighten Part A: a LIVE override (ms) for the remote jitter buffer, set by the F1 Movement-tab
+    // "Remote interp buffer" knob so the user dials remote-render lag-vs-smoothness in-client with no restart. < 0
+    // (the default) means "use the computed default" (max(multiplier*cadence, MinBufferMs)); >= 0 pins every remote
+    // interpolator's delay to exactly this value live. Applies to all current AND future remote interpolators
+    // (mirrors how camera smoothing applies live): SetRemoteInterpolationBufferMs re-pushes it onto every existing
+    // remote entity immediately. Local-player path (predictor) is UNTOUCHED — this only moves the REMOTE buffer.
+    private double _remoteInterpolationBufferOverrideMs = -1d;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -1447,7 +1470,8 @@ public sealed class MmoClient : IDisposable
             existing.UpdateMetadata(characterId, kind, displayName, isLocal);
             if (effectiveCooldown.HasValue)
             {
-                existing.SetStepCooldownMs(effectiveCooldown.Value, ResolveCadence(effectiveCooldown), existing.IsLocal);
+                var existingCadence = ResolveCadence(effectiveCooldown);
+                existing.SetStepCooldownMs(effectiveCooldown.Value, existingCadence, ResolveInterpolationDelay(existingCadence, existing.IsLocal));
             }
 
             // EntitySpawn carries no Depleted/HP bits (those ride the AOI snapshot), so preserve whatever the
@@ -1489,7 +1513,8 @@ public sealed class MmoClient : IDisposable
 
         // A 0 cooldown means "fall back to the global cadence" (clear any per-entity override).
         ushort? cooldown = speed.StepCooldownMs > 0 ? speed.StepCooldownMs : null;
-        entity.SetStepCooldownMs(cooldown, ResolveCadence(cooldown), entity.IsLocal);
+        var speedCadence = ResolveCadence(cooldown);
+        entity.SetStepCooldownMs(cooldown, speedCadence, ResolveInterpolationDelay(speedCadence, entity.IsLocal));
     }
 
     // Resolves the tween step duration (ms) for a given per-entity cooldown: the entity's own advertised
@@ -1506,6 +1531,46 @@ public sealed class MmoClient : IDisposable
         return Server?.EffectiveStepCadenceMs ?? MovementCadence.EffectiveStepCadenceMs(140, 20);
     }
 
+    // remote-interp-tighten Part A: the single source of truth for an interpolator's playout-buffer delay given its
+    // cadence and whether it's the local player. LOCAL keeps its existing cadence-multiple buffer untouched. REMOTE
+    // uses the LIVE override when set (>= 0), else the computed default max(multiplier*cadence, fixed floor) — so the
+    // floor and the live knob both apply at every call site (CreateInterpolator / RefreshInterpolatorCadence /
+    // SetStepCooldownMs go through here, except SetStepCooldownMs which lives on ClientEntity and is handled there).
+    private double ResolveInterpolationDelay(double cadenceMs, bool isLocal)
+    {
+        if (isLocal)
+        {
+            return cadenceMs * LocalInterpolationCadenceMultiplier;
+        }
+
+        if (_remoteInterpolationBufferOverrideMs >= 0d)
+        {
+            return _remoteInterpolationBufferOverrideMs;
+        }
+
+        return Math.Max(cadenceMs * RemoteInterpolationCadenceMultiplier, RemoteInterpolationMinBufferMs);
+    }
+
+    // remote-interp-tighten Part A: the live remote jitter-buffer override in ms, or null when using the computed
+    // default (< 0). Read-only; seeds the F1 Movement-tab "Remote interp buffer" field on panel open and the perf HUD.
+    public double? RemoteInterpolationBufferOverrideMs =>
+        _remoteInterpolationBufferOverrideMs >= 0d ? _remoteInterpolationBufferOverrideMs : null;
+
+    // remote-interp-tighten Part A: the effective remote buffer (ms) at the DEFAULT cadence — what the F1 field shows
+    // before the user pins an override, so the knob seeds with the value actually in effect (not a raw multiplier).
+    public double EffectiveDefaultRemoteInterpolationBufferMs =>
+        ResolveInterpolationDelay(ResolveCadence(null), isLocal: false);
+
+    // remote-interp-tighten Part A: live-set the remote jitter buffer (ms), applied to every CURRENT remote
+    // interpolator immediately (no restart) and to future ones. A NEGATIVE value clears the override (revert to the
+    // computed default). Clamped to a sane debug range on the positive side. Local-player prediction is untouched.
+    // Mirrors how camera smoothing applies live: set the field, then re-push cadence/delay to all entities.
+    public void SetRemoteInterpolationBufferMs(double bufferMs)
+    {
+        _remoteInterpolationBufferOverrideMs = bufferMs < 0d ? -1d : Math.Min(bufferMs, 2000d);
+        RefreshInterpolatorCadence();
+    }
+
     // Recomputes every entity's tween cadence. Each entity keeps its OWN advertised cooldown if it has one
     // (per-entity speed, S51) and only falls back to the ServerHello global when it doesn't — so a global
     // refresh (e.g. ServerHello arriving) never clobbers a per-entity cadence.
@@ -1514,7 +1579,7 @@ public sealed class MmoClient : IDisposable
         foreach (var entity in _entities.Values)
         {
             var cadence = ResolveCadence(entity.StepCooldownMs);
-            var delay = cadence * (entity.IsLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
+            var delay = ResolveInterpolationDelay(cadence, entity.IsLocal);
             entity.UpdateInterpolationCadence(cadence, delay);
         }
     }
@@ -1522,7 +1587,7 @@ public sealed class MmoClient : IDisposable
     private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal, ushort? stepCooldownMs)
     {
         var cadence = ResolveCadence(stepCooldownMs);
-        var delay = cadence * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
+        var delay = ResolveInterpolationDelay(cadence, isLocal);
         return new TileInterpolator(initialTile, cadence, delay);
     }
 
@@ -1727,13 +1792,13 @@ public sealed class MmoClient : IDisposable
 
         // Applies a per-entity cadence (from EntitySpawn / MovementSpeedChanged). stepCooldownMs null clears
         // the override (the entity reverts to the global cadence the caller resolved). cadenceMs is the
-        // already-resolved tween step duration; the interpolation delay is derived from it the same way as
-        // CreateInterpolator (local vs remote playout buffer multiplier).
-        public void SetStepCooldownMs(ushort? stepCooldownMs, double cadenceMs, bool isLocal)
+        // already-resolved tween step duration; interpolationDelayMs is the already-resolved playout buffer
+        // (remote-interp-tighten Part A: the caller computes it via ResolveInterpolationDelay so the fixed floor
+        // and the live remote-buffer override apply here too, not just at CreateInterpolator).
+        public void SetStepCooldownMs(ushort? stepCooldownMs, double cadenceMs, double interpolationDelayMs)
         {
             StepCooldownMs = stepCooldownMs;
-            var delay = cadenceMs * (isLocal ? LocalInterpolationCadenceMultiplier : RemoteInterpolationCadenceMultiplier);
-            _interpolator.UpdateCadence(cadenceMs, delay);
+            _interpolator.UpdateCadence(cadenceMs, interpolationDelayMs);
             // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
             // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
             _predictor?.SetCadence(cadenceMs);

@@ -190,6 +190,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _moveCameraSmoothing;
 	// New (S102): camera teleport-snap distance (tiles) — exposes the former CameraTeleportSnapTiles const live.
 	private LineEdit? _moveCameraTeleportSnapTiles;
+	// remote-interp-tighten Part A: the REMOTE jitter-buffer (ms) live knob. Dials remote-entity render lag-vs-
+	// smoothness in-client (no restart) — lower = the slime renders tighter to its server tile; raise to absorb more
+	// arrival jitter. Empty/blank or < 0 reverts to the computed default. Applies to all remote interpolators live.
+	private LineEdit? _moveRemoteInterpBufferMs;
 	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). Each item carries
 	// its multiplier; selecting one sends /speed <mult> live. Populated once on first open from ServerHello (base
 	// cadence + tick rate). _moveSpeedOptions is the parallel option list (item index -> SpeedOption) so the
@@ -1390,6 +1394,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S102 new: camera teleport-snap distance (tiles). Beyond this single-frame jump the camera hard-snaps
 		// (respawn / zone change) instead of gliding; below it the smoothing glides. Was the const = 4.
 		_moveCameraTeleportSnapTiles = AddTuningField(rows, "Camera teleport-snap (tiles)", OnMovementApplyPressed);
+		// remote-interp-tighten Part A: the REMOTE jitter-buffer (ms) — how far behind its true server tile a remote
+		// entity (slime, other players) renders. Lower = tighter to the cyan server marker; raise = smoother under
+		// jitter. Blank / < 0 = computed default (max(0.5*cadence, 50ms)). Applied live to all remote interpolators.
+		_moveRemoteInterpBufferMs = AddTuningField(rows, "Remote interp buffer (ms, <0=auto)", OnMovementApplyPressed);
 
 		// UO4 live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
 		// flip while moving settles to a clean tile stop, then resumes the new direction (kills the left-right
@@ -2585,6 +2593,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
 		// New (S102).
 		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
+		// remote-interp-tighten Part A: seed the remote-buffer field with the override if one is pinned, else the
+		// computed default in effect — so the knob shows the real value, not a blank or a raw multiplier.
+		SetField(_moveRemoteInterpBufferMs,
+			_client?.RemoteInterpolationBufferOverrideMs ?? _client?.EffectiveDefaultRemoteInterpolationBufferMs ?? 0d);
 		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
 		// default walk. Done here (first open) since ServerHello has landed by login.
 		PopulateMoveSpeedDropdown();
@@ -2862,6 +2874,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveCameraTeleportSnapTiles, out var teleportSnap))
 		{
 			_cameraTeleportSnapTiles = Mathf.Clamp((float)teleportSnap, 0.5f, 100f);
+		}
+
+		// remote-interp-tighten Part A: the remote jitter buffer (ms). A negative value (or blank, which fails to
+		// parse and is skipped) reverts to the computed default; >= 0 pins it. Clamped client-side to a debug range
+		// (the client also clamps). Applied live to every remote interpolator — no restart.
+		if (TryReadField(_moveRemoteInterpBufferMs, out var remoteBuffer))
+		{
+			_client.SetRemoteInterpolationBufferMs(remoteBuffer < 0d ? -1d : Mathf.Clamp((float)remoteBuffer, 0f, 2000f));
 		}
 
 		ShowInteractFeedback("Movement tuning applied.");

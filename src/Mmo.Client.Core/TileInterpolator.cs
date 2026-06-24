@@ -4,6 +4,15 @@ namespace Mmo.Client.Core;
 
 public sealed class TileInterpolator
 {
+    // Catch-up cap (remote-interp-tighten Part B): a permanent runaway guard. If the render falls more than
+    // CatchUpQueueCap confirmed tiles behind the NEWEST confirmed tile (the queue backs up — cadence mismatch,
+    // a GC hitch, a tab-out, a live speed change before the steady fix landed), drop the backlog and fast-forward
+    // toward the newest confirmed tile so the render can NEVER trail more than ~this many tiles. Chosen small (2):
+    // one tile of normal lookahead buffer plus one slack tile, so a single late/early arrival never trips it, but
+    // any genuine pile-up is collapsed within ~2 tiles. The fast-forward is NOT a hard teleport — it keeps a short
+    // final glide (the kept tail) so the catch-up still tweens into place over one step instead of snapping.
+    private const int CatchUpQueueCap = 2;
+
     private readonly Queue<ConfirmedTile> _confirmedTiles = new();
     private double _stepDurationMs;
     private double _interpolationDelayMs;
@@ -55,6 +64,45 @@ public sealed class TileInterpolator
 
         _lastConfirmedTile = tile;
         _confirmedTiles.Enqueue(new ConfirmedTile(tile, receivedAt));
+        FastForwardIfBackedUp(receivedAt);
+    }
+
+    // Catch-up cap (Part B): collapse a backed-up queue so the render never trails the newest confirmed tile by
+    // more than CatchUpQueueCap tiles. Counts the in-flight active step toward the backlog (it is one tile already
+    // dequeued but not yet finished gliding). While the total depth exceeds the cap, drop the OLDEST queued tile —
+    // those are stale waypoints the render would otherwise have to crawl through one by one. We keep the cap'th-from-
+    // newest tiles so a short final glide remains (no hard teleport): the active step keeps gliding from the current
+    // render position toward its target, then the remaining (<= cap) queued tiles play out normally. receivedAt of the
+    // newest kept tile is back-dated so the trimmed tiles don't each re-impose the full interpolation buffer delay.
+    private void FastForwardIfBackedUp(TimeSpan receivedAt)
+    {
+        // Depth = queued tiles + the active step (if any). The render is "behind" by this many tiles.
+        var depth = _confirmedTiles.Count + (_activeStep is null ? 0 : 1);
+        if (depth <= CatchUpQueueCap)
+        {
+            return;
+        }
+
+        // Drop the oldest queued tiles until the backlog is back within the cap. We never drop the active step
+        // (it owns the live glide) nor the cap'th-from-newest tiles (they are the short tail we glide through).
+        while (_confirmedTiles.Count + (_activeStep is null ? 0 : 1) > CatchUpQueueCap && _confirmedTiles.Count > 0)
+        {
+            _confirmedTiles.Dequeue();
+        }
+
+        // Back-date the oldest REMAINING queued tile to receivedAt so it is immediately eligible (the buffer delay
+        // is measured from arrival; without this the kept tile would still wait out _interpolationDelayMs from its
+        // own older timestamp, re-stalling the catch-up we just performed). Newer kept tiles keep their own arrival.
+        if (_confirmedTiles.Count > 0)
+        {
+            var rest = _confirmedTiles.ToArray();
+            _confirmedTiles.Clear();
+            _confirmedTiles.Enqueue(new ConfirmedTile(rest[0].Tile, receivedAt));
+            for (var i = 1; i < rest.Length; i++)
+            {
+                _confirmedTiles.Enqueue(rest[i]);
+            }
+        }
     }
 
     public RenderPosition Sample(TimeSpan now)

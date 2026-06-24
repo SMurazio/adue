@@ -154,7 +154,10 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _);
 
         client.HandleMessageForTests(Snapshot(1, isComplete: true, State(7, 0, 0)));
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 300, 30));
+        // 600ms cooldown → 600ms cadence → trimmed remote buffer max(0.5*600, 50)=300ms, so at the 200ms sample the
+        // refreshed entity is still buffered at its origin (X==0). Un-refreshed it would use the ~150ms-cadence default
+        // (~75ms buffer) and have moved by 200ms — so X==0 still proves ServerHello refreshed the early entity's cadence.
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 600, 30));
         client.HandleMessageForTests(Snapshot(2, isComplete: false, State(7, 1, 0)));
 
         var render = Assert.Single(client.GetRenderStates(TimeSpan.FromMilliseconds(200)));
