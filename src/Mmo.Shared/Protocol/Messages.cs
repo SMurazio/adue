@@ -316,15 +316,15 @@ public sealed record MonsterTuningMessage(MonsterTuningSnapshot Tuning) : IProto
     public MessageType Type => MessageType.MonsterTuning;
 }
 
-// LIVING-ENEMIES P2-POLISH (protocol v33): server->viewer replication of a MONSTER's leash HOME tile — the de-aggro
-// anchor the monster returns to. Sent once when the monster enters a viewer's AOI (right after its EntitySpawn) so the
-// client can paint a RED floor tile there, making the otherwise-invisible leash home legible ("why did it give up"
-// becomes visible). NetworkId is the monster's; HomeTile is fixed for the monster's life (P1/P2 — the home never
-// moves), so a single message suffices and there is no per-tick cost. Reliable-ordered like EntitySpawn; the client
-// drops the marker when the monster despawns. (Sets up the P3 spawner entity, but for now it is just the anchor.)
-public sealed record MonsterHomeMessage(uint NetworkId, TileCoord HomeTile) : IProtocolMessage
+// LIVING-ENEMIES P3 (protocol v34): server->viewer replication of a SPAWNER's red-tile marker — the PERSISTENT
+// leash/de-aggro anchor that owns + respawns a monster. Replaces the former per-monster MonsterHomeMessage: the marker
+// is keyed by a stable SpawnerId (NOT a monster network id, which is reborn on each respawn), so the red tile STAYS PUT
+// while the monster dies and a fresh one spawns. Active=true is sent when the spawner enters a viewer's AOI (place the
+// red tile); Active=false when it leaves AOI (drop it). Tile is the spawner's fixed tile. Reliable-ordered; AOI-driven
+// per-recipient like the entity spawn/despawn pair. The monster's leash HOME is exactly this spawner tile.
+public sealed record SpawnerMarkerMessage(uint SpawnerId, TileCoord Tile, bool Active) : IProtocolMessage
 {
-    public MessageType Type => MessageType.MonsterHome;
+    public MessageType Type => MessageType.SpawnerMarker;
 }
 
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage

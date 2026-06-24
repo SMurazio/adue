@@ -60,6 +60,52 @@ public sealed class WorldEntityStatsTests
         Assert.False(entity.TrySetStatCurrent(StatKind.Health, 200));
     }
 
+    // LIVING-ENEMIES P3: ApplyDamage can drive HP to exactly 0 (death trigger). The entity does not auto-die — the
+    // caller (GameServer) detects HP<=0 and despawns it — but the stat path must reach 0 cleanly.
+    [Fact]
+    public void ApplyDamageReachesZeroForDeath()
+    {
+        var entity = CreateEntity();
+        Assert.True(entity.ApplyDamage(60));
+        Assert.Equal(40, entity.Stats.Health);
+        Assert.True(entity.ApplyDamage(100)); // overkill clamps at 0.
+        Assert.Equal(0, entity.Stats.Health);
+        // A further hit on a 0-HP body is a no-op (no number, no spam).
+        Assert.False(entity.ApplyDamage(10));
+    }
+
+    // LIVING-ENEMIES P3: RestoreFullHealth refills current HP to max (respawn at full) and reports a real change.
+    [Fact]
+    public void RestoreFullHealthRefillsAndReportsChange()
+    {
+        var entity = CreateEntity();
+        entity.ApplyDamage(100);
+        Assert.Equal(0, entity.Stats.Health);
+
+        Assert.True(entity.RestoreFullHealth());
+        Assert.Equal(entity.Stats.MaxHealth, entity.Stats.Health);
+
+        // No-op at full.
+        Assert.False(entity.RestoreFullHealth());
+    }
+
+    // LIVING-ENEMIES P3: TeleportTo moves the tile, faces S, resets the movement clocks, and bumps the revision so the
+    // jump replicates (the player-respawn teleport).
+    [Fact]
+    public void TeleportMovesTileAndBumpsRevision()
+    {
+        var entity = CreateEntity();
+        var revisionBefore = entity.StateRevision;
+        var seqBefore = entity.StepSequence;
+
+        entity.TeleportTo(new TileCoord(99, 88));
+
+        Assert.Equal(new TileCoord(99, 88), entity.Tile);
+        Assert.Equal(Direction8.S, entity.Facing);
+        Assert.True(entity.StateRevision > revisionBefore);
+        Assert.True(entity.StepSequence > seqBefore);
+    }
+
     private static WorldEntity CreateEntity()
     {
         return new WorldEntity(

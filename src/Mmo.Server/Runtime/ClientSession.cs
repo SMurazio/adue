@@ -8,6 +8,12 @@ public sealed class ClientSession
     private readonly HashSet<uint> _lastSnapshotEntityIds = [];
     private readonly HashSet<uint> _knownEntityIds = [];
 
+    // LIVING-ENEMIES P3: the set of SPAWNER ids whose red-tile marker this viewer currently knows (the marker is in
+    // its AOI). Mirrors _knownEntityIds for the non-entity spawner markers — a SpawnerMarker(Active=true) is sent when
+    // a spawner enters AOI (added here) and Active=false when it leaves (removed). Lets the per-tick spawner-AOI pass
+    // diff cheaply against the live spawner set without re-sending a known marker each tick.
+    private readonly HashSet<uint> _knownSpawnerIds = [];
+
     // Acked baseline (S46): the entity revision the CLIENT has acknowledged receiving, per visible
     // entity. Snapshot selection sends an entity iff its current revision differs from this acked
     // revision — so a dropped (never-acked) snapshot's changes stay "unacked" and are re-sent next tick
@@ -126,6 +132,47 @@ public sealed class ClientSession
     {
         ClientDrivenMovement = clientDriven;
     }
+
+    // LIVING-ENEMIES P3: the player-death respawn guard. When the player's HP hits 0 it DIES: IsDead is set and
+    // RespawnAtTick is the tick the server will teleport it back to spawn at full HP. While IsDead the player must not
+    // take further hits, act, or die again (a simple "downed" window). Cleared on respawn. RespawnAtTick is null when
+    // alive. Minimal — no corpse/loot/penalty/death-screen this phase.
+    public bool IsDead { get; private set; }
+    public uint? RespawnAtTick { get; private set; }
+
+    // Marks the player dead at `serverTick`, scheduling the respawn `respawnDelayTicks` later. No-op (returns false) if
+    // already dead — so a flurry of hits on the same tick can't re-trigger death or reset the timer.
+    public bool MarkDead(uint serverTick, uint respawnDelayTicks)
+    {
+        if (IsDead)
+        {
+            return false;
+        }
+
+        IsDead = true;
+        RespawnAtTick = serverTick + respawnDelayTicks;
+        return true;
+    }
+
+    // True iff the player is dead and its respawn due tick has arrived (the server polls this each tick).
+    public bool IsRespawnDue(uint serverTick) =>
+        IsDead && RespawnAtTick.HasValue && serverTick >= RespawnAtTick.Value;
+
+    // Clears the dead state on respawn (the caller has teleported + refilled the entity).
+    public void MarkAlive()
+    {
+        IsDead = false;
+        RespawnAtTick = null;
+    }
+
+    // LIVING-ENEMIES P3: spawner-marker AOI bookkeeping (mirrors the entity Knows/Remember/Forget trio).
+    public bool KnowsSpawner(uint spawnerId) => _knownSpawnerIds.Contains(spawnerId);
+
+    public void RememberKnownSpawner(uint spawnerId) => _knownSpawnerIds.Add(spawnerId);
+
+    public bool ForgetKnownSpawner(uint spawnerId) => _knownSpawnerIds.Remove(spawnerId);
+
+    public IReadOnlyCollection<uint> KnownSpawnerIds => _knownSpawnerIds;
 
     public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId)
     {

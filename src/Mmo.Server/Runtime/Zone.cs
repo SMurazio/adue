@@ -376,6 +376,16 @@ public sealed class Zone
         return World.Remove(entityId, out entity);
     }
 
+    // LIVING-ENEMIES P3: teleport an entity to `tile` (player death->respawn), migrating its spatial-index bucket the
+    // same way TryStep does for a move. previousTile is read before WorldEntity.TeleportTo mutates Tile in place. The
+    // tile must be walkable (the caller passes a resolved spawn tile, always walkable).
+    public void Teleport(WorldEntity entity, TileCoord tile)
+    {
+        var previousTile = entity.Tile;
+        entity.TeleportTo(tile);
+        World.OnEntityMoved(entity, previousTile);
+    }
+
     private static IReadOnlyList<TileCoord> CreateSpawnTiles(TileGrid tileGrid, SpawnDistribution spawnDistribution)
     {
         var center = new TileCoord(tileGrid.Width / 2, tileGrid.Height / 2);

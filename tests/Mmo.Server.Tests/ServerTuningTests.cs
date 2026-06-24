@@ -130,6 +130,27 @@ public sealed class ServerTuningTests
         // A non-combat key is known but not flagged as combat (so it doesn't trigger a combat re-broadcast).
         Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.InterestRadiusKey));
         Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.InterestRadiusKey));
+
+        // LIVING-ENEMIES P3: the global player respawn delay is a known, non-combat key.
+        Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.PlayerRespawnMsKey));
+        Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.PlayerRespawnMsKey));
+    }
+
+    // LIVING-ENEMIES P3: the player respawn delay applies, clamps to [0, 60000] ms, and derives a tick count.
+    [Fact]
+    public void PlayerRespawnDelayAppliesAndClamps()
+    {
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(2000, tuning.PlayerRespawnMs); // default ~2 s.
+
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.PlayerRespawnMsKey, 3000d, out var applied));
+        Assert.Equal(3000d, applied);
+        Assert.Equal(3000, tuning.PlayerRespawnMs);
+        Assert.Equal(60u, tuning.PlayerRespawnTicks); // 3000 ms / 50 ms = 60 ticks at 20 Hz.
+
+        // Clamps a wild value to the 60 s max.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.PlayerRespawnMsKey, 999999d, out var clamped));
+        Assert.Equal(60000d, clamped);
     }
 
     [Fact]

@@ -78,6 +78,16 @@ public sealed class ServerTuning
     // AOI interest radius in tiles. Read each AOI pass (snapshot selection + interact validation).
     public float InterestRadius { get; set; }
 
+    // LIVING-ENEMIES P3: how long after the PLAYER's HP hits 0 the server waits before teleporting it back to spawn at
+    // full HP (the brief "downed" window during which it can't act / take hits / die again). A single GLOBAL knob
+    // (~2 s), live-tunable via the "player.respawnMs" key. Read at death time.
+    public int PlayerRespawnMs { get; set; } = 2000;
+
+    // Player respawn delay in TICKS (Round, floored at 0). Read by GameServer when scheduling the respawn so a live
+    // retune applies to the next death.
+    public uint PlayerRespawnTicks =>
+        (uint)Math.Max(0, (int)Math.Round(PlayerRespawnMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
+
     // Base step cooldown in TICKS, derived exactly like ServerOptions.StepCooldownTicks so live changes
     // stay tick-quantised identically to the startup value (default value byte-for-byte unchanged).
     public uint StepCooldownTicks =>

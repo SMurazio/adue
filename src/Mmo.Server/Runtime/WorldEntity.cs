@@ -191,6 +191,38 @@ public sealed class WorldEntity
         return true;
     }
 
+    // LIVING-ENEMIES P3: TELEPORT this entity to `tile` WITHOUT a movement step — sets Tile directly (the caller
+    // migrates the spatial-grid bucket via Zone.Teleport), faces it S, and resets the movement cooldown clocks so the
+    // respawned entity can act immediately and its predictor re-bases cleanly. Bumps StateRevision so the new position
+    // rides the next snapshot (the client sees the entity jump). Used for player death->respawn (no death corpse/penalty
+    // this phase); distinct from a TryStep (which validates walkability + cooldown). The caller is responsible for the
+    // tile being walkable (the spawn tile always is). Returns nothing — a teleport is unconditional.
+    public void TeleportTo(TileCoord tile)
+    {
+        Tile = tile;
+        Facing = Direction8.S;
+        _nextEligibleTick = null;
+        _lastStepTick = null;
+        _lastAuthoredCommitTick = null;
+        StateRevision++;
+        StepSequence++;
+    }
+
+    // LIVING-ENEMIES P3: restore current Health to MaxHealth (respawn at full). Returns true iff Health actually
+    // changed (so the caller only re-replicates on a real change), bumping StateRevision so the refilled bar rides the
+    // snapshot. Mana/stamina are left untouched (this phase only models HP-driven death). A no-op at full HP.
+    public bool RestoreFullHealth()
+    {
+        if (Stats.Health == Stats.MaxHealth)
+        {
+            return false;
+        }
+
+        Stats = Stats with { Health = Stats.MaxHealth };
+        StateRevision++;
+        return true;
+    }
+
     // LIVING-ENEMIES P2: turn this entity to face `direction` WITHOUT moving (used when a monster attacks a target
     // in place — it should look at its victim). Returns true iff Facing actually changed, bumping StateRevision so
     // the new facing rides the snapshot delta and the client flips the sprite. A no-op (already facing that way)

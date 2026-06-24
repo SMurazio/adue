@@ -47,4 +47,9 @@ public sealed class MonsterType
     public int AttackRange { get; set; } = 1;
     public int AttackDamage { get; set; } = 10;
     public int AttackCooldownMs { get; set; } = 1000;
+
+    // LIVING-ENEMIES P3: how long after a monster of this type DIES its spawner waits before spawning a fresh
+    // full-HP one at the spawner tile. Default 5000 ms (~5 s). Live-tunable via the "<typeId>.respawnMs" key on the
+    // F1 Monster tab; read live by the spawner at death time.
+    public int RespawnMs { get; set; } = 5000;
 }

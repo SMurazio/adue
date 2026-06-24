@@ -177,5 +177,30 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(7, slime.RoamRadius);
         Assert.Equal(0.5, slime.MoveSpeedMultiplier, 3);
         Assert.Equal(100, slime.MaxHealth);
+        Assert.Equal(5000, slime.RespawnMs); // P3 default ~5 s, unchanged.
+    }
+
+    // LIVING-ENEMIES P3: the per-type respawn delay applies + clamps, is a known key, and derives a tick count.
+    [Fact]
+    public void RespawnDelayAppliesClampsAndDerivesTicks()
+    {
+        var registry = Registry();
+        Assert.True(registry.TryGet("slime", out var slime));
+        Assert.Equal(5000, slime.RespawnMs);
+        Assert.Equal(100u, registry.RespawnTicks(slime)); // 5000 ms / 50 ms = 100 ticks at 20 Hz.
+
+        Assert.True(registry.IsMonsterTypeKey("slime.respawnMs"));
+        Assert.True(registry.TryApply("slime.respawnMs", 3000d, out var applied));
+        Assert.Equal(3000d, applied);
+        Assert.Equal(3000, slime.RespawnMs);
+        Assert.Equal(60u, registry.RespawnTicks(slime));
+
+        // Clamps a wild value to the 5-minute max.
+        Assert.True(registry.TryApply("slime.respawnMs", 999999999d, out var clamped));
+        Assert.Equal(300000d, clamped);
+
+        // The snapshot reflects it.
+        var snapshot = registry.BuildSnapshot();
+        Assert.Equal(300000, snapshot.Types.Single().RespawnMs);
     }
 }

@@ -10,8 +10,12 @@ into a real loop. Built in phases.
   HP bar, does not self-heal.
 - **P2 — Fight back (in progress).** Aggro radius → chase (leashed) → attack on a cooldown → the *player* takes
   damage (HUD HP bar). No death yet.
-- **P3 — Death + respawn + spawners.** Monster death/respawn; a placed **spawner** entity that owns + respawns
-  its mobs (the leash home becomes the spawner); player death + respawn.
+- **P3 — Death + respawn + spawners (DONE).** A monster at HP 0 DIES (despawn + AI/type cleanup) and its persistent
+  **spawner** respawns a fresh full-HP one at its tile after a per-type delay (`slime.respawnMs`, ~5 s). The spawner is
+  a server object (NOT a replicated entity); its red tile is replicated via `SpawnerMarkerMessage` (keyed by a stable
+  spawner id + an Active flag, AOI-driven) so it survives the kill/respawn. `/monster` creates a spawner. The PLAYER at
+  HP 0 DIES too → after a global delay (`player.respawnMs`, ~2 s) it teleports to spawn at full HP (a "downed" guard
+  blocks acting/dying twice meanwhile). Minimal — no corpse/loot/penalty/death-screen.
 - **P4 — Loot** on kill.
 
 ## Server load model — READ before scaling monster counts
@@ -69,10 +73,28 @@ to clients via `MonsterTuningSnapshot` (protocol v33) so the F1 **Monster tab** 
 selected type's fields) can show + edit the authoritative live values — mirroring the combat.* tab.
 De-aggro range (×1.5 aggro hysteresis) and the aggro-scan cadence (~0.5 s) stay DERIVED.
 
-## Visible spawner anchor (P2-polish)
-Each monster's leash HOME tile is replicated to viewers (`MonsterHomeMessage`, sent once when the monster
-enters AOI) and painted as a **RED floor tile** on the client, so the leash/de-aggro anchor is legible. This
-is just the visible anchor for now; the P3 spawner entity will own it.
+## Spawner + red anchor (P3)
+A **spawner** is a persistent server object (`MonsterSpawner`) that OWNS a monster: a fixed tile, a monster type, a
+respawn delay, and (for now) <= 1 live monster. It spawns the first monster and, when that monster dies, schedules a
+respawn and spawns a fresh full-HP one of its type at the same tile after the delay. The spawner OUTLIVES the monster's
+death/respawn. `/monster <name>` creates a spawner (which spawns the first monster). The monster's leash HOME = the
+spawner tile.
+
+The red anchor tile is now the SPAWNER (replacing the per-monster `MonsterHomeMessage`): replicated via
+`SpawnerMarkerMessage(SpawnerId, Tile, Active)` keyed by a STABLE spawner id (not a monster network id, which is reborn
+each respawn), AOI-driven per recipient — Active=true on AOI-entry (place the red tile), Active=false on AOI-exit (drop
+it). Because it tracks the spawner, the red tile STAYS PUT when the monster dies and a new one spawns. Protocol v34.
+
+## Death detection (P3)
+- **Monster death:** detected in `HandleAttack` after the free-aim resolver applies damage — any Monster victim at HP 0
+  is killed (`KillMonster`): despawn the entity (`EntityDespawn` to viewers + remove from the world/spatial index),
+  clean up `_monsterAi.Forget(id)` + `_monsterTypeOf.Remove(id)` (the P3 leak cleanup), and notify the owning spawner to
+  schedule the respawn. The per-tick `RespawnMonsters` pass spawns the fresh monster when due.
+- **Player death:** detected in `ApplyMonsterAttack` — when a monster's hit drives the player to HP 0, the session is
+  marked dead (`ClientSession.MarkDead`) with a global respawn delay and gets a "You died." toast. The per-tick
+  `RespawnPlayers` pass teleports it to spawn at full HP when due. While dead, the message dispatch suppresses movement/
+  attack inputs and the held-move pacer skips it (the downed guard), and `ApplyMonsterAttack` no-ops on a dead target —
+  so a downed player can't act, take further hits, or die twice.
 
 ## Known gaps / future polish
 - **Attacks are NOT telegraphed.** A monster attack is an instant hit on its cooldown — no wind-up, no

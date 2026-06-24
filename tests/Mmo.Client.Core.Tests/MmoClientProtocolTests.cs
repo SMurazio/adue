@@ -358,26 +358,32 @@ public sealed class MmoClientProtocolTests
 
     // LIVING-ENEMIES P2-POLISH: the per-monster-TYPE tuning mirror + the monster home (red-tile anchor) tracking.
     [Fact]
-    public void MonsterTuningAndHomeAreMirrored()
+    public void MonsterTuningAndSpawnerMarkerAreMirrored()
     {
         using var client = CreateClient(out _);
 
         Assert.Null(client.MonsterTuning);
         client.HandleMessageForTests(new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
         {
-            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000),
+            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000, 5000),
         })));
         Assert.NotNull(client.MonsterTuning);
         Assert.Equal("slime", client.MonsterTuning!.Value.Types[0].Id);
+        Assert.Equal(5000, client.MonsterTuning!.Value.Types[0].RespawnMs);
         Assert.Equal(1, client.MonsterTuningVersion);
 
-        client.HandleMessageForTests(new MonsterHomeMessage(42, new TileCoord(8, 9)));
-        Assert.True(client.MonsterHomes.TryGetValue(42, out var home));
-        Assert.Equal(new TileCoord(8, 9), home);
+        // LIVING-ENEMIES P3: a spawner marker keyed by spawner id is added on Active=true.
+        client.HandleMessageForTests(new SpawnerMarkerMessage(7, new TileCoord(8, 9), true));
+        Assert.True(client.SpawnerMarkers.TryGetValue(7, out var tile));
+        Assert.Equal(new TileCoord(8, 9), tile);
 
-        // The home marker is dropped when the monster despawns.
+        // A monster ENTITY despawn (its network id, NOT the spawner id) must NOT drop the persistent marker.
         client.HandleMessageForTests(new EntityDespawnMessage(5, 42));
-        Assert.False(client.MonsterHomes.ContainsKey(42));
+        Assert.True(client.SpawnerMarkers.ContainsKey(7));
+
+        // The marker is dropped only by an explicit Active=false (the spawner left AOI / was removed).
+        client.HandleMessageForTests(new SpawnerMarkerMessage(7, default, false));
+        Assert.False(client.SpawnerMarkers.ContainsKey(7));
     }
 
     private static WorldSnapshotMessage Snapshot(uint sequence, bool isComplete, params EntityStateSnapshot[] entities)

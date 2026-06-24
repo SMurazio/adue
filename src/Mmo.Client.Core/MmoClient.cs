@@ -333,12 +333,14 @@ public sealed class MmoClient : IDisposable
     public MonsterTuningSnapshot? MonsterTuning { get; private set; }
     public int MonsterTuningVersion { get; private set; }
 
-    // LIVING-ENEMIES P2-POLISH: per-monster leash HOME tiles, from MonsterHomeMessage (sent when a monster enters AOI).
-    // The Godot layer reads this read-only to paint a RED floor tile at each known monster's home so the de-aggro
-    // anchor is visible. An entry is added on the message and dropped when the monster despawns.
-    private readonly Dictionary<uint, TileCoord> _monsterHomes = [];
+    // LIVING-ENEMIES P3: persistent SPAWNER red-tile anchors, from SpawnerMarkerMessage (keyed by a stable spawner id,
+    // NOT a monster network id). The Godot layer reads this read-only to paint a RED floor tile at each known spawner's
+    // tile. An entry is added on SpawnerMarker(Active=true) (the spawner entered AOI) and dropped on Active=false (it
+    // left AOI / was removed). Because the spawner — not the monster — owns the tile, the marker STAYS PUT across the
+    // monster's death/respawn (the whole point of the P3 refactor).
+    private readonly Dictionary<uint, TileCoord> _spawnerMarkers = [];
 
-    public IReadOnlyDictionary<uint, TileCoord> MonsterHomes => _monsterHomes;
+    public IReadOnlyDictionary<uint, TileCoord> SpawnerMarkers => _spawnerMarkers;
 
     // COMBAT-TUNING (radial cooldown): the client clock time of the most recent attack we SENT, and the cooldown
     // duration in effect when we sent it (snapshotted so a mid-cooldown tuning change doesn't retroactively rescale
@@ -984,7 +986,9 @@ public sealed class MmoClient : IDisposable
                 break;
             case EntityDespawnMessage despawn:
                 _entities.Remove(despawn.NetworkId);
-                _monsterHomes.Remove(despawn.NetworkId);
+                // LIVING-ENEMIES P3: spawner markers are keyed by spawner id (not monster network id) and are dropped by
+                // an explicit SpawnerMarker(Active=false), so an entity despawn no longer clears a marker — a killed
+                // monster despawns but its spawner's red tile persists until the spawner itself leaves AOI.
                 if (LocalNetworkId == despawn.NetworkId)
                 {
                     ClearLocalEntity();
@@ -1022,9 +1026,18 @@ public sealed class MmoClient : IDisposable
                 MonsterTuning = monsterTuning.Tuning;
                 MonsterTuningVersion++;
                 break;
-            case MonsterHomeMessage monsterHome:
-                // LIVING-ENEMIES P2-POLISH: remember the monster's leash home so the renderer can paint a red tile.
-                _monsterHomes[monsterHome.NetworkId] = monsterHome.HomeTile;
+            case SpawnerMarkerMessage spawnerMarker:
+                // LIVING-ENEMIES P3: a persistent spawner's red-tile marker entered (Active=true) or left (Active=false)
+                // AOI. Add/update or drop it, keyed by the stable spawner id so it survives the monster's death/respawn.
+                if (spawnerMarker.Active)
+                {
+                    _spawnerMarkers[spawnerMarker.SpawnerId] = spawnerMarker.Tile;
+                }
+                else
+                {
+                    _spawnerMarkers.Remove(spawnerMarker.SpawnerId);
+                }
+
                 break;
             case DamageEventMessage damage:
                 // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the
@@ -1271,7 +1284,8 @@ public sealed class MmoClient : IDisposable
             foreach (var networkId in _staleEntityScratch)
             {
                 _entities.Remove(networkId);
-                _monsterHomes.Remove(networkId);
+                // LIVING-ENEMIES P3: spawner markers are keyed by spawner id + dropped by an explicit Active=false, so a
+                // snapshot prune of stale ENTITIES no longer touches them.
                 if (LocalNetworkId == networkId)
                 {
                     ClearLocalEntity();

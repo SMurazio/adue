@@ -27,6 +27,48 @@ public sealed class ClientSessionTests
         Assert.Equal(2u, session.NextSnapshotSequence());
     }
 
+    // LIVING-ENEMIES P3: the player-death respawn guard. MarkDead is idempotent (a flurry of hits can't reset the
+    // timer or re-die), the respawn becomes due only after the delay, and MarkAlive clears it.
+    [Fact]
+    public void DeadStateSchedulesRespawnAndIsIdempotent()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.False(session.IsDead);
+        Assert.True(session.MarkDead(serverTick: 100, respawnDelayTicks: 40));
+        Assert.True(session.IsDead);
+        Assert.Equal(140u, session.RespawnAtTick);
+
+        // A second hit on the same downed player does NOT re-mark / reset the timer.
+        Assert.False(session.MarkDead(serverTick: 105, respawnDelayTicks: 40));
+        Assert.Equal(140u, session.RespawnAtTick);
+
+        // Not due before the delay; due at/after.
+        Assert.False(session.IsRespawnDue(139));
+        Assert.True(session.IsRespawnDue(140));
+
+        session.MarkAlive();
+        Assert.False(session.IsDead);
+        Assert.Null(session.RespawnAtTick);
+        Assert.False(session.IsRespawnDue(99999));
+    }
+
+    // LIVING-ENEMIES P3: spawner-marker AOI bookkeeping mirrors the entity Knows/Remember/Forget trio.
+    [Fact]
+    public void SpawnerMarkerKnowledgeTracksAddAndForget()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.False(session.KnowsSpawner(5));
+        session.RememberKnownSpawner(5);
+        Assert.True(session.KnowsSpawner(5));
+        Assert.Contains(5u, session.KnownSpawnerIds);
+
+        Assert.True(session.ForgetKnownSpawner(5));
+        Assert.False(session.KnowsSpawner(5));
+        Assert.False(session.ForgetKnownSpawner(5)); // already gone.
+    }
+
     [Fact]
     public void AckAdvancesAckedBaselineForCarriedEntities()
     {

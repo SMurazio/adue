@@ -28,4 +28,6 @@ public readonly record struct MonsterTypeSnapshot(
     int ChaseLeash,
     int AttackRange,
     int AttackDamage,
-    int AttackCooldownMs);
+    int AttackCooldownMs,
+    // LIVING-ENEMIES P3 (v34): how long this type's spawner waits after a kill before respawning a fresh monster.
+    int RespawnMs);

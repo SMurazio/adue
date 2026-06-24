@@ -44,8 +44,10 @@ public enum MessageType : ushort
     // template — slime now). Sent on login + whenever a per-type tuning key changes, so the F1 "Monster" tab can list
     // the types and show + edit the authoritative live values. See MonsterTuningSnapshot.
     MonsterTuning = 114,
-    // LIVING-ENEMIES P2-POLISH (v33): server->viewer replication of a monster's leash HOME tile, so the client can
-    // paint a RED floor tile there (the de-aggro anchor becomes visible). Sent once when the monster enters a viewer's
-    // AOI (alongside its EntitySpawn). Per-monster + reliable; cleared client-side on the monster's despawn.
-    MonsterHome = 115
+    // LIVING-ENEMIES P3 (v34): server->viewer replication of a SPAWNER's red-tile marker — the PERSISTENT leash/
+    // de-aggro anchor that OWNS + respawns a monster. Replaces the former per-monster MonsterHome (v33): the marker is
+    // keyed by a stable SPAWNER id (not the monster's network id, which changes on each death/respawn), and carries an
+    // Active flag — Active=true when the spawner enters a viewer's AOI (show/place the red tile), Active=false when it
+    // leaves (drop it). The marker therefore STAYS PUT while the monster dies and a fresh one respawns. Reliable.
+    SpawnerMarker = 115
 }

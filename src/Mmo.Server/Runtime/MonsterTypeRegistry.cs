@@ -38,6 +38,9 @@ public sealed class MonsterTypeRegistry
     private const int MaxAttackDamage = 10000;
     private const int MinAttackCooldownMs = 100;
     private const int MaxAttackCooldownMs = 10000;
+    // LIVING-ENEMIES P3 respawn delay bounds: 0 (instant) up to 5 min, wide enough to tune feel.
+    private const int MinRespawnMs = 0;
+    private const int MaxRespawnMs = 300000;
     // moveSpeed 0.1..5x — a near-crawl up to 5x the player base; the per-entity cadence is further clamped by the
     // server's EffectiveStepCooldown ms bounds, so an extreme value can never break the tick loop.
     private const double MinMoveSpeed = 0.1d;
@@ -56,6 +59,7 @@ public sealed class MonsterTypeRegistry
     public const string AttackCooldownMsField = "attackCooldownMs";
     public const string MoveSpeedField = "moveSpeed";
     public const string MaxHealthField = "maxHealth";
+    public const string RespawnMsField = "respawnMs";
 
     private readonly int _tickRate;
     private readonly Dictionary<string, MonsterType> _types = new(StringComparer.OrdinalIgnoreCase);
@@ -179,6 +183,9 @@ public sealed class MonsterTypeRegistry
             case MaxHealthField:
                 type.MaxHealth = ClampInt(value, MinMaxHealth, MaxMaxHealth, out applied);
                 return true;
+            case RespawnMsField:
+                type.RespawnMs = ClampInt(value, MinRespawnMs, MaxRespawnMs, out applied);
+                return true;
             case MoveSpeedField:
             {
                 var clamped = Math.Clamp(value, MinMoveSpeed, MaxMoveSpeed);
@@ -208,8 +215,13 @@ public sealed class MonsterTypeRegistry
 
         return key[(dot + 1)..] is RoamRadiusField or PauseMinMsField or PauseMaxMsField or AggroRadiusField
             or ChaseLeashField or AttackRangeField or AttackDamageField or AttackCooldownMsField
-            or MoveSpeedField or MaxHealthField;
+            or MoveSpeedField or MaxHealthField or RespawnMsField;
     }
+
+    // LIVING-ENEMIES P3: this type's respawn delay in TICKS (Round, floored at 0 — instant respawn is allowed). Read
+    // by the spawner at death time so a live retune applies to the NEXT death.
+    public uint RespawnTicks(MonsterType type) =>
+        (uint)Math.Max(0, (int)Math.Round(type.RespawnMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
 
     // The current per-type tuning as the wire snapshot the server replicates (login + on change). Ints/doubles in
     // the SAME ms/tile units as the registry keys, so the client F1 tab shows + edits the authoritative numbers.
@@ -231,7 +243,8 @@ public sealed class MonsterTypeRegistry
                 t.ChaseLeash,
                 t.AttackRange,
                 t.AttackDamage,
-                t.AttackCooldownMs);
+                t.AttackCooldownMs,
+                t.RespawnMs);
         }
 
         return new MonsterTuningSnapshot(entries);

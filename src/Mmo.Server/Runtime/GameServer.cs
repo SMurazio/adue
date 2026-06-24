@@ -128,9 +128,24 @@ public sealed class GameServer
     // tick. Tick-rate-fixed at construction (for the tick-quantised pause/cooldown derivations).
     private readonly MonsterTypeRegistry _monsterTypes;
 
-    // Per-monster type membership (entity id -> its type). Set on spawn, cleared on despawn (Forget). The AI step
-    // reads it to build that monster's Tunables from the live per-type values. Tiny (a handful of monsters).
+    // Per-monster type membership (entity id -> its type). Set on spawn; REMOVED on death (LIVING-ENEMIES P3 —
+    // KillMonster calls _monsterTypeOf.Remove + _monsterAi.Forget, fixing the former add-only leak flagged in
+    // todo/monster-types-followups.md). The AI step reads it to build that monster's Tunables from the live per-type
+    // values. Tiny (a handful of monsters).
     private readonly Dictionary<ulong, MonsterType> _monsterTypeOf = [];
+
+    // LIVING-ENEMIES P3: the PERSISTENT monster spawners, keyed by spawner id. A spawner owns a monster, respawns it
+    // after the type's delay when it dies, and is the red-tile anchor (the monster's leash home = the spawner tile).
+    // `/monster` creates one. Server objects, not replicated entities — the red marker is sent via SpawnerMarkerMessage
+    // keyed by SpawnerId (AOI-driven), so it survives the monster's death/respawn. Tiny (a handful).
+    private readonly Dictionary<uint, MonsterSpawner> _spawners = [];
+
+    // Reverse map: a live monster's entity id -> the spawner that owns it, so on death we find the spawner in O(1) to
+    // schedule its respawn. Kept in lockstep with each spawner's LiveMonsterId (added on spawn, removed on death).
+    private readonly Dictionary<ulong, MonsterSpawner> _spawnerOfMonster = [];
+
+    // Monotonic spawner-id allocator (distinct id space from entity network ids — these key the red marker only).
+    private uint _nextSpawnerId = 1;
 
     // Half-extent (in tiles) of the cell neighborhood an AOI query must examine. The grid returns every
     // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
@@ -371,6 +386,15 @@ public sealed class GameServer
             return;
         }
 
+        // LIVING-ENEMIES P3: while a player is DEAD (the brief respawn delay), drop its action inputs — movement
+        // (intent/input/commit), movement-mode flips, and attacks — so it can't act while downed. Chat/ack/admin still
+        // flow (a dead admin can still see/ack snapshots and use the panel). The session is server-paced, so suppressing
+        // the inputs is enough; the entity is teleported + refilled on respawn.
+        if (session.IsAuthenticated && session.IsDead && IsSuppressedWhileDead(message.Type))
+        {
+            return;
+        }
+
         switch (message)
         {
             case ClientHelloMessage hello:
@@ -456,6 +480,13 @@ public sealed class GameServer
                 break;
         }
     }
+
+    // LIVING-ENEMIES P3: the action message types suppressed while a player is dead (movement + attacks). Non-action
+    // messages (chat, snapshot ack, admin tuning/stat, hello/login) are NOT suppressed so the client stays responsive.
+    private static bool IsSuppressedWhileDead(MessageType type) =>
+        type is MessageType.MoveIntent or MessageType.MoveInput or MessageType.StepCommitRequest
+            or MessageType.StepCommitBatch or MessageType.MovementMode or MessageType.Attack
+			or MessageType.InteractRequest;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -621,6 +652,10 @@ public sealed class GameServer
         {
             RespawnResourceNodes();
             RegenEnemies();
+            // LIVING-ENEMIES P3: spawn fresh monsters whose spawner's respawn delay elapsed, and respawn dead players
+            // whose downed window elapsed. Both poll tiny sets (spawners / sessions) and no-op when nothing is due.
+            RespawnMonsters();
+            RespawnPlayers();
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
@@ -685,6 +720,15 @@ public sealed class GameServer
         {
             SendEntityDespawns(session, _visibleNetworkIdScratch);
             EnsureEntitySpawns(session, _visibleEntityScratch);
+            // LIVING-ENEMIES P3: sync the persistent spawner red-tile markers for this viewer (AOI-driven). Only when
+            // there are spawners to consider; the viewer's own entity is the AOI center.
+            if (_spawners.Count > 0 || session.KnownSpawnerIds.Count > 0)
+            {
+                if (TryGetSessionEntity(session, out var viewerEntity))
+                {
+                    SyncSpawnerMarkers(session, viewerEntity);
+                }
+            }
         }
 
         SendSnapshotPackets(session, _visibleEntityScratch, tickBudget, out var visibleCount, out var chunkCount, out var sentBytes, out var sentPackets);
@@ -963,15 +1007,60 @@ public sealed class GameServer
                 EffectiveStepCooldownMs(entity));
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
+        }
 
-            // LIVING-ENEMIES P2-POLISH: a monster entering this viewer's AOI also gets its leash HOME tile, so the
-            // client can paint a RED floor tile there (the de-aggro anchor becomes visible). Sent once alongside the
-            // spawn; the home is fixed for the monster's life so no per-tick cost. Skipped if the AI has no home yet.
-            if (entity.Kind == EntityKind.Monster && _monsterAi.TryGetHome(entity.Id, out var home))
+        // LIVING-ENEMIES P3: the red anchor is now the persistent SPAWNER (not the transient monster), replicated via
+        // a separate AOI-driven SpawnerMarker pass below — so it stays put across the monster's death/respawn.
+    }
+
+    // LIVING-ENEMIES P3: per-recipient AOI sync of the persistent SPAWNER red-tile markers. A spawner is a server
+    // object, not a world entity, so it has no EntitySpawn; this is the parallel "spawn/despawn" for its marker.
+    // For each spawner whose tile is within the viewer's interest radius and that the viewer doesn't yet know, send
+    // SpawnerMarker(Active=true) (place the red tile); for each KNOWN spawner that has left AOI or no longer exists,
+    // send Active=false (drop it). Reliable-ordered, like the entity spawn/despawn pair. The set is tiny (a handful),
+    // and the diff is against the viewer's _knownSpawnerIds so a steady-state in-AOI spawner costs one Contains check.
+    private readonly List<uint> _spawnerForgetScratch = [];
+
+    private void SyncSpawnerMarkers(ClientSession recipient, WorldEntity recipientEntity)
+    {
+        // Place markers for spawners that newly entered AOI.
+        foreach (var spawner in _spawners.Values)
+        {
+            var inAoi = IsTileInInterest(recipientEntity.Tile, spawner.Tile, _tuning.InterestRadius);
+            if (inAoi && !recipient.KnowsSpawner(spawner.SpawnerId))
             {
-                TrySend(recipient.Peer, new MonsterHomeMessage(entity.NetworkId, home), DeliveryMethod.ReliableOrdered);
+                TrySend(recipient.Peer, new SpawnerMarkerMessage(spawner.SpawnerId, spawner.Tile, true), DeliveryMethod.ReliableOrdered);
+                recipient.RememberKnownSpawner(spawner.SpawnerId);
             }
         }
+
+        // Drop markers for known spawners that left AOI or were removed.
+        _spawnerForgetScratch.Clear();
+        foreach (var spawnerId in recipient.KnownSpawnerIds)
+        {
+            var stillVisible = _spawners.TryGetValue(spawnerId, out var spawner)
+                && IsTileInInterest(recipientEntity.Tile, spawner.Tile, _tuning.InterestRadius);
+            if (!stillVisible)
+            {
+                _spawnerForgetScratch.Add(spawnerId);
+            }
+        }
+
+        foreach (var spawnerId in _spawnerForgetScratch)
+        {
+            TrySend(recipient.Peer, new SpawnerMarkerMessage(spawnerId, default, false), DeliveryMethod.ReliableOrdered);
+            recipient.ForgetKnownSpawner(spawnerId);
+        }
+    }
+
+    // Whether `target` is within `interestRadius` (Euclidean, no hysteresis) of `viewerTile`. Plain radius test for the
+    // spawner marker — it does not need the entity hysteresis (the marker is cheap + reliable, and a 1-tile flicker at
+    // the boundary is invisible since the marker is static).
+    private static bool IsTileInInterest(TileCoord viewerTile, TileCoord target, float interestRadius)
+    {
+        var dx = target.X - viewerTile.X;
+        var dy = target.Y - viewerTile.Y;
+        return (dx * dx) + (dy * dy) <= interestRadius * interestRadius;
     }
 
     private static float SnapshotSortKey(ClientSession recipient, WorldEntity candidate, float distanceSquared)
@@ -1548,25 +1637,90 @@ public sealed class GameServer
             type = _monsterTypes.Default;
         }
 
-        // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
-        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, type.DisplayName, actor.Tile, Direction8.S);
-        // LIVING-ENEMIES P2-POLISH: the monster takes its TYPE's stats/AI tuning. MaxHealth (spawn at full) + the
-        // move-speed multiplier (which feeds the existing EffectiveStepCooldown path so the monster steps on its OWN
-        // type-derived cadence — slower than the player by default, outrunnable). Remember the type for the AI step.
-        monster.SetMaxHealthFull(type.MaxHealth);
-        monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
-        _monsterTypeOf[monster.Id] = type;
-
-        // Register with the roam AI: the spawn tile is the leash home; start Idle with an initial randomized pause,
-        // tick-quantised off THIS type's pause bounds.
-        var tunables = _monsterTypes.BuildTunables(type);
-        _monsterAi.Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
+        // LIVING-ENEMIES P3: /monster now creates a PERSISTENT SPAWNER at the caller's tile (the spawner owns + respawns
+        // the monster, and is the red-tile anchor that survives a kill). The spawner immediately spawns its first
+        // monster. The spawner tile = the monster's leash home; it must be walkable (the caller stands there).
+        var spawner = new MonsterSpawner(_nextSpawnerId++, actor.Tile, type);
+        _spawners[spawner.SpawnerId] = spawner;
+        var monster = SpawnMonsterForSpawner(spawner);
 
         var effectiveMs = EffectiveStepCooldownMs(monster);
         SendSystem(
             sender,
-            $"monster: spawned {type.DisplayName} at {monster.Tile.X},{monster.Tile.Y} (home), hp={type.MaxHealth}, step={effectiveMs}ms, roamRadius={type.RoamRadius}, aggro={type.AggroRadius}, leash={type.ChaseLeash}, atk={type.AttackDamage}/{type.AttackCooldownMs}ms.");
-        Log.Info($"{sender.DisplayName} spawned a {type.DisplayName} at {monster.Tile} (home, type={type.Id}).");
+            $"monster: spawner #{spawner.SpawnerId} for {type.DisplayName} at {spawner.Tile.X},{spawner.Tile.Y}, hp={type.MaxHealth}, step={effectiveMs}ms, roamRadius={type.RoamRadius}, aggro={type.AggroRadius}, leash={type.ChaseLeash}, atk={type.AttackDamage}/{type.AttackCooldownMs}ms, respawn={type.RespawnMs}ms.");
+        Log.Info($"{sender.DisplayName} created spawner #{spawner.SpawnerId} for {type.DisplayName} at {spawner.Tile} (type={type.Id}).");
+    }
+
+    // LIVING-ENEMIES P3: spawns a fresh full-HP monster of the spawner's type at the spawner tile, wires it to the AI +
+    // type maps, and attaches it to the spawner. Shared by the initial /monster spawn AND each respawn. The red marker
+    // is a separate persistent spawner concept, so spawning a monster does NOT send a per-monster home anymore.
+    private WorldEntity SpawnMonsterForSpawner(MonsterSpawner spawner)
+    {
+        var type = spawner.Type;
+        // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
+        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, type.DisplayName, spawner.Tile, Direction8.S);
+        // The monster takes its TYPE's stats/AI tuning. MaxHealth (spawn at full) + the move-speed multiplier (which
+        // feeds the EffectiveStepCooldown path so it steps on its OWN type-derived cadence — outrunnable). Remember the
+        // type for the AI step.
+        monster.SetMaxHealthFull(type.MaxHealth);
+        monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
+        _monsterTypeOf[monster.Id] = type;
+
+        // Register with the roam AI: the spawner tile is the leash home; start Idle with an initial randomized pause,
+        // tick-quantised off THIS type's pause bounds.
+        var tunables = _monsterTypes.BuildTunables(type);
+        _monsterAi.Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
+
+        // Link the monster to its spawner (both directions) so a death finds the spawner in O(1).
+        spawner.AttachMonster(monster.Id);
+        _spawnerOfMonster[monster.Id] = spawner;
+        return monster;
+    }
+
+    // LIVING-ENEMIES P3: a monster DIED (HP hit 0 from a player attack). Despawn the entity (EntityDespawn to AOI
+    // viewers + remove from the world/spatial index), clean up its AI + type state (the cleanup the P3 follow-up asked
+    // for — no leak), and notify its spawner to schedule the respawn. The persistent spawner + its red marker stay.
+    private void KillMonster(WorldEntity monster)
+    {
+        var monsterId = monster.Id;
+
+        // Remove from the world (also unhooks the spatial index). Returning the network id frees it for reuse.
+        if (_zone.Despawn(monsterId, out var removed))
+        {
+            _networkIds.Return(removed.NetworkId);
+        }
+
+        // Clean up AI + type membership (fixes the former add-only leak — see todo/monster-types-followups.md P2/P3).
+        _monsterAi.Forget(monsterId);
+        _monsterTypeOf.Remove(monsterId);
+
+        // Notify the owning spawner so it schedules a respawn after the type's delay (read live).
+        if (_spawnerOfMonster.Remove(monsterId, out var spawner))
+        {
+            var respawnTicks = _monsterTypes.RespawnTicks(spawner.Type);
+            spawner.NotifyMonsterDied(monsterId, _serverTick, respawnTicks);
+            Log.Info($"Monster {removed?.NetworkId} (spawner #{spawner.SpawnerId}) died; respawn in {respawnTicks} ticks.");
+        }
+    }
+
+    // LIVING-ENEMIES P3: per-tick spawner respawn pass. For each spawner whose respawn delay has elapsed, spawn a fresh
+    // full-HP monster of its type at its tile. Iterates the (tiny) spawner set directly; SpawnMonsterForSpawner clears
+    // the schedule via AttachMonster. The marker is already present (it persisted across the death), so a respawn just
+    // re-adds a roaming monster under the existing red tile.
+    private void RespawnMonsters()
+    {
+        if (_spawners.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var spawner in _spawners.Values)
+        {
+            if (spawner.IsRespawnDue(_serverTick))
+            {
+                SpawnMonsterForSpawner(spawner);
+            }
+        }
     }
 
     // S60 live-tuning handler. ADMIN-GATED (the same role check as /speed and /metrics): a non-admin
@@ -1772,6 +1926,17 @@ public sealed class GameServer
             }
 
             Log.Info($"{session.DisplayName} free-aim hit {hits} target(s) for {damage} each (aim {aimRadians:F2} rad).");
+
+            // LIVING-ENEMIES P3: a MONSTER victim whose HP hit 0 DIES. Check after the damage numbers (so the final hit
+            // still floats) and after the loop (the scratch buffer is reused inside KillMonster's despawn path). Only
+            // monsters die from a player attack here; dummies floor at 0 + regen, players can't hit players.
+            foreach (var damaged in _damagedVictimScratch)
+            {
+                if (damaged.Victim.Kind == EntityKind.Monster && damaged.Victim.Stats.Health <= 0)
+                {
+                    KillMonster(damaged.Victim);
+                }
+            }
         }
     }
 
@@ -2068,6 +2233,12 @@ public sealed class GameServer
                 continue;
             }
 
+            // LIVING-ENEMIES P3: a DEAD (downed) player doesn't walk during its respawn delay (the dead-player guard).
+            if (session.IsDead)
+            {
+                continue;
+            }
+
             // UO1: a client-driven session paces its OWN movement via the per-step StepCommitRequest stream. The
             // server must NOT also step it from the held MoveIntent here, or the held-intent pacer and the commits
             // would both advance the entity (double-stepping / 2x speed). The MoveIntent is still recorded (for
@@ -2216,8 +2387,9 @@ public sealed class GameServer
     // PLAYER through the SAME ApplyDamage + DamageEventMessage path a player's attack uses (no combat fork). The AI
     // owns the WHEN (adjacency + the monster's own attack cooldown); this owns the HOW. The damage number is broadcast
     // to the victim AND nearby viewers — the victim is the PLAYER, NOT the attacker, so it is NOT excluded (it has no
-    // client-side prediction of incoming damage, unlike its own outgoing swings). HP floors at 0 in ApplyDamage; a
-    // 0-HP player simply takes a no-op clamp on further hits (no death/respawn — Phase 3+).
+    // client-side prediction of incoming damage, unlike its own outgoing swings). LIVING-ENEMIES P3: HP reaching 0 now
+    // KILLS the player (marks the session dead + schedules the respawn); a dead/downed player is guarded out (no further
+    // hits, no double-death) until RespawnPlayers teleports it back to spawn at full HP.
     private void ApplyMonsterAttack(WorldEntity monster, ulong targetId, int attackDamage)
     {
         if (!_zone.World.TryGet(targetId, out var target))
@@ -2233,12 +2405,62 @@ public sealed class GameServer
             monster.TrySetFacing(facing);
         }
 
+        // LIVING-ENEMIES P3: a DEAD (downed) player takes no further hits while waiting to respawn — guard before
+        // applying damage so a monster adjacent at the moment of death can't keep hammering the 0-HP body or re-trigger
+        // death. (The AI also de-aggros a 0-HP target, but a hit resolved the same tick as death must still be guarded.)
+        if (target.OwnerSession is { IsDead: true })
+        {
+            return;
+        }
+
         // Authoritative damage rides the snapshot HP field (the HUD bar falls). A real change floats a number; a hit
         // on an already-0-HP player is a no-op (no number, no spam). Broadcast to ALL viewers incl. the victim.
         if (target.ApplyDamage(attackDamage))
         {
             BroadcastDamageEvent(target, attackDamage);
             Log.Info($"Monster {monster.NetworkId} hit {target.DisplayName} for {attackDamage} (hp now {target.Stats.Health}).");
+
+            // LIVING-ENEMIES P3: HP hit 0 → the player DIES. Mark the session dead + schedule the respawn (a global
+            // delay). The actual teleport-to-spawn + HP refill happens in the per-tick RespawnPlayers pass once the
+            // delay elapses, so the dead-guard window above is honoured. MarkDead is a no-op if already dead.
+            if (target.Stats.Health <= 0 && target.OwnerSession is { } session && session.MarkDead(_serverTick, _tuning.PlayerRespawnTicks))
+            {
+                SendSystem(session, "You died.");
+                Log.Info($"{target.DisplayName} died; respawn in {_tuning.PlayerRespawnTicks} ticks.");
+            }
+        }
+    }
+
+    // LIVING-ENEMIES P3: per-tick player respawn pass. For each dead session whose respawn delay has elapsed, teleport
+    // its entity back to the spawn point, refill HP, replicate the new vitals to the owner, and clear the dead flag.
+    // Minimal — no corpse/loot/penalty/death-screen (Phase 4+). The teleport rides the snapshot (the client sees the
+    // jump) and SendPlayerStats refills the owner's HUD bar.
+    private void RespawnPlayers()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated || !session.IsRespawnDue(_serverTick))
+            {
+                continue;
+            }
+
+            if (!TryGetSessionEntity(session, out var entity))
+            {
+                // Entity gone (disconnected mid-death) — just clear the flag so we stop polling it.
+                session.MarkAlive();
+                continue;
+            }
+
+            var spawnTile = _zone.ResolveSpawnTile(Zone.DefaultSpawnTile);
+            _zone.Teleport(entity, spawnTile);
+            entity.RestoreFullHealth();
+            session.MarkAlive();
+            // The teleport also resets the held move intent so the respawned player doesn't keep walking from a
+            // pre-death key-hold.
+            session.ClearMoveIntent();
+            SendPlayerStats(session, entity);
+            SendSystem(session, "You respawned.");
+            Log.Info($"{session.DisplayName} respawned at {spawnTile}.");
         }
     }
 

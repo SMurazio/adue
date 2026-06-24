@@ -22,3 +22,9 @@ AND call `_monsterAi.Forget(id)`. Until then, correct the comment to say "add-on
 The doc + `MonsterType.cs:16` + some comments say the slime steps "~312 ms," but tick-quantised at 20 Hz it's
 exactly `round(5/0.8)=6` ticks = **300 ms**. Cosmetic; behaviour (slower than the player) is correct. Correct the
 prose to ~300 ms when convenient.
+
+## 4. (P3 nit) Spawners are never removed
+`GameServer._spawners` only grows — `/monster` adds a spawner; nothing deletes one. Fine for the phase, but a long
+dev session accumulates spawners (and their markers). Add a way to clear/remove a spawner (e.g. a `/despawn` or
+`/clear-spawners` admin command, or remove a spawner when its tile is re-used). Also: a downed-player harvest gap
+was found + FIXED inline (InteractRequest now in IsSuppressedWhileDead) — no action needed, noted for history.

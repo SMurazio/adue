@@ -71,16 +71,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private CheckBox? _debugFacingBoxCheck;
 	private CheckBox? _catoSpriteCheck;
 	private CheckBox? _predictionTilesCheck;
+	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
+	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
+	private bool _showSpawnerTiles;
 	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
 	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
 	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
 	private MeshInstance3D? _predictedTileMarker;
 	private MeshInstance3D? _confirmedTileMarker;
 
-	// LIVING-ENEMIES P2-POLISH: one flat RED ground marker per known monster HOME (leash/de-aggro anchor), keyed by
-	// the monster's network id, parented under _worldRoot. Synced each _Process frame from MmoClient.MonsterHomes:
-	// a marker is created when a monster's home arrives and freed when the monster despawns (its home drops). Makes
-	// the otherwise-invisible leash home legible ("why did it give up" becomes visible). Sets up the P3 spawner.
+	// LIVING-ENEMIES P3: one flat RED ground marker per known SPAWNER (the persistent leash/de-aggro anchor), keyed by
+	// the stable spawner id, parented under _worldRoot. Synced each _Process frame from MmoClient.SpawnerMarkers: a
+	// marker is created when a spawner enters AOI and freed when it leaves. Because it tracks the SPAWNER (not the
+	// monster), the red tile stays put across the monster's death/respawn — the de-aggro anchor stays legible.
 	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _monsterHomeMarkers = new();
 	private readonly System.Collections.Generic.List<uint> _monsterHomeStaleScratch = new();
 
@@ -219,6 +222,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _monsterAttackCooldownMs;
 	private LineEdit? _monsterPauseMinMs;
 	private LineEdit? _monsterPauseMaxMs;
+	private LineEdit? _monsterRespawnMs;
 
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
@@ -1273,6 +1277,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(predictionTiles);
 		_predictionTilesCheck = predictionTiles;
 
+		// Spawner tiles: debug viz of the monster spawner anchors (red tiles), default off — like prediction tiles.
+		var spawnerTiles = new CheckBox { Name = "SpawnerTiles", Text = "Spawner tiles", ButtonPressed = _showSpawnerTiles };
+		spawnerTiles.AddThemeFontSizeOverride("font_size", 13);
+		spawnerTiles.Toggled += ApplySpawnerTiles;
+		rows.AddChild(spawnerTiles);
+
 		// S107 HUD scaffold — live debug control (no Apply, no restart, no launch flag, per the live-toggle rule).
 		// Each press cycles the STUBBED HudState (health/resource/portrait/cooldowns) through demo presets so the
 		// HUD states can be exercised without a server. Mutates only stub fields; never touches movement state.
@@ -1428,6 +1438,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_monsterAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnMonsterApplyPressed);
 		_monsterPauseMinMs = AddTuningField(rows, "pause min (ms)", OnMonsterApplyPressed);
 		_monsterPauseMaxMs = AddTuningField(rows, "pause max (ms)", OnMonsterApplyPressed);
+		_monsterRespawnMs = AddTuningField(rows, "respawn (ms)", OnMonsterApplyPressed);
 
 		var apply = new Button { Name = "MonsterApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -1628,6 +1639,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	{
 		_tuning.DebugCatoSprite = enabled;
 		_renderer?.RebuildPlayerVisuals();
+	}
+
+	// F1 Visual "Spawner tiles" live toggle — show/hide the red spawner-anchor debug markers (default off). The
+	// rendering is gated in UpdateMonsterHomeMarkers (which frees the markers next frame when off); this just flips
+	// the flag.
+	private void ApplySpawnerTiles(bool enabled)
+	{
+		_showSpawnerTiles = enabled;
 	}
 
 	// S79 live debug toggle (F5 "Prediction tiles"). Flip the shared flag and ensure the two ground markers
@@ -2421,6 +2440,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetField(_monsterAttackCooldownMs, t.AttackCooldownMs);
 		SetField(_monsterPauseMinMs, t.PauseMinMs);
 		SetField(_monsterPauseMaxMs, t.PauseMaxMs);
+		SetField(_monsterRespawnMs, t.RespawnMs);
 		_monsterPanelSeededVersion = _client.MonsterTuningVersion;
 	}
 
@@ -2601,6 +2621,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SendMonsterField(typeId, "attackCooldownMs", _monsterAttackCooldownMs);
 		SendMonsterField(typeId, "pauseMinMs", _monsterPauseMinMs);
 		SendMonsterField(typeId, "pauseMaxMs", _monsterPauseMaxMs);
+		SendMonsterField(typeId, "respawnMs", _monsterRespawnMs);
 
 		ShowInteractFeedback($"Monster tuning sent ({typeId}).");
 	}
@@ -3380,15 +3401,34 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		var homes = _client.MonsterHomes;
+		// F1 Visual "Spawner tiles" toggle (default OFF): a debug visualizer like the prediction-tiles markers.
+		// When off, free any shown markers and skip — the red spawner anchors only appear when the toggle is on.
+		if (!_showSpawnerTiles)
+		{
+			if (_monsterHomeMarkers.Count > 0)
+			{
+				foreach (var marker in _monsterHomeMarkers.Values)
+				{
+					marker.QueueFree();
+				}
 
-		// Drop markers whose monster home is gone.
+				_monsterHomeMarkers.Clear();
+			}
+
+			return;
+		}
+
+		// LIVING-ENEMIES P3: the red anchors are now keyed by persistent SPAWNER id (not monster network id), so they
+		// stay put across a monster's death/respawn. Source is SpawnerMarkers (added/dropped by SpawnerMarker messages).
+		var spawners = _client.SpawnerMarkers;
+
+		// Drop markers whose spawner is gone (left AOI / removed).
 		if (_monsterHomeMarkers.Count > 0)
 		{
 			_monsterHomeStaleScratch.Clear();
 			foreach (var id in _monsterHomeMarkers.Keys)
 			{
-				if (!homes.ContainsKey(id))
+				if (!spawners.ContainsKey(id))
 				{
 					_monsterHomeStaleScratch.Add(id);
 				}
@@ -3401,24 +3441,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			}
 		}
 
-		// Add/position a marker per known home (home is fixed for a monster's life, so positioning once on create is
-		// enough — but re-setting it is a cheap idempotent assignment that also handles a future moving home for free).
-		foreach (var (networkId, homeTile) in homes)
+		// Add/position a marker per known spawner (the spawner tile is fixed, so positioning once on create suffices —
+		// re-setting it is a cheap idempotent assignment).
+		foreach (var (spawnerId, spawnerTile) in spawners)
 		{
-			if (!_monsterHomeMarkers.TryGetValue(networkId, out var marker))
+			if (!_monsterHomeMarkers.TryGetValue(spawnerId, out var marker))
 			{
 				marker = new MeshInstance3D
 				{
-					Name = $"MonsterHome_{networkId}",
+					Name = $"Spawner_{spawnerId}",
 					Mesh = MonsterHomeMarkerMesh,
 					MaterialOverride = MonsterHomeMarkerMaterial,
 				};
 				_worldRoot.AddChild(marker);
-				_monsterHomeMarkers[networkId] = marker;
+				_monsterHomeMarkers[spawnerId] = marker;
 			}
 
 			// A hair above the ground (below the prediction markers' 0.04 so those still win any overlap z-fight).
-			marker.Position = TileToWorld(homeTile, 0.03f);
+			marker.Position = TileToWorld(spawnerTile, 0.03f);
 		}
 	}
 

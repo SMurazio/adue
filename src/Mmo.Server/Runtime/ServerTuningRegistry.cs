@@ -28,6 +28,10 @@ public static class ServerTuningRegistry
     public const string FreeAimRadiusTilesKey = "combat.radiusTiles";
     public const string AttackDamageKey = "combat.damage";
 
+    // LIVING-ENEMIES P3: the GLOBAL player respawn delay (ms) — how long after the player's HP hits 0 it respawns at
+    // spawn with full HP. Distinct from the per-TYPE monster respawn (slime.respawnMs, owned by MonsterTypeRegistry).
+    public const string PlayerRespawnMsKey = "player.respawnMs";
+
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys (P1 roam + P2 aggro/chase/attack) were
     // REPLACED by PER-TYPE keys ("<typeId>.<field>", e.g. slime.roamRadius) owned by MonsterTypeRegistry, which also
     // REPLICATES them to clients (MonsterTuningSnapshot) for the F1 Monster tab. The per-type keys are applied via a
@@ -54,6 +58,10 @@ public static class ServerTuningRegistry
     private const double MaxRadiusTiles = 16d;
     private const int MinAttackDamage = 0;
     private const int MaxAttackDamage = 10000;
+    // LIVING-ENEMIES P3 player respawn delay 0..60 s (0 = instant; bounded so a typo can't strand a dead player for
+    // minutes).
+    private const int MinPlayerRespawnMs = 0;
+    private const int MaxPlayerRespawnMs = 60000;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -109,13 +117,20 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case PlayerRespawnMsKey:
+            {
+                var clamped = Math.Clamp((int)Math.Round(value), MinPlayerRespawnMs, MaxPlayerRespawnMs);
+                tuning.PlayerRespawnMs = clamped;
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
     }
 
     public static bool IsKnownKey(string key) =>
-        key is InterestRadiusKey || IsCombatKey(key);
+        key is InterestRadiusKey or PlayerRespawnMsKey || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated
     // CombatTuningSnapshot to all clients when (and only when) one of these changes, so the wedge/predictor/viz stay

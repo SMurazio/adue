@@ -25,7 +25,11 @@ public static class ProtocolCodec
     // LIVING-ENEMIES P2-POLISH (v33): new server->client MonsterTuningMessage replicating the per-monster-TYPE tuning
     // (one entry per named template — slime now) so the F1 "Monster" tab can list the types and show + edit the live
     // values. Sent on login + on every per-type tuning change. Server + client ship together.
-    public const byte Version = 33;
+    // LIVING-ENEMIES P3 (v34): the per-monster MonsterHomeMessage (keyed by the monster's network id) is REPLACED by
+    // SpawnerMarkerMessage (keyed by a stable spawner id + an Active flag). The red tile now represents the PERSISTENT
+    // spawner, so it survives the monster's death/respawn; it is sent Active=true on spawner AOI-entry and Active=false
+    // on AOI-exit. Wire layout changed (uint SpawnerId + tile + bool), so the version bumps. Server + client ship together.
+    public const byte Version = 34;
 
     private const int MaxMonsterTypes = 256;
 
@@ -169,9 +173,10 @@ public static class ProtocolCodec
             case MonsterTuningMessage value:
                 WriteMonsterTuning(writer, value.Tuning);
                 break;
-            case MonsterHomeMessage value:
-                writer.Write(value.NetworkId);
-                WriteTile(writer, value.HomeTile);
+            case SpawnerMarkerMessage value:
+                writer.Write(value.SpawnerId);
+                WriteTile(writer, value.Tile);
+                writer.Write(value.Active);
                 break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
@@ -293,7 +298,7 @@ public static class ProtocolCodec
             MessageType.CombatTuning => new CombatTuningMessage(ReadCombatTuning(reader)),
             MessageType.DamageEvent => new DamageEventMessage(reader.ReadUInt32(), reader.ReadInt32(), reader.ReadUInt16()),
             MessageType.MonsterTuning => new MonsterTuningMessage(ReadMonsterTuning(reader)),
-            MessageType.MonsterHome => new MonsterHomeMessage(reader.ReadUInt32(), ReadTile(reader)),
+            MessageType.SpawnerMarker => new SpawnerMarkerMessage(reader.ReadUInt32(), ReadTile(reader), reader.ReadBoolean()),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
@@ -633,6 +638,7 @@ public static class ProtocolCodec
             writer.Write(t.AttackRange);
             writer.Write(t.AttackDamage);
             writer.Write(t.AttackCooldownMs);
+            writer.Write(t.RespawnMs);
         }
     }
 
@@ -659,9 +665,10 @@ public static class ProtocolCodec
             var attackRange = reader.ReadInt32();
             var attackDamage = reader.ReadInt32();
             var attackCooldownMs = reader.ReadInt32();
+            var respawnMs = reader.ReadInt32();
             types.Add(new MonsterTypeSnapshot(
                 id, displayName, maxHealth, moveSpeed, roamRadius, pauseMinMs, pauseMaxMs,
-                aggroRadius, chaseLeash, attackRange, attackDamage, attackCooldownMs));
+                aggroRadius, chaseLeash, attackRange, attackDamage, attackCooldownMs, respawnMs));
         }
 
         return new MonsterTuningSnapshot(types);

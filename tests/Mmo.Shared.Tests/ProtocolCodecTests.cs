@@ -55,8 +55,8 @@ public sealed class ProtocolCodecTests
     {
         var original = new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
         {
-            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000),
-            new MonsterTypeSnapshot("ogre", "Ogre", 250, 0.6, 3, 1000, 4000, 8, 20, 1, 25, 1500),
+            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000, 5000),
+            new MonsterTypeSnapshot("ogre", "Ogre", 250, 0.6, 3, 1000, 4000, 8, 20, 1, 25, 1500, 8000),
         }));
 
         var decoded = Assert.IsType<MonsterTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -69,18 +69,26 @@ public sealed class ProtocolCodecTests
         Assert.Equal("ogre", decoded.Tuning.Types[1].Id);
         Assert.Equal(250, decoded.Tuning.Types[1].MaxHealth);
         Assert.Equal(25, decoded.Tuning.Types[1].AttackDamage);
+        Assert.Equal(5000, decoded.Tuning.Types[0].RespawnMs);
+        Assert.Equal(8000, decoded.Tuning.Types[1].RespawnMs);
     }
 
-    // LIVING-ENEMIES P2-POLISH (v33): the per-monster leash-home message round-trips (network id + home tile).
+    // LIVING-ENEMIES P3 (v34): the persistent spawner red-tile marker round-trips (spawner id + tile + active flag).
     [Fact]
-    public void MonsterHomeRoundTrips()
+    public void SpawnerMarkerRoundTrips()
     {
-        var original = new MonsterHomeMessage(4242, new TileCoord(13, -7));
+        var original = new SpawnerMarkerMessage(4242, new TileCoord(13, -7), true);
 
-        var decoded = Assert.IsType<MonsterHomeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+        var decoded = Assert.IsType<SpawnerMarkerMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
-        Assert.Equal(4242u, decoded.NetworkId);
-        Assert.Equal(new TileCoord(13, -7), decoded.HomeTile);
+        Assert.Equal(4242u, decoded.SpawnerId);
+        Assert.Equal(new TileCoord(13, -7), decoded.Tile);
+        Assert.True(decoded.Active);
+
+        var inactive = new SpawnerMarkerMessage(7, default, false);
+        var decodedInactive = Assert.IsType<SpawnerMarkerMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(inactive)));
+        Assert.Equal(7u, decodedInactive.SpawnerId);
+        Assert.False(decodedInactive.Active);
     }
 
     [Fact]
@@ -348,12 +356,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyThree()
+    public void ProtocolVersionIsThirtyFour()
     {
-        // LIVING-ENEMIES P2-POLISH protocol bump (v32 -> v33): new server->client MonsterTuningMessage (per-type
-        // tuning for the F1 Monster tab) + MonsterHomeMessage (the red leash-anchor tile). New message types are
-        // breaking (server + client ship together). Pin the version so an accidental change is caught.
-        Assert.Equal(33, ProtocolCodec.Version);
+        // LIVING-ENEMIES P3 protocol bump (v33 -> v34): the per-monster MonsterHomeMessage was REPLACED by the
+        // persistent SpawnerMarkerMessage (spawner id + tile + active flag), and MonsterTypeSnapshot gained RespawnMs.
+        // The wire layout changed, so the version bumps (server + client ship together). Pin it so a change is caught.
+        Assert.Equal(34, ProtocolCodec.Version);
     }
 
     [Fact]
