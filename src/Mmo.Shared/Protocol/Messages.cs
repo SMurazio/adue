@@ -327,6 +327,28 @@ public sealed record SpawnerMarkerMessage(uint SpawnerId, TileCoord Tile, bool A
     public MessageType Type => MessageType.SpawnerMarker;
 }
 
+// LOOT P4c (protocol v35): the loot-window verb a client sends against a corpse it has OPEN. Kind selects the
+// action: TakeItem takes the single stack identified by TemplateKey, LootAll takes everything that fits, Close
+// releases the window (the server forgets the open-loot pairing). TemplateKey is meaningful only for TakeItem (it
+// is empty otherwise). OPENING the window is NOT a LootAction — it reuses the existing InteractRequest on a corpse
+// (the same E-key path that targets corpses), so the open path needs no new client input. Reliable-ordered: a
+// dropped take or close must not be lost (loot is low-rate, so reliable retransmit is fine — unlike movement).
+public sealed record LootActionMessage(uint CorpseNetworkId, LootActionKind Kind, string TemplateKey) : IProtocolMessage
+{
+    public MessageType Type => MessageType.LootAction;
+}
+
+// LOOT P4c (protocol v35): server->owner replication of an OPEN corpse's live contents — what the loot window
+// lists. Open=true carries the current remaining stacks (template key + quantity + rarity tier) for the corpse the
+// owner just opened or just looted from; the window shows/refreshes to these. Open=false (empty Items) tells the
+// client to CLOSE the window — the last item was taken / loot-all emptied it / the player walked out of range / the
+// corpse decayed. CorpseNetworkId ties the payload to the targeted corpse entity so a stale window for a different
+// corpse can't be confused. Owner-only + reliable-ordered, like InventoryUpdate (corpse loot never AOI-replicates).
+public sealed record CorpseContentsMessage(uint CorpseNetworkId, bool Open, IReadOnlyList<CorpseItem> Items) : IProtocolMessage
+{
+    public MessageType Type => MessageType.CorpseContents;
+}
+
 public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntityDespawn;

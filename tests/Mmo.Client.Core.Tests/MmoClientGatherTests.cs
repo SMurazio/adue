@@ -71,6 +71,64 @@ public sealed class MmoClientGatherTests
         Assert.False(Assert.Single(client.GetRenderStates(TimeSpan.Zero)).Depleted);
     }
 
+    // LOOT P4c: an OPEN CorpseContents fills the client's loot mirror with rarity-tagged rows + the corpse id; a CLOSE
+    // (Open=false) clears it. CorpseLootVersion bumps on each so the HUD rebuilds only on change.
+    [Fact]
+    public void CorpseContentsOpensAndClosesTheLootMirror()
+    {
+        using var client = CreateClient(out _);
+        Assert.Null(client.CorpseLoot);
+        var v0 = client.CorpseLootVersion;
+
+        client.HandleMessageForTests(new CorpseContentsMessage(55, true, new[]
+        {
+            new CorpseItem("slime_gel", 3, Rarity.Common),
+            new CorpseItem("slime_core", 1, Rarity.Legendary),
+        }));
+
+        Assert.NotNull(client.CorpseLoot);
+        Assert.Equal(55u, client.CorpseLoot!.CorpseNetworkId);
+        Assert.True(client.CorpseLootVersion > v0);
+
+        var rows = client.CorpseLoot.ToRows(ItemRegistry.Default);
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, r => r.TemplateKey == "slime_gel" && r.Quantity == 3 && r.Rarity == Rarity.Common && r.DisplayName == "Slime Gel");
+        Assert.Contains(rows, r => r.TemplateKey == "slime_core" && r.Rarity == Rarity.Legendary);
+
+        var vOpen = client.CorpseLootVersion;
+        client.HandleMessageForTests(new CorpseContentsMessage(55, false, System.Array.Empty<CorpseItem>()));
+        Assert.Null(client.CorpseLoot);
+        Assert.True(client.CorpseLootVersion > vOpen);
+    }
+
+    // LOOT P4c: the loot-window send verbs emit the right reliable LootAction (kind + corpse id + key); Close also
+    // clears the local mirror immediately so the panel hides without waiting for the server round-trip.
+    [Fact]
+    public void LootActionSendsEmitTheRightVerbs()
+    {
+        using var client = CreateClient(out var outbound);
+
+        client.SendLootItem(99, "arcane_dust");
+        var take = Assert.Single(outbound.OfType<LootActionMessage>());
+        Assert.Equal(99u, take.CorpseNetworkId);
+        Assert.Equal(LootActionKind.TakeItem, take.Kind);
+        Assert.Equal("arcane_dust", take.TemplateKey);
+
+        outbound.Clear();
+        client.SendLootAll(99);
+        var all = Assert.Single(outbound.OfType<LootActionMessage>());
+        Assert.Equal(LootActionKind.LootAll, all.Kind);
+
+        // Open a window, then Close: the close verb is sent AND the mirror clears immediately.
+        client.HandleMessageForTests(new CorpseContentsMessage(99, true, new[] { new CorpseItem("slime_gel", 1, Rarity.Common) }));
+        Assert.NotNull(client.CorpseLoot);
+        outbound.Clear();
+        client.SendCloseLoot(99);
+        var close = Assert.Single(outbound.OfType<LootActionMessage>());
+        Assert.Equal(LootActionKind.Close, close.Kind);
+        Assert.Null(client.CorpseLoot);
+    }
+
     private static MmoClient CreateClient(out List<IProtocolMessage> outbound)
     {
         outbound = [];

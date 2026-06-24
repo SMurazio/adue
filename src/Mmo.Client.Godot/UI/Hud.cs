@@ -40,6 +40,10 @@ public partial class Hud : CanvasLayer
     // a child; MmoClientRoot toggles it (Tab) and feeds it the (Version-guarded) inventory rows. Hidden by default.
     private InventoryWindow? _inventory;
 
+    // LOOT P4c: the corpse loot window. The HUD owns it as a child; MmoClientRoot drives open/close + feeds the
+    // (CorpseLootVersion-guarded) rows and forwards its take/loot-all/close events to the MmoClient send methods.
+    private LootWindow? _loot;
+
     // The portrait's base (white) modulate so we can toggle the low-health red tint without losing the texture.
     private static readonly Color PortraitNormalTint = Colors.White;
     private static readonly Color PortraitLowHealthTint = new(1f, 0.45f, 0.45f, 1f);
@@ -58,6 +62,7 @@ public partial class Hud : CanvasLayer
         BuildActionBar();
         MountMinimap();
         MountInventoryWindow();
+        MountLootWindow();
     }
 
     // S111: instantiate the Inventory window scene and add it as a child of the HUD (hidden by default). Falls
@@ -76,6 +81,17 @@ public partial class Hud : CanvasLayer
     {
         _inventory?.Toggle();
     }
+
+    // LOOT P4c: instantiate the corpse loot window (built programmatically; no .tscn) and add it as a hidden child.
+    // MmoClientRoot subscribes to its events (in MountHud-time wiring) and drives its visibility via the
+    // CorpseLootVersion-guarded refresh. Exposed so MmoClientRoot can hook the events + feed rows.
+    private void MountLootWindow()
+    {
+        _loot = new LootWindow { Visible = false };
+        AddChild(_loot);
+    }
+
+    public LootWindow? Loot => _loot;
 
     // S111: re-present the current inventory in the window. MmoClientRoot calls this from its Version-guarded
     // UpdateInventory() with the SAME ToOrderedRows(registry) data the old text panel used — presentation only.

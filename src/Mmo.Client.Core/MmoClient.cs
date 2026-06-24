@@ -354,6 +354,14 @@ public sealed class MmoClient : IDisposable
     // until the first interaction completes.
     public InteractResultInfo? LastInteractResult { get; private set; }
 
+    // LOOT P4c: the OPEN corpse loot window's live contents, last replicated by CorpseContentsMessage. Null when no
+    // window is open (never opened, or the server sent Open=false — emptied / decayed / out of range). The Godot HUD
+    // reads this read-only to render the rarity-coloured loot panel; the server stays authoritative (the panel sends
+    // SendLootItem / SendLootAll / SendCloseLoot and the confirmed contents land back here). CorpseLootVersion bumps on
+    // every change (open / refresh / close) so the Godot layer can cheaply detect "rebuild the panel" without diffing.
+    public ClientCorpseLoot? CorpseLoot { get; private set; }
+    public int CorpseLootVersion { get; private set; }
+
     public IReadOnlyList<ReplicatedEntity> Entities => _entities.Values.Select(static entity => entity.ToSnapshot()).ToArray();
 
     public IReadOnlyList<EntityRenderState> GetRenderStates()
@@ -1010,6 +1018,9 @@ public sealed class MmoClient : IDisposable
             case InventoryUpdateMessage inventory:
                 _inventory.Apply(inventory.ChangedStacks);
                 break;
+            case CorpseContentsMessage corpse:
+                HandleCorpseContents(corpse);
+                break;
             case PlayerStatsMessage stats:
                 LocalStats = stats.Stats;
                 break;
@@ -1056,6 +1067,48 @@ public sealed class MmoClient : IDisposable
     {
         var sequence = (LastInteractResult?.Sequence ?? 0) + 1;
         LastInteractResult = new InteractResultInfo(interact.Success, interact.Reason, sequence);
+    }
+
+    // LOOT P4c: adopt an OPEN corpse's replicated contents (or a close). Open=true sets/refreshes CorpseLoot to the new
+    // rarity-coloured rows; Open=false (or empty) clears it so the Godot panel hides. Pure mirror — no client authority;
+    // the server validates every take. Bumps CorpseLootVersion so the HUD rebuilds only when something changed.
+    private void HandleCorpseContents(CorpseContentsMessage message)
+    {
+        if (message.Open && message.Items.Count > 0)
+        {
+            CorpseLoot = ClientCorpseLoot.From(message.CorpseNetworkId, message.Items);
+        }
+        else
+        {
+            // Close (Open=false) OR an open with zero items (an emptied corpse the server hasn't despawned yet — treat
+            // as closed; the despawn/Close follows). Drop the window.
+            CorpseLoot = null;
+        }
+
+        CorpseLootVersion++;
+    }
+
+    // LOOT P4c: send a take-ONE-stack request for the open corpse (the window's per-row take button). Reliable-ordered;
+    // the server validates the open pairing + adjacency + eligibility and pushes the refreshed CorpseContents (or a
+    // despawn-close if it emptied). No-op if no window is open. corpseNetworkId guards against a stale window.
+    public void SendLootItem(uint corpseNetworkId, string templateKey)
+    {
+        Send(new LootActionMessage(corpseNetworkId, LootActionKind.TakeItem, templateKey), DeliveryMethod.ReliableOrdered);
+    }
+
+    // LOOT P4c: send a loot-ALL request for the open corpse (the window's "Loot all" button). Reliable-ordered.
+    public void SendLootAll(uint corpseNetworkId)
+    {
+        Send(new LootActionMessage(corpseNetworkId, LootActionKind.LootAll, string.Empty), DeliveryMethod.ReliableOrdered);
+    }
+
+    // LOOT P4c: tell the server we closed the loot window (Escape / close button / out of range) so it forgets the
+    // open-loot pairing. Also clears the local mirror immediately so the panel hides without waiting for a round-trip.
+    public void SendCloseLoot(uint corpseNetworkId)
+    {
+        Send(new LootActionMessage(corpseNetworkId, LootActionKind.Close, string.Empty), DeliveryMethod.ReliableOrdered);
+        CorpseLoot = null;
+        CorpseLootVersion++;
     }
 
     private void HandleZoneInfo(ZoneInfoMessage zone)

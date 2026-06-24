@@ -226,6 +226,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
+	// LOOT P4c: the last CorpseLootVersion we rendered into the loot window, so UpdateLootWindow only rebuilds the
+	// panel (open/refresh/close) when the replicated corpse contents actually changed.
+	private int _renderedCorpseLootVersion = -1;
 	private long _lastInteractResultSequence;
 	private double _toastExpiresAt;
 	private double _elapsedSeconds;
@@ -410,6 +413,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		_hud = hud;
 		AddChild(_hud);
+
+		// LOOT P4c: wire the loot window's take/loot-all/close intents to the client send methods. The window carries
+		// the open corpse's network id so the server can guard a stale window. Hooked once at mount.
+		if (_hud.Loot is { } lootWindow)
+		{
+			lootWindow.TakeItemRequested += templateKey => _client?.SendLootItem(lootWindow.CorpseNetworkId, templateKey);
+			lootWindow.LootAllRequested += () => _client?.SendLootAll(lootWindow.CorpseNetworkId);
+			lootWindow.CloseRequested += () => _client?.SendCloseLoot(lootWindow.CorpseNetworkId);
+		}
 	}
 
 	public override void _Process(double delta)
@@ -586,6 +598,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.Escape && _chatInput?.HasFocus() == true)
 		{
 			_chatInput.ReleaseFocus();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// LOOT P4c: Escape closes the loot window when it's open (and chat isn't focused). Raises the window's close
+		// (which tells the server to forget the open-loot pairing + hides the panel locally).
+		if (key.Keycode == Key.Escape && _chatInput?.HasFocus() != true && _hud?.Loot is { IsOpen: true } lootWindow)
+		{
+			lootWindow.RaiseCloseRequested();
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -2035,6 +2056,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		UpdateInventory();
+		UpdateLootWindow();
 		UpdateInteractFeedback(now);
 		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
 		// reads the freshest local position/facing. Do not re-add it here — that reintroduces the one-frame-stale feed.
@@ -2215,6 +2237,34 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_renderedInventoryVersion = inventory.Version;
 		var rows = inventory.ToOrderedRows(_itemRegistry);
 		_hud.SetInventory(rows, _itemRegistry);
+	}
+
+	// LOOT P4c: drive the corpse loot window from the client's replicated mirror (CorpseLootVersion-guarded). When the
+	// version changes we either fill+show the window from the open corpse's rarity-tagged rows (server sent Open=true)
+	// or hide it (server sent Open=false / close — emptied, decayed, out of range, despawned). Presentation only; the
+	// server is authoritative for every take. Resolves display names against the registry, like the inventory window.
+	private void UpdateLootWindow()
+	{
+		if (_hud?.Loot is not { } window || _client is null)
+		{
+			return;
+		}
+
+		if (_client.CorpseLootVersion == _renderedCorpseLootVersion)
+		{
+			return;
+		}
+
+		_renderedCorpseLootVersion = _client.CorpseLootVersion;
+
+		if (_client.CorpseLoot is { } loot)
+		{
+			window.SetContents(loot.CorpseNetworkId, loot.ToRows(_itemRegistry));
+		}
+		else
+		{
+			window.HideWindow();
+		}
 	}
 
 	private void UpdateInteractFeedback(TimeSpan now)

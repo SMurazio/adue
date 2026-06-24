@@ -86,6 +86,52 @@ public sealed class Corpse
     // inventory (for the feedback toast), and whether the corpse is now empty (so the caller despawns it).
     public readonly record struct LootAllResult(bool Looted, IReadOnlyList<ItemStack> Transferred, bool CorpseEmptied);
 
+    // LOOT P4c: the result of a single-stack take. Took = whether ANY of the named stack moved (false if the key
+    // isn't in the corpse or none of it fit); Transferred = how much actually moved (for the toast / inventory
+    // delta); CorpseEmptied = whether the corpse is now empty (so the caller despawns it instantly).
+    public readonly record struct TakeItemResult(bool Took, ItemStack Transferred, bool CorpseEmptied);
+
+    // LOOT P4c: take the SINGLE stack identified by `templateKey` into `inventory` via Inventory.TryAdd (stack-cap
+    // honouring; an un-added remainder stays in the corpse — nothing vanishes, same as TryLootAll). The window's
+    // per-item take button calls this. Eligibility is NOT re-checked here (the caller gates it, like TryLootAll), so
+    // this stays a pure transfer primitive. An unknown key, an absent stack, or a full inventory returns Took=false
+    // with the corpse untouched. A take that empties the corpse reports CorpseEmptied so the caller despawns it.
+    public TakeItemResult TryTakeItem(string templateKey, Inventory inventory)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+
+        if (string.IsNullOrEmpty(templateKey))
+        {
+            return new TakeItemResult(false, default, _contents.Count == 0);
+        }
+
+        var index = _contents.FindIndex(s => s.TemplateKey == templateKey);
+        if (index < 0)
+        {
+            return new TakeItemResult(false, default, _contents.Count == 0);
+        }
+
+        var stack = _contents[index];
+        var added = inventory.TryAdd(stack.TemplateKey, stack.Quantity);
+        if (added <= 0)
+        {
+            // Inventory full for this template (or unknown key): leave it whole in the corpse.
+            return new TakeItemResult(false, default, _contents.Count == 0);
+        }
+
+        var remaining = stack.Quantity - added;
+        if (remaining <= 0)
+        {
+            _contents.RemoveAt(index);
+        }
+        else
+        {
+            _contents[index] = stack.WithQuantity(remaining);
+        }
+
+        return new TakeItemResult(true, new ItemStack(stack.TemplateKey, added), _contents.Count == 0);
+    }
+
     // Transfers every stack into `inventory` via Inventory.TryAdd (which honours per-template stack caps and returns
     // the amount actually added). Items that don't fit (a full/partial inventory) are LEFT in the corpse with their
     // remaining quantity — nothing is vanished. Returns what actually moved + whether the corpse is now empty.

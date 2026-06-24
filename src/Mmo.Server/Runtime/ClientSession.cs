@@ -133,6 +133,18 @@ public sealed class ClientSession
         ClientDrivenMovement = clientDriven;
     }
 
+    // LOOT P4c: the ENTITY id of the corpse this session currently has its loot window OPEN on, or null if no
+    // window is open. Set when the player opens a corpse (InteractRequest on it, eligibility-passed); cleared on
+    // Close, on the corpse despawning/decaying, or on the player walking out of range. The server routes a
+    // LootActionMessage to THIS corpse and pushes CorpseContents refreshes here, so a stale window can't loot a
+    // different corpse. Keyed by entity id (stable for the corpse's life), like the GameServer's _corpses map.
+    public ulong? OpenCorpseEntityId { get; private set; }
+
+    public void SetOpenCorpse(ulong? corpseEntityId)
+    {
+        OpenCorpseEntityId = corpseEntityId;
+    }
+
     // LIVING-ENEMIES P3: the player-death respawn guard. When the player's HP hits 0 it DIES: IsDead is set and
     // RespawnAtTick is the tick the server will teleport it back to spawn at full HP. While IsDead the player must not
     // take further hits, act, or die again (a simple "downed" window). Cleared on respawn. RespawnAtTick is null when

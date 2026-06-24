@@ -12,9 +12,10 @@ namespace Mmo.Server.Runtime;
 // AI pass, so a live change takes effect on the next tick with no torn state (single-threaded tick loop).
 //
 // Defaults migrate the former global monster.* block verbatim (roam 4 / pause 2000-5000 / aggro 6 / leash 12 /
-// attackRange 1 / attackDamage 10 / attackCooldown 1000), EXCEPT MoveSpeedMultiplier, which is the NEW slower-than-
-// player default (0.8 → the slime steps ~312 ms vs the player's 250 ms base, so the dumb ones are outrunnable), and
-// MaxHealth (100, the CharacterStats default, now an explicit per-type knob so a tankier type is one number away).
+// attackRange 1 / attackDamage 10 / attackCooldown 1000), EXCEPT MoveSpeedMultiplier, which is the slower-than-
+// player default (0.6 → the slime steps ~417 ms vs the player's 250 ms base, so the dumb ones are clearly
+// outrunnable), and MaxHealth (100, the CharacterStats default, now an explicit per-type knob so a tankier type
+// is one number away).
 public sealed class MonsterType
 {
     public MonsterType(string id, string displayName)
@@ -32,9 +33,16 @@ public sealed class MonsterType
     // Per-type max HP — the monster spawns at full of this. Default 100 (the CharacterStats default).
     public int MaxHealth { get; set; } = 100;
 
-    // Per-type movement speed as a multiplier of the player's base cadence (SpeedMultiplier on the spawned entity).
-    // < 1 = slower than the player (outrunnable), 1 = same, > 1 = faster. Default 0.8 (slower).
-    public double MoveSpeedMultiplier { get; set; } = 0.8;
+    // Per-type movement speed as a multiplier of the player's base cadence. < 1 = slower than the player
+    // (outrunnable), 1 = same, > 1 = faster. Default 0.6 — at 0.6x the slime's effective step cooldown is
+    // round(5 / 0.6) = 8 ticks (~417 ms) vs the player's base 250 ms, so it is clearly outrunnable.
+    //
+    // LOOT P4c: this is the TYPE's LIVE knob — StepMonsterAi derives a stepping monster's cadence from this
+    // value EACH TICK (EffectiveStepCooldownTicksFor), so editing "slime.moveSpeed" on the F1 Monster tab dials
+    // ALREADY-SPAWNED slimes, consistent with the other live per-type Tunables. (The spawned entity still gets a
+    // one-time SpeedMultiplier copy at spawn for parity with the player /speed path, but the monster cadence no
+    // longer reads it — the type value is authoritative for monster stepping.)
+    public double MoveSpeedMultiplier { get; set; } = 0.6;
 
     // P1 roam knobs (migrated from the global monster.* defaults).
     public int RoamRadius { get; set; } = 4;

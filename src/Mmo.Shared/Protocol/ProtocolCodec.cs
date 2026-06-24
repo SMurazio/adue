@@ -29,13 +29,22 @@ public static class ProtocolCodec
     // SpawnerMarkerMessage (keyed by a stable spawner id + an Active flag). The red tile now represents the PERSISTENT
     // spawner, so it survives the monster's death/respawn; it is sent Active=true on spawner AOI-entry and Active=false
     // on AOI-exit. Wire layout changed (uint SpawnerId + tile + bool), so the version bumps. Server + client ship together.
-    public const byte Version = 34;
+    // LOOT P4c (v35): the corpse loot WINDOW. Two new messages — client->server LootActionMessage (corpse net id +
+    // LootActionKind {TakeItem/LootAll/Close} + a template key for TakeItem) and server->owner CorpseContentsMessage
+    // (corpse net id + Open flag + a CorpseItem[] of {template key, quantity, rarity}). Opening the window reuses the
+    // existing InteractRequest on a corpse. Corpse contents now replicate (eligibility-gated) where P4b kept them
+    // server-side. Server + client ship together.
+    public const byte Version = 35;
 
     private const int MaxMonsterTypes = 256;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
     private const int MaxInventoryUpdateStacks = 1024;
+
+    // LOOT P4c: a corpse holds a handful of rolled stacks; bound the decoded list so a malformed/hostile packet
+    // can't allocate unboundedly (same defensive cap idea as the inventory-update bound).
+    private const int MaxCorpseItems = 256;
 
     // NET1 Stage 1: an unreliable MoveInput packet carries the head input plus a small redundancy window
     // of prior inputs (deltas). Bound the decoded window so a malformed/hostile packet can't allocate
@@ -94,6 +103,11 @@ public static class ProtocolCodec
                 // SWING-COMMIT-FIX (v30): authored tick last, so the server can root the swing at the same logical
                 // tick the predictor did. Mirrored in the Attack decode (read in the same order).
                 writer.Write(value.AuthoredTick);
+                break;
+            case LootActionMessage value:
+                writer.Write(value.CorpseNetworkId);
+                writer.Write((byte)value.Kind);
+                WriteString(writer, value.TemplateKey);
                 break;
             case ChatSendMessage value:
                 WriteString(writer, value.Text);
@@ -177,6 +191,9 @@ public static class ProtocolCodec
                 writer.Write(value.SpawnerId);
                 WriteTile(writer, value.Tile);
                 writer.Write(value.Active);
+                break;
+            case CorpseContentsMessage value:
+                WriteCorpseContents(writer, value);
                 break;
             case EntityDespawnMessage value:
                 writer.Write(value.ServerTick);
@@ -267,6 +284,7 @@ public static class ProtocolCodec
             MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
             MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
             MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16(), reader.ReadUInt32()),
+            MessageType.LootAction => new LootActionMessage(reader.ReadUInt32(), ReadLootActionKind(reader), ReadString(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
@@ -299,6 +317,7 @@ public static class ProtocolCodec
             MessageType.DamageEvent => new DamageEventMessage(reader.ReadUInt32(), reader.ReadInt32(), reader.ReadUInt16()),
             MessageType.MonsterTuning => new MonsterTuningMessage(ReadMonsterTuning(reader)),
             MessageType.SpawnerMarker => new SpawnerMarkerMessage(reader.ReadUInt32(), ReadTile(reader), reader.ReadBoolean()),
+            MessageType.CorpseContents => ReadCorpseContents(reader),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
             _ => throw new ProtocolException($"Unknown message type {(ushort)type}.")
@@ -788,6 +807,71 @@ public static class ProtocolCodec
         }
 
         return new InventoryUpdateMessage(stacks);
+    }
+
+    // LOOT P4c: a LootActionKind is one wire byte; an out-of-range value is a protocol error (not a silent default,
+    // mirroring ReadAttackKind) so a corrupt/hostile packet can't be quietly misinterpreted as e.g. LootAll.
+    private static LootActionKind ReadLootActionKind(BinaryReader reader)
+    {
+        var raw = reader.ReadByte();
+        if (raw > (byte)LootActionKind.Close)
+        {
+            throw new ProtocolException($"Unknown loot action kind {raw}.");
+        }
+
+        return (LootActionKind)raw;
+    }
+
+    // LOOT P4c: wire layout = corpse network id (uint), Open (bool), then a ushort count + that many
+    // {TemplateKey (string), Quantity (int >= 0), Rarity (byte)} rows. Mirrored in ReadCorpseContents.
+    private static void WriteCorpseContents(BinaryWriter writer, CorpseContentsMessage value)
+    {
+        if (value.Items.Count > MaxCorpseItems)
+        {
+            throw new ProtocolException($"Corpse contents have too many items: {value.Items.Count}.");
+        }
+
+        writer.Write(value.CorpseNetworkId);
+        writer.Write(value.Open);
+        writer.Write((ushort)value.Items.Count);
+        foreach (var item in value.Items)
+        {
+            WriteString(writer, item.TemplateKey);
+            if (item.Quantity < 0)
+            {
+                throw new ProtocolException($"Corpse item quantity is negative: {item.Quantity}.");
+            }
+
+            writer.Write(item.Quantity);
+            writer.Write((byte)item.Rarity);
+        }
+    }
+
+    private static CorpseContentsMessage ReadCorpseContents(BinaryReader reader)
+    {
+        var corpseNetworkId = reader.ReadUInt32();
+        var open = reader.ReadBoolean();
+        var count = reader.ReadUInt16();
+        if (count > MaxCorpseItems)
+        {
+            throw new ProtocolException($"Corpse contents have too many items: {count}.");
+        }
+
+        var items = new List<CorpseItem>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadString(reader);
+            var quantity = reader.ReadInt32();
+            if (quantity < 0)
+            {
+                throw new ProtocolException($"Corpse item quantity is negative: {quantity}.");
+            }
+
+            var rarity = (Rarity)reader.ReadByte();
+            items.Add(new CorpseItem(key, quantity, rarity));
+        }
+
+        return new CorpseContentsMessage(corpseNetworkId, open, items);
     }
 
     private static void WriteString(BinaryWriter writer, string value)

@@ -37,9 +37,10 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(1000, slime.AttackCooldownMs);
         Assert.Equal(100, slime.MaxHealth);
 
-        // The NEW slower-than-player default: < 1.0 so the player (base 1.0) outruns it.
+        // The slower-than-player default: < 1.0 so the player (base 1.0) outruns it. LOOT P4c lowered it 0.8 → 0.6
+        // (clearly outrunnable: ~417 ms/step vs the player's 250 ms).
         Assert.True(slime.MoveSpeedMultiplier < 1.0);
-        Assert.Equal(0.8, slime.MoveSpeedMultiplier, 3);
+        Assert.Equal(0.6, slime.MoveSpeedMultiplier, 3);
 
         // LOOT P4a: the slime references the "slime_loot" table (static seed data; not live-tunable).
         Assert.Equal("slime_loot", slime.LootTableId);
@@ -144,9 +145,10 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(4, t.RoamRadius);
     }
 
-    // LIVING-ENEMIES P2-POLISH item 4: applying the slime type's default move speed to an entity yields a LONGER
-    // effective step cooldown than the player's base (the monster is slower → outrunnable). Base 250 ms @ 20 Hz = 5
-    // ticks; at 0.8x the slime's effective cooldown rounds to 6 ticks (~312 ms) — strictly slower than the player.
+    // LIVING-ENEMIES P2-POLISH item 4 (LOOT P4c default tweak): applying the slime type's default move speed yields a
+    // LONGER effective step cooldown than the player's base (the monster is slower → outrunnable). Base 250 ms @ 20 Hz
+    // = 5 ticks; at the NEW 0.6x default the slime's effective cooldown rounds to 8 ticks (~417 ms) — clearly slower
+    // than the player.
     [Fact]
     public void SlimeMoveSpeedMakesItStepSlowerThanTheBase()
     {
@@ -163,7 +165,7 @@ public sealed class MonsterTypeRegistryTests
         var effective = monster.EffectiveStepCooldownTicks(baseCooldownTicks, minTicks: 1, maxTicks: 100);
 
         Assert.True(effective > baseCooldownTicks, $"expected slime cadence > {baseCooldownTicks}, got {effective}.");
-        Assert.Equal(6u, effective); // round(5 / 0.8) = 6.
+        Assert.Equal(8u, effective); // round(5 / 0.6) = 8.
     }
 
     [Fact]
@@ -205,5 +207,35 @@ public sealed class MonsterTypeRegistryTests
         // The snapshot reflects it.
         var snapshot = registry.BuildSnapshot();
         Assert.Equal(300000, snapshot.Types.Single().RespawnMs);
+    }
+
+    // LOOT P4c (monster-types follow-up #1): the monster's step cadence is now derived from its TYPE's LIVE
+    // MoveSpeedMultiplier each tick (GameServer.EffectiveStepCooldownTicksFor), not the entity's spawn-time
+    // SpeedMultiplier — so editing "slime.moveSpeed" re-paces an ALREADY-SPAWNED slime on the next tick. This pins the
+    // derivation: applying a new moveSpeed changes the cadence the type yields (the formula StepMonsterAi feeds the AI),
+    // proving the knob dials live. (round(base / multiplier), clamped — matching the server helper.)
+    [Fact]
+    public void EditingTypeMoveSpeedChangesTheDerivedCadence()
+    {
+        var registry = Registry();
+        var slime = registry.Default;
+
+        // Mirror GameServer.EffectiveStepCooldownTicksFor: base 5 ticks (250 ms @ 20 Hz), min 1, max 100.
+        const uint baseTicks = 5;
+        static uint Cadence(double multiplier) =>
+            (uint)Math.Clamp((long)Math.Max(1, Math.Round(baseTicks / multiplier, MidpointRounding.AwayFromZero)), 1L, 100L);
+
+        // Default 0.6 -> round(5 / 0.6) = 8 ticks (the new outrunnable cadence).
+        Assert.Equal(8u, Cadence(slime.MoveSpeedMultiplier));
+
+        // An admin speeds the type up to 1.0 (player pace). Because StepMonsterAi reads the TYPE value each tick, an
+        // already-spawned slime's cadence becomes round(5 / 1.0) = 5 next tick — strictly faster than before.
+        Assert.True(registry.TryApply("slime.moveSpeed", 1.0d, out _));
+        Assert.Equal(5u, Cadence(slime.MoveSpeedMultiplier));
+        Assert.True(Cadence(slime.MoveSpeedMultiplier) < 8u, "speeding the type up must shorten the cadence live.");
+
+        // And slowing it to 0.5 lengthens it to round(5 / 0.5) = 10 ticks — the same live re-pacing the other way.
+        Assert.True(registry.TryApply("slime.moveSpeed", 0.5d, out _));
+        Assert.Equal(10u, Cadence(slime.MoveSpeedMultiplier));
     }
 }

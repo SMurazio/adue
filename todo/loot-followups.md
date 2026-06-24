@@ -25,3 +25,17 @@ The corpse/ledger LOGIC is exhaustively pure-tested, but the live GameServer WIR
 `KillMonster`→`RollAndSpawnCorpse`, `HandleCorpseLoot`, `DecayCorpses` — has no headless integration test (no
 codebase precedent for an attack-to-death GameServer harness). The P4b reviewer traced it line-by-line + the human
 live-verifies. If a GameServer-level test harness ever lands, add a kill→corpse→loot→despawn + decay integration test.
+
+## 5. (P4c nits, optional polish)
+- **No "bags full" feedback on a failed single Take.** When a window `TakeItem` fails (inventory full / unknown key),
+  the server just re-sends unchanged contents — the row silently doesn't move. Add an `inventory_full` toast like the
+  old grab-all path (`HandleLootAction`, the `Took==false` branch).
+- **Unvalidated rarity byte on `ReadCorpseContents` decode** — unlike sibling readers it doesn't range-check the
+  `(Rarity)` cast. Server→client only + the window falls back to Common, so no crash; tighten for consistency.
+
+## 6. (P4c deferred) Corpse-on-the-dead-monster visual position
+The corpse spawns at the authoritative death TILE (correct), but a fast monster's CLIENT visual lags the tile (interp),
+so the corpse can appear ~1 tile off from where the monster visually died. Lowering slime speed to 0.6 shrinks it.
+A precise fix means rendering the corpse at the dead entity's LAST RENDERED client position — needs new-Corpse↔dead-Monster
+correlation + an interp-offset carry (the renderer keys by network id, no last-position cache). Deferred as not worth the
+hack; revisit if it bugs at the slower speed or for faster future monsters.

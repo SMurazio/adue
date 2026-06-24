@@ -356,12 +356,62 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyFour()
+    public void ProtocolVersionIsThirtyFive()
     {
-        // LIVING-ENEMIES P3 protocol bump (v33 -> v34): the per-monster MonsterHomeMessage was REPLACED by the
-        // persistent SpawnerMarkerMessage (spawner id + tile + active flag), and MonsterTypeSnapshot gained RespawnMs.
-        // The wire layout changed, so the version bumps (server + client ship together). Pin it so a change is caught.
-        Assert.Equal(34, ProtocolCodec.Version);
+        // LOOT P4c protocol bump (v34 -> v35): two new messages — client->server LootActionMessage (corpse loot-window
+        // verb) and server->owner CorpseContentsMessage (the open corpse's rarity-tagged contents). Corpse contents now
+        // replicate where P4b kept them server-side. Server + client ship together. Pin it so a change is caught.
+        Assert.Equal(35, ProtocolCodec.Version);
+    }
+
+    // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).
+    [Fact]
+    public void LootActionRoundTrips()
+    {
+        var take = new LootActionMessage(4242u, LootActionKind.TakeItem, "slime_gel");
+        var decodedTake = Assert.IsType<LootActionMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(take)));
+        Assert.Equal(take, decodedTake);
+
+        var all = new LootActionMessage(7u, LootActionKind.LootAll, string.Empty);
+        Assert.Equal(all, ProtocolCodec.Decode(ProtocolCodec.Encode(all)));
+
+        var close = new LootActionMessage(7u, LootActionKind.Close, string.Empty);
+        Assert.Equal(close, ProtocolCodec.Decode(ProtocolCodec.Encode(close)));
+    }
+
+    // LOOT P4c: an OPEN corpse's contents round-trip — the corpse net id, the Open flag, and each item's template key,
+    // quantity, and rarity tier (the wire data the rarity-coloured loot window renders).
+    [Fact]
+    public void CorpseContentsRoundTrips()
+    {
+        var original = new CorpseContentsMessage(987u, true, new[]
+        {
+            new CorpseItem("slime_gel", 3, Rarity.Common),
+            new CorpseItem("arcane_dust", 1, Rarity.Rare),
+            new CorpseItem("slime_core", 2, Rarity.Legendary),
+        });
+
+        var decoded = Assert.IsType<CorpseContentsMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(987u, decoded.CorpseNetworkId);
+        Assert.True(decoded.Open);
+        Assert.Equal(3, decoded.Items.Count);
+        Assert.Equal(new CorpseItem("slime_gel", 3, Rarity.Common), decoded.Items[0]);
+        Assert.Equal(new CorpseItem("arcane_dust", 1, Rarity.Rare), decoded.Items[1]);
+        Assert.Equal(new CorpseItem("slime_core", 2, Rarity.Legendary), decoded.Items[2]);
+    }
+
+    // LOOT P4c: a CLOSE (Open=false, empty items) round-trips so the client reliably hides the window.
+    [Fact]
+    public void CorpseContentsCloseRoundTrips()
+    {
+        var original = new CorpseContentsMessage(987u, false, System.Array.Empty<CorpseItem>());
+
+        var decoded = Assert.IsType<CorpseContentsMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(987u, decoded.CorpseNetworkId);
+        Assert.False(decoded.Open);
+        Assert.Empty(decoded.Items);
     }
 
     [Fact]

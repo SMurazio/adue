@@ -501,6 +501,12 @@ public sealed class GameServer
                     HandleAttack(session, attack.Sequence, attack.Kind, attack.AimAngle, attack.AuthoredTick);
                 }
                 break;
+            case LootActionMessage loot:
+                if (session.IsAuthenticated)
+                {
+                    HandleLootAction(session, loot.CorpseNetworkId, loot.Kind, loot.TemplateKey);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -512,7 +518,7 @@ public sealed class GameServer
     private static bool IsSuppressedWhileDead(MessageType type) =>
         type is MessageType.MoveIntent or MessageType.MoveInput or MessageType.StepCommitRequest
             or MessageType.StepCommitBatch or MessageType.MovementMode or MessageType.Attack
-			or MessageType.InteractRequest;
+			or MessageType.InteractRequest or MessageType.LootAction;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -1364,11 +1370,12 @@ public sealed class GameServer
             return;
         }
 
-        // LOOT P4b: interacting with a CORPSE is the loot path (eligibility-gated loot-all), NOT a resource harvest.
-        // Route it before the resource check so a corpse isn't rejected as "not_resource".
+        // LOOT P4c: interacting with a CORPSE OPENS the loot window (eligibility-gated), NOT a resource harvest and
+        // no longer an immediate loot-all (P4b). Route it before the resource check so a corpse isn't rejected as
+        // "not_resource". The window's buttons then drive take-item / loot-all / close via LootActionMessage.
         if (target.Kind == EntityKind.Corpse)
         {
-            HandleCorpseLoot(session, actor, target);
+            HandleCorpseOpen(session, actor, target);
             return;
         }
 
@@ -1413,18 +1420,17 @@ public sealed class GameServer
         SendInventoryUpdate(session, [new ItemStack(definition.YieldItemKey, actor.Inventory.QuantityOf(definition.YieldItemKey))]);
     }
 
-    // LOOT P4b: loot-all a CORPSE the actor walked up to. Gates: adjacency (like a harvest), the actor must be in the
-    // corpse's eligibleLooters (the contribution ledger's contributors — solo = the killer), and the actor must have
-    // an inventory. On success it transfers EVERY stack into the actor's inventory via Inventory.TryAdd (honouring
-    // stack caps), leaves any un-added remainder IN the corpse (a full/partial inventory is graceful — nothing
-    // vanishes), pushes the inventory delta + a "Looted: ..." feedback toast, and despawns the corpse iff it is now
-    // empty. A non-eligible actor is rejected ("not_eligible") with the loot untouched.
-    private void HandleCorpseLoot(ClientSession session, WorldEntity actor, WorldEntity corpseEntity)
+    // LOOT P4c: OPEN the loot window on a CORPSE the actor walked up to (an InteractRequest on a corpse). Gates:
+    // adjacency (like a harvest) + the actor must be in the corpse's eligibleLooters (the contribution ledger's
+    // contributors — solo = the killer). On success it records the open-loot pairing on the session and ships the
+    // corpse's current contents (CorpseContents, Open=true) so the client shows the rarity-coloured window. No items
+    // move here — taking is a separate LootAction the window's buttons send. A non-eligible / out-of-range / gone
+    // corpse is rejected with the same machine reason the harvest path uses.
+    private void HandleCorpseOpen(ClientSession session, WorldEntity actor, WorldEntity corpseEntity)
     {
         if (!_corpses.TryGetValue(corpseEntity.Id, out var corpse))
         {
-            // The entity is a corpse kind but has no live loot payload (already looted/decayed this tick, or a stale
-            // target). Treat as gone rather than as a resource.
+            // Corpse kind but no live loot payload (already looted/decayed this tick, or a stale target): treat as gone.
             SendInteractResult(session, false, "no_target");
             return;
         }
@@ -1437,44 +1443,138 @@ public sealed class GameServer
 
         if (actor.CharacterId is not { } looterId || !corpse.IsEligible(looterId))
         {
-            // Not a contributor to the kill (or a non-durable actor with no character id): rejected, loot untouched.
+            // Not a contributor to the kill (or a non-durable actor with no character id): rejected, window not opened.
             SendInteractResult(session, false, "not_eligible");
             return;
         }
 
-        if (actor.Inventory is null)
-        {
-            SendInteractResult(session, false, "no_inventory");
-            return;
-        }
-
-        var result = corpse.TryLootAll(actor.Inventory);
-        if (!result.Looted)
-        {
-            // Nothing fit (inventory full for every stack): the corpse keeps all its loot. Distinct reason so the
-            // client can message "your bags are full" rather than a generic failure.
-            SendInteractResult(session, false, "inventory_full");
-            return;
-        }
-
-        // Report the post-transfer authoritative totals for the templates that changed, so the owner's inventory view
-        // reconciles (same shape as the harvest delta).
-        var changed = new List<ItemStack>(result.Transferred.Count);
-        foreach (var moved in result.Transferred)
-        {
-            changed.Add(new ItemStack(moved.TemplateKey, actor.Inventory.QuantityOf(moved.TemplateKey)));
-        }
-
+        // Remember which corpse this session has open so a LootAction routes here and a despawn can close the window.
+        session.SetOpenCorpse(corpseEntity.Id);
         SendInteractResult(session, true, "");
-        SendInventoryUpdate(session, changed);
-        SendSystem(session, $"Looted: {FormatLootSummary(result.Transferred)}.");
+        SendCorpseContents(session, corpseEntity.NetworkId, corpse);
+    }
 
-        // Despawn the corpse once it is empty (the AOI pass turns the world removal into an EntityDespawn). A corpse
-        // with a leftover remainder (the actor's bags filled mid-transfer) STAYS so they can return with space.
-        if (result.CorpseEmptied)
+    // LOOT P4c: a loot-window verb (take one stack / take all / close) on the corpse the session has OPEN. The action
+    // is routed by the session's OpenCorpseEntityId (not blind trust of the client's network id — a stale window can't
+    // loot a different corpse): the message's CorpseNetworkId must match the open corpse's network id. Close just drops
+    // the pairing. Take/LootAll re-validate the corpse still exists + adjacency + eligibility (the player may have
+    // walked away or the corpse decayed), transfer via the Corpse primitives, push the inventory delta + toast + the
+    // refreshed CorpseContents, and despawn the corpse INSTANTLY if the action emptied it (no lingering empty body).
+    private void HandleLootAction(ClientSession session, uint corpseNetworkId, LootActionKind kind, string templateKey)
+    {
+        // Close: drop the pairing only if it matches (a close for a different/stale corpse is harmless). No reply
+        // needed — the client closed its own window; this just releases the server-side pairing.
+        if (kind == LootActionKind.Close)
         {
-            DespawnCorpse(corpseEntity.Id);
+            session.SetOpenCorpse(null);
+            return;
         }
+
+        if (session.OpenCorpseEntityId is not { } openCorpseId)
+        {
+            // No window open server-side (already closed / never opened): ignore — the client's window is stale.
+            return;
+        }
+
+        if (!_corpses.TryGetValue(openCorpseId, out var corpse)
+            || !_zone.World.TryGet(openCorpseId, out var corpseEntity)
+            || corpseEntity.NetworkId != corpseNetworkId)
+        {
+            // The open corpse is gone (decayed/despawned) or the message targets a different corpse than the one this
+            // session has open. Close the (now invalid) window and forget the pairing.
+            session.SetOpenCorpse(null);
+            SendCorpseClosed(session, corpseNetworkId);
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var actor))
+        {
+            return;
+        }
+
+        if (!IsAdjacent(actor.Tile, corpseEntity.Tile))
+        {
+            // Walked out of range with the window open: close it (the client drops the panel on this Open=false).
+            session.SetOpenCorpse(null);
+            SendCorpseClosed(session, corpseEntity.NetworkId);
+            return;
+        }
+
+        if (actor.CharacterId is not { } looterId || !corpse.IsEligible(looterId) || actor.Inventory is null)
+        {
+            // Eligibility can't change for a live corpse, but re-gate defensively (and a missing inventory is a no-op).
+            return;
+        }
+
+        if (kind == LootActionKind.TakeItem)
+        {
+            var take = corpse.TryTakeItem(templateKey, actor.Inventory);
+            if (take.Took)
+            {
+                SendInventoryUpdate(session, [new ItemStack(take.Transferred.TemplateKey, actor.Inventory.QuantityOf(take.Transferred.TemplateKey))]);
+                SendSystem(session, $"Looted: {FormatLootSummary([take.Transferred])}.");
+            }
+
+            FinishLootAction(session, corpseEntity, corpse, take.CorpseEmptied);
+            return;
+        }
+
+        // LootAll.
+        var result = corpse.TryLootAll(actor.Inventory);
+        if (result.Looted)
+        {
+            var changed = new List<ItemStack>(result.Transferred.Count);
+            foreach (var moved in result.Transferred)
+            {
+                changed.Add(new ItemStack(moved.TemplateKey, actor.Inventory.QuantityOf(moved.TemplateKey)));
+            }
+
+            SendInventoryUpdate(session, changed);
+            SendSystem(session, $"Looted: {FormatLootSummary(result.Transferred)}.");
+        }
+
+        FinishLootAction(session, corpseEntity, corpse, result.CorpseEmptied);
+    }
+
+    // LOOT P4c: after a take/loot-all, either despawn the now-empty corpse INSTANTLY (which closes the window via
+    // SendCorpseClosed + forgets the pairing) or refresh the still-open window with the remaining contents. Shared by
+    // the take-item and loot-all paths so "empty => instant despawn, no lingering body" is one place.
+    private void FinishLootAction(ClientSession session, WorldEntity corpseEntity, Corpse corpse, bool corpseEmptied)
+    {
+        if (corpseEmptied)
+        {
+            // Instant despawn the moment the last item leaves (parity with the old grab-all path): no empty corpse ever
+            // sits on the ground waiting for decay. DespawnCorpse closes the window for every session that had it open.
+            DespawnCorpse(corpseEntity.Id);
+            return;
+        }
+
+        // Still has loot: refresh the open window with what remains.
+        SendCorpseContents(session, corpseEntity.NetworkId, corpse);
+    }
+
+    // LOOT P4c: ship an OPEN corpse's current contents to the owner so the loot window shows/refreshes (rarity-coloured).
+    // Resolves each stack's rarity from the item registry (Common for an unknown key — defensive). DisplayName is NOT
+    // sent; the client resolves it from its own registry (falling back to the key), keeping the wire thin.
+    private void SendCorpseContents(ClientSession session, uint corpseNetworkId, Corpse corpse)
+    {
+        var contents = corpse.Contents;
+        var items = new List<CorpseItem>(contents.Count);
+        foreach (var stack in contents)
+        {
+            var rarity = _itemRegistry.TryGet(stack.TemplateKey, out var definition) ? definition.Rarity : Rarity.Common;
+            items.Add(new CorpseItem(stack.TemplateKey, stack.Quantity, rarity));
+        }
+
+        TrySend(session.Peer, new CorpseContentsMessage(corpseNetworkId, true, items), DeliveryMethod.ReliableOrdered);
+    }
+
+    // LOOT P4c: tell the client to CLOSE the loot window for a corpse (Open=false, empty items) — the corpse emptied,
+    // decayed, despawned, or the player walked out of range. Reliable-ordered so a close is never lost (a stuck-open
+    // window would let the client send LootActions the server now rejects, but never loot — still, close cleanly).
+    private void SendCorpseClosed(ClientSession session, uint corpseNetworkId)
+    {
+        TrySend(session.Peer, new CorpseContentsMessage(corpseNetworkId, false, []), DeliveryMethod.ReliableOrdered);
     }
 
     // LOOT P4b: formats a looted-stacks list into a human "2x Slime Gel, 1x Arcane Dust" toast, using the item
@@ -1899,14 +1999,26 @@ public sealed class GameServer
         }
     }
 
-    // LOOT P4b: removes a corpse's world entity + its server-side loot payload, freeing the network id. The AOI pass
-    // turns the world removal into an EntityDespawn for viewers. Shared by the loot-all-empties path and the decay
-    // pass. Idempotent-ish: a missing corpse id is a no-op.
+    // LOOT P4b/P4c: removes a corpse's world entity + its server-side loot payload, freeing the network id. The AOI
+    // pass turns the world removal into an EntityDespawn for viewers. Shared by the loot-empties path (instant) and the
+    // decay pass. LOOT P4c: also CLOSES the loot window for any session that had this corpse open (forgets the pairing
+    // + sends Open=false) so no client is left with a window for a gone corpse. Idempotent-ish: a missing id is a no-op.
     private void DespawnCorpse(ulong corpseEntityId)
     {
         if (!_corpses.Remove(corpseEntityId))
         {
             return;
+        }
+
+        // Capture the network id BEFORE despawning so we can address the close to the viewers' windows.
+        var corpseNetworkId = _zone.World.TryGet(corpseEntityId, out var corpseEntity) ? corpseEntity.NetworkId : 0u;
+        foreach (var session in _sessions.Values)
+        {
+            if (session.OpenCorpseEntityId == corpseEntityId)
+            {
+                session.SetOpenCorpse(null);
+                SendCorpseClosed(session, corpseNetworkId);
+            }
         }
 
         if (_zone.Despawn(corpseEntityId, out var removed))
@@ -2427,6 +2539,20 @@ public sealed class GameServer
             MinEffectiveStepCooldownTicks,
             MaxEffectiveStepCooldownTicks);
 
+    // LOOT P4c (monster-types follow-up #1): the effective step cooldown in TICKS for an arbitrary speed
+    // MULTIPLIER, sharing the exact same base-cooldown ÷ multiplier + min/max clamp as the per-entity path
+    // (WorldEntity.EffectiveStepCooldownTicks). StepMonsterAi feeds the monster's TYPE's LIVE MoveSpeedMultiplier
+    // here each tick (not the entity's spawn-time-copied SpeedMultiplier), so editing "<typeId>.moveSpeed" on the
+    // F1 Monster tab re-paces ALREADY-SPAWNED monsters on the next tick — consistent with the other live Tunables.
+    // A non-positive multiplier (impossible after the registry's [0.1, 5] clamp) falls back to 1.0 defensively.
+    private uint EffectiveStepCooldownTicksFor(double speedMultiplier)
+    {
+        var multiplier = speedMultiplier > 0 ? speedMultiplier : 1.0;
+        var scaled = _tuning.StepCooldownTicks / multiplier;
+        var ticks = (long)Math.Max(1, Math.Round(scaled, MidpointRounding.AwayFromZero));
+        return (uint)Math.Clamp(ticks, (long)MinEffectiveStepCooldownTicks, (long)MaxEffectiveStepCooldownTicks);
+    }
+
     // The entity's effective step cooldown in MS for the wire (EntitySpawn / MovementSpeedChanged). Derived
     // from the effective TICKS so it round-trips to the same tick count when the client re-quantises it via
     // MovementCadence.EffectiveStepCadenceMs — keeping server and client cadence in lockstep. Clamped to a
@@ -2531,10 +2657,14 @@ public sealed class GameServer
                 type = _monsterTypes.Default;
             }
 
+            // LOOT P4c (monster-types follow-up #1): pace the monster off its TYPE's LIVE MoveSpeedMultiplier read
+            // fresh each tick — NOT the entity's spawn-time-copied SpeedMultiplier — so an admin retuning
+            // "<typeId>.moveSpeed" on the F1 tab speeds up / slows down ALREADY-SPAWNED monsters next tick, like the
+            // other live Tunables. Same base ÷ multiplier + min/max clamp as the player path.
             _monsterAi.StepMonster(
                 entity,
                 _serverTick,
-                EffectiveStepCooldownTicks(entity),
+                EffectiveStepCooldownTicksFor(type.MoveSpeedMultiplier),
                 _monsterTypes.BuildTunables(type));
         }
     }

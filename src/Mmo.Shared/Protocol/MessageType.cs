@@ -17,6 +17,10 @@ public enum MessageType : ushort
     AdminSetStat = 12,
     // COMBAT-S2B: client->server attack action (its OWN dedup cursor, never movement's). Reliable-ordered.
     Attack = 13,
+    // LOOT P4c (v35): client->server loot-window verb on a corpse the player has OPEN — take ONE stack by template
+    // key, take ALL, or CLOSE the window. (OPENING the window reuses the existing InteractRequest on a corpse.)
+    // Reliable-ordered: a dropped take/close must not be lost. See LootActionMessage.
+    LootAction = 14,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -49,5 +53,11 @@ public enum MessageType : ushort
     // keyed by a stable SPAWNER id (not the monster's network id, which changes on each death/respawn), and carries an
     // Active flag — Active=true when the spawner enters a viewer's AOI (show/place the red tile), Active=false when it
     // leaves (drop it). The marker therefore STAYS PUT while the monster dies and a fresh one respawns. Reliable.
-    SpawnerMarker = 115
+    SpawnerMarker = 115,
+    // LOOT P4c (v35): server->owner replication of an OPEN corpse's contents — the rolled stacks (template key +
+    // quantity + rarity tier) the loot window lists, rarity-coloured. Sent eligibility-gated when the player opens a
+    // corpse (InteractRequest on it) and re-sent after each take/loot-all so the window reflects the live remaining
+    // contents; Open=false tells the client to CLOSE the window (last item taken / out of range / corpse gone).
+    // Owner-only + reliable-ordered (like InventoryUpdate — corpse loot never AOI-replicates). See CorpseContentsMessage.
+    CorpseContents = 116
 }

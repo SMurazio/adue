@@ -124,6 +124,76 @@ public sealed class CorpseTests
         Assert.DoesNotContain(corpse.Contents, s => s.TemplateKey == "arcane_dust");
     }
 
+    // LOOT P4c: TryTakeItem moves exactly the named stack and reports CorpseEmptied when it was the last one.
+    [Fact]
+    public void TakeItemTransfersTheNamedStackAndEmptiesWhenLast()
+    {
+        var looter = Guid.NewGuid();
+        var corpse = SlimeCorpse(looter, new ItemStack("slime_gel", 3), new ItemStack("arcane_dust", 1));
+        var inventory = NewInventory();
+
+        var gel = corpse.TryTakeItem("slime_gel", inventory);
+        Assert.True(gel.Took);
+        Assert.Equal(3, gel.Transferred.Quantity);
+        Assert.Equal("slime_gel", gel.Transferred.TemplateKey);
+        Assert.False(gel.CorpseEmptied); // arcane_dust still in the corpse.
+        Assert.Equal(3, inventory.QuantityOf("slime_gel"));
+        Assert.DoesNotContain(corpse.Contents, s => s.TemplateKey == "slime_gel");
+
+        var dust = corpse.TryTakeItem("arcane_dust", inventory);
+        Assert.True(dust.Took);
+        Assert.True(dust.CorpseEmptied); // last stack taken.
+        Assert.True(corpse.IsEmpty);
+        Assert.Equal(1, inventory.QuantityOf("arcane_dust"));
+    }
+
+    // LOOT P4c: taking an item not in the corpse (or an empty key) is a no-op — nothing moves, corpse untouched.
+    [Fact]
+    public void TakeItemUnknownKeyIsNoOp()
+    {
+        var corpse = SlimeCorpse(Guid.NewGuid(), new ItemStack("slime_gel", 2));
+        var inventory = NewInventory();
+
+        var result = corpse.TryTakeItem("crystal_shard", inventory);
+
+        Assert.False(result.Took);
+        Assert.False(result.CorpseEmptied);
+        Assert.Equal(0, inventory.QuantityOf("crystal_shard"));
+        Assert.Equal(2, corpse.Contents.Single().Quantity);
+    }
+
+    // LOOT P4c: a full inventory leaves the taken stack's remainder IN the corpse (nothing vanishes), like loot-all.
+    [Fact]
+    public void TakeItemFullInventoryLeavesRemainder()
+    {
+        var inventory = NewInventory();
+        inventory.TryAdd("slime_gel", 98); // room for 1 more (MaxStack 99).
+
+        var corpse = SlimeCorpse(Guid.NewGuid(), new ItemStack("slime_gel", 5));
+        var result = corpse.TryTakeItem("slime_gel", inventory);
+
+        Assert.True(result.Took);
+        Assert.Equal(1, result.Transferred.Quantity);
+        Assert.False(result.CorpseEmptied);
+        Assert.Equal(99, inventory.QuantityOf("slime_gel"));
+        Assert.Equal(4, corpse.Contents.Single().Quantity); // the 4 that didn't fit stay.
+    }
+
+    // LOOT P4c: a totally full inventory takes nothing — Took=false, corpse keeps the stack.
+    [Fact]
+    public void TakeItemTotallyFullIsNoOp()
+    {
+        var inventory = NewInventory();
+        inventory.TryAdd("slime_gel", 99); // capped.
+
+        var corpse = SlimeCorpse(Guid.NewGuid(), new ItemStack("slime_gel", 3));
+        var result = corpse.TryTakeItem("slime_gel", inventory);
+
+        Assert.False(result.Took);
+        Assert.False(result.CorpseEmptied);
+        Assert.Equal(3, corpse.Contents.Single().Quantity);
+    }
+
     [Fact]
     public void DecayIsDeadlineDriven()
     {
