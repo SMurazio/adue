@@ -58,7 +58,7 @@ public sealed class ServerOptionsTests
         var options = ServerOptions.FromEnvironment();
 
         Assert.Equal(30f, options.InterestRadius);
-        Assert.Equal(150, options.StepCooldownMs);
+        Assert.Equal(250, options.StepCooldownMs); // default base walk cadence (the 0.6x/4.0-tiles-per-sec feel)
         Assert.Equal(15, options.PersistenceCheckpointSeconds);
         Assert.Equal(128, options.WorldWidthTiles);
         Assert.Equal(128, options.WorldHeightTiles);
