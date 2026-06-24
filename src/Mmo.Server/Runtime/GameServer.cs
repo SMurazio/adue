@@ -1906,11 +1906,12 @@ public sealed class GameServer
         var monsterId = monster.Id;
         var deathTile = monster.Tile;
 
-        // Remove from the world (also unhooks the spatial index). Returning the network id frees it for reuse.
-        if (_zone.Despawn(monsterId, out var removed))
-        {
-            _networkIds.Return(removed.NetworkId);
-        }
+        // Remove from the world (also unhooks the spatial index). Do NOT free the network id here: RollAndSpawnCorpse
+        // below rents an id and the pool REUSES freed ids, so freeing now lets the corpse rent the just-despawned
+        // monster's SAME id. An in-AOI client still "knows" that id, so EnsureEntitySpawns skips the corpse's spawn
+        // (KnowsEntity == true) and the corpse NEVER RENDERS (it exists server-side, so its loot window still opens —
+        // the "no corpse on an in-AOI death" bug). Free it at the END, after the corpse has rented a fresh id.
+        var despawned = _zone.Despawn(monsterId, out var removed);
 
         // LOOT P4b: roll this monster's loot and spawn a CORPSE at the death tile holding it, tagged with the
         // eligible-looter set (the contribution ledger's contributors) + the loot mode + a decay deadline. Done
@@ -1935,6 +1936,13 @@ public sealed class GameServer
             var respawnTicks = _monsterTypes.RespawnTicks(spawner.Type);
             spawner.NotifyMonsterDied(monsterId, _serverTick, respawnTicks);
             Log.Info($"Monster {removed?.NetworkId} (spawner #{spawner.SpawnerId}) died; respawn in {respawnTicks} ticks.");
+        }
+
+        // Now free the monster's network id — the corpse (if one spawned) has already rented a DIFFERENT id, so the
+        // pool's reuse can't hand the corpse the still-known monster id and get its spawn skipped on in-AOI clients.
+        if (despawned)
+        {
+            _networkIds.Return(removed.NetworkId);
         }
     }
 
