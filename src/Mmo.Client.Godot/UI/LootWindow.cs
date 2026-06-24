@@ -35,9 +35,28 @@ public partial class LootWindow : Control
     public event Action? LootAllRequested;
     public event Action? CloseRequested;
 
+    // The persisted-position key for UiPrefs (loot window placement survives corpses + relaunch).
+    private const string PrefsKey = "loot_window";
+
+    // Default window footprint (matches the panel's CustomMinimumSize) — used to centre the window on the very
+    // first open (before the user has dragged/persisted a position).
+    private static readonly Vector2 DefaultSize = new(360, 320);
+
     private VBoxContainer? _list;
     private Button? _lootAllButton;
     private Label? _emptyHint;
+
+    // The draggable panel (the visible window body). Positioned absolutely so it can be dragged + clamped like the
+    // F1 admin panel; its placement persists across corpses and across relaunch (UiPrefs).
+    private PanelContainer? _panel;
+
+    // Drag state: the title bar reports button-down + relative motion via _GuiInput (mirrors OnDebugHeaderGuiInput).
+    // _dragging is true between left-button-down and button-up; we persist the position when a drag ends.
+    private bool _dragging;
+
+    // Whether we've placed the panel at least once this session (so we restore the persisted/centre position on the
+    // FIRST open, then leave it wherever the user dragged it for subsequent corpses in the same session).
+    private bool _placed;
 
     // The corpse network id currently shown — surfaced so MmoClientRoot can pass it on the send calls (the server
     // guards a stale window against it). 0 when nothing is open.
@@ -60,7 +79,84 @@ public partial class LootWindow : Control
 
         CorpseNetworkId = corpseNetworkId;
         RenderRows(rows);
+        EnsurePlaced();
         Visible = true;
+    }
+
+    // Place the panel on its FIRST open this session: at the persisted position (if any) else screen centre. After
+    // that we leave it wherever the user last dragged it (so reopening on another corpse reuses the live position).
+    // Always re-clamps so a position saved at a larger window size can't strand the panel off-screen.
+    private void EnsurePlaced()
+    {
+        if (_panel is null)
+        {
+            return;
+        }
+
+        if (!_placed)
+        {
+            _placed = true;
+            if (UiPrefs.TryLoadWindowPosition(PrefsKey, out var saved))
+            {
+                _panel.Position = saved;
+            }
+            else
+            {
+                var viewport = GetViewport().GetVisibleRect().Size;
+                _panel.Position = (viewport - DefaultSize) * 0.5f;
+            }
+        }
+
+        ClampPanel();
+    }
+
+    // Clamp the panel fully on-screen (top-left within [0, viewport - size]), mirroring the F1 panel drag clamp.
+    private void ClampPanel()
+    {
+        if (_panel is null)
+        {
+            return;
+        }
+
+        var viewport = GetViewport().GetVisibleRect().Size;
+        // Use the larger of the laid-out size and the known min size: on the very first open the container may not
+        // have computed its size yet (reads ~0), which would otherwise clamp the panel hard into the top-left.
+        var sizeX = Mathf.Max(_panel.Size.X, DefaultSize.X);
+        var sizeY = Mathf.Max(_panel.Size.Y, DefaultSize.Y);
+        var pos = _panel.Position;
+        var maxX = Mathf.Max(0f, viewport.X - sizeX);
+        var maxY = Mathf.Max(0f, viewport.Y - sizeY);
+        pos.X = Mathf.Clamp(pos.X, 0f, maxX);
+        pos.Y = Mathf.Clamp(pos.Y, 0f, maxY);
+        _panel.Position = pos;
+    }
+
+    // Title-bar drag (mirrors OnDebugHeaderGuiInput): left button-down begins dragging; motion slides the panel by
+    // the mouse delta (clamped on-screen); button-up ends the drag and persists the new position to disk so it
+    // survives relaunch/relog.
+    private void OnTitleBarGuiInput(InputEvent @event)
+    {
+        if (_panel is null)
+        {
+            return;
+        }
+
+        if (@event is InputEventMouseButton { ButtonIndex: MouseButton.Left } mb)
+        {
+            _dragging = mb.Pressed;
+            if (!mb.Pressed)
+            {
+                // Drag (or click) ended — persist wherever it now sits.
+                UiPrefs.SaveWindowPosition(PrefsKey, _panel.Position);
+            }
+            return;
+        }
+
+        if (@event is InputEventMouseMotion motion && _dragging)
+        {
+            _panel.Position += motion.Relative;
+            ClampPanel();
+        }
     }
 
     // Hide the window without raising CloseRequested (used when the server already closed it — emptied/decayed/range).
@@ -151,16 +247,19 @@ public partial class LootWindow : Control
         // Fill the HUD layer but ignore mouse so only the inner panel captures clicks (same idiom as InventoryWindow).
         MouseFilter = MouseFilterEnum.Ignore;
 
+        // Top-left anchored (NOT centre-anchored) so the panel is positioned via absolute Position — that's what
+        // makes it draggable + clamp-able + persistable like the F1 admin panel. EnsurePlaced sets the actual
+        // Position on first open (persisted position, else screen centre).
         var panel = new PanelContainer
         {
             Name = "WindowPanel",
-            AnchorLeft = 0.5f,
-            AnchorTop = 0.5f,
-            AnchorRight = 0.5f,
-            AnchorBottom = 0.5f,
-            GrowHorizontal = GrowDirection.Both,
-            GrowVertical = GrowDirection.Both,
-            CustomMinimumSize = new Vector2(360, 320),
+            AnchorLeft = 0f,
+            AnchorTop = 0f,
+            AnchorRight = 0f,
+            AnchorBottom = 0f,
+            GrowHorizontal = GrowDirection.End,
+            GrowVertical = GrowDirection.End,
+            CustomMinimumSize = DefaultSize,
         };
         var panelStyle = new StyleBoxFlat
         {
@@ -171,24 +270,24 @@ public partial class LootWindow : Control
         panelStyle.SetCornerRadiusAll(8);
         panelStyle.SetContentMarginAll(10);
         panel.AddThemeStyleboxOverride("panel", panelStyle);
-        // Offset to the RIGHT of centre so it doesn't sit on top of the inventory window when both are open.
-        panel.OffsetLeft = 40f;
-        panel.OffsetRight = 400f;
-        panel.OffsetTop = -160f;
-        panel.OffsetBottom = 160f;
+        _panel = panel;
         AddChild(panel);
 
         var outer = new VBoxContainer { Name = "Outer" };
         outer.AddThemeConstantOverride("separation", 8);
         panel.AddChild(outer);
 
-        // Title bar: "Loot" + close X.
-        var bar = new HBoxContainer { Name = "TitleBar" };
+        // Title bar: "Loot" + close X. Doubles as the DRAG HANDLE — grabbing it (left-drag) repositions the whole
+        // window (clamped on-screen) and persists the position on release. MouseFilter Stop so it captures the drag;
+        // the label inside Ignores the mouse so it doesn't swallow it (mirrors the F1 DebugHeader pattern).
+        var bar = new HBoxContainer { Name = "TitleBar", MouseFilter = MouseFilterEnum.Stop };
+        bar.GuiInput += OnTitleBarGuiInput;
         var title = new Label
         {
             Name = "Title",
-            Text = "Loot",
+            Text = "Loot — drag to move",
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            MouseFilter = MouseFilterEnum.Ignore,
         };
         title.AddThemeFontSizeOverride("font_size", 20);
         title.AddThemeColorOverride("font_color", new Color(0.92f, 0.94f, 1f));
