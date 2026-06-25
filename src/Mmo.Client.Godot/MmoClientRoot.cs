@@ -191,10 +191,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// smoothness in-client (no restart) — lower = the slime renders tighter to its server tile; raise to absorb more
 	// arrival jitter. Empty/blank or < 0 reverts to the computed default. Applies to all remote interpolators live.
 	private LineEdit? _moveRemoteInterpBufferMs;
-	// MONSTER-HOP: the live monster hop duration (ms) — how long a slime's tile-to-tile hop+arc takes. Lower = a
-	// snappier hop; kept clearly under the step cadence so the monster visibly settles on its tile between hops.
-	// Applied live to every monster's hop interpolator (no restart). Mirrors the remote-buffer knob shape.
-	private LineEdit? _moveMonsterHopDurationMs;
 	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). Each item carries
 	// its multiplier; selecting one sends /speed <mult> live. Populated once on first open from ServerHello (base
 	// cadence + tick rate). _moveSpeedOptions is the parallel option list (item index -> SpeedOption) so the
@@ -1387,10 +1383,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// entity (slime, other players) renders. Lower = tighter to the cyan server marker; raise = smoother under
 		// jitter. Blank / < 0 = computed default (max(0.5*cadence, 50ms)). Applied live to all remote interpolators.
 		_moveRemoteInterpBufferMs = AddTuningField(rows, "Remote interp buffer (ms, <0=auto)", OnMovementApplyPressed);
-		// MONSTER-HOP: the monster hop duration (ms) — how long a slime's tile-to-tile hop+arc takes. Lower = snappier;
-		// keep it under the step cadence (~150ms) so the slime settles on its (cyan-marked) server tile between hops.
-		// Applied live to all monster hop interpolators. The hop HEIGHT is a fixed constant (no knob this pass).
-		_moveMonsterHopDurationMs = AddTuningField(rows, "Monster hop duration (ms)", OnMovementApplyPressed);
 
 		// CAMERA-EXPERIMENT live toggle — flips on click, no Apply: the camera targets the DISCRETE predicted tile
 		// instead of the smooth character render. Pair with "Camera smoothing" > 0 to glide the tile-to-tile jumps
@@ -2561,8 +2553,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// computed default in effect — so the knob shows the real value, not a blank or a raw multiplier.
 		SetField(_moveRemoteInterpBufferMs,
 			_client?.RemoteInterpolationBufferOverrideMs ?? _client?.EffectiveDefaultRemoteInterpolationBufferMs ?? 0d);
-		// MONSTER-HOP: seed the hop-duration field from the live client value (the default until the user changes it).
-		SetField(_moveMonsterHopDurationMs, _client?.MonsterHopDurationMs ?? MmoClient.DefaultMonsterHopDurationMs);
 		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
 		// default walk. Done here (first open) since ServerHello has landed by login.
 		PopulateMoveSpeedDropdown();
@@ -2846,13 +2836,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveRemoteInterpBufferMs, out var remoteBuffer))
 		{
 			_client.SetRemoteInterpolationBufferMs(remoteBuffer < 0d ? -1d : Mathf.Clamp((float)remoteBuffer, 0f, 2000f));
-		}
-
-		// MONSTER-HOP: the monster hop duration (ms). Clamped to a sane debug range; applied live to every monster's
-		// hop interpolator (no restart). Blank fails to parse and is skipped (the current value stays).
-		if (TryReadField(_moveMonsterHopDurationMs, out var hopDuration))
-		{
-			_client.SetMonsterHopDurationMs(Mathf.Clamp((float)hopDuration, 1f, 1000f));
 		}
 
 		ShowInteractFeedback("Movement tuning applied.");

@@ -12,10 +12,12 @@ public sealed class MmoClient : IDisposable
     // the predictor integrates the predicted present immediately (zero render lag). It RECONCILES against each
     // snapshot's (Position, LastInputSeq), replaying its unacked buffer over the SHARED collision resolver / walls /
     // radius / speed the server uses, so steady walking and wall slides open NO correction (the determinism contract).
-    // The LOCAL player renders the predictor's RenderX/Y; REMOTE entities + monsters still render RAW (Phase 5 re-adds
-    // remote smoothing via TileInterpolator / MonsterHopInterpolator, kept here for that). The obsolete tile
-    // LocalPlayerPredictor + its dead plumbing were DELETED this phase; targeting/harvest still read the CONFIRMED tile,
-    // never the predicted position. The PredictionEnabled F-key toggle is the live raw-vs-predicted A/B lever.
+    // The LOCAL player renders the predictor's RenderX/Y; REMOTE entities + monsters render the continuous
+    // RemotePositionInterpolator's fixed-delay playout glide (Phase 5 — one driver smooths both continuous players
+    // and tile-stepped monsters; the per-kind TileInterpolator / MonsterHopInterpolator split was retired). The
+    // obsolete tile LocalPlayerPredictor + its dead plumbing were DELETED earlier; targeting/harvest still read the
+    // CONFIRMED tile, never the predicted/interpolated position. PredictionEnabled is the live raw-vs-predicted A/B
+    // lever (local only).
 
     // remote-interp-tighten Part A: the remote jitter buffer was 1.3 * cadence (~1.3 tiles of steady-state lag) —
     // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
@@ -137,15 +139,6 @@ public sealed class MmoClient : IDisposable
     // (mirrors how camera smoothing applies live): SetRemoteInterpolationBufferMs re-pushes it onto every existing
     // remote entity immediately. Local-player path (predictor) is UNTOUCHED — this only moves the REMOTE buffer.
     private double _remoteInterpolationBufferOverrideMs = -1d;
-
-    // MONSTER-HOP: the LIVE hop duration (ms) every monster's hop interpolator uses — how long the tile-to-tile
-    // hop+arc takes. Kept clearly shorter than the step cadence (~150ms default at the 150ms cadence) so a monster
-    // visibly settles on its tile between hops rather than gliding continuously. Mirrors the remote-buffer knob:
-    // SetMonsterHopDurationMs re-pushes it onto every current AND future monster hop interpolator live (no restart).
-    // The hop HEIGHT is a fixed sensible constant (MonsterHopInterpolator.DefaultHopHeight); a second knob can drive
-    // it if the human wants — flagged in the review request.
-    public const double DefaultMonsterHopDurationMs = 160d;
-    private double _monsterHopDurationMs = DefaultMonsterHopDurationMs;
 
     public MmoClient(ClientConnectionOptions options)
         : this(options, ClientMovementTrace.FromEnvironment())
@@ -1013,7 +1006,7 @@ public sealed class MmoClient : IDisposable
                     sequence,
                     DateTimeOffset.UtcNow,
                     confirmation.QueueDepth,
-                    confirmation.EffectiveCadenceMs,
+                    ResolveCadence(entity.StepCooldownMs),
                     confirmation.RenderPosition);
             }
 
@@ -1207,12 +1200,10 @@ public sealed class MmoClient : IDisposable
             return existing;
         }
 
-        // MONSTER-HOP: ClientEntity attaches a hop driver iff this is a Monster (now, or later via UpdateMetadata when
-        // a Player placeholder is revealed as a Monster). It still constructs a TileInterpolator for a uniform shape
-        // (and so a never-monster entity keeps the existing path verbatim). Pass the live hop duration so a hop driver
-        // created now or lazily uses the current knob value.
-        // MIGRATION (Phase 3 Pass A): the interpolator/predictor are still tile-based; derive the anchor tile from
-        // the (tile-centred) position. Byte-identical to the old direct-TileCoord path while the wire sends tiles.
+        // CONTINUOUS MIGRATION (Phase 5): every entity gets ONE continuous remote playout buffer, anchored on the
+        // (continuous) spawn position. One driver smooths all remote kinds (the per-kind hop/interp split is gone);
+        // the local player keeps the predictor and ignores this buffer in ToRenderState. The playout DELAY is the
+        // resolved remote-buffer value (fixed floor + live knob); the local entity's delay is irrelevant (unused).
         var entity = new ClientEntity(
             networkId,
             characterId,
@@ -1221,8 +1212,7 @@ public sealed class MmoClient : IDisposable
             position,
             facing,
             isLocal,
-            CreateInterpolator(position.ToTileRounded(), isLocal, effectiveCooldown),
-            _monsterHopDurationMs,
+            CreateInterpolator(position, isLocal, effectiveCooldown),
             effectiveCooldown);
         _entities[networkId] = entity;
         if (isLocal)
@@ -1311,21 +1301,6 @@ public sealed class MmoClient : IDisposable
         RefreshInterpolatorCadence();
     }
 
-    // MONSTER-HOP: the live hop duration (ms) shown by the F1 Movement-tab "Monster hop duration" field on open.
-    public double MonsterHopDurationMs => _monsterHopDurationMs;
-
-    // MONSTER-HOP: live-set the monster hop duration (ms), applied to every CURRENT monster's hop interpolator
-    // immediately (no restart) and to all future ones. Clamped to a sane debug range (1ms..1000ms). Mirrors how
-    // SetRemoteInterpolationBufferMs re-pushes onto every entity. Players/NPCs/resources are untouched.
-    public void SetMonsterHopDurationMs(double hopDurationMs)
-    {
-        _monsterHopDurationMs = Math.Clamp(hopDurationMs, 1d, 1000d);
-        foreach (var entity in _entities.Values)
-        {
-            entity.SetHopDurationMs(_monsterHopDurationMs);
-        }
-    }
-
     // Recomputes every entity's tween cadence. Each entity keeps its OWN advertised cooldown if it has one
     // (per-entity speed, S51) and only falls back to the ServerHello global when it doesn't — so a global
     // refresh (e.g. ServerHello arriving) never clobbers a per-entity cadence.
@@ -1339,11 +1314,15 @@ public sealed class MmoClient : IDisposable
         }
     }
 
-    private TileInterpolator CreateInterpolator(TileCoord initialTile, bool isLocal, ushort? stepCooldownMs)
+    // CONTINUOUS MIGRATION (Phase 5): build the continuous remote playout buffer anchored on the spawn position.
+    // The playout DELAY is the resolved value (ResolveInterpolationDelay: remote = floor + live knob; local =
+    // cadence-multiple, though the local entity's buffer is unused — the predictor renders it). The cadence itself
+    // no longer quantizes the glide (the buffer lerps on real arrival clocks), so only the delay is passed.
+    private RemotePositionInterpolator CreateInterpolator(WorldVector initialPosition, bool isLocal, ushort? stepCooldownMs)
     {
         var cadence = ResolveCadence(stepCooldownMs);
         var delay = ResolveInterpolationDelay(cadence, isLocal);
-        return new TileInterpolator(initialTile, cadence, delay);
+        return new RemotePositionInterpolator(initialPosition, delay);
     }
 
     private void Send(IProtocolMessage message, DeliveryMethod deliveryMethod)
@@ -1399,17 +1378,12 @@ public sealed class MmoClient : IDisposable
 
     private sealed class ClientEntity
     {
-        private readonly TileInterpolator _interpolator;
-
-        // MONSTER-HOP: non-null only for EntityKind.Monster. When present it REPLACES the buffered _interpolator as
-        // the render driver: the monster rests on its latest confirmed tile and hops (with a vertical arc) to a new
-        // tile when one arrives, so it sits on its authoritative server tile (no buffered-past lag → combat lands).
-        // Players/NPCs/resources keep _interpolator; the local player keeps the predictor. Mutable (not readonly):
-        // a snapshot can create an entity as a Player PLACEHOLDER before the EntitySpawn reveals it is a Monster, so
-        // UpdateMetadata lazily attaches the hop driver the moment Kind first becomes Monster (anchored on the tile
-        // the placeholder's interpolator currently rests on, so the hand-off doesn't snap).
-        private MonsterHopInterpolator? _hop;
-        private double _hopDurationMs;
+        // CONTINUOUS MIGRATION (Phase 5): ONE remote render driver for EVERY kind (other players, tile-stepped
+        // monsters, resources) — a fixed-delay continuous playout buffer that lerps between received positions so
+        // all of them glide smoothly (the per-kind TileInterpolator + MonsterHopInterpolator split is gone). Only
+        // the LOCAL player bypasses it (the predictor renders the local player; this still buffers the local
+        // confirmed positions but ToRenderState ignores it for the local entity). Anchored on the spawn position.
+        private readonly RemotePositionInterpolator _remoteInterp;
 
         public ClientEntity(
             uint networkId,
@@ -1419,8 +1393,7 @@ public sealed class MmoClient : IDisposable
             WorldVector position,
             Direction8 facing,
             bool isLocal,
-            TileInterpolator interpolator,
-            double hopDurationMs,
+            RemotePositionInterpolator remoteInterp,
             ushort? stepCooldownMs)
         {
             NetworkId = networkId;
@@ -1430,16 +1403,7 @@ public sealed class MmoClient : IDisposable
             Position = position;
             Facing = facing;
             IsLocal = isLocal;
-            _interpolator = interpolator;
-            _hopDurationMs = hopDurationMs;
-            // MONSTER-HOP: attach the hop driver up-front when this entity is already known to be a Monster at
-            // construction (the EntitySpawn path). The snapshot-placeholder path constructs as Player and attaches
-            // the hop lazily in UpdateMetadata once the real Monster kind arrives.
-            if (kind == EntityKind.Monster)
-            {
-                _hop = new MonsterHopInterpolator(Tile, hopDurationMs);
-            }
-
+            _remoteInterp = remoteInterp;
             StepCooldownMs = stepCooldownMs;
         }
 
@@ -1495,24 +1459,18 @@ public sealed class MmoClient : IDisposable
             Kind = kind;
             DisplayName = displayName;
             IsLocal = isLocal || IsLocal;
-            // MONSTER-HOP: a snapshot placeholder (created as Player) revealed as a Monster by EntitySpawn — attach
-            // the hop driver now, anchored on the confirmed authoritative tile (Tile) so it rests on its server
-            // position immediately (the monster-hop design point). Idempotent (only when not already attached).
-            if (kind == EntityKind.Monster && _hop is null)
-            {
-                _hop = new MonsterHopInterpolator(Tile, _hopDurationMs);
-            }
+            // CONTINUOUS MIGRATION (Phase 5): a placeholder→Monster reveal no longer swaps render drivers — ONE
+            // RemotePositionInterpolator drives every kind, so a Player placeholder revealed as a Monster keeps
+            // gliding off the same buffer (no hand-off, no driver re-anchor). The hop arc is retired.
         }
 
         public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
         {
             var previousTile = Tile;
             // Position/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
-            // the derived Tile, and the renderer's AuthoritativeTile uses it. Prediction only affects the
-            // interpolated render position, never this authoritative position.
+            // the derived Tile, and the renderer's AuthoritativeTile uses it. Prediction/interpolation only affect
+            // the rendered position, never this authoritative position.
             Position = position;
-            // MIGRATION (Phase 3 Pass A): the predictor/interpolator/hop are still tile-based — derive the
-            // confirmed tile from the (tile-centred) Position. Byte-identical to the old TileCoord param.
             var tile = Tile;
             Depleted = depleted;
             // COMBAT-S2A: adopt the replicated public HP (snapshot-driven, like Depleted). Preserving callers
@@ -1527,48 +1485,35 @@ public sealed class MmoClient : IDisposable
             _ = recipientStepSeq;
             _ = serverTick;
             Facing = facing;
-            // MONSTER-HOP: a monster confirms onto the hop driver (rest-on-latest-tile + arc), never the buffered
-            // interpolator — so it tracks its authoritative tile with no playout delay. Everything else interpolates.
-            if (_hop is not null)
-            {
-                _hop.Confirm(tile, receivedAt);
-                return new EntityConfirmationDebug(
-                    tile != previousTile,
-                    _hop.IsHopping ? 1 : 0,
-                    _hop.HopDurationMs,
-                    _hop.RenderPosition);
-            }
-
-            _interpolator.Confirm(tile, receivedAt);
+            // CONTINUOUS MIGRATION (Phase 5): feed the CONTINUOUS confirmed position into the one remote playout
+            // buffer (every kind glides the same — the per-kind hop/interp split is retired). The local player also
+            // feeds it (harmless — its render comes from the predictor, ToRenderState ignores this for IsLocal).
+            // The debug carries the buffered-sample depth + the last render position for the trace's queue-depth /
+            // render read-out (the effective cadence is resolved at the outer call site from the entity's cooldown).
+            _remoteInterp.Confirm(position, receivedAt);
             return new EntityConfirmationDebug(
                 tile != previousTile,
-                _interpolator.QueueDepth,
-                _interpolator.StepDurationMs,
-                _interpolator.RenderPosition);
+                _remoteInterp.BufferedSampleCount,
+                _remoteInterp.RenderPosition);
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
         {
-            _interpolator.UpdateCadence(stepDurationMs, interpolationDelayMs);
-        }
-
-        // MONSTER-HOP: live-set this entity's hop duration. Stored so a hop driver attached later (placeholder ->
-        // Monster reveal) uses the latest value; applied immediately to the live hop interpolator when present.
-        public void SetHopDurationMs(double hopDurationMs)
-        {
-            _hopDurationMs = hopDurationMs;
-            _hop?.SetHopDurationMs(hopDurationMs);
+            // CONTINUOUS MIGRATION (Phase 5): only the playout-buffer DELAY drives the continuous interpolator
+            // (the cadence/step-duration no longer quantizes the glide — it lerps on real arrival clocks). The
+            // delay is the already-resolved value (ResolveInterpolationDelay: floor + live remote-buffer knob).
+            _ = stepDurationMs;
+            _remoteInterp.UpdateDelay(interpolationDelayMs);
         }
 
         // Applies a per-entity cadence (from EntitySpawn / MovementSpeedChanged). stepCooldownMs null clears
-        // the override (the entity reverts to the global cadence the caller resolved). cadenceMs is the
-        // already-resolved tween step duration; interpolationDelayMs is the already-resolved playout buffer
-        // (remote-interp-tighten Part A: the caller computes it via ResolveInterpolationDelay so the fixed floor
-        // and the live remote-buffer override apply here too, not just at CreateInterpolator).
+        // the override (the entity reverts to the global cadence the caller resolved). interpolationDelayMs is the
+        // already-resolved playout buffer (ResolveInterpolationDelay: fixed floor + live remote-buffer override).
         public void SetStepCooldownMs(ushort? stepCooldownMs, double cadenceMs, double interpolationDelayMs)
         {
             StepCooldownMs = stepCooldownMs;
-            _interpolator.UpdateCadence(cadenceMs, interpolationDelayMs);
+            _ = cadenceMs;
+            _remoteInterp.UpdateDelay(interpolationDelayMs);
             // CONTINUOUS MIGRATION (Phase 4): the local predictor's speed retune lives on the OUTER MmoClient
             // (HandleMovementSpeedChanged calls _predictor.SetSpeed), not here — ClientEntity no longer owns a predictor.
         }
@@ -1578,17 +1523,18 @@ public sealed class MmoClient : IDisposable
             return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
         }
 
-        // CONTINUOUS MIGRATION (Phase 4): the LOCAL player renders the predictor's smooth RenderX/RenderY when a
-        // predictor is attached (passed in by the outer MmoClient as localOverride, since the predictor lives there).
-        // Remote players / monsters / resources still render RAW off the latest decoded CONTINUOUS server Position
-        // (Phase 5 re-adds remote smoothing). The AuthoritativeTile (Tile) ALWAYS stays the confirmed tile — targeting/
-        // harvest reads it and must NEVER see the predicted position (S53 invariant). Only the rendered Position moves.
+        // CONTINUOUS MIGRATION (Phase 4 + 5): the LOCAL player renders the predictor's smooth RenderX/RenderY when a
+        // predictor is attached (passed in by the outer MmoClient as localOverride, since the predictor lives there);
+        // EVERY REMOTE entity (other players / monsters / resources) now renders the continuous playout buffer's
+        // Sample(now) — a fixed-delay glide (Phase 5) instead of the raw confirmed position. The AuthoritativeTile
+        // (Tile) ALWAYS stays the confirmed tile — targeting/harvest reads it and must NEVER see the
+        // predicted/interpolated position (S53 invariant). Only the rendered Position moves. HopHeight is always 0
+        // now (the vertical hop arc is retired — the slime glides flat between tiles).
         public EntityRenderState ToRenderState(TimeSpan now, RenderPosition? localOverride = null)
         {
-            _ = now;
             var position = IsLocal && localOverride.HasValue
                 ? localOverride.Value
-                : RenderPosition.FromWorld(Position);
+                : _remoteInterp.Sample(now);
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth, 0d);
         }
     }
@@ -1596,7 +1542,6 @@ public sealed class MmoClient : IDisposable
     private readonly record struct EntityConfirmationDebug(
         bool TileChanged,
         int QueueDepth,
-        double EffectiveCadenceMs,
         RenderPosition RenderPosition);
 
     private sealed class PendingSnapshot
