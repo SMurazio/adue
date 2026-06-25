@@ -29,4 +29,15 @@ public static class Direction8Extensions
             _ => TileCoord.Zero
         };
     }
+
+    // Phase 1 (continuous migration): the direction as a UNIT WorldVector for the continuous integrator. The tile
+    // Delta (above) is the integer step offset — a diagonal is (±1, ±1), length sqrt(2) — so feeding it straight to
+    // the integrator would make diagonals ~41% faster. Normalizing here is the whole point: every direction
+    // (cardinal AND diagonal) becomes length 1, so a held diagonal travels at exactly the same speed as a cardinal
+    // once scaled by SpeedUnitsPerSecond. Built off Delta so the two stay in lockstep (one direction table).
+    public static WorldVector ToUnitVector(this Direction8 direction)
+    {
+        var delta = direction.Delta();
+        return new WorldVector(delta.X, delta.Y).Normalized();
+    }
 }

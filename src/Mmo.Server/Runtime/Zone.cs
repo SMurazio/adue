@@ -134,50 +134,22 @@ public sealed class Zone
         return stepped;
     }
 
-    // S103 commit-step: a server-validated single step in `direction` with the commit anti-cheat floor (see
-    // WorldEntity.TryCommitStep). Mirrors TryStep's spatial-index migration so an accepted commit moves the
-    // entity's grid bucket. previousTile must be read before the call (TryCommitStep mutates Tile in place).
-    public bool TryCommitStep(
-        WorldEntity entity,
-        Direction8 direction,
-        uint serverTick,
-        uint stepCooldownTicks,
-        double acceptFraction,
-        out MovementStepResult result)
+    // Phase 1 (continuous migration): the PLAYER continuous-integrator wrapper (sibling to TryStep for the tile-step
+    // path). Advances the entity's continuous Position by Velocity x dt (WorldEntity.IntegrateMovement, no-walls
+    // path) and migrates the spatial-index bucket ONLY when the entity's ROUNDED tile actually crossed — the grid
+    // stays integer-keyed in Phase 1 (Phase 6 floats it), so a sub-tile move that doesn't change ToTileRounded must
+    // not touch the index. previousTile is read before the call because IntegrateMovement mutates Position in place.
+    // Returns true iff the rounded tile crossed (the same signal IntegrateMovement returns).
+    public bool IntegrateMovement(WorldEntity entity, WorldVector unitDir, double dtSeconds)
     {
         var previousTile = entity.TileCoord;
-        var stepped = entity.TryCommitStep(direction, serverTick, stepCooldownTicks, acceptFraction, _tileGrid, out result);
-        if (stepped)
+        var crossedTile = entity.IntegrateMovement(unitDir, dtSeconds);
+        if (crossedTile)
         {
             World.OnEntityMoved(entity, previousTile);
         }
 
-        return stepped;
-    }
-
-    // NET3 authored-tick commit: a UoClientDriven commit applied at its AUTHORED tick (see
-    // WorldEntity.TryCommitStepAuthored). Mirrors TryCommitStep's spatial-index migration so an accepted commit
-    // moves the entity's grid bucket. previousTile must be read before the call (TryCommitStepAuthored mutates Tile
-    // in place).
-    public bool TryCommitStepAuthored(
-        WorldEntity entity,
-        Direction8 direction,
-        uint authoredTick,
-        uint serverTick,
-        uint stepCooldownTicks,
-        uint pastWindowTicks,
-        uint futureLeadTicks,
-        out MovementStepResult result)
-    {
-        var previousTile = entity.TileCoord;
-        var stepped = entity.TryCommitStepAuthored(
-            direction, authoredTick, serverTick, stepCooldownTicks, pastWindowTicks, futureLeadTicks, _tileGrid, out result);
-        if (stepped)
-        {
-            World.OnEntityMoved(entity, previousTile);
-        }
-
-        return stepped;
+        return crossedTile;
     }
 
     public WorldEntity SpawnPlayer(

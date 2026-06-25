@@ -7,28 +7,11 @@ public sealed class WorldEntity
     // The earliest server tick at which this entity's next movement step may fire. Null = never acted, so the
     // first step is always eligible. An ACCEPTED step sets it to serverTick + the full step cooldown; a step
     // BLOCKED at a wall advances it by one tick (the cooldown is not consumed) so a held-into-a-wall intent
-    // re-tests next tick. This single field replaces the old _lastStepTick gate: storing the next-eligible tick
-    // directly (rather than backdating _lastStepTick by the cooldown) is underflow-safe near tick 0 and keeps
-    // the predictor mirror trivial. (S98: turn-then-move removed — a direction change now steps immediately,
-    // facing set on the step; there is no separate turn beat or turn delay.)
+    // re-tests next tick. (S98: turn-then-move removed — a direction change now steps immediately, facing set on the
+    // step; there is no separate turn beat or turn delay.) Phase 1: still the MONSTER tile-step pacing gate AND the
+    // player attack-movement-ROOT freeze (IsMovementFrozen) — the continuous PLAYER integrator does not gate ordinary
+    // pacing on it.
     private uint? _nextEligibleTick;
-
-    // S103 commit-step: the server tick of this entity's last ACCEPTED tile move (set in TryStep/TryCommitStep on
-    // accept). Null = never stepped. The commit-step anti-cheat floor measures "elapsed into the current step" as
-    // serverTick - _lastStepTick and accepts a commit only once that elapsed is at least CommitAcceptFraction of
-    // the cooldown — so a scripted client cannot use early commits to step faster than the normal cadence. Stored
-    // directly (rather than re-derived from _nextEligibleTick - cooldown) so a mid-step cadence change can't skew
-    // the elapsed measurement.
-    private uint? _lastStepTick;
-
-    // NET3 authored-tick commit scheduling: the AUTHORED tick of this entity's last ACCEPTED UoClientDriven commit
-    // (TryCommitStepAuthored). Null = no authored commit accepted yet. The anti-speedhack SPACING gate is keyed on
-    // authored ticks: a new commit's authored tick must be >= this prior accepted authored tick + the step cooldown,
-    // so a client cannot claim steps closer together than cadence regardless of when the packets arrive (the bundled
-    // [C2,C3] recovery is in-order and a cadence apart, so it passes; a spam burst at the same authored tick does
-    // not). Distinct from _lastStepTick (which is a RECEIVE-time field the S103 floor uses) so the two paths don't
-    // skew each other.
-    private uint? _lastAuthoredCommitTick;
 
     // COMBAT-S2B: the earliest server tick at which this entity's next ATTACK may fire. Null = never attacked, so
     // the first attack is always eligible. INDEPENDENT of the movement cooldown (_nextEligibleTick) — an attack and
@@ -69,21 +52,20 @@ public sealed class WorldEntity
     public uint NetworkId { get; }
     public EntityKind Kind { get; }
 
-    // Phase 0: the entity's CONTINUOUS world position (WorldVector, tile units). Behaviour is frozen
-    // tile-stepped, so in Phase 0 this is always an exact tile centre — every write goes through
-    // WorldVector.FromTile(targetTile) with the UNCHANGED integer step math. Phase 1's integrator is what
-    // first lets it hold fractional values. The wire/persistence/grid still speak TileCoord; they read the
-    // derived TileCoord accessor below, which round-trips losslessly while positions are tile centres.
+    // The entity's CONTINUOUS world position (WorldVector, tile units). Phase 1: for PLAYERS this now holds
+    // FRACTIONAL values — IntegrateMovement advances it by Velocity x dt off-grid. For MONSTERS it stays an exact
+    // tile centre (every TryStep write goes through WorldVector.FromTile(targetTile)). The wire/persistence/grid
+    // still speak TileCoord; they read the derived TileCoord accessor below, which rounds to the nearest tile.
     public WorldVector Position { get; private set; }
 
-    // Phase 0: dormant. Velocity is added for the Phase 1 integrator but is NEVER set non-zero in Phase 0
-    // (movement is still discrete tile steps). Read by nothing yet.
+    // The entity's current world-space velocity (units/sec). Phase 1: LIVE for PLAYERS — IntegrateMovement sets it
+    // to unitDir x SpeedUnitsPerSecond each tick (and StopMovement zeroes it on release). Stays Zero for MONSTERS
+    // (they tile-step via TryStep, which never touches Velocity).
     public WorldVector Velocity { get; private set; } = WorldVector.Zero;
 
-    // Phase 0: dormant speed stat (tiles/sec). Stored on the entity (set by the server from the base move
-    // speed × SpeedMultiplier) but READ BY NOTHING in Phase 0 — the tile cadence is still driven by
-    // SpeedMultiplier / EffectiveStepCooldownTicks. Phase 1's integrator switches onto this and retires the
-    // cooldown machinery.
+    // The entity's speed stat (tiles/sec), set by the server from base move speed x SpeedMultiplier. Phase 1: LIVE
+    // for PLAYERS — IntegrateMovement scales the unit direction by this. Monsters still pace off
+    // SpeedMultiplier / EffectiveStepCooldownTicks (the tile-step cadence), so this is dormant for them.
     public double SpeedUnitsPerSecond { get; private set; }
 
     // The entity's tile (nearest tile centre to Position). The single read accessor for every tile-needing
@@ -122,9 +104,9 @@ public sealed class WorldEntity
         return true;
     }
 
-    // Phase 0: store the dormant tiles/sec speed stat. Set by the server from BaseMoveSpeedUnitsPerSecond ×
-    // SpeedMultiplier on spawn / speed change. Read by NOTHING in Phase 0 (the cooldown path still drives the
-    // cadence) — it only becomes live when Phase 1's integrator consumes it. Guards against non-finite values.
+    // Store the tiles/sec speed stat. Set by the server from BaseMoveSpeedUnitsPerSecond × SpeedMultiplier on
+    // spawn / speed change. Phase 1: consumed LIVE by the PLAYER integrator (IntegrateMovement). Guards against
+    // non-finite values.
     public void SetSpeedUnitsPerSecond(double unitsPerSecond)
     {
         if (!double.IsFinite(unitsPerSecond) || unitsPerSecond < 0)
@@ -240,8 +222,6 @@ public sealed class WorldEntity
         Position = WorldVector.FromTile(tile);
         Facing = Direction8.S;
         _nextEligibleTick = null;
-        _lastStepTick = null;
-        _lastAuthoredCommitTick = null;
         StateRevision++;
         StepSequence++;
     }
@@ -385,17 +365,6 @@ public sealed class WorldEntity
     // this stage only puts it on the wire (no reconcile change).
     public uint StepSequence { get; private set; }
 
-    // DIAG1 (measurement only): per-entity commit-path counters so the server side of the 3-link recovery chain is
-    // observable. RecvCommits = commit attempts that reached this entity's gate (a RECOVERED lost commit counts —
-    // it was never consumed; a true duplicate already deduped upstream does NOT) — climbing while StepSequence
-    // (srvSeq) stalls means the server is REJECTING delivered commits (link 2), not failing to receive them (link 1). RejectsCommitTooEarly = commits refused by the authored-tick future-cap /
-    // receive-time cooldown floor ("commit_too_early") — the anti-speedhack gate the recovery hypothesis suspects.
-    // RejectsBlocked = commits refused because the target tile was a wall / out of bounds. Bumped inside the commit
-    // methods below; pure tallies that change NO movement decision. (StepSequence already exposes srvSeq.)
-    public uint RecvCommits { get; private set; }
-    public uint RejectsCommitTooEarly { get; private set; }
-    public uint RejectsBlocked { get; private set; }
-
     // Harvests the node: marks it depleted, schedules respawn, and bumps StateRevision so the change
     // re-replicates through the AOI snapshot delta path. Caller must have validated availability.
     public void DepleteResource(uint serverTick)
@@ -496,7 +465,6 @@ public sealed class WorldEntity
         var from = TileCoord;
         // Phase 0: accepted step assigns the tile-centre position with the UNCHANGED integer target tile.
         Position = WorldVector.FromTile(target);
-        _lastStepTick = serverTick;
         _nextEligibleTick = serverTick + stepCooldownTicks;
         StateRevision++;
         // S76: count this accepted tile move. ONLY here — blocked/cooldown steps above return early without
@@ -514,245 +482,98 @@ public sealed class WorldEntity
         return true;
     }
 
-    // S103 commit-step on release. A client whose model-B cosmetic render has glided past its commit threshold onto
-    // the next tile at key-release asks the server to finish that ONE step early instead of snapping back. This is a
-    // server-validated single step in `direction` with the SAME walkability gate as TryStep PLUS an anti-cheat
-    // floor, and it is the ONLY way an entity can step before its cooldown fully elapses:
+    // Phase 1 (continuous migration): the PLAYER continuous integrator — a direct port of the proven
+    // exp:ContinuousMover.Step (Z->Y, on WorldVector), NO-WALLS path (real swept-circle collision is Phase 2, so a
+    // player walks through walls here, which is the expected Phase-1 behaviour). Per server tick:
+    //   Velocity = unitDir x SpeedUnitsPerSecond            // unit direction (Direction8.ToUnitVector) x server speed
+    //   Position += Velocity x dtSeconds                    // dt is FIXED = 1/TickRate (the caller owns it)
+    // The client's MoveIntent carries ONLY a Direction8 (no magnitude, no timing), so the server owns speed AND dt —
+    // anti-speedhack is intrinsic. Faces the entity from the direction (the unit vector points the same way as the
+    // tile delta, so the discrete Facing follows the continuous heading). Returns true iff the entity's ROUNDED tile
+    // crossed a boundary this tick — only THEN do we bump StateRevision/StepSequence and (via Zone) migrate the grid
+    // bucket, so the tile-keyed wire/grid stay at exactly today's cadence and the snapshot bandwidth is unchanged
+    // (R1: do NOT bump every sub-tile tick). A zero unitDir is treated as a stop (Velocity = Zero, no move).
     //
-    //   * Walkable-gate identically to TryStep (S75 corner-cut rule) — a commit into a wall / out of bounds is
-    //     rejected and changes nothing.
-    //   * Anti-cheat floor: accept ONLY IF the entity is at least `acceptFraction` of its cooldown into the current
-    //     step, i.e. elapsed = serverTick - _lastStepTick >= acceptFraction * stepCooldownTicks. A never-stepped
-    //     entity (no _lastStepTick) is treated as fully elapsed (first move is always eligible, like TryStep).
-    //   * No-speedhack borrow: on accept the early finish CONSUMES the current step's remaining cooldown — it does
-    //     NOT gain time. The committed step is scheduled as if it had landed at its NOMINAL end (the tick the
-    //     current step's cooldown would have elapsed = _lastStepTick + cooldown), so the next step's clock starts
-    //     from there: _lastStepTick = nominalEnd and _nextEligibleTick = nominalEnd + cooldown. Thus the average
-    //     step rate can NEVER exceed the normal cadence (you finished one step a little early on screen, but the
-    //     NEXT step is no earlier than it would have been). A commit that arrives at/after the nominal end is just a
-    //     normal on-time step (scheduled from serverTick). This is what makes the held-intent model anti-speedhack:
-    //     spamming release-commits cannot raise the long-run step rate above one per cooldown.
-    //
-    // NOTE (deviation from the literal task text): the task wrote `_nextEligibleTick = commitTick + cooldown`, but
-    // that formula does NOT cap the rate — chaining commits at the acceptFraction floor would yield ~1/(fraction)×
-    // cadence (e.g. 2× at 0.5). The task's STATED guarantee ("average step rate can never exceed the normal
-    // cadence") and its required cadence-cap test win, so the borrow is scheduled from the nominal step end (above)
-    // which honours that guarantee exactly. Flagged in the S103 review request.
-    //
-    // Accept advances the tile + StepSequence + StateRevision exactly like a normal accepted step (so it replicates
-    // and the recipient-scoped RecipientStepSeq bumps, which the client reconciles against). There is no dedicated
-    // reply — the next snapshot showing the advanced tile is the accept signal; staying put is the reject signal.
-    public bool TryCommitStep(
-        Direction8 direction,
-        uint serverTick,
-        uint stepCooldownTicks,
-        double acceptFraction,
-        TileGrid grid,
-        out MovementStepResult result)
+    // Distinct from TryStep (the tile-step path monsters still use): a player uses IntegrateMovement (Velocity goes
+    // non-zero); a monster uses TryStep (Velocity stays Zero). NEVER both on one entity (R3).
+    public bool IntegrateMovement(WorldVector unitDir, double dtSeconds)
     {
-        // DIAG1: count every received commit attempt before any gate (see TryCommitStepAuthored). Measurement only.
-        RecvCommits++;
+        // Set velocity from the (already unit) direction scaled by the server speed stat. A zero direction means
+        // "not moving" — zero velocity, an instant stop with no inertia (matches ContinuousMover's no-input branch).
+        Velocity = unitDir.LengthSquared > 0d ? unitDir * SpeedUnitsPerSecond : WorldVector.Zero;
 
-        var delta = direction.Delta();
-        var target = TileCoord.Offset(delta.X, delta.Y);
-
-        // Walkability gate first (same rule as TryStep). A commit into a wall / out of bounds changes nothing —
-        // not even facing (a commit is a render-completion request, not a fresh direction input; the held-intent
-        // path already owns facing). The reject leaves the entity on its current tile, which the snapshot shows.
-        if (!IsStepWalkable(delta, target, grid))
+        // Face from the held direction even on a zero-dt / zero-distance tick so the sprite heading is correct (the
+        // unit vector points the same way as the tile delta). A zero direction leaves Facing unchanged.
+        var facing = FacingFromUnit(unitDir);
+        if (facing.HasValue)
         {
-            RejectsBlocked++; // DIAG1.
-            result = new MovementStepResult(
-                direction,
-                TileCoord,
-                target,
-                CooldownElapsed: true,
-                TargetWalkable: false,
-                Accepted: false,
-                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                TileCoord);
+            Facing = facing.Value;
+        }
+
+        if (dtSeconds <= 0d || Velocity.LengthSquared <= 0d)
+        {
             return false;
         }
 
-        // Anti-cheat floor: the entity must be at least acceptFraction of its cooldown into the current step. A
-        // never-stepped entity has no last step, so its first commit is always eligible (elapsed treated as
-        // infinite). A commit that arrives too early — a scripted spam below the floor — is rejected so commits
-        // can't raise the step rate above cadence.
-        if (_lastStepTick.HasValue)
+        var previousTile = TileCoord;
+        Position += Velocity * dtSeconds;
+        var crossedTile = TileCoord != previousTile;
+        if (crossedTile)
         {
-            // _lastStepTick can be a FUTURE tick after a borrowed commit (it is scheduled from the nominal step
-            // end). A commit arriving at or before that base has zero/negative elapsed — reject (and avoid the
-            // uint underflow that serverTick - _lastStepTick would otherwise produce). Otherwise compare the
-            // elapsed-since-base against the accept fraction.
-            var floor = acceptFraction * stepCooldownTicks;
-            var elapsedEnough = serverTick > _lastStepTick.Value
-                && (serverTick - _lastStepTick.Value) >= floor;
-            if (!elapsedEnough)
-            {
-                RejectsCommitTooEarly++; // DIAG1.
-                result = new MovementStepResult(
-                    direction,
-                    TileCoord,
-                    target,
-                    CooldownElapsed: false,
-                    TargetWalkable: true,
-                    Accepted: false,
-                    "commit_too_early",
-                    TileCoord);
-                return false;
-            }
+            // R1: only a rounded-tile crossing bumps replication state — the tile-keyed snapshot then carries the
+            // advance to the client at exactly the discrete cadence (StepSequence still counts tile crossings).
+            StateRevision++;
+            StepSequence++;
         }
 
-        var from = TileCoord;
-        // Phase 0: accepted commit assigns the tile-centre position with the UNCHANGED integer target tile.
-        Position = WorldVector.FromTile(target);
-        Facing = direction;
-        // Schedule the committed step from its NOMINAL end so the early finish consumes the current step's remaining
-        // cooldown rather than gaining time (the no-speedhack cap). nominalEnd = the tick the current step's cooldown
-        // would have elapsed = _lastStepTick + cooldown (which is exactly the old _nextEligibleTick). If the commit
-        // arrives at/after that nominal end (or the entity never stepped), it is just an on-time step scheduled from
-        // serverTick.
-        var nominalEnd = _lastStepTick.HasValue ? _lastStepTick.Value + stepCooldownTicks : serverTick;
-        var scheduleBase = nominalEnd > serverTick ? nominalEnd : serverTick;
-        _lastStepTick = scheduleBase;
-        _nextEligibleTick = scheduleBase + stepCooldownTicks;
-        StateRevision++;
-        StepSequence++;
-        result = new MovementStepResult(
-            direction,
-            from,
-            target,
-            CooldownElapsed: true,
-            TargetWalkable: true,
-            Accepted: true,
-            "committed",
-            TileCoord);
-        return true;
+        return crossedTile;
     }
 
-    // NET3 — apply a UoClientDriven commit at its AUTHORED tick (the references' "process the command at its own
-    // timing", not at receive time). This is the loss-desync fix: NET2's redundant window recovers a dropped commit,
-    // but it arrives BUNDLED with the next ([C2,C3] in one packet). The old TryCommitStep gated the cooldown on the
-    // RECEIVE tick, so both landed at the same tick → C2 accepted, C3 rejected "too early" → never confirmed →
-    // prediction stays ahead → desync. Here the cooldown SCHEDULE is keyed on the AUTHORED tick instead:
-    //
-    //   * authoredTick is the integer server tick the CLIENT's predictor banked the step on (carried on the wire,
-    //     NET3). It is clamped UP to a recent window floor [serverTick - pastWindow] so a far-past tick (a very stale
-    //     recovered commit, or tamper) can't rewind the schedule arbitrarily into the past.
-    //   * PACING (anti-speedhack): the commit is scheduled at scheduled = max(clampedAuthored, prior + cooldown) —
-    //     never closer than a full cooldown after the prior accepted commit. So a same-tick spam BURST is SERIALISED
-    //     to cadence (each clamped up to the prior's nominal end) rather than all landing at once; a client cannot
-    //     claim steps closer than cadence. The in-order redundant window delivers recovered commits a cadence apart,
-    //     so a bundle is already spaced and each lands at its own authored tick — exactly the [C2,C3] the receive-
-    //     time gate rejected. A reorder/dup (authored < prior) is paced up to the next slot too — no rollback (full
-    //     reorder rollback is Stage 4); the window normally prevents reorders anyway.
-    //   * REAL-TIME CAP: the scheduled tick must not exceed serverTick + futureLead — the schedule can NEVER run
-    //     ahead of real time by more than the small in-flight lead the predictor legitimately has. A serialised spam
-    //     burst whose paced slot would land in the future is REJECTED ("too early") and re-tries on a later tick once
-    //     real time catches up. This is what bounds the rate to cadence in real time (a 100-deep same-tick burst
-    //     cannot teleport the entity 100 tiles in one tick — only futureLead-worth land, the rest wait).
-    //   * On accept the schedule anchor advances to the scheduled tick; tile/StepSequence advance through the SAME
-    //     body as a normal step.
-    //
-    // Walkability is the identical S75 corner-cut gate as TryStep/TryCommitStep. A blocked authored commit holds in
-    // place WITHOUT consuming the authored schedule (mirroring TryStep's wall-hold) so a later commit re-tests.
-    public bool TryCommitStepAuthored(
-        Direction8 direction,
-        uint authoredTick,
-        uint serverTick,
-        uint stepCooldownTicks,
-        uint pastWindowTicks,
-        uint futureLeadTicks,
-        TileGrid grid,
-        out MovementStepResult result)
+    // Phase 1 (continuous migration): the attack-movement-ROOT freeze gate for the PLAYER integrator (R2). A
+    // committed swing pushes _nextEligibleTick forward (ApplyAttackMovementRoot[Authored]) to root the attacker's
+    // movement — a combat invariant the combat tests assert. The continuous integrator no longer gates on the step
+    // cooldown for ordinary pacing (that machinery is the tile-step path monsters keep), but it MUST still honour
+    // this root: while serverTick is before the next-eligible tick the player is frozen and does not integrate. The
+    // caller skips IntegrateMovement (and instead StopMovement()s) for a frozen player so a rooted entity neither
+    // glides nor advances. A never-rooted entity (no _nextEligibleTick) is never frozen.
+    public bool IsMovementFrozen(uint serverTick)
     {
-        // DIAG1: count every received commit attempt (incl. redundant re-sends) before any gate, so a climbing
-        // RecvCommits with a stalled StepSequence cleanly separates link-2 (server rejecting) from link-1 (not
-        // receiving). Measurement only.
-        RecvCommits++;
+        return _nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value;
+    }
 
-        // Clamp the authored tick up to a recent window floor so a far-past (stale / tamper) tick can't rewind the
-        // schedule arbitrarily. A far-future tick needs no separate clamp here — the real-time cap below rejects a
-        // scheduled tick beyond serverTick + futureLead.
-        var windowFloor = serverTick > pastWindowTicks ? serverTick - pastWindowTicks : 0u;
-        var clampedAuthored = authoredTick < windowFloor ? windowFloor : authoredTick;
+    // Phase 1: instant stop — zero the velocity so the entity does not glide. Called on release / dead / keepalive
+    // timeout (R6: without this the entity keeps its last Velocity and integrates forever). Position is untouched
+    // (the entity stays exactly where it is — fractional tile position is fine; the wire rounds it). No StateRevision
+    // bump: a stop changes no tile and no facing.
+    public void StopMovement()
+    {
+        Velocity = WorldVector.Zero;
+    }
 
-        // PACE: never schedule closer than a full cooldown after the prior accepted commit. A bundle that is already
-        // a cadence apart keeps its own authored ticks; a too-close / same-tick / reorder commit is paced up to the
-        // prior's nominal next slot (serialising a spam burst to cadence rather than dropping it).
-        var scheduledTick = clampedAuthored;
-        if (_lastAuthoredCommitTick.HasValue)
+    // The Direction8 a unit vector points toward (same table as Direction8.ToUnitVector), or null for a zero vector
+    // (no heading -> leave Facing as-is). Used by the integrator to keep the discrete Facing tracking the continuous
+    // heading without re-deriving the 8-way table at the call site.
+    private static Direction8? FacingFromUnit(WorldVector unitDir)
+    {
+        if (unitDir.LengthSquared <= 0d)
         {
-            var nominalNext = _lastAuthoredCommitTick.Value + stepCooldownTicks;
-            if (scheduledTick < nominalNext)
-            {
-                scheduledTick = nominalNext;
-            }
+            return null;
         }
 
-        // REAL-TIME CAP: the schedule can never run ahead of real time by more than the small in-flight lead. If the
-        // paced slot is beyond serverTick + futureLead, reject "too early" — the client is trying to claim steps
-        // faster than real time allows (a serialised spam burst, or a far-future authored tick). It re-tries on a
-        // later tick once real time advances, so the long-run rate is bounded to cadence and a burst can't teleport.
-        if (scheduledTick > serverTick + futureLeadTicks)
+        var dx = Math.Sign(unitDir.X);
+        var dy = Math.Sign(unitDir.Y);
+        return (dx, dy) switch
         {
-            // DIAG1: this is the link-2 reject the recovery hypothesis suspects (the future-cap refusing a
-            // delivered commit). Count it so the trace shows rejects climbing while StepSequence stalls.
-            RejectsCommitTooEarly++;
-            result = new MovementStepResult(
-                direction,
-                TileCoord,
-                TileCoord,
-                CooldownElapsed: false,
-                TargetWalkable: true,
-                Accepted: false,
-                "commit_too_early",
-                TileCoord);
-            return false;
-        }
-
-        var delta = direction.Delta();
-        var target = TileCoord.Offset(delta.X, delta.Y);
-
-        // Walkability gate (same S75 corner-cut rule as TryStep). A commit into a wall / out of bounds changes
-        // nothing and does NOT advance the authored schedule, so a later commit in an open direction still applies.
-        if (!IsStepWalkable(delta, target, grid))
-        {
-            RejectsBlocked++; // DIAG1.
-            result = new MovementStepResult(
-                direction,
-                TileCoord,
-                target,
-                CooldownElapsed: true,
-                TargetWalkable: false,
-                Accepted: false,
-                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                TileCoord);
-            return false;
-        }
-
-        var from = TileCoord;
-        // Phase 0: accepted authored commit assigns the tile-centre position with the UNCHANGED integer target.
-        Position = WorldVector.FromTile(target);
-        Facing = direction;
-        // Advance the authored-schedule anchor to the scheduled (paced) tick. The next commit must be scheduled at
-        // least a cooldown later. _lastStepTick / _nextEligibleTick are kept coherent off the SAME anchor so a later
-        // S103-style receive-time commit or a switch back to server-paced reads a sane base rather than a stale one.
-        _lastAuthoredCommitTick = scheduledTick;
-        _lastStepTick = scheduledTick;
-        _nextEligibleTick = scheduledTick + stepCooldownTicks;
-        StateRevision++;
-        StepSequence++;
-        result = new MovementStepResult(
-            direction,
-            from,
-            target,
-            CooldownElapsed: true,
-            TargetWalkable: true,
-            Accepted: true,
-            "committed",
-            TileCoord);
-        return true;
+            (0, -1) => Direction8.N,
+            (1, -1) => Direction8.NE,
+            (1, 0) => Direction8.E,
+            (1, 1) => Direction8.SE,
+            (0, 1) => Direction8.S,
+            (-1, 1) => Direction8.SW,
+            (-1, 0) => Direction8.W,
+            (-1, -1) => Direction8.NW,
+            _ => null,
+        };
     }
 
     // S75: walkability of a step from the current tile, with diagonal corner-cutting rejected. The destination

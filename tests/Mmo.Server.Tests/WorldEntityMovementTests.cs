@@ -4,310 +4,129 @@ using Xunit;
 
 namespace Mmo.Server.Tests;
 
+// Phase 1 (continuous migration): PLAYER movement is now CONTINUOUS — Position += Velocity x dt via
+// WorldEntity.IntegrateMovement, NOT a tile-step off the step cooldown. (The tile-step path — TryStep — survives for
+// MONSTERS and the attack-root; it is covered by WorldEntitySpeedTests / ZoneTests / MonsterRoamAiTests.) These tests
+// assert the player movement SEMANTICS the flip introduces: continuous advance, instant stop, facing from direction,
+// no walkability clamp (players walk through "walls" — Phase 2 adds real collision), and the attack-root freeze (R2)
+// still rooting a player via IsMovementFrozen. The focused port of the proven exp:ContinuousMover lives in
+// WorldEntityIntegratorTests; this file pins the player-path behaviour and its interaction with the root gate.
 public sealed class WorldEntityMovementTests
 {
+    private const double Eps = 1e-9;
+
     [Fact]
-    public void ValidStepMovesOneTileAndSetsFacing()
+    public void IntegratingAdvancesPositionContinuously_NotByWholeTiles()
     {
-        // Already facing the step direction, so it moves immediately.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
-        var grid = new TileGrid(16, 16, []);
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 4d);
 
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
+        // 4 units/s * 0.05s = 0.2 units east — a sub-tile advance the tile-step model could never express.
+        var crossed = entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.05d);
 
-        Assert.True(moved);
-        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);
+        Assert.False(crossed);                                  // no rounded-tile crossing yet
+        Assert.Equal(8.2d, entity.Position.X, Eps);            // continuous, fractional position
+        Assert.Equal(8d, entity.Position.Y, Eps);
+        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);   // still rounds to the origin tile
+        Assert.Equal(Direction8.E, entity.Facing);             // faced from the direction
+    }
+
+    [Fact]
+    public void IntegratingFacesFromTheHeldDirection()
+    {
+        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S, speed: 4d);
+
+        entity.IntegrateMovement(Direction8.NE.ToUnitVector(), dtSeconds: 0.05d);
+
         Assert.Equal(Direction8.NE, entity.Facing);
-        Assert.Equal(2u, entity.StateRevision);
-        Assert.True(result.Accepted);
-        Assert.Equal("accepted", result.Reason);
-        Assert.Equal(new TileCoord(8, 8), result.From);
-        Assert.Equal(new TileCoord(9, 7), result.Target);
-        Assert.Equal(entity.TileCoord, result.Result);
     }
 
     [Fact]
-    public void StepInNewDirectionStepsImmediately()
+    public void CrossingARoundedTileBumpsStateRevisionAndStepSequence()
     {
-        // S98: turn-then-move removed. A step in a direction we don't face now STEPS immediately in that
-        // direction (facing set on the step) — no separate turn beat, no extra tick.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
-        var grid = new TileGrid(16, 16, []);
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 10d);
+        var revisionBefore = entity.StateRevision;
+        var seqBefore = entity.StepSequence;
 
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var move);
+        // 10 units/s * 0.06s = 0.6 east -> x = 8.6 rounds to tile (9,8): a crossing.
+        var crossed = entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.06d);
 
-        Assert.True(moved);                                   // moved on the FIRST press in the new direction
-        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);       // advanced one tile in the new direction
-        Assert.Equal(Direction8.NE, entity.Facing);           // facing set on the step
-        Assert.Equal(2u, entity.StateRevision);               // a single bump for the accepted step (no turn bump)
-        Assert.Equal(1u, entity.StepSequence);                // one accepted tile move
-        Assert.True(move.Accepted);
-        Assert.Equal("accepted", move.Reason);
-    }
-
-    [Fact]
-    public void DirectionChangeStepsAtFullCooldown_NoTurnBeat()
-    {
-        // S98: with the turn delay gone, a direction change is just a step — the NEXT step in any direction is
-        // gated only by the full step cooldown (no shorter turn-delay window). cooldown=10, step at tick 10
-        // moves; tick 12 (< 20) is dropped on cooldown; tick 20 moves again.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
-        var grid = new TileGrid(16, 16, []);
-
-        Assert.True(entity.TryStep(Direction8.E, 10, stepCooldownTicks: 10, grid, out var first));
-        Assert.True(first.Accepted);
+        Assert.True(crossed);
         Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
-        Assert.Equal(Direction8.E, entity.Facing);
-
-        // Inside the full cooldown: dropped (no shorter turn-delay window any more).
-        Assert.False(entity.TryStep(Direction8.E, 12, stepCooldownTicks: 10, grid, out var early));
-        Assert.False(early.CooldownElapsed);
-        Assert.Equal("cooldown", early.Reason);
-        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
-
-        // At tick 20 (full cooldown elapsed) the next step moves.
-        Assert.True(entity.TryStep(Direction8.E, 20, stepCooldownTicks: 10, grid, out var move));
-        Assert.True(move.Accepted);
-        Assert.Equal(new TileCoord(10, 8), entity.TileCoord);
+        Assert.Equal(revisionBefore + 1, entity.StateRevision);
+        Assert.Equal(seqBefore + 1, entity.StepSequence);
     }
 
     [Fact]
-    public void BlockedDirectionChangeUpdatesAndReplicatesFacing()
+    public void StopMovementHaltsInstantly_NoGlide()
     {
-        // S98 replication detail: a direction change INTO A WALL (no tile move) must still update Facing AND
-        // bump StateRevision so the new facing replicates (the Cato sprite flip depends on it).
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]); // wall to the E
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 5d);
+        entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.1d); // moving
+        var xAfterMove = entity.Position.X;
 
-        var moved = entity.TryStep(Direction8.E, 10, 4, grid, out var result);
+        entity.StopMovement();
 
-        Assert.False(moved);                                  // blocked — no tile move
-        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);       // held in place
-        Assert.Equal(Direction8.E, entity.Facing);            // facing updated to the new direction
-        Assert.Equal(2u, entity.StateRevision);               // bumped so the facing-only change replicates
-        Assert.Equal(0u, entity.StepSequence);                // no accepted tile move
-        Assert.False(result.TargetWalkable);
-        Assert.Equal("blocked", result.Reason);
+        Assert.Equal(0d, entity.Velocity.Length, Eps);
+        // A subsequent stopped tick does not drift the position.
+        entity.IntegrateMovement(WorldVector.Zero, dtSeconds: 0.1d);
+        Assert.Equal(xAfterMove, entity.Position.X, Eps);
     }
 
     [Fact]
-    public void RepeatedPressIntoSameWall_DoesNotBumpStateRevisionAgain()
+    public void PlayerWalksThroughBlockedTiles_NoCollisionInPhase1()
     {
-        // A repeated press into the SAME wall (no facing change) must not bump StateRevision — it would spam
-        // snapshot deltas for nothing. Only the first press (which changed facing) bumped it.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]); // wall to the E, already facing E
+        // Phase 1 has NO collision (Phase 2 adds swept-circle). The integrator never consults walkability — a held
+        // direction integrates straight across what would be a wall. (Expected per the roadmap; do not "fix" this.)
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 10d);
 
-        Assert.False(entity.TryStep(Direction8.E, 10, 4, grid)); // blocked, facing unchanged
-        Assert.Equal(1u, entity.StateRevision);                  // no bump (facing already E)
+        for (var i = 0; i < 5; i++)
+        {
+            entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.1d); // 1 unit/tick east
+        }
 
-        Assert.False(entity.TryStep(Direction8.E, 11, 4, grid)); // blocked again, facing unchanged
-        Assert.Equal(1u, entity.StateRevision);                  // still no bump
+        // Advanced ~5 tiles east unobstructed — no clamp, no snag.
+        Assert.Equal(13d, entity.Position.X, Eps);
+        Assert.Equal(new TileCoord(13, 8), entity.TileCoord);
     }
 
     [Fact]
-    public void EarlyStepInsideCooldownIsDropped()
+    public void AttackRootFreezesThePlayer_IsMovementFrozenGatesIntegration()
     {
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        var grid = new TileGrid(16, 16, []);
+        // R2: a committed swing roots the player's movement by pushing _nextEligibleTick forward
+        // (ApplyAttackMovementRoot). While serverTick is inside that window IsMovementFrozen is true and the
+        // integrator caller must skip the move (the combat invariant).
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 5d);
+        entity.ApplyAttackMovementRoot(serverTick: 10, rootTicks: 5); // rooted until tick 15
 
-        Assert.True(entity.TryStep(Direction8.E, 10, 4, grid)); // moves (already facing E)
-        var moved = entity.TryStep(Direction8.E, 12, 4, grid, out var result);
-
-        Assert.False(moved);
-        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
-        Assert.Equal(Direction8.E, entity.Facing);
-        Assert.Equal(2u, entity.StateRevision);
-        Assert.False(result.CooldownElapsed);
-        Assert.Equal("cooldown", result.Reason);
+        Assert.True(entity.IsMovementFrozen(10));
+        Assert.True(entity.IsMovementFrozen(14));
+        Assert.False(entity.IsMovementFrozen(15)); // window elapsed
+        Assert.False(entity.IsMovementFrozen(20));
     }
 
     [Fact]
-    public void BlockedTileStepIsDropped()
+    public void NeverRootedPlayerIsNeverFrozen()
     {
-        // Already facing E so the step is a MOVE attempt — and the target is blocked.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
-
-        var moved = entity.TryStep(Direction8.E, 10, 4, grid, out var result);
-
-        Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);
-        Assert.Equal(Direction8.E, entity.Facing);
-        Assert.Equal(1u, entity.StateRevision); // facing unchanged (already E) -> no bump
-        Assert.False(result.TargetWalkable);
-        Assert.Equal("blocked", result.Reason);
-    }
-
-    [Fact]
-    public void OutOfBoundsStepIsDropped()
-    {
-        // Already facing N so the step is a MOVE attempt off the map.
-        var entity = CreateEntity(tile: new TileCoord(0, 0), facing: Direction8.N);
-        var grid = new TileGrid(16, 16, []);
-
-        var moved = entity.TryStep(Direction8.N, 10, 4, grid, out var result);
-
-        Assert.False(moved);
-        Assert.Equal(new TileCoord(0, 0), entity.TileCoord);
-        Assert.Equal(1u, entity.StateRevision); // facing unchanged (already N) -> no bump
-        Assert.Equal("out_of_bounds", result.Reason);
-    }
-
-    [Fact]
-    public void DiagonalStepThroughCornerIsRejected_OneSideBlocked()
-    {
-        // S75: a diagonal NE step from (8,8) to (9,7) cuts between the side tiles (9,8) and (8,7). The
-        // destination (9,7) is open, but one side (9,8) is blocked — the move would slip diagonally through the
-        // wall corner, so it must be rejected and held (same shape as a blocked cardinal).
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
-
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
-
-        Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.TileCoord); // held — did not slip through the corner
-        Assert.Equal(Direction8.NE, entity.Facing);
-        Assert.Equal(1u, entity.StateRevision); // facing unchanged (already NE) -> no bump
-        Assert.False(result.TargetWalkable);
-        Assert.Equal("blocked", result.Reason); // in bounds, just blocked by the corner
-    }
-
-    [Fact]
-    public void DiagonalStepThroughCornerIsRejected_BothSidesBlocked()
-    {
-        // S75: both side tiles (9,8) and (8,7) blocked — a fully-walled corner. The open destination (9,7) is
-        // unreachable diagonally; the step is rejected and held.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 8), new TileCoord(8, 7)]);
-
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
-
-        Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);
-        Assert.Equal(1u, entity.StateRevision);
-        Assert.False(result.TargetWalkable);
-        Assert.Equal("blocked", result.Reason);
-    }
-
-    [Fact]
-    public void DiagonalStepThroughOpenSpaceStillSucceeds()
-    {
-        // S75: both side tiles open ⇒ the diagonal is a clean move (corner check only rejects when a side is
-        // blocked, never an open diagonal).
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.NE);
-        var grid = new TileGrid(16, 16, []);
-
-        var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
-
-        Assert.True(moved);
-        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);
-        Assert.Equal(Direction8.NE, entity.Facing);
-        Assert.True(result.Accepted);
-        Assert.Equal("accepted", result.Reason);
-    }
-
-    [Fact]
-    public void CardinalStepIntoWallStillHolds_NoCornerRuleApplied()
-    {
-        // S75 guard: the corner rule must not touch cardinal steps. A blocked E target still holds with the same
-        // "blocked" result, and an OPEN cardinal step past an adjacent-but-irrelevant blocked tile still moves
-        // (a cardinal has no side tiles to check).
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        var blockedAdjacent = new TileGrid(16, 16, [new TileCoord(8, 7)]); // (8,7) is N of us, irrelevant to E
-
-        var moved = entity.TryStep(Direction8.E, 10, 4, blockedAdjacent, out var openResult);
-        Assert.True(moved); // cardinal E to (9,8): destination open, no side-tile rule
-        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
-        Assert.True(openResult.Accepted);
-
-        // Cardinal into a wall still holds (unchanged blocked behaviour).
-        var wallEast = new TileGrid(16, 16, [new TileCoord(10, 8)]);
-        var blocked = entity.TryStep(Direction8.E, 14, 4, wallEast, out var wallResult);
-        Assert.False(blocked);
-        Assert.Equal(new TileCoord(9, 8), entity.TileCoord); // held at the wall
-        Assert.Equal("blocked", wallResult.Reason);
-    }
-
-    [Fact]
-    public void EntitiesMayShareTile()
-    {
-        var first = CreateEntity(networkId: 1, tile: new TileCoord(8, 8), facing: Direction8.E);
-        var second = CreateEntity(networkId: 2, tile: new TileCoord(8, 8), facing: Direction8.E);
-        var grid = new TileGrid(16, 16, []);
-
-        Assert.True(first.TryStep(Direction8.E, 10, 4, grid));
-        Assert.True(second.TryStep(Direction8.E, 10, 4, grid));
-
-        Assert.Equal(first.TileCoord, second.TileCoord);
-    }
-
-    [Fact]
-    public void StepSequenceIncrementsOncePerAcceptedStep()
-    {
-        // S76: StepSequence starts at 0 and bumps by exactly 1 per ACCEPTED tile move.
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        var grid = new TileGrid(16, 16, []);
-
-        Assert.Equal(0u, entity.StepSequence);
-
-        Assert.True(entity.TryStep(Direction8.E, 10, 4, grid)); // accepted
-        Assert.Equal(1u, entity.StepSequence);
-
-        Assert.True(entity.TryStep(Direction8.E, 14, 4, grid)); // accepted (cooldown elapsed)
-        Assert.Equal(2u, entity.StepSequence);
-    }
-
-    [Fact]
-    public void StepSequenceUnchangedOnBlockedDirectionChange()
-    {
-        // S98: a blocked direction change updates+replicates facing but does NOT move the tile — StepSequence
-        // must NOT bump (it counts accepted tile moves only).
-        var entity = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.S);
-        var grid = new TileGrid(16, 16, [new TileCoord(9, 7)]); // wall NE of us
-
-        Assert.False(entity.TryStep(Direction8.NE, 10, 4, grid, out var blocked)); // blocked direction change
-        Assert.Equal("blocked", blocked.Reason);
-        Assert.Equal(Direction8.NE, entity.Facing); // facing updated
-        Assert.Equal(0u, entity.StepSequence);       // no tile move
-
-        // A subsequent step into an open direction now moves and bumps the sequence.
-        Assert.True(entity.TryStep(Direction8.E, 12, 4, grid)); // (8,8) -> (9,8) open
-        Assert.Equal(1u, entity.StepSequence);
-    }
-
-    [Fact]
-    public void StepSequenceUnchangedOnBlockedAndCooldownStep()
-    {
-        // S76: a blocked step (and an early/cooldown step) is rejected without moving — StepSequence must not
-        // bump on either.
-        var blockedGrid = new TileGrid(16, 16, [new TileCoord(9, 8)]);
-        var blocked = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        Assert.False(blocked.TryStep(Direction8.E, 10, 4, blockedGrid)); // blocked
-        Assert.Equal(0u, blocked.StepSequence);
-
-        var openGrid = new TileGrid(16, 16, []);
-        var cooldown = CreateEntity(tile: new TileCoord(8, 8), facing: Direction8.E);
-        Assert.True(cooldown.TryStep(Direction8.E, 10, 4, openGrid)); // accepted -> seq 1
-        Assert.Equal(1u, cooldown.StepSequence);
-        Assert.False(cooldown.TryStep(Direction8.E, 12, 4, openGrid)); // early/cooldown drop
-        Assert.Equal(1u, cooldown.StepSequence); // unchanged
+        var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 5d);
+        Assert.False(entity.IsMovementFrozen(0));
+        Assert.False(entity.IsMovementFrozen(1000));
     }
 
     private static WorldEntity CreateEntity(
-        uint networkId = 1,
-        TileCoord? tile = null,
-        Direction8 facing = Direction8.S)
+        TileCoord tile,
+        Direction8 facing = Direction8.S,
+        double speed = 4d)
     {
-        return new WorldEntity(
-            id: networkId,
-            networkId: networkId,
+        var entity = new WorldEntity(
+            id: 1,
+            networkId: 1,
             EntityKind.Player,
-            tile ?? TileGrid.DefaultSpawnTile,
+            tile,
             facing,
-            $"Player{networkId}",
+            "Player1",
             Guid.NewGuid(),
             ownerSession: null,
             isDurable: true);
+        entity.SetSpeedUnitsPerSecond(speed);
+        return entity;
     }
 }

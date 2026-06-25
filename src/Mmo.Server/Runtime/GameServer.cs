@@ -31,25 +31,12 @@ public sealed class GameServer
     private const int MinEffectiveStepCooldownMs = 50;
     private const int MaxEffectiveStepCooldownMs = 5000;
 
-    // S103 commit-step anti-cheat floor. A StepCommitRequest is accepted only if the entity is at least this
-    // fraction of its step cooldown into the current step (elapsed >= CommitAcceptFraction * cooldown). The
-    // legit client only commits once its cosmetic render has glided past its ~0.7 threshold (the F6 default),
-    // which is BELOW this fraction in elapsed terms only after enough cooldown has passed — set to 0.5 so a
-    // genuine release-commit (render ~70% onto the next tile, i.e. well past half the cooldown) is always
-    // accepted, while a scripted commit fired below half the cooldown is rejected. On accept the server borrows
-    // the next step's full cooldown (WorldEntity.TryCommitStep), so the average step rate stays capped at cadence
-    // regardless — this fraction only sets how early within a step a commit may legitimately fire.
-    private const double CommitAcceptFraction = 0.5d;
-
-    // NET3 authored-tick commit window. A UoClientDriven commit is applied at its AUTHORED tick (the tick the
-    // client's predictor banked the step on), but the authored tick is clamped to [serverTick - AuthoredTickPastWindow,
-    // serverTick + AuthoredTickFutureLead] before it gates/schedules anything, so a far-past (very stale recovered
-    // commit / tamper) or far-future (clock skew) authored tick can't poison the schedule. The past window covers a
-    // generous loss-recovery depth (the redundant window is ~8 commits ≈ 8 cadences ≈ 24 ticks at 150 ms cadence;
-    // 64 ticks ≈ 3.2 s gives ample slack for a deep recovery without letting an ancient tick through). The future
-    // lead is tiny: the predictor leads the server by ~1-2 in-flight steps, so a few ticks of lead is legitimate
-    // (uplink jitter / a frame that banked slightly ahead), but a commit authored far in the future is clamped down
-    // so the schedule can never run ahead of real time by more than this — the rate stays capped at cadence.
+    // Authored-tick clamp window for the attack-movement-ROOT (ApplyAttackMovementRootAuthored). The swing root is
+    // anchored on the CLIENT's AUTHORED tick (carried on the wire) so the server and the client predictor compute the
+    // identical root window under latency, but the authored tick is clamped to [serverTick - AuthoredTickPastWindow,
+    // serverTick + AuthoredTickFutureLead] first so a far-past/far-future (tamper / clock skew) authored tick can't
+    // poison the schedule. (Phase 1: formerly also bounded the NET3 authored-tick STEP COMMIT, which is now retired —
+    // these constants remain solely for the swing-root anchor.)
     private const uint AuthoredTickPastWindow = 64;
     private const uint AuthoredTickFutureLead = 4;
 
@@ -444,26 +431,13 @@ public sealed class GameServer
                     HandleMoveInput(session, input);
                 }
                 break;
-            case StepCommitRequestMessage commit:
-                if (session.IsAuthenticated)
-                {
-                    HandleStepCommit(session, commit.Sequence, commit.Direction);
-                }
-                break;
-            case StepCommitBatchMessage batch:
-                if (session.IsAuthenticated)
-                {
-                    HandleStepCommitBatch(session, batch);
-                }
-                break;
-            case MovementModeMessage mode:
-                if (session.IsAuthenticated)
-                {
-                    // UO1: record whether this session drives its own movement (client-driven) so the tick loop
-                    // stops auto-pacing its held MoveIntent (StepHeldMovementIntents skips client-driven sessions).
-                    // No stepping happens here; the entity advances ONLY via the per-step StepCommitRequest stream.
-                    session.SetClientDrivenMovement(mode.ClientDriven);
-                }
+            // Phase 1 (continuous migration): the client-driven commit-step machinery is RETIRED — player movement is
+            // now server-authoritative continuous integration off the held MoveIntent (IntegrateHeldMovementIntents).
+            // The wire message TYPES + codec survive (Phase 3 removes them); these dispatch arms are now NO-OPS so an
+            // older client's StepCommit*/MovementMode packets are accepted and ignored rather than erroring.
+            case StepCommitRequestMessage:
+            case StepCommitBatchMessage:
+            case MovementModeMessage:
                 break;
             case ChatSendMessage chat:
                 if (session.IsAuthenticated)
@@ -676,9 +650,10 @@ public sealed class GameServer
         tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
         using (tickBudget.Measure(TickBudgetCategory.Movement))
         {
-            StepHeldMovementIntents();
+            IntegrateHeldMovementIntents();
             // LIVING-ENEMIES P1: a sibling movement pass that steps each roaming Monster off the step cooldown
-            // (same tile-step path as players), so monsters idle near home and occasionally stroll within a leash.
+            // (the TILE-STEP path — monsters stay tile-stepped in Phase 1; the continuous integrator above is
+            // PLAYER-only), so monsters idle near home and occasionally stroll within a leash.
             StepMonsterAi();
         }
 
@@ -2630,11 +2605,12 @@ public sealed class GameServer
         return (ushort)Math.Clamp((int)Math.Round(ms, MidpointRounding.AwayFromZero), 1, ushort.MaxValue);
     }
 
-    // Phase 0 (continuous migration): refresh an entity's DORMANT tiles/sec speed stat from the base move speed ×
-    // its current SpeedMultiplier. Called on spawn + on every SpeedMultiplier change so the stat tracks the same
-    // factor the cooldown path uses. READ BY NOTHING in Phase 0 — the cooldown/EffectiveStepCooldownTicks path
-    // still drives movement; this only seeds the value Phase 1's integrator will consume. No replication, no
-    // behaviour change.
+    // Refresh an entity's tiles/sec speed stat from the base move speed × its current SpeedMultiplier. Called on
+    // spawn + on every SpeedMultiplier change so the stat tracks the live multiplier. Phase 1: this is now LIVE for
+    // PLAYERS — IntegrateHeldMovementIntents consumes SpeedUnitsPerSecond as the continuous integrator's speed (base
+    // 1000/StepCooldownMs ⇒ one tile per StepCooldownMs at multiplier 1.0, so the tile-crossing cadence ≈ the old
+    // tile-step cadence). Monsters keep the EffectiveStepCooldownTicks tile-step path, so for them this stat is still
+    // dormant. No replication change (the wire still carries the cadence ms).
     private void RefreshDormantSpeedStat(WorldEntity entity)
     {
         entity.SetSpeedUnitsPerSecond(_tuning.BaseMoveSpeedUnitsPerSecond * entity.SpeedMultiplier);
@@ -2646,35 +2622,26 @@ public sealed class GameServer
     // cooldown simply doesn't move this tick, and a blocked target keeps the intent so the entity steps
     // as soon as it is unblocked or redirected. A "moving" session that has not sent any intent (not even
     // a keepalive) within MoveIntentKeepaliveTimeout is force-stopped. See docs/movement-input-model.md.
-    private void StepHeldMovementIntents()
+    // Phase 1 (continuous migration): the PLAYER continuous-integrator pass (the behavioural flip — formerly
+    // StepHeldMovementIntents, which tile-stepped each held intent off the step cooldown). Per tick, per
+    // authenticated session: a MOVING player integrates its Position by Velocity x dt in the held direction
+    // (Zone.IntegrateMovement, no-walls — players walk through walls until Phase 2 adds swept-circle collision); a
+    // RELEASED / DEAD / keepalive-timed-out / attack-rooted player is force-STOPPED (Velocity = Zero) so it never
+    // glides (R6). dt is FIXED at 1/TickRate (R4 — Phase 4's predictor must replay with this same dt). The wire is
+    // unchanged: the snapshot still emits the rounded tile, and IntegrateMovement only bumps StateRevision/StepSequence
+    // on a rounded-tile crossing (R1) so the tile cadence/bandwidth match today's.
+    //
+    // MONSTERS are untouched — they still tile-step via StepMonsterAi/Zone.TryStep (R3); this pass only drives
+    // player-owned session entities.
+    private void IntegrateHeldMovementIntents()
     {
         var keepaliveTimeoutTicks = (uint)Math.Max(1, (int)Math.Ceiling(MoveIntentKeepaliveTimeout.TotalMilliseconds / (1000d / _options.TickRate)));
+        var dtSeconds = 1.0 / _options.TickRate;
 
         foreach (var session in _sessions.Values)
         {
-            if (!session.IsAuthenticated || !session.MoveIntentMoving)
+            if (!session.IsAuthenticated)
             {
-                continue;
-            }
-
-            // LIVING-ENEMIES P3: a DEAD (downed) player doesn't walk during its respawn delay (the dead-player guard).
-            if (session.IsDead)
-            {
-                continue;
-            }
-
-            // UO1: a client-driven session paces its OWN movement via the per-step StepCommitRequest stream. The
-            // server must NOT also step it from the held MoveIntent here, or the held-intent pacer and the commits
-            // would both advance the entity (double-stepping / 2x speed). The MoveIntent is still recorded (for
-            // facing/keepalive) — it is just not paced. Default sessions are unaffected.
-            if (session.ClientDrivenMovement)
-            {
-                continue;
-            }
-
-            if (_serverTick - session.LastMoveIntentTick >= keepaliveTimeoutTicks)
-            {
-                session.ClearMoveIntent();
                 continue;
             }
 
@@ -2683,17 +2650,44 @@ public sealed class GameServer
                 continue;
             }
 
-            var direction = session.MoveIntentDirection;
-            if (_zone.TryStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), out var result))
+            // Decide whether this player integrates this tick. A non-moving intent, a DEAD (downed) player during its
+            // respawn delay, a keepalive-timed-out (wedged) client, or an attack-rooted player (R2) all STOP instead
+            // of moving — StopMovement zeroes velocity so the entity does not glide (R6).
+            var moving = session.MoveIntentMoving;
+
+            // LIVING-ENEMIES P3: a DEAD (downed) player doesn't walk during its respawn delay (the dead-player guard).
+            if (moving && session.IsDead)
             {
-                MarkDirtyDurableTile(entity);
+                moving = false;
             }
 
-            // Trace every cooldown-elapsed step attempt (accepted, blocked, or out-of-bounds); cooldown
-            // no-ops are skipped to keep the trace readable, matching the old per-MoveStep granularity.
-            if (result.CooldownElapsed)
+            // Keepalive safety: a "moving" session silent past the timeout is force-stopped (its intent is cleared so
+            // it does not resume without a fresh intent).
+            if (moving && _serverTick - session.LastMoveIntentTick >= keepaliveTimeoutTicks)
             {
-                _movementTrace.MoveStep(session, session.LastMoveSeq, result, _serverTick);
+                session.ClearMoveIntent();
+                moving = false;
+            }
+
+            // R2: the attack-movement-root still freezes the player. While the swing-root window is active
+            // (serverTick < the entity's next-eligible tick, set by ApplyAttackMovementRoot[Authored]) the player is
+            // rooted — it neither integrates nor glides.
+            if (moving && entity.IsMovementFrozen(_serverTick))
+            {
+                moving = false;
+            }
+
+            if (!moving)
+            {
+                entity.StopMovement();
+                continue;
+            }
+
+            var unitDir = session.MoveIntentDirection.ToUnitVector();
+            if (_zone.IntegrateMovement(entity, unitDir, dtSeconds))
+            {
+                // A rounded-tile crossing — persist the new durable tile (mirrors the tile-step path).
+                MarkDirtyDurableTile(entity);
             }
         }
     }
@@ -2913,20 +2907,13 @@ public sealed class GameServer
         };
     }
 
-    // S103 commit-step on release. A client whose cosmetic render glided past its commit threshold onto the
-    // next tile at key-release asks the server to finish that one step early (instead of snapping back). Validate
-    // the sequence (on the dedicated commit cursor, NET6 — so a stale/duplicate commit can't fire twice and a commit
-    // never resurrects a stopped intent), resolve the entity, then attempt a single server-validated commit step
-    // with the anti-cheat floor. On accept the tile advances + StepSequence bumps, so the next snapshot's confirmed
-    // tile + RecipientStepSeq carry the result to the client (no dedicated reply). On reject nothing changes and the
-    // snapshot still shows the old tile (the client reads that as "snap back"). Tracing mirrors the held-step path.
     // NET1 Stage 1: ingest a redundant-unreliable MoveInput packet. The packet carries the newest input
     // (HeadSeq/Moving/Direction) plus a window of prior inputs as deltas off HeadSeq. We reconstruct each
     // input's sequence, then apply them in ASCENDING seq order through the EXISTING TryUpdateMoveIntent,
     // which dedups (seq <= LastMoveSeq dropped) and advances the held intent. Because every packet repeats
     // the full window, a dropped packet's intermediate state change is recovered from any later packet that
-    // still carries it — no head-of-line stall, no retransmit bunching. The stepping model is untouched:
-    // StepHeldMovementIntents still paces the entity off the held intent this fed.
+    // still carries it — no head-of-line stall, no retransmit bunching. The movement model is untouched:
+    // IntegrateHeldMovementIntents still integrates the entity off the held intent this fed.
     private void HandleMoveInput(ClientSession session, MoveInputMessage input)
     {
         foreach (var (seq, moving, direction) in ExtractFreshMoveInputs(input, session.LastMoveSeq))
@@ -2973,146 +2960,6 @@ public sealed class GameServer
         // are distinct off a single head), so a stable insertion sort suffices.
         fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
         return fresh;
-    }
-
-    // NET2/NET3: ingest a redundant-unreliable StepCommitBatch. The packet carries the newest committed step
-    // (HeadSeq/HeadTick/Direction) plus a window of prior committed steps as seq/tick deltas off the head. We
-    // reconstruct each commit's (sequence, authored tick), then apply them in ASCENDING seq order — the cursor
-    // dedups (TryConsumeCommitSequence drops seq <= LastCommitSeq, NET6) and each fresh commit is applied at its AUTHORED
-    // tick (NET3: TryCommitStepAuthored gates/schedules the cooldown on authored time, not the receive tick). This
-    // is the loss-desync fix: a dropped commit recovered BUNDLED with the next ([C2,C3] in one packet) used to land
-    // at the same receive tick — C2 accepted, C3 rejected "too early". Keying the schedule on authored ticks lets
-    // C2(authored T+3) advance the schedule to T+6 so C3(authored T+6) is then accepted. Forward replay only (the
-    // window delivers recovered commits in order); a genuine reorder is dropped gracefully (Stage 4 owns rollback).
-    private void HandleStepCommitBatch(ClientSession session, StepCommitBatchMessage batch)
-    {
-        // NET6: gate the commit window on the COMMIT cursor (LastCommitSeq), not the intent cursor. The two are
-        // now independent, so an interleaved STOP/direction-change intent (which advances LastMoveSeq) can no
-        // longer pre-dedup an unconfirmed commit out of this window before its re-send lands.
-        foreach (var (seq, authoredTick, direction) in ExtractFreshStepCommits(batch, session.LastCommitSeq))
-        {
-            HandleAuthoredStepCommit(session, seq, authoredTick, direction);
-        }
-    }
-
-    // NET2/NET3 (pure, unit-testable): given a redundant StepCommitBatch and the last seq already accepted on the
-    // COMMIT cursor (NET6 — the caller passes session.LastCommitSeq, not the intent cursor), returns the fresh
-    // commits (seq > lastSeq) in ASCENDING seq order — head plus window
-    // entries reconstructed from their deltas (entrySeq = HeadSeq - SeqDelta; entryTick = HeadTick - TickDelta).
-    // Already-seen and malformed (seq delta 0 / underflowing, or a tick delta that underflows the head tick) entries
-    // are dropped. Applying the result oldest-first feeds the commit path each new step once, each carrying the
-    // AUTHORED tick the client banked it on; a "dropped head" batch's commit is recovered from a later batch's
-    // window with its authored tick intact.
-    internal static IReadOnlyList<(uint Seq, uint AuthoredTick, Direction8 Direction)> ExtractFreshStepCommits(
-        StepCommitBatchMessage batch,
-        uint lastSeq)
-    {
-        var fresh = new List<(uint Seq, uint AuthoredTick, Direction8 Direction)>(batch.Window.Count + 1);
-        if (batch.HeadSeq > lastSeq)
-        {
-            fresh.Add((batch.HeadSeq, batch.HeadTick, batch.Direction));
-        }
-
-        for (var i = 0; i < batch.Window.Count; i++)
-        {
-            var entry = batch.Window[i];
-            if (entry.SeqDelta == 0 || entry.SeqDelta > batch.HeadSeq)
-            {
-                // 0 would alias the head; a delta past HeadSeq underflows — drop the malformed entry.
-                continue;
-            }
-
-            if (entry.TickDelta > batch.HeadTick)
-            {
-                // A tick delta past HeadTick underflows the authored tick — drop the malformed entry. (TickDelta 0
-                // would tie the head's tick, which the client never emits since authored ticks increase, but it is
-                // harmless if it slips through — the authored-tick spacing gate handles a too-close tick.)
-                continue;
-            }
-
-            var entrySeq = batch.HeadSeq - entry.SeqDelta;
-            if (entrySeq > lastSeq)
-            {
-                fresh.Add((entrySeq, batch.HeadTick - entry.TickDelta, entry.Direction));
-            }
-        }
-
-        // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
-        // are distinct off a single head), so a stable sort suffices. Seq order == authored-tick order (both
-        // increase monotonically per accepted step), so this also yields ascending authored ticks.
-        fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
-        return fresh;
-    }
-
-    // NET3: apply ONE fresh commit at its authored tick. The cursor (TryConsumeCommitSequence) dedups; on accept the
-    // entity steps via the authored-tick path (TryCommitStepAuthored), which clamps the authored tick to a recent
-    // window and enforces cooldown SPACING on authored ticks (anti-speedhack) before scheduling on it.
-    private void HandleAuthoredStepCommit(ClientSession session, uint sequence, uint authoredTick, Direction8 direction)
-    {
-        if (!session.TryConsumeCommitSequence(sequence, _serverTick))
-        {
-            return;
-        }
-
-        if (!TryGetSessionEntity(session, out var entity))
-        {
-            return;
-        }
-
-        if (_zone.TryCommitStepAuthored(
-                entity,
-                direction,
-                authoredTick,
-                _serverTick,
-                EffectiveStepCooldownTicks(entity),
-                AuthoredTickPastWindow,
-                AuthoredTickFutureLead,
-                out var result))
-        {
-            MarkDirtyDurableTile(entity);
-        }
-
-        if (result.CooldownElapsed)
-        {
-            // NET6: a commit step's seq is the COMMIT cursor (LastCommitSeq), not the intent cursor — report it
-            // so the trace's seq column tracks the stream that actually advanced.
-            _movementTrace.MoveStep(session, session.LastCommitSeq, result, _serverTick);
-        }
-
-        // DIAG1: surface the server-side recovery-chain counters on EVERY commit (accept AND reject). The
-        // future-cap reject ("commit_too_early") carries CooldownElapsed=false, so MoveStep above skips it — this
-        // line ensures the rejects-climbing-while-srvSeq-stalls (link-2) signal is always traced. Measurement only.
-        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
-    }
-
-    // S103: the reliable per-step StepCommitRequest path (still defined; the wire send is now StepCommitBatch). Keeps
-    // the receive-time S103 commit-step floor (TryCommitStep) for any client still using the legacy single-commit
-    // message. The redundant StepCommitBatch path uses HandleAuthoredStepCommit (NET3) instead.
-    private void HandleStepCommit(ClientSession session, uint sequence, Direction8 direction)
-    {
-        if (!session.TryConsumeCommitSequence(sequence, _serverTick))
-        {
-            return;
-        }
-
-        if (!TryGetSessionEntity(session, out var entity))
-        {
-            return;
-        }
-
-        if (_zone.TryCommitStep(entity, direction, _serverTick, EffectiveStepCooldownTicks(entity), CommitAcceptFraction, out var result))
-        {
-            MarkDirtyDurableTile(entity);
-        }
-
-        if (result.CooldownElapsed)
-        {
-            // NET6: report the commit cursor (see HandleAuthoredStepCommit).
-            _movementTrace.MoveStep(session, session.LastCommitSeq, result, _serverTick);
-        }
-
-        // DIAG1: surface the server-side recovery-chain counters on every legacy commit too (see the authored path).
-        _movementTrace.CommitCounters(session, entity, result.Reason, _serverTick);
     }
 
     private void MarkDirtyDurableTile(WorldEntity entity)
