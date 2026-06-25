@@ -278,7 +278,7 @@ public sealed class UoClientDrivenCrashSoakTests
                         {
                             if (state.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = state.Tile;
+                                OwnTile = state.Position.ToTileRounded();
                             }
                         }
 

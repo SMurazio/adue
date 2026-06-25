@@ -70,7 +70,7 @@ public sealed class MmoClientDeltadOutReconcileTests
                 IsComplete: false,          // a delta snapshot (not a full re-baseline)
                 ChunkIndex: 0,
                 ChunkCount: 1,
-                Entities: new[] { new EntityStateSnapshot(777, new TileCoord(0, 0), Direction8.S) },
+                Entities: new[] { new EntityStateSnapshot(777, WorldVector.FromTile(0, 0), Direction8.S) },
                 RecipientStepSeq: 0));      // server's count of OUR CONFIRMED moves: 0 (banked commits still in flight)
             client.Poll(wallMs);
         }
@@ -108,7 +108,7 @@ public sealed class MmoClientDeltadOutReconcileTests
                 IsComplete: false,
                 ChunkIndex: 0,
                 ChunkCount: 1,
-                Entities: new[] { new EntityStateSnapshot(777, new TileCoord(0, 0), Direction8.S) },
+                Entities: new[] { new EntityStateSnapshot(777, WorldVector.FromTile(0, 0), Direction8.S) },
                 RecipientStepSeq: 0));
             client.Poll(TimeSpan.FromMilliseconds(i * TickMs));
         }

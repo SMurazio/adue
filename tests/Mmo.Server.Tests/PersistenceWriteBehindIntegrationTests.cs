@@ -277,7 +277,7 @@ public sealed class PersistenceWriteBehindIntegrationTests
                         {
                             if (entity.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = entity.Tile;
+                                OwnTile = entity.Position.ToTileRounded();
                                 break;
                             }
                         }

@@ -766,7 +766,7 @@ public sealed class InteractHarvestIntegrationTests
                             _depletedByNetworkId[entity.NetworkId] = entity.Depleted;
                             if (entity.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = entity.Tile;
+                                OwnTile = entity.Position.ToTileRounded();
                             }
                         }
 

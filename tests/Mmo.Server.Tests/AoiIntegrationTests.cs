@@ -489,10 +489,10 @@ public sealed class AoiIntegrationTests
 
             foreach (var entity in snapshot.Entities)
             {
-                _reconstructed[entity.NetworkId] = entity.Tile;
+                _reconstructed[entity.NetworkId] = entity.Position.ToTileRounded();
                 if (entity.NetworkId == OwnNetworkId)
                 {
-                    OwnTile = entity.Tile;
+                    OwnTile = entity.Position.ToTileRounded();
                 }
             }
 

@@ -211,8 +211,10 @@ public sealed class WebBridgeSession
                     entities = snapshot.Entities.Select(entity => new
                     {
                         id = entity.NetworkId,
-                        x = entity.Tile.X,
-                        y = entity.Tile.Y,
+                        // MIGRATION (Phase 3 Pass A): the snapshot now carries a continuous Position; project it to
+                        // its tile for the existing browser payload (tile-centred in Pass A, so byte-identical).
+                        x = entity.Position.ToTileRounded().X,
+                        y = entity.Position.ToTileRounded().Y,
                         facing = entity.Facing.ToString()
                     })
                 });

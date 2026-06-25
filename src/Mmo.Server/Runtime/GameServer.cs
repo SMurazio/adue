@@ -1158,7 +1158,10 @@ public sealed class GameServer
         var (health, maxHealth) = HasPublicHealth(entity.Kind)
             ? (ToHealthWire(entity.Stats.Health), ToHealthWire(entity.Stats.MaxHealth))
             : ((ushort)0, (ushort)0);
-        return new EntityStateSnapshot(entity.NetworkId, entity.TileCoord, entity.Facing, entity.IsDepleted, health, maxHealth);
+        // MIGRATION (Phase 3 Pass A): carry the entity's full continuous Position on the snapshot DTO. The codec
+        // still quantizes it to a tile on the wire (v35 unchanged); Pass B sends it continuously. The double sim
+        // position is never rounded here — only the wire projection is.
+        return new EntityStateSnapshot(entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth);
     }
 
     // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry

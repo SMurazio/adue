@@ -195,7 +195,7 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
 
         var sequence = client.SendMoveIntent(true, Direction8.E);
-        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.E)));
 
         // NET1 Stage 1: SendMoveIntent now ships the redundant-unreliable MoveInputMessage (full current state +
         // window), not the old reliable MoveIntentMessage. The head seq matches the returned sequence.
@@ -239,7 +239,7 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
-        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.E)));
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.E)));
 
         client.RecordFrameHitch(42.5, 1, 2, 3);
 
@@ -266,12 +266,12 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 70));
 
-        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, new TileCoord(6, 5), Direction8.S)));
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.S)));
         Assert.Equal(100d, client.MovementDebug.EffectiveCadenceMs);
 
         // A MovementSpeedChanged retunes the entity's cadence (back toward the slower 150ms here).
         client.HandleMessageForTests(new MovementSpeedChangedMessage(9, 150));
-        client.HandleMessageForTests(Snapshot(4, isComplete: true, new EntityStateSnapshot(9, new TileCoord(7, 5), Direction8.S)));
+        client.HandleMessageForTests(Snapshot(4, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(7, 5), Direction8.S)));
         Assert.Equal(150d, client.MovementDebug.EffectiveCadenceMs);
     }
 
@@ -286,8 +286,8 @@ public sealed class MmoClientProtocolTests
 
         // A snapshot-created placeholder (no EntitySpawn yet) carries no per-entity cooldown, so it tweens
         // at the ServerHello global (200ms ⇒ 200ms quantised).
-        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(42, new TileCoord(5, 5), Direction8.S)));
-        client.HandleMessageForTests(Snapshot(4, isComplete: true, new EntityStateSnapshot(42, new TileCoord(6, 5), Direction8.S)));
+        client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(42, WorldVector.FromTile(5, 5), Direction8.S)));
+        client.HandleMessageForTests(Snapshot(4, isComplete: true, new EntityStateSnapshot(42, WorldVector.FromTile(6, 5), Direction8.S)));
         Assert.Equal(200d, client.MovementDebug.EffectiveCadenceMs);
     }
 
@@ -313,8 +313,8 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(Snapshot(
             1,
             isComplete: true,
-            new EntityStateSnapshot(1, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
-            new EntityStateSnapshot(2, new TileCoord(6, 6), Direction8.S)));
+            new EntityStateSnapshot(1, WorldVector.FromTile(5, 5), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+            new EntityStateSnapshot(2, WorldVector.FromTile(6, 6), Direction8.S)));
 
         var renders = client.GetRenderStates(TimeSpan.FromMilliseconds(200))
             .ToDictionary(r => r.NetworkId);
@@ -344,13 +344,13 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new PlayerStatsMessage(new CharacterStats(100, 100, 60, 120, 30, 80)));
         // A snapshot carrying the local player at full HP (MaxHealth>0 so the sync is armed).
         client.HandleMessageForTests(Snapshot(2, isComplete: true,
-            new EntityStateSnapshot(9, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 100, MaxHealth: 100)));
+            new EntityStateSnapshot(9, WorldVector.FromTile(5, 5), Direction8.S, Depleted: false, Health: 100, MaxHealth: 100)));
         Assert.Equal(100, client.LocalStats!.Value.Health);
 
         // A monster hits the player: ONLY the snapshot HP drops (no new PlayerStatsMessage). The HUD's current HP
         // (LocalStats.Health) must follow it down.
         client.HandleMessageForTests(Snapshot(3, isComplete: true,
-            new EntityStateSnapshot(9, new TileCoord(5, 5), Direction8.S, Depleted: false, Health: 73, MaxHealth: 100)));
+            new EntityStateSnapshot(9, WorldVector.FromTile(5, 5), Direction8.S, Depleted: false, Health: 73, MaxHealth: 100)));
 
         Assert.Equal(73, client.LocalStats!.Value.Health);
         // Max + mana + stamina preserved from PlayerStatsMessage.
@@ -396,6 +396,6 @@ public sealed class MmoClientProtocolTests
 
     private static EntityStateSnapshot State(uint networkId, int x, int y)
     {
-        return new EntityStateSnapshot(networkId, new TileCoord(x, y), Direction8.S);
+        return new EntityStateSnapshot(networkId, WorldVector.FromTile(x, y), Direction8.S);
     }
 }

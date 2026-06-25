@@ -289,7 +289,7 @@ public sealed class AdminTuningIntegrationTests
                         {
                             if (entity.NetworkId == OwnNetworkId)
                             {
-                                OwnTile = entity.Tile;
+                                OwnTile = entity.Position.ToTileRounded();
                             }
                         }
 

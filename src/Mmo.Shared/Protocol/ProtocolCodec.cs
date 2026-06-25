@@ -369,8 +369,12 @@ public static class ProtocolCodec
         foreach (var entity in entities)
         {
             writer.Write(ToSnapshotNetworkId(entity.NetworkId));
-            WriteSnapshotTileCoordinate(writer, entity.Tile.X);
-            WriteSnapshotTileCoordinate(writer, entity.Tile.Y);
+            // MIGRATION (Phase 3 Pass A): the snapshot now carries a continuous WorldVector Position, but the
+            // WIRE is unchanged — quantize it to its tile centre here (exactly as the field used to be a tile),
+            // so v35 still round-trips byte-for-byte. Pass B replaces this with PositionEncoding (fixed-point).
+            var tile = entity.Position.ToTileRounded();
+            WriteSnapshotTileCoordinate(writer, tile.X);
+            WriteSnapshotTileCoordinate(writer, tile.Y);
             writer.Write((byte)entity.Facing);
             writer.Write(entity.Depleted);
             // COMBAT-S2A (v27): public HP rides each per-entity state, after Depleted. MaxHealth == 0 means
@@ -580,7 +584,9 @@ public static class ProtocolCodec
             // COMBAT-S2A (v27): mirrors WriteEntityStates — Health then MaxHealth, ushort each.
             var health = reader.ReadUInt16();
             var maxHealth = reader.ReadUInt16();
-            entities.Add(new EntityStateSnapshot(networkId, new TileCoord(x, y), facing, depleted, health, maxHealth));
+            // MIGRATION (Phase 3 Pass A): the wire still carries the two tile shorts; rebuild the snapshot's
+            // continuous Position from the tile centre so behaviour is byte-identical to the tile-only field.
+            entities.Add(new EntityStateSnapshot(networkId, WorldVector.FromTile(x, y), facing, depleted, health, maxHealth));
         }
 
         return entities;

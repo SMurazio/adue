@@ -16,9 +16,16 @@ namespace Mmo.Shared.Domain;
 // game uses) so each adds only 2 bytes/entity to the per-entity state (4 bytes total), keeping the snapshot
 // delta-friendly. MaxHealth == 0 is the canonical "this entity has no HP" marker: resources/trees (and any
 // kind without CharacterStats) replicate 0/0, and the client hides the bar for them.
+//
+// MIGRATION (Phase 3 Pass A): the position field is now a continuous WorldVector (double X, Y) rather than a
+// TileCoord. This is an internal-type seam ONLY — the codec STILL quantizes it to a tile on the wire
+// (WriteEntityStates does Position.ToTileRounded(); ReadEntityStates rebuilds Position = WorldVector.FromTile),
+// so the v35 bytes round-trip byte-for-byte unchanged. Pass B flips the codec to send fixed-point continuous
+// positions (PositionEncoding) and bumps the protocol version. Consumers that need a grid cell derive it via
+// Position.ToTileRounded() (e.g. the client's ClientEntity.Tile).
 public readonly record struct EntityStateSnapshot(
     uint NetworkId,
-    TileCoord Tile,
+    WorldVector Position,
     Direction8 Facing,
     bool Depleted = false,
     ushort Health = 0,

@@ -59,14 +59,14 @@ public sealed class MmoClientGatherTests
         using var client = CreateClient(out _);
 
         client.HandleMessageForTests(Snapshot(1, isComplete: true,
-            new EntityStateSnapshot(7, new TileCoord(3, 3), Direction8.S, Depleted: true)));
+            new EntityStateSnapshot(7, WorldVector.FromTile(3, 3), Direction8.S, Depleted: true)));
 
         var render = Assert.Single(client.GetRenderStates(TimeSpan.Zero));
         Assert.True(render.Depleted);
 
         // Respawn (Depleted=false) flips it back.
         client.HandleMessageForTests(Snapshot(2, isComplete: true,
-            new EntityStateSnapshot(7, new TileCoord(3, 3), Direction8.S, Depleted: false)));
+            new EntityStateSnapshot(7, WorldVector.FromTile(3, 3), Direction8.S, Depleted: false)));
 
         Assert.False(Assert.Single(client.GetRenderStates(TimeSpan.Zero)).Depleted);
     }

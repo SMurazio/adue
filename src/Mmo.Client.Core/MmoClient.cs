@@ -1019,7 +1019,9 @@ public sealed class MmoClient : IDisposable
                 HandleZoneInfo(zone);
                 break;
             case EntitySpawnMessage spawn:
-                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, spawn.Tile, spawn.Facing, spawn.StepCooldownMs);
+                // EntitySpawn.Tile stays a genuine TileCoord anchor (Phase 3 keeps spawns/login tile-typed); lift it
+                // to the continuous Position the upsert now takes. Tile-centred, so behaviour is unchanged.
+                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, WorldVector.FromTile(spawn.Tile), spawn.Facing, spawn.StepCooldownMs);
                 break;
             case MovementSpeedChangedMessage speed:
                 HandleMovementSpeedChanged(speed);
@@ -1311,16 +1313,16 @@ public sealed class MmoClient : IDisposable
                     Guid.Empty,
                     EntityKind.Player,
                     $"#{state.NetworkId}",
-                    state.Tile,
+                    state.Position,
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Tile, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth);
+            var confirmation = entity.ApplySnapshot(state.Position, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
                     state.NetworkId,
-                    state.Tile,
+                    state.Position.ToTileRounded(),
                     sequence,
                     DateTimeOffset.UtcNow,
                     confirmation.QueueDepth,
@@ -1344,7 +1346,7 @@ public sealed class MmoClient : IDisposable
             && _entities.TryGetValue(localId, out var localEntity))
         {
             localEntity.ApplySnapshot(
-                localEntity.Tile,
+                localEntity.Position,
                 localEntity.Facing,
                 _currentTime,
                 sequence,
@@ -1463,12 +1465,15 @@ public sealed class MmoClient : IDisposable
     // stepCooldownMs is the entity's server-advertised effective cadence (from EntitySpawn); null on the
     // snapshot-created placeholder path, where the entity tweens at the ServerHello global until its real
     // EntitySpawn arrives. A 0 cooldown is treated as "absent" (no spawn has supplied a real value yet).
+    // MIGRATION (Phase 3 Pass A): the upsert position is now a continuous WorldVector. EntitySpawn (genuine tile
+    // anchor) wraps its TileCoord via WorldVector.FromTile; the snapshot path passes the decoded Position directly.
+    // In Pass A every position is still tile-centred (the wire sends tiles), so behaviour is byte-identical.
     private ClientEntity UpsertEntity(
         uint networkId,
         Guid characterId,
         EntityKind kind,
         string displayName,
-        TileCoord tile,
+        WorldVector position,
         Direction8 facing,
         ushort? stepCooldownMs = null)
     {
@@ -1485,7 +1490,7 @@ public sealed class MmoClient : IDisposable
 
             // EntitySpawn carries no Depleted/HP bits (those ride the AOI snapshot), so preserve whatever the
             // last snapshot set rather than resetting a known-depleted node to available or zeroing known HP.
-            existing.ApplySnapshot(tile, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth);
+            existing.ApplySnapshot(position, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -1498,15 +1503,17 @@ public sealed class MmoClient : IDisposable
         // a Player placeholder is revealed as a Monster). It still constructs a TileInterpolator for a uniform shape
         // (and so a never-monster entity keeps the existing path verbatim). Pass the live hop duration so a hop driver
         // created now or lazily uses the current knob value.
+        // MIGRATION (Phase 3 Pass A): the interpolator/predictor are still tile-based; derive the anchor tile from
+        // the (tile-centred) position. Byte-identical to the old direct-TileCoord path while the wire sends tiles.
         var entity = new ClientEntity(
             networkId,
             characterId,
             kind,
             displayName,
-            tile,
+            position,
             facing,
             isLocal,
-            CreateInterpolator(tile, isLocal, effectiveCooldown),
+            CreateInterpolator(position.ToTileRounded(), isLocal, effectiveCooldown),
             _monsterHopDurationMs,
             effectiveCooldown);
         _entities[networkId] = entity;
@@ -1695,7 +1702,7 @@ public sealed class MmoClient : IDisposable
             Guid characterId,
             EntityKind kind,
             string displayName,
-            TileCoord tile,
+            WorldVector position,
             Direction8 facing,
             bool isLocal,
             TileInterpolator interpolator,
@@ -1706,7 +1713,7 @@ public sealed class MmoClient : IDisposable
             CharacterId = characterId;
             Kind = kind;
             DisplayName = displayName;
-            Tile = tile;
+            Position = position;
             Facing = facing;
             IsLocal = isLocal;
             _interpolator = interpolator;
@@ -1716,7 +1723,7 @@ public sealed class MmoClient : IDisposable
             // the hop lazily in UpdateMetadata once the real Monster kind arrives.
             if (kind == EntityKind.Monster)
             {
-                _hop = new MonsterHopInterpolator(tile, hopDurationMs);
+                _hop = new MonsterHopInterpolator(Tile, hopDurationMs);
             }
 
             StepCooldownMs = stepCooldownMs;
@@ -1730,7 +1737,13 @@ public sealed class MmoClient : IDisposable
 
         public string DisplayName { get; private set; }
 
-        public TileCoord Tile { get; private set; }
+        // MIGRATION (Phase 3 Pass A): the entity now stores a continuous WorldVector Position (decoded off the
+        // snapshot); Tile is DERIVED from it so HarvestTargeting/LocalTile/the predictor+interpolators (all of
+        // which read .Tile) keep working unchanged. In Pass A the wire still delivers tile-centred positions, so
+        // Tile is byte-identical to the old stored field. Pass B feeds it genuinely-fractional positions.
+        public WorldVector Position { get; private set; }
+
+        public TileCoord Tile => Position.ToTileRounded();
 
         public Direction8 Facing { get; private set; }
 
@@ -1777,13 +1790,16 @@ public sealed class MmoClient : IDisposable
             }
         }
 
-        public EntityConfirmationDebug ApplySnapshot(TileCoord tile, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
+        public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
         {
             var previousTile = Tile;
-            // Tile/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
-            // it, and the renderer's AuthoritativeTile uses it. Prediction only affects the interpolated
-            // render position, never this authoritative tile.
-            Tile = tile;
+            // Position/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
+            // the derived Tile, and the renderer's AuthoritativeTile uses it. Prediction only affects the
+            // interpolated render position, never this authoritative position.
+            Position = position;
+            // MIGRATION (Phase 3 Pass A): the predictor/interpolator/hop are still tile-based — derive the
+            // confirmed tile from the (tile-centred) Position. Byte-identical to the old TileCoord param.
+            var tile = Tile;
             Depleted = depleted;
             // COMBAT-S2A: adopt the replicated public HP (snapshot-driven, like Depleted). Preserving callers
             // (the delta'd-out local re-apply and EntitySpawn) pass the current values so HP isn't reset to 0.

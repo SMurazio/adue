@@ -27,8 +27,8 @@ public sealed class MmoClientMonsterHopTests
 
         // Both confirm a step to tile X=1 at t=0.
         client.HandleMessageForTests(Snapshot(2, isComplete: true,
-            new EntityStateSnapshot(1, new TileCoord(1, 0), Direction8.E),
-            new EntityStateSnapshot(2, new TileCoord(1, 0), Direction8.E)));
+            new EntityStateSnapshot(1, WorldVector.FromTile(1, 0), Direction8.E),
+            new EntityStateSnapshot(2, WorldVector.FromTile(1, 0), Direction8.E)));
 
         // Sample well past the hop duration (160ms) so the monster has settled, but the player is still inside its
         // ~75ms buffer lag relative to its confirmed tile. The monster sits on tile 1; the player has NOT (yet) reached it.
@@ -63,8 +63,8 @@ public sealed class MmoClientMonsterHopTests
         client.HandleMessageForTests(new EntitySpawnMessage(2, Guid.NewGuid(), EntityKind.Player, "Bob", new TileCoord(0, 0), Direction8.S, StepCooldownMs: 140));
 
         client.HandleMessageForTests(Snapshot(2, isComplete: true,
-            new EntityStateSnapshot(1, new TileCoord(1, 0), Direction8.E),
-            new EntityStateSnapshot(2, new TileCoord(1, 0), Direction8.E)));
+            new EntityStateSnapshot(1, WorldVector.FromTile(1, 0), Direction8.E),
+            new EntityStateSnapshot(2, WorldVector.FromTile(1, 0), Direction8.E)));
 
         // Sample at 40ms — inside the player's ~75ms remote buffer (so the player is still pinned at origin), but the
         // monster's hop (no buffer) has already advanced part-way toward tile 1.
@@ -83,12 +83,12 @@ public sealed class MmoClientMonsterHopTests
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
 
         // First sighting is a snapshot — created as a Player placeholder (#42).
-        client.HandleMessageForTests(Snapshot(1, isComplete: true, new EntityStateSnapshot(42, new TileCoord(0, 0), Direction8.S)));
+        client.HandleMessageForTests(Snapshot(1, isComplete: true, new EntityStateSnapshot(42, WorldVector.FromTile(0, 0), Direction8.S)));
         // Then the real EntitySpawn reveals it is a Monster.
         client.HandleMessageForTests(new EntitySpawnMessage(42, Guid.NewGuid(), EntityKind.Monster, "Slime", new TileCoord(0, 0), Direction8.S, StepCooldownMs: 140));
 
         // A move confirm; after the hop settles, it rests on the latest tile (proving the hop driver attached).
-        client.HandleMessageForTests(Snapshot(2, isComplete: true, new EntityStateSnapshot(42, new TileCoord(1, 0), Direction8.E)));
+        client.HandleMessageForTests(Snapshot(2, isComplete: true, new EntityStateSnapshot(42, WorldVector.FromTile(1, 0), Direction8.E)));
         var render = Assert.Single(client.GetRenderStates(TimeSpan.FromMilliseconds(300)));
 
         Assert.Equal(EntityKind.Monster, render.Kind);
@@ -108,7 +108,7 @@ public sealed class MmoClientMonsterHopTests
         // A burst of confirms (a hitch) without sampling in between — tiles 1..4 all arrive.
         for (var x = 1; x <= 4; x++)
         {
-            client.HandleMessageForTests(Snapshot((uint)(x + 1), isComplete: true, new EntityStateSnapshot(1, new TileCoord(x, 0), Direction8.E)));
+            client.HandleMessageForTests(Snapshot((uint)(x + 1), isComplete: true, new EntityStateSnapshot(1, WorldVector.FromTile(x, 0), Direction8.E)));
         }
 
         // After the hop to the newest tile settles, the monster rests on tile 4 (not crawling through 1,2,3).
@@ -130,7 +130,7 @@ public sealed class MmoClientMonsterHopTests
         Assert.Equal(80d, client.MonsterHopDurationMs);
 
         // Confirm a step; with the 80ms hop it is fully settled by 120ms (still mid-hop at the 160ms default).
-        client.HandleMessageForTests(Snapshot(2, isComplete: true, new EntityStateSnapshot(1, new TileCoord(1, 0), Direction8.E)));
+        client.HandleMessageForTests(Snapshot(2, isComplete: true, new EntityStateSnapshot(1, WorldVector.FromTile(1, 0), Direction8.E)));
         var render = Assert.Single(client.GetRenderStates(TimeSpan.FromMilliseconds(120)));
         Assert.Equal(1, render.Position.X, 6); // settled -> the live knob took effect
         Assert.Equal(0d, render.HopHeight, 6);

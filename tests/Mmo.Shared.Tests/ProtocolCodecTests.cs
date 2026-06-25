@@ -29,7 +29,7 @@ public sealed class ProtocolCodecTests
             6,
             new[]
             {
-                new EntityStateSnapshot(99, new TileCoord(12, -25), Direction8.NE)
+                new EntityStateSnapshot(99, WorldVector.FromTile(12, -25), Direction8.NE)
             },
             RecipientStepSeq: 555);
 
@@ -44,7 +44,8 @@ public sealed class ProtocolCodecTests
         Assert.Equal(6, decoded.ChunkCount);
         var entity = Assert.Single(decoded.Entities);
         Assert.Equal(99u, entity.NetworkId);
-        Assert.Equal(new TileCoord(12, -25), entity.Tile);
+        // The wire still carries tiles (Pass A): the decoded Position is the tile centre, byte-identical to v35.
+        Assert.Equal(WorldVector.FromTile(12, -25), entity.Position);
         Assert.Equal(Direction8.NE, entity.Facing);
     }
 
@@ -139,8 +140,8 @@ public sealed class ProtocolCodecTests
         var original = new WorldSnapshotMessage(
             21,
             [
-                new EntityStateSnapshot(31, new TileCoord(8, 9), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
-                new EntityStateSnapshot(32, new TileCoord(2, 3), Direction8.N, Depleted: false, Health: 0, MaxHealth: 0),
+                new EntityStateSnapshot(31, WorldVector.FromTile(8, 9), Direction8.S, Depleted: false, Health: 70, MaxHealth: 100),
+                new EntityStateSnapshot(32, WorldVector.FromTile(2, 3), Direction8.N, Depleted: false, Health: 0, MaxHealth: 0),
             ]);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -158,8 +159,8 @@ public sealed class ProtocolCodecTests
         var original = new WorldSnapshotMessage(
             7,
             [
-                new EntityStateSnapshot(11, new TileCoord(3, 4), Direction8.S, Depleted: true),
-                new EntityStateSnapshot(12, new TileCoord(5, 6), Direction8.N, Depleted: false),
+                new EntityStateSnapshot(11, WorldVector.FromTile(3, 4), Direction8.S, Depleted: true),
+                new EntityStateSnapshot(12, WorldVector.FromTile(5, 6), Direction8.N, Depleted: false),
             ]);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -202,7 +203,7 @@ public sealed class ProtocolCodecTests
             false,
             1,
             3,
-            new[] { new EntityStateSnapshot(7, new TileCoord(1, 2), Direction8.W) },
+            new[] { new EntityStateSnapshot(7, WorldVector.FromTile(1, 2), Direction8.W) },
             RecipientStepSeq: 99);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -218,7 +219,7 @@ public sealed class ProtocolCodecTests
         // The convenience constructors leave it 0 (no recipient scoping) and that survives the round-trip.
         var original = new WorldSnapshotMessage(
             7,
-            [new EntityStateSnapshot(11, new TileCoord(3, 4), Direction8.S)]);
+            [new EntityStateSnapshot(11, WorldVector.FromTile(3, 4), Direction8.S)]);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -623,7 +624,7 @@ public sealed class ProtocolCodecTests
             false,
             2,
             6,
-            [new EntityStateSnapshot(99, new TileCoord(12, -25), Direction8.NE)]);
+            [new EntityStateSnapshot(99, WorldVector.FromTile(12, -25), Direction8.NE)]);
         writer.Flush();
         var snapshot = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(stream.ToArray()));
         Assert.Equal(42u, snapshot.ServerTick);

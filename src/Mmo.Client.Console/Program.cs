@@ -214,7 +214,8 @@ static void PrintMessage(
                 var name = entityNames.TryGetValue(entity.NetworkId, out var knownName)
                     ? knownName
                     : $"#{entity.NetworkId}";
-                return $"{name}@({entity.Tile.X},{entity.Tile.Y}) {entity.Facing}";
+                var tile = entity.Position.ToTileRounded();
+                return $"{name}@({tile.X},{tile.Y}) {entity.Facing}";
             }));
             Console.WriteLine($"tick={snapshot.ServerTick} seq={snapshot.SnapshotSequence} visible=[{players}]");
             break;
