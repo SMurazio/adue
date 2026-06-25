@@ -32,9 +32,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 0 | Position type + speed stat; retype ~243 `.Tile` sites | ✅ **DONE** | `9fdc65a`; gate green (Server 329/Core 251 unchanged, Shared +15); independent review SHIP (clean behavior-frozen seam) |
-| 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | **IN PROGRESS** | plan: `docs/migration/phase-1-plan.md`; PLAYERS-only continuous (monsters tile-stepped till Phase 8), no collision till Phase 2, wire tile till Phase 3 |
-| 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | pending | depends 1 — proven in spike |
-| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1 |
+| 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | ✅ **DONE** | `836befd`; review SHIP-WITH-FOLLOWUPS; cosmetic followup #1 done (`f41b8cb`); #2 (dead ClientSession members) → Phase 3 |
+| 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | **PLANNING** | depends 1 — resolver proven in spike; new part = derive AABBs from the blocked-tile grid + spatial query |
+| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1. Also delete dead `ClientSession` commit members (`ClientDrivenMovement`/`SetClientDrivenMovement`/`TryConsumeCommitSequence`/`LastCommitSeq`) — Phase 1 review followup #2 |
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3. **MUST port the timing-faithful reconcile-harness rigor** (latency/jitter/drop, snapshot-vs-cadence mismatch) onto the continuous reconcile — the UO5/NET2/NET3 regression guard (`TimingFaithfulReconcileHarnessTests`/`TailLossResendHarnessTests`, deleted with the commit-step in Phase 1). Don't ship Phase 4 without it. |
 | 5 | Remote interpolation/extrapolation (port `RemoteContinuousEntity`); retire hop/TileInterpolator | pending | depends 3,4 |
 | 6 | AOI float retype | pending | depends 0 |
@@ -62,3 +62,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   deleted 2 client-project commit-step harnesses (`TimingFaithfulReconcileHarnessTests`, `TailLossResendHarnessTests`
   — they tested the deleted commit-step model); their timing-faithful regression-guard lesson re-targeted to Phase 4
   (see the Phase 4 row). Gate: Shared 118 / Client.Core 209 / Server 304, godot-build clean. Independent review in flight.
+- **2026-06-25** — **Phase 1 SHIPPED.** Independent review verdict SHIP-WITH-FOLLOWUPS — integrator math correct
+  (diagonals normalized, instant stop, fixed Δt), deletions safe (surviving refs comment-only; wire types preserved),
+  scope held (monsters + client untouched), invariants held (swing-root freeze, no StateRevision spam),
+  anti-speedhack intrinsic. Followup #1 (stale dormant-speed comments + `RefreshDormantSpeedStat`→`RefreshSpeedStat`)
+  done in `f41b8cb`. Followup #2 (dead `ClientSession` commit members) deferred to Phase 3 wire cleanup. Phase 2
+  (collision) planning started.
