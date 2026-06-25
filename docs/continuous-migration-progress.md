@@ -74,3 +74,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   swept-neighborhood query is a strict superset (no tunnel), wall-block flip pinned, monsters/client/wire untouched.
   **Server-side continuous foundation complete (position + integrator + collision, all green + independently reviewed).**
   Phase 3 (the protocol-major wire break) planning started.
+- **2026-06-25** — Phase 3 **Pass A** green + committed (`f6b1ffa`): additive `PositionEncoding` (Q12.4) +
+  `EntityStateSnapshot.Tile`→`WorldVector Position` internal retype, WIRE UNCHANGED (v35 round-trips). Shared 146
+  (+14) / Client.Core 209 / Server 310, godot clean. **Pass B (the v35→v36 atomic break + per-input server + dt-clamp)
+  HELD for the user's explicit go-ahead** (the wire point-of-no-return + a new anti-speedhack decision).
