@@ -41,6 +41,10 @@ public static class ServerTuningRegistry
     // per-entity SpeedUnitsPerSecond derived from it (= base × SpeedMultiplier). Monsters still tile-step (Phase 8).
     public const string BaseMoveSpeedUnitsPerSecondKey = "continuous.baseMoveSpeed";
 
+    // CONTINUOUS MIGRATION (Phase 2): the PLAYER body radius (tile units) for swept-circle wall collision, a live
+    // feel knob. Clamped STRICTLY below 0.5 (see MaxBodyRadiusUnits) so a 1-tile-wide gap stays passable.
+    public const string BodyRadiusUnitsKey = "continuous.bodyRadius";
+
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys (P1 roam + P2 aggro/chase/attack) were
     // REPLACED by PER-TYPE keys ("<typeId>.<field>", e.g. slime.roamRadius) owned by MonsterTypeRegistry, which also
     // REPLICATES them to clients (MonsterTuningSnapshot) for the F1 Monster tab. The per-type keys are applied via a
@@ -79,6 +83,12 @@ public static class ServerTuningRegistry
     // degenerate value. > 0 always (a 0 speed would freeze the player integrator).
     private const double MinBaseMoveSpeedUnitsPerSecond = 0.1d;
     private const double MaxBaseMoveSpeedUnitsPerSecond = 100d;
+    // Body-radius bounds: (0, 0.5). STRICTLY below 0.5 — a radius of exactly 0.5 would inscribe the full tile and jam
+    // a body in a 1-tile-wide corridor (the wall AABBs on both sides would clamp it to a zero-width slot). 0.49 is the
+    // practical ceiling (a hair under half a tile); the floor is a small positive so a typo can't store a 0/negative
+    // radius (which would make the swept-circle test degenerate — every move would be "open").
+    private const double MinBodyRadiusUnits = 0.05d;
+    private const double MaxBodyRadiusUnits = 0.49d;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -155,6 +165,13 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case BodyRadiusUnitsKey:
+            {
+                var clamped = Math.Clamp(value, MinBodyRadiusUnits, MaxBodyRadiusUnits);
+                tuning.BodyRadiusUnits = clamped;
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
@@ -162,6 +179,7 @@ public static class ServerTuningRegistry
 
     public static bool IsKnownKey(string key) =>
         key is InterestRadiusKey or PlayerRespawnMsKey or CorpseDecayMsKey or BaseMoveSpeedUnitsPerSecondKey
+            or BodyRadiusUnitsKey
             || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated

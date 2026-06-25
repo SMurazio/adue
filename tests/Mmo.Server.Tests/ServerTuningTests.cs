@@ -246,6 +246,33 @@ public sealed class ServerTuningTests
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys were REPLACED by per-TYPE keys owned by
     // MonsterTypeRegistry (see MonsterTypeRegistryTests). ServerTuning no longer holds any monster knob.
 
+    // CONTINUOUS MIGRATION (Phase 2): the body-radius knob seeds to the shared default (0.5), is a known non-combat
+    // key, applies, and clamps STRICTLY below 0.5 (so a 1-tile-wide gap stays passable) and above 0.
+    [Fact]
+    public void BodyRadiusSeedsToSharedDefaultAndClampsStrictlyBelowHalf()
+    {
+        var tuning = new ServerTuning(Options());
+        Assert.Equal(Mmo.Shared.Domain.CollisionDefaults.BodyRadius, tuning.BodyRadiusUnits);
+        Assert.Equal(0.5d, tuning.BodyRadiusUnits);
+
+        Assert.True(ServerTuningRegistry.IsKnownKey(ServerTuningRegistry.BodyRadiusUnitsKey));
+        Assert.False(ServerTuningRegistry.IsCombatKey(ServerTuningRegistry.BodyRadiusUnitsKey));
+
+        // A mid-range value applies verbatim.
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.BodyRadiusUnitsKey, 0.4d, out var applied));
+        Assert.Equal(0.4d, applied);
+        Assert.Equal(0.4d, tuning.BodyRadiusUnits);
+
+        // 0.5 (or above) clamps STRICTLY below 0.5 — never inscribes the full tile (which would jam a 1-wide gap).
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.BodyRadiusUnitsKey, 0.5d, out var ceiled));
+        Assert.True(ceiled < 0.5d, $"body radius must clamp strictly below 0.5, got {ceiled}");
+        Assert.True(tuning.BodyRadiusUnits < 0.5d);
+
+        // A 0/negative radius floors to a small positive (a 0 radius would make the swept-circle test degenerate).
+        Assert.True(ServerTuningRegistry.TryApply(tuning, ServerTuningRegistry.BodyRadiusUnitsKey, 0d, out var floored));
+        Assert.True(floored > 0d);
+    }
+
     [Fact]
     public void CombatRootTicksMatchesSharedConversion()
     {

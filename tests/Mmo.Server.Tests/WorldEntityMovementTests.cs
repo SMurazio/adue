@@ -72,10 +72,13 @@ public sealed class WorldEntityMovementTests
     }
 
     [Fact]
-    public void PlayerWalksThroughBlockedTiles_NoCollisionInPhase1()
+    public void EntityIntegratorIsGridAgnostic_NoCollisionAtThisLayer()
     {
-        // Phase 1 has NO collision (Phase 2 adds swept-circle). The integrator never consults walkability — a held
-        // direction integrates straight across what would be a wall. (Expected per the roadmap; do not "fix" this.)
+        // Phase 2: collision lives at the ZONE layer (Zone.IntegrateMovement queries walls + runs
+        // ContinuousCollision.Resolve), NOT inside WorldEntity — the entity integrator stays grid-agnostic. So a bare
+        // WorldEntity.IntegrateMovement (no grid in scope) still advances straight, unobstructed. The wall-block FLIP
+        // (a player stopping at a blocked tile) is pinned at the server layer in ZoneContinuousCollisionTests; do not
+        // "fix" this entity-level test to collide.
         var entity = CreateEntity(tile: new TileCoord(8, 8), speed: 10d);
 
         for (var i = 0; i < 5; i++)

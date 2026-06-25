@@ -57,4 +57,46 @@ public sealed class TileGrid
     {
         return IsInBounds(tile) && !_blockedTiles.Contains(tile);
     }
+
+    // CONTINUOUS MIGRATION (Phase 2): the per-tick nearby-walls query for the PLAYER continuous integrator. Given the
+    // body's start Position, this tick's `delta` (velocity x dt) and `radius`, compute the swept body AABB
+    // (start..end, each expanded by `radius`), floor/ceil it to an INCLUSIVE tile box, and emit one collision Wall per
+    // blocked tile inside that box — in STABLE ROW-MAJOR order, into the caller's REUSED scratch buffer (zero per-tick
+    // alloc; the single-threaded tick loop owns the buffer). The wall derivation is the SHARED Mmo.Shared TileWalls
+    // (the EXACT function the Phase-4 client predictor calls), so the same (blocked set, box) yields the same Wall[]
+    // in the same order on both sides — the determinism contract.
+    //
+    // The box is a deterministic SUPERSET of the swept+radius region: it bounds the resolver's wall set without
+    // needing a tighter per-tile test (the resolver itself ignores walls the circle never reaches). At sub-tile
+    // per-tick deltas this is ~2x2-3x3 tiles. The box is NOT clamped to grid bounds — a blocked border tile just
+    // outside the swept region is simply absent from `_blockedTiles`/out of range of the probe, and the perimeter
+    // ring is always blocked anyway; probing a few out-of-bounds coords is a cheap Contains miss and keeps the box
+    // math branch-simple (the resolver only ever sees in-set blocked tiles).
+    public void QueryNearbyWalls(
+        WorldVector start,
+        WorldVector delta,
+        double radius,
+        List<ContinuousCollision.Wall> scratch)
+    {
+        var endX = start.X + delta.X;
+        var endY = start.Y + delta.Y;
+
+        // Swept AABB of the body centre over the move, expanded by the radius on every side.
+        var minX = Math.Min(start.X, endX) - radius;
+        var maxX = Math.Max(start.X, endX) + radius;
+        var minY = Math.Min(start.Y, endY) - radius;
+        var maxY = Math.Max(start.Y, endY) + radius;
+
+        // Floor/ceil to the inclusive tile box. A tile (tx,ty) occupies [tx-0.5 .. tx+0.5]; a body AABB edge at world
+        // X overlaps tile column tx whenever tx-0.5 <= maxX and tx+0.5 >= minX, i.e. tx in [Round(minX)..Round(maxX)]
+        // — but to stay a conservative SUPERSET we floor the lower bound minus 0.5 and ceil the upper bound plus 0.5
+        // so any partially-overlapped tile is included. Using floor(minX) / ceil(maxX) over-covers by at most one
+        // tile each side, which the resolver harmlessly ignores.
+        var minTileX = (int)Math.Floor(minX);
+        var maxTileX = (int)Math.Ceiling(maxX);
+        var minTileY = (int)Math.Floor(minY);
+        var maxTileY = (int)Math.Ceiling(maxY);
+
+        TileWalls.NeighborhoodWalls(_blockedTiles, minTileX, minTileY, maxTileX, maxTileY, scratch);
+    }
 }

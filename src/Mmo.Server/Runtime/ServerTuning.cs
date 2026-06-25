@@ -32,6 +32,14 @@ public sealed class ServerTuning
     // Phase 1. The base walk speed in tiles/sec.
     public double BaseMoveSpeedUnitsPerSecond { get; set; }
 
+    // CONTINUOUS MIGRATION (Phase 2): the PLAYER body radius in tile units for swept-circle wall collision. Seeded to
+    // the shared CollisionDefaults.BodyRadius (0.5) so the default path matches the byte-identical baseline the future
+    // client mirrors. A LIVE feel knob (continuous.bodyRadius) — the registry clamps it STRICTLY below 0.5 so a
+    // 1-tile-wide corridor stays passable (a radius of exactly 0.5 would jam a body in a 1-wide gap). Read fresh each
+    // tick by the player integrator (GameServer.IntegrateHeldMovementIntents threads it into Zone.IntegrateMovement).
+    // This override is server-feel only until Phase 3 decides whether to replicate it.
+    public double BodyRadiusUnits { get; set; } = CollisionDefaults.BodyRadius;
+
     // COMBAT-TUNING (live): the free-aim combat feel-knobs, now LIVE-tunable (combat.* registry keys) and replicated
     // to clients (CombatTuningSnapshot) so the server's resolution and the client's wedge/predictor/cooldown-viz can
     // never silently drift. Seeded to the former hard-coded constants so default behaviour is byte-for-byte

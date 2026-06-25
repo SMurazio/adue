@@ -482,9 +482,11 @@ public sealed class WorldEntity
         return true;
     }
 
-    // Phase 1 (continuous migration): the PLAYER continuous integrator — a direct port of the proven
-    // exp:ContinuousMover.Step (Z->Y, on WorldVector), NO-WALLS path (real swept-circle collision is Phase 2, so a
-    // player walks through walls here, which is the expected Phase-1 behaviour). Per server tick:
+    // The PLAYER continuous integrator — a direct port of the proven exp:ContinuousMover.Step (Z->Y, on WorldVector),
+    // the GRID-AGNOSTIC open-field path (NO wall collision at THIS layer — Phase 2's swept-circle collision lives in
+    // Zone.IntegrateMovement, which interposes ContinuousCollision.Resolve between the velocity/facing step and the
+    // position apply). This overload advances straight, so a bare WorldEntity (no grid in scope) walks unobstructed —
+    // it is retained for the integrator unit tests and any caller wanting the un-collided advance. Per server tick:
     //   Velocity = unitDir x SpeedUnitsPerSecond            // unit direction (Direction8.ToUnitVector) x server speed
     //   Position += Velocity x dtSeconds                    // dt is FIXED = 1/TickRate (the caller owns it)
     // The client's MoveIntent carries ONLY a Direction8 (no magnitude, no timing), so the server owns speed AND dt —
@@ -498,12 +500,48 @@ public sealed class WorldEntity
     // non-zero); a monster uses TryStep (Velocity stays Zero). NEVER both on one entity (R3).
     public bool IntegrateMovement(WorldVector unitDir, double dtSeconds)
     {
-        // Set velocity from the (already unit) direction scaled by the server speed stat. A zero direction means
-        // "not moving" — zero velocity, an instant stop with no inertia (matches ContinuousMover's no-input branch).
+        // Phase 2: the NO-WALLS integrator, now expressed as the two-step split the collided Zone path uses
+        // (ComputeMoveDelta sets Velocity + Facing and returns the raw delta; ApplyResolvedMove applies it + runs the
+        // tile-crossing bookkeeping). Composing them here keeps ONE source of truth for the velocity/facing rule and
+        // the tile bump, and is byte-for-byte the former inline body (Position += Velocity·dt with no wall clamp). The
+        // Zone path interposes ContinuousCollision.Resolve between the two halves; this open-field overload does not.
+        // Retained for the Phase-1 integrator unit tests and any caller that wants the un-collided advance.
+        var delta = ComputeMoveDelta(unitDir, dtSeconds);
+        return ApplyResolvedMove(Position + delta);
+    }
+
+    // CONTINUOUS MIGRATION (Phase 2): apply a COLLIDED end position the caller already computed (via the shared
+    // ContinuousCollision.Resolve against the nearby walls) and run the SAME tile-crossing bookkeeping
+    // IntegrateMovement does. WorldEntity stays grid-agnostic — it does NOT query walls or run the resolver itself
+    // (Zone owns the grid + the resolve); this is the seam that keeps the entity unaware of collision geometry while
+    // still owning its replication state. Velocity/Facing are set by IntegrateMovement (the velocity/heading step,
+    // unchanged); this only writes the resolved Position and bumps StateRevision/StepSequence iff the ROUNDED tile
+    // crossed (R1 — sub-tile moves do NOT bump, so the tile-keyed snapshot cadence/bandwidth are unchanged). Returns
+    // true iff the rounded tile crossed (the signal Zone uses to migrate the spatial bucket).
+    public bool ApplyResolvedMove(WorldVector newPosition)
+    {
+        var previousTile = TileCoord;
+        Position = newPosition;
+        var crossedTile = TileCoord != previousTile;
+        if (crossedTile)
+        {
+            StateRevision++;
+            StepSequence++;
+        }
+
+        return crossedTile;
+    }
+
+    // CONTINUOUS MIGRATION (Phase 2): the velocity/heading half of a continuous tick, SEPARATED from position
+    // integration so the caller (Zone) can interpose swept-circle collision between them: set Velocity + Facing here,
+    // then resolve (Position += Velocity·dt) against walls, then ApplyResolvedMove(collided). Mirrors the front of the
+    // Phase-1 IntegrateMovement exactly (same velocity rule, same facing-from-direction, same stop semantics) but
+    // returns the RAW (un-collided) delta for this tick instead of mutating Position. A zero unitDir / zero dt yields
+    // a zero delta (an instant stop with no glide — Velocity goes Zero). Phase 4's predictor mirrors this same split.
+    public WorldVector ComputeMoveDelta(WorldVector unitDir, double dtSeconds)
+    {
         Velocity = unitDir.LengthSquared > 0d ? unitDir * SpeedUnitsPerSecond : WorldVector.Zero;
 
-        // Face from the held direction even on a zero-dt / zero-distance tick so the sprite heading is correct (the
-        // unit vector points the same way as the tile delta). A zero direction leaves Facing unchanged.
         var facing = FacingFromUnit(unitDir);
         if (facing.HasValue)
         {
@@ -512,21 +550,10 @@ public sealed class WorldEntity
 
         if (dtSeconds <= 0d || Velocity.LengthSquared <= 0d)
         {
-            return false;
+            return WorldVector.Zero;
         }
 
-        var previousTile = TileCoord;
-        Position += Velocity * dtSeconds;
-        var crossedTile = TileCoord != previousTile;
-        if (crossedTile)
-        {
-            // R1: only a rounded-tile crossing bumps replication state — the tile-keyed snapshot then carries the
-            // advance to the client at exactly the discrete cadence (StepSequence still counts tile crossings).
-            StateRevision++;
-            StepSequence++;
-        }
-
-        return crossedTile;
+        return Velocity * dtSeconds;
     }
 
     // Phase 1 (continuous migration): the attack-movement-ROOT freeze gate for the PLAYER integrator (R2). A

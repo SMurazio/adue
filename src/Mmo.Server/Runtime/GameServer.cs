@@ -2637,6 +2637,10 @@ public sealed class GameServer
     {
         var keepaliveTimeoutTicks = (uint)Math.Max(1, (int)Math.Ceiling(MoveIntentKeepaliveTimeout.TotalMilliseconds / (1000d / _options.TickRate)));
         var dtSeconds = 1.0 / _options.TickRate;
+        // CONTINUOUS MIGRATION (Phase 2): the player body radius for swept-circle wall collision, read fresh from the
+        // live tuning each pass (so a continuous.bodyRadius retune takes effect next tick). Threaded into
+        // Zone.IntegrateMovement; Phase 4's predictor must replay with this IDENTICAL radius + dt.
+        var bodyRadius = _tuning.BodyRadiusUnits;
 
         foreach (var session in _sessions.Values)
         {
@@ -2684,7 +2688,7 @@ public sealed class GameServer
             }
 
             var unitDir = session.MoveIntentDirection.ToUnitVector();
-            if (_zone.IntegrateMovement(entity, unitDir, dtSeconds))
+            if (_zone.IntegrateMovement(entity, unitDir, dtSeconds, bodyRadius))
             {
                 // A rounded-tile crossing — persist the new durable tile (mirrors the tile-step path).
                 MarkDirtyDurableTile(entity);

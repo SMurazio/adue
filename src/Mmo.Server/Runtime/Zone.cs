@@ -12,6 +12,13 @@ public sealed class Zone
     private readonly TileCoord[] _spawnTiles;
     private int _nextSpawnTileIndex;
 
+    // CONTINUOUS MIGRATION (Phase 2): the reused per-tick nearby-walls scratch buffer for the player continuous
+    // integrator (IntegrateMovement). Owned by the Zone and refilled per integrate call (TileGrid.QueryNearbyWalls
+    // clears it), so the wall query allocates ZERO per tick. Single-threaded tick loop, so one shared buffer is safe
+    // (each IntegrateMovement call fully consumes it before the next entity's call — the Resolve runs synchronously
+    // inside the same call). NEVER touched by the monster TryStep path.
+    private readonly List<ContinuousCollision.Wall> _wallScratch = new();
+
     public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles)
         : this(id, tileGrid, spawnTiles, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion)
     {
@@ -134,16 +141,28 @@ public sealed class Zone
         return stepped;
     }
 
-    // Phase 1 (continuous migration): the PLAYER continuous-integrator wrapper (sibling to TryStep for the tile-step
-    // path). Advances the entity's continuous Position by Velocity x dt (WorldEntity.IntegrateMovement, no-walls
-    // path) and migrates the spatial-index bucket ONLY when the entity's ROUNDED tile actually crossed — the grid
-    // stays integer-keyed in Phase 1 (Phase 6 floats it), so a sub-tile move that doesn't change ToTileRounded must
-    // not touch the index. previousTile is read before the call because IntegrateMovement mutates Position in place.
-    // Returns true iff the rounded tile crossed (the same signal IntegrateMovement returns).
-    public bool IntegrateMovement(WorldEntity entity, WorldVector unitDir, double dtSeconds)
+    // CONTINUOUS MIGRATION (Phase 2): the PLAYER continuous-integrator wrapper (sibling to TryStep for the tile-step
+    // path) — now WITH swept-circle WALL COLLISION (the behavioural flip; Phase 1 walked through walls). Per tick for
+    // a moving player:
+    //   1. delta  = entity.ComputeMoveDelta(unitDir, dt)            // velocity + facing set here; raw delta returned
+    //   2. walls  = TileGrid.QueryNearbyWalls(pos, delta, radius)   // shared TileWalls, stable row-major, scratch
+    //   3. end    = ContinuousCollision.Resolve(pos, delta, radius, walls)  // shared, deterministic, byte-identical
+    //   4. crossed = entity.ApplyResolvedMove(end)                  // collided position + tile-crossing bookkeeping
+    //   5. migrate the spatial bucket ONLY when the ROUNDED tile crossed (grid stays integer-keyed; Phase 6 floats it)
+    // The wall set, radius and dt are the SAME the Phase-4 client predictor will use, so server and prediction land
+    // byte-identically at a wall (the determinism contract). previousTile is captured before ApplyResolvedMove mutates
+    // Position. Returns true iff the rounded tile crossed (the same signal the integrator returns). A zero delta
+    // (stopped / rooted upstream) resolves in place — no tile crossing, no migration.
+    public bool IntegrateMovement(WorldEntity entity, WorldVector unitDir, double dtSeconds, double radius)
     {
         var previousTile = entity.TileCoord;
-        var crossedTile = entity.IntegrateMovement(unitDir, dtSeconds);
+        var start = entity.Position;
+
+        var delta = entity.ComputeMoveDelta(unitDir, dtSeconds);
+        _tileGrid.QueryNearbyWalls(start, delta, radius, _wallScratch);
+        var resolved = ContinuousCollision.Resolve(start, delta, radius, _wallScratch);
+
+        var crossedTile = entity.ApplyResolvedMove(resolved);
         if (crossedTile)
         {
             World.OnEntityMoved(entity, previousTile);
