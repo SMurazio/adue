@@ -124,7 +124,7 @@ public sealed class Zone
         // Capture the pre-step tile so the spatial index can migrate the entity's bucket if the step is
         // accepted. WorldEntity.TryStep mutates Tile in place, so the previous tile must be read before
         // the call. Same-cell steps are a no-op inside the grid.
-        var previousTile = entity.Tile;
+        var previousTile = entity.TileCoord;
         var stepped = entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
         if (stepped)
         {
@@ -145,7 +145,7 @@ public sealed class Zone
         double acceptFraction,
         out MovementStepResult result)
     {
-        var previousTile = entity.Tile;
+        var previousTile = entity.TileCoord;
         var stepped = entity.TryCommitStep(direction, serverTick, stepCooldownTicks, acceptFraction, _tileGrid, out result);
         if (stepped)
         {
@@ -169,7 +169,7 @@ public sealed class Zone
         uint futureLeadTicks,
         out MovementStepResult result)
     {
-        var previousTile = entity.Tile;
+        var previousTile = entity.TileCoord;
         var stepped = entity.TryCommitStepAuthored(
             direction, authoredTick, serverTick, stepCooldownTicks, pastWindowTicks, futureLeadTicks, _tileGrid, out result);
         if (stepped)
@@ -381,7 +381,7 @@ public sealed class Zone
     // tile must be walkable (the caller passes a resolved spawn tile, always walkable).
     public void Teleport(WorldEntity entity, TileCoord tile)
     {
-        var previousTile = entity.Tile;
+        var previousTile = entity.TileCoord;
         entity.TeleportTo(tile);
         World.OnEntityMoved(entity, previousTile);
     }

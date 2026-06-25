@@ -100,7 +100,7 @@ public sealed class WorldEntityStatsTests
 
         entity.TeleportTo(new TileCoord(99, 88));
 
-        Assert.Equal(new TileCoord(99, 88), entity.Tile);
+        Assert.Equal(new TileCoord(99, 88), entity.TileCoord);
         Assert.Equal(Direction8.S, entity.Facing);
         Assert.True(entity.StateRevision > revisionBefore);
         Assert.True(entity.StepSequence > seqBefore);

@@ -27,12 +27,12 @@ public static class MeleeConeResolver
         List<WorldEntity> candidateScratch)
     {
         Span<TileCoord> coneTiles = stackalloc TileCoord[MeleeCone.TileCount];
-        MeleeCone.Resolve(attacker.Tile, attacker.Facing, coneTiles);
+        MeleeCone.Resolve(attacker.TileCoord, attacker.Facing, coneTiles);
 
         // The cone is entirely within 1 tile of the attacker, so a radius-1 neighborhood gather is a superset of
         // every entity that could be on a cone tile. Route it through the SAME spatial index as AOI so occupancy
         // and replication can never diverge; then filter to the exact cone tiles.
-        world.GatherInterestCandidates(attacker.Tile, 1, candidateScratch);
+        world.GatherInterestCandidates(attacker.TileCoord, 1, candidateScratch);
 
         var hits = 0;
         foreach (var candidate in candidateScratch)
@@ -42,7 +42,7 @@ public static class MeleeConeResolver
                 continue;
             }
 
-            if (!ConeContains(coneTiles, candidate.Tile))
+            if (!ConeContains(coneTiles, candidate.TileCoord))
             {
                 continue;
             }

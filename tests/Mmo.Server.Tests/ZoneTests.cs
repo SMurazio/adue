@@ -29,11 +29,11 @@ public sealed class ZoneTests
         // S98: a step in a new direction steps immediately. A step E into the blocked (3,2) tile is rejected
         // (held in place, facing updated).
         Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(2, 2), entity.Tile);
+        Assert.Equal(new TileCoord(2, 2), entity.TileCoord);
 
         // A valid step S into the open tile succeeds immediately (no separate turn beat).
         Assert.True(zone.TryStep(entity, Direction8.S, serverTick: 18, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(2, 3), entity.Tile);
+        Assert.Equal(new TileCoord(2, 3), entity.TileCoord);
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public sealed class ZoneTests
         Assert.True(zone.World.TryGet(entity.Id, out var found));
         Assert.Same(entity, found);
         Assert.Equal(4u, entity.NetworkId);
-        Assert.Equal(new TileCoord(3, 3), entity.Tile);
+        Assert.Equal(new TileCoord(3, 3), entity.TileCoord);
         Assert.True(entity.IsDurable);
     }
 

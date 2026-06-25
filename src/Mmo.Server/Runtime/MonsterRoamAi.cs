@@ -153,10 +153,10 @@ public sealed class MonsterRoamAi
         var stagger = aggroScanIntervalTicks == 0 ? 0u : (uint)(monster.Id % aggroScanIntervalTicks);
         _states[monster.Id] = new MonsterState
         {
-            Home = monster.Tile,
+            Home = monster.TileCoord,
             Phase = State.Idle,
             PauseUntilTick = serverTick + NextPauseTicks(pauseMinTicks, pauseMaxTicks),
-            Destination = monster.Tile,
+            Destination = monster.TileCoord,
             TargetId = 0,
             TargetPresent = false,
             NextAttackTick = serverTick,
@@ -316,8 +316,8 @@ public sealed class MonsterRoamAi
             return false;
         }
 
-        var distToTarget = Chebyshev(monster.Tile, targetTile);
-        var distFromHome = Chebyshev(monster.Tile, state.Home);
+        var distToTarget = Chebyshev(monster.TileCoord, targetTile);
+        var distFromHome = Chebyshev(monster.TileCoord, state.Home);
         if (distToTarget > t.DeaggroRadius || distFromHome > t.ChaseLeash)
         {
             BeginReturnHome(ref state, serverTick);
@@ -331,7 +331,7 @@ public sealed class MonsterRoamAi
             // Face the target while adjacent (an attack tick takes no step, so nothing else sets facing). The
             // injected attack callback also faces the victim (same sign-of-delta, harmless redundancy) — facing
             // here keeps it in the testable AI path, not only the GameServer callback.
-            monster.TrySetFacing(GreedyDirectionToward(monster.Tile, targetTile));
+            monster.TrySetFacing(GreedyDirectionToward(monster.TileCoord, targetTile));
             if (serverTick >= state.NextAttackTick)
             {
                 _attack(monster, state.TargetId, t.AttackDamage);
@@ -343,7 +343,7 @@ public sealed class MonsterRoamAi
         }
 
         // (3) Greedy step toward the target's current tile. The same stepper players use (facing set on the step).
-        var direction = GreedyDirectionToward(monster.Tile, targetTile);
+        var direction = GreedyDirectionToward(monster.TileCoord, targetTile);
         var stepped = _tryStep(monster, direction, serverTick, stepCooldownTicks);
         if (stepped)
         {
@@ -387,21 +387,21 @@ public sealed class MonsterRoamAi
         in Tunables t,
         bool returningHome)
     {
-        if (monster.Tile == state.Destination)
+        if (monster.TileCoord == state.Destination)
         {
             GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
             return false;
         }
 
-        var direction = GreedyDirectionToward(monster.Tile, state.Destination);
-        var before = monster.Tile;
+        var direction = GreedyDirectionToward(monster.TileCoord, state.Destination);
+        var before = monster.TileCoord;
         var stepped = _tryStep(monster, direction, serverTick, stepCooldownTicks);
 
         if (stepped)
         {
             state.LastProgressTick = serverTick;
             // Advanced one tile. If that landed us on the destination, go Idle; otherwise keep moving.
-            if (monster.Tile == state.Destination)
+            if (monster.TileCoord == state.Destination)
             {
                 GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
             }
@@ -447,7 +447,7 @@ public sealed class MonsterRoamAi
     // home is what KEEPS the monster leashed during roam: a greedy walk toward an in-radius tile never leaves it.
     private bool TryPickRoamDestination(WorldEntity monster, TileCoord home, int roamRadius, out TileCoord destination)
     {
-        destination = monster.Tile;
+        destination = monster.TileCoord;
         if (roamRadius <= 0)
         {
             return false;
@@ -459,7 +459,7 @@ public sealed class MonsterRoamAi
             var candidate = home.Offset(
                 _random.Next(-roamRadius, roamRadius + 1),
                 _random.Next(-roamRadius, roamRadius + 1));
-            if (candidate != monster.Tile && _isWalkable(candidate))
+            if (candidate != monster.TileCoord && _isWalkable(candidate))
             {
                 destination = candidate;
                 return true;
@@ -475,7 +475,7 @@ public sealed class MonsterRoamAi
             var dx = (index % span) - roamRadius;
             var dy = (index / span) - roamRadius;
             var candidate = home.Offset(dx, dy);
-            if (candidate != monster.Tile && _isWalkable(candidate))
+            if (candidate != monster.TileCoord && _isWalkable(candidate))
             {
                 destination = candidate;
                 return true;

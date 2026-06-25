@@ -350,7 +350,7 @@ public sealed class GameServer
             if (_zone.Despawn(session.EntityId!.Value, out var entity))
             {
                 _networkIds.Return(entity.NetworkId);
-                QueueTileSave(session, entity.Tile);
+                QueueTileSave(session, entity.TileCoord);
                 FlushInventory(entity);
             }
             else
@@ -557,8 +557,10 @@ public sealed class GameServer
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current, inventory);
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
+                        // Phase 0: seed the player's dormant tiles/sec speed stat (read by nothing yet).
+                        RefreshDormantSpeedStat(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
-                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.Tile, ""), DeliveryMethod.ReliableOrdered);
+                        TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.TileCoord, ""), DeliveryMethod.ReliableOrdered);
                         TrySend(peer, CreateZoneInfoMessage(), DeliveryMethod.ReliableOrdered);
                         // Send a full inventory snapshot so the client panel reflects the persisted (or
                         // handed-off, on takeover) contents immediately — otherwise it stays empty until the
@@ -639,13 +641,13 @@ public sealed class GameServer
         Inventory? inventory = null;
         if (session.EntityId.HasValue && _zone.Despawn(session.EntityId.Value, out var entity))
         {
-            tile = entity.Tile;
+            tile = entity.TileCoord;
             // Hand the live in-memory inventory to the taking-over login so any not-yet-flushed harvest
             // gains survive the relogin. FlushInventory still enqueues its dirty changes for persistence;
             // the quantities live on this same object, so nothing is lost either way.
             inventory = entity.Inventory;
             _networkIds.Return(entity.NetworkId);
-            QueueTileSave(session, entity.Tile);
+            QueueTileSave(session, entity.TileCoord);
             FlushInventory(entity);
         }
         else
@@ -812,7 +814,7 @@ public sealed class GameServer
         // (it covers the exit/hysteresis radius), so applying the exact same IsEntityInInterest test to
         // the candidates below yields a result IDENTICAL to the old full scan. `entities.Count` (the total
         // world entity count) still drives the cap branch exactly as before.
-        _zone.World.GatherInterestCandidates(recipientEntity.Tile, _aoiQueryRadiusTiles, _aoiCandidateScratch);
+        _zone.World.GatherInterestCandidates(recipientEntity.TileCoord, _aoiQueryRadiusTiles, _aoiCandidateScratch);
 
         if (_options.MaxVisibleEntities >= entities.Count)
         {
@@ -1036,7 +1038,7 @@ public sealed class GameServer
                 entity.CharacterId ?? Guid.Empty,
                 entity.Kind,
                 entity.DisplayName,
-                entity.Tile,
+                entity.TileCoord,
                 entity.Facing,
                 EffectiveStepCooldownMs(entity));
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
@@ -1060,7 +1062,7 @@ public sealed class GameServer
         // Place markers for spawners that newly entered AOI.
         foreach (var spawner in _spawners.Values)
         {
-            var inAoi = IsTileInInterest(recipientEntity.Tile, spawner.Tile, _tuning.InterestRadius);
+            var inAoi = IsTileInInterest(recipientEntity.TileCoord, spawner.Tile, _tuning.InterestRadius);
             if (inAoi && !recipient.KnowsSpawner(spawner.SpawnerId))
             {
                 TrySend(recipient.Peer, new SpawnerMarkerMessage(spawner.SpawnerId, spawner.Tile, true), DeliveryMethod.ReliableOrdered);
@@ -1073,7 +1075,7 @@ public sealed class GameServer
         foreach (var spawnerId in recipient.KnownSpawnerIds)
         {
             var stillVisible = _spawners.TryGetValue(spawnerId, out var spawner)
-                && IsTileInInterest(recipientEntity.Tile, spawner.Tile, _tuning.InterestRadius);
+                && IsTileInInterest(recipientEntity.TileCoord, spawner.Tile, _tuning.InterestRadius);
             if (!stillVisible)
             {
                 _spawnerForgetScratch.Add(spawnerId);
@@ -1124,8 +1126,8 @@ public sealed class GameServer
 
     private static float DistanceSquared(WorldEntity a, WorldEntity b)
     {
-        var dx = b.Tile.X - a.Tile.X;
-        var dy = b.Tile.Y - a.Tile.Y;
+        var dx = b.TileCoord.X - a.TileCoord.X;
+        var dy = b.TileCoord.Y - a.TileCoord.Y;
         return (dx * dx) + (dy * dy);
     }
 
@@ -1181,7 +1183,7 @@ public sealed class GameServer
         var (health, maxHealth) = HasPublicHealth(entity.Kind)
             ? (ToHealthWire(entity.Stats.Health), ToHealthWire(entity.Stats.MaxHealth))
             : ((ushort)0, (ushort)0);
-        return new EntityStateSnapshot(entity.NetworkId, entity.Tile, entity.Facing, entity.IsDepleted, health, maxHealth);
+        return new EntityStateSnapshot(entity.NetworkId, entity.TileCoord, entity.Facing, entity.IsDepleted, health, maxHealth);
     }
 
     // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry
@@ -1385,7 +1387,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.Tile, target.Tile))
+        if (!IsAdjacent(actor.TileCoord, target.TileCoord))
         {
             SendInteractResult(session, false, "too_far");
             return;
@@ -1435,7 +1437,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.Tile, corpseEntity.Tile))
+        if (!IsAdjacent(actor.TileCoord, corpseEntity.TileCoord))
         {
             SendInteractResult(session, false, "too_far");
             return;
@@ -1492,7 +1494,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.Tile, corpseEntity.Tile))
+        if (!IsAdjacent(actor.TileCoord, corpseEntity.TileCoord))
         {
             // Walked out of range with the window open: close it (the client drops the panel on this Open=false).
             session.SetOpenCorpse(null);
@@ -1608,7 +1610,7 @@ public sealed class GameServer
         // interest set; the exact IsEntityInInterest test below is the security boundary. A target outside
         // the query neighborhood is necessarily outside the interest radius too, so it would fail the test
         // anyway — same result as the old full scan, but without scanning every entity.
-        _zone.World.GatherInterestCandidates(actor.Tile, _aoiQueryRadiusTiles, _aoiInteractCandidateScratch);
+        _zone.World.GatherInterestCandidates(actor.TileCoord, _aoiQueryRadiusTiles, _aoiInteractCandidateScratch);
         foreach (var candidate in _aoiInteractCandidateScratch)
         {
             if (candidate.NetworkId != targetNetworkId)
@@ -1812,6 +1814,8 @@ public sealed class GameServer
         }
 
         var changed = entity.TrySetSpeedMultiplier(multiplier);
+        // Phase 0: keep the dormant tiles/sec stat tracking the multiplier (read by nothing yet).
+        RefreshDormantSpeedStat(entity);
         var effectiveMs = EffectiveStepCooldownMs(entity);
         if (changed)
         {
@@ -1861,7 +1865,7 @@ public sealed class GameServer
         // LIVING-ENEMIES P3: /monster now creates a PERSISTENT SPAWNER at the caller's tile (the spawner owns + respawns
         // the monster, and is the red-tile anchor that survives a kill). The spawner immediately spawns its first
         // monster. The spawner tile = the monster's leash home; it must be walkable (the caller stands there).
-        var spawner = new MonsterSpawner(_nextSpawnerId++, actor.Tile, type);
+        var spawner = new MonsterSpawner(_nextSpawnerId++, actor.TileCoord, type);
         _spawners[spawner.SpawnerId] = spawner;
         var monster = SpawnMonsterForSpawner(spawner);
 
@@ -1885,6 +1889,8 @@ public sealed class GameServer
         // type for the AI step.
         monster.SetMaxHealthFull(type.MaxHealth);
         monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
+        // Phase 0: seed the dormant tiles/sec stat from the monster's type multiplier (read by nothing yet).
+        RefreshDormantSpeedStat(monster);
         _monsterTypeOf[monster.Id] = type;
 
         // Register with the roam AI: the spawner tile is the leash home; start Idle with an initial randomized pause,
@@ -1904,7 +1910,7 @@ public sealed class GameServer
     private void KillMonster(WorldEntity monster)
     {
         var monsterId = monster.Id;
-        var deathTile = monster.Tile;
+        var deathTile = monster.TileCoord;
 
         // Remove from the world (also unhooks the spatial index). Do NOT free the network id here: RollAndSpawnCorpse
         // below rents an id and the pool REUSES freed ids, so freeing now lets the corpse rent the just-despawned
@@ -2176,6 +2182,8 @@ public sealed class GameServer
 
             if (entity.TrySetSpeedMultiplier(editedType.MoveSpeedMultiplier))
             {
+                // Phase 0: keep the dormant tiles/sec stat tracking the retuned multiplier (read by nothing yet).
+                RefreshDormantSpeedStat(entity);
                 BroadcastMovementSpeedChanged(entity, EffectiveStepCooldownMs(entity));
             }
         }
@@ -2622,6 +2630,16 @@ public sealed class GameServer
         return (ushort)Math.Clamp((int)Math.Round(ms, MidpointRounding.AwayFromZero), 1, ushort.MaxValue);
     }
 
+    // Phase 0 (continuous migration): refresh an entity's DORMANT tiles/sec speed stat from the base move speed ×
+    // its current SpeedMultiplier. Called on spawn + on every SpeedMultiplier change so the stat tracks the same
+    // factor the cooldown path uses. READ BY NOTHING in Phase 0 — the cooldown/EffectiveStepCooldownTicks path
+    // still drives movement; this only seeds the value Phase 1's integrator will consume. No replication, no
+    // behaviour change.
+    private void RefreshDormantSpeedStat(WorldEntity entity)
+    {
+        entity.SetSpeedUnitsPerSecond(_tuning.BaseMoveSpeedUnitsPerSecond * entity.SpeedMultiplier);
+    }
+
     // Per-tick held-movement stepping. For every authenticated session whose intent is "moving", attempt
     // exactly one tile step in the held direction. WorldEntity.TryStep enforces the per-entity cooldown,
     // bounds, and walkability (the same validation as before) — a session that is still inside its
@@ -2737,7 +2755,7 @@ public sealed class GameServer
     // per-tick scan the P1 review flagged is avoided.
     private bool FindMonsterAggroTarget(WorldEntity monster, int aggroRadius, out ulong targetId, out TileCoord targetTile)
     {
-        _zone.World.GatherInterestCandidates(monster.Tile, aggroRadius, _monsterAggroScratch);
+        _zone.World.GatherInterestCandidates(monster.TileCoord, aggroRadius, _monsterAggroScratch);
 
         var bestDist = int.MaxValue;
         WorldEntity? best = null;
@@ -2749,8 +2767,8 @@ public sealed class GameServer
             }
 
             var dist = Math.Max(
-                Math.Abs(candidate.Tile.X - monster.Tile.X),
-                Math.Abs(candidate.Tile.Y - monster.Tile.Y));
+                Math.Abs(candidate.TileCoord.X - monster.TileCoord.X),
+                Math.Abs(candidate.TileCoord.Y - monster.TileCoord.Y));
             if (dist > aggroRadius)
             {
                 continue;
@@ -2771,7 +2789,7 @@ public sealed class GameServer
         }
 
         targetId = best.Id;
-        targetTile = best.Tile;
+        targetTile = best.TileCoord;
         return true;
     }
 
@@ -2783,7 +2801,7 @@ public sealed class GameServer
     {
         if (_zone.World.TryGet(targetId, out var target) && target.Kind == EntityKind.Player)
         {
-            targetTile = target.Tile;
+            targetTile = target.TileCoord;
             alive = target.Stats.Health > 0;
             return true;
         }
@@ -2810,7 +2828,7 @@ public sealed class GameServer
         // Face the victim (turn-in-place, no move) so the attack reads on the client; bumps StateRevision to replicate.
         // Sign-of-delta → the 8-direction facing (the same greedy mapping the chase step uses); same-tile leaves
         // facing unchanged (can't happen — the AI only attacks at Chebyshev >= 1, but guard anyway).
-        if (TileDeltaToFacing(monster.Tile, target.Tile) is { } facing)
+        if (TileDeltaToFacing(monster.TileCoord, target.TileCoord) is { } facing)
         {
             monster.TrySetFacing(facing);
         }
@@ -3107,7 +3125,7 @@ public sealed class GameServer
         _dirtyDurableTiles[entity.CharacterId.Value] = new PendingTileSave(
             entity.CharacterId.Value,
             entity.DisplayName,
-            entity.Tile);
+            entity.TileCoord);
     }
 
     // Single write-behind checkpoint for all durable per-character state. Gated to the configured
@@ -3179,7 +3197,7 @@ public sealed class GameServer
     {
         if (TryGetSessionEntity(session, out var entity))
         {
-            QueueTileSave(session, entity.Tile);
+            QueueTileSave(session, entity.TileCoord);
             FlushInventory(entity);
         }
     }

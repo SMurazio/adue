@@ -16,14 +16,14 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
 
         Assert.True(moved);
-        Assert.Equal(new TileCoord(9, 7), entity.Tile);
+        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);
         Assert.Equal(Direction8.NE, entity.Facing);
         Assert.Equal(2u, entity.StateRevision);
         Assert.True(result.Accepted);
         Assert.Equal("accepted", result.Reason);
         Assert.Equal(new TileCoord(8, 8), result.From);
         Assert.Equal(new TileCoord(9, 7), result.Target);
-        Assert.Equal(entity.Tile, result.Result);
+        Assert.Equal(entity.TileCoord, result.Result);
     }
 
     [Fact]
@@ -37,7 +37,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var move);
 
         Assert.True(moved);                                   // moved on the FIRST press in the new direction
-        Assert.Equal(new TileCoord(9, 7), entity.Tile);       // advanced one tile in the new direction
+        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);       // advanced one tile in the new direction
         Assert.Equal(Direction8.NE, entity.Facing);           // facing set on the step
         Assert.Equal(2u, entity.StateRevision);               // a single bump for the accepted step (no turn bump)
         Assert.Equal(1u, entity.StepSequence);                // one accepted tile move
@@ -56,19 +56,19 @@ public sealed class WorldEntityMovementTests
 
         Assert.True(entity.TryStep(Direction8.E, 10, stepCooldownTicks: 10, grid, out var first));
         Assert.True(first.Accepted);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
         Assert.Equal(Direction8.E, entity.Facing);
 
         // Inside the full cooldown: dropped (no shorter turn-delay window any more).
         Assert.False(entity.TryStep(Direction8.E, 12, stepCooldownTicks: 10, grid, out var early));
         Assert.False(early.CooldownElapsed);
         Assert.Equal("cooldown", early.Reason);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
 
         // At tick 20 (full cooldown elapsed) the next step moves.
         Assert.True(entity.TryStep(Direction8.E, 20, stepCooldownTicks: 10, grid, out var move));
         Assert.True(move.Accepted);
-        Assert.Equal(new TileCoord(10, 8), entity.Tile);
+        Assert.Equal(new TileCoord(10, 8), entity.TileCoord);
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.E, 10, 4, grid, out var result);
 
         Assert.False(moved);                                  // blocked — no tile move
-        Assert.Equal(new TileCoord(8, 8), entity.Tile);       // held in place
+        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);       // held in place
         Assert.Equal(Direction8.E, entity.Facing);            // facing updated to the new direction
         Assert.Equal(2u, entity.StateRevision);               // bumped so the facing-only change replicates
         Assert.Equal(0u, entity.StepSequence);                // no accepted tile move
@@ -115,7 +115,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.E, 12, 4, grid, out var result);
 
         Assert.False(moved);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
         Assert.Equal(Direction8.E, entity.Facing);
         Assert.Equal(2u, entity.StateRevision);
         Assert.False(result.CooldownElapsed);
@@ -132,7 +132,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.E, 10, 4, grid, out var result);
 
         Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.Tile);
+        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);
         Assert.Equal(Direction8.E, entity.Facing);
         Assert.Equal(1u, entity.StateRevision); // facing unchanged (already E) -> no bump
         Assert.False(result.TargetWalkable);
@@ -149,7 +149,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.N, 10, 4, grid, out var result);
 
         Assert.False(moved);
-        Assert.Equal(new TileCoord(0, 0), entity.Tile);
+        Assert.Equal(new TileCoord(0, 0), entity.TileCoord);
         Assert.Equal(1u, entity.StateRevision); // facing unchanged (already N) -> no bump
         Assert.Equal("out_of_bounds", result.Reason);
     }
@@ -166,7 +166,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
 
         Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.Tile); // held — did not slip through the corner
+        Assert.Equal(new TileCoord(8, 8), entity.TileCoord); // held — did not slip through the corner
         Assert.Equal(Direction8.NE, entity.Facing);
         Assert.Equal(1u, entity.StateRevision); // facing unchanged (already NE) -> no bump
         Assert.False(result.TargetWalkable);
@@ -184,7 +184,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
 
         Assert.False(moved);
-        Assert.Equal(new TileCoord(8, 8), entity.Tile);
+        Assert.Equal(new TileCoord(8, 8), entity.TileCoord);
         Assert.Equal(1u, entity.StateRevision);
         Assert.False(result.TargetWalkable);
         Assert.Equal("blocked", result.Reason);
@@ -201,7 +201,7 @@ public sealed class WorldEntityMovementTests
         var moved = entity.TryStep(Direction8.NE, 10, 4, grid, out var result);
 
         Assert.True(moved);
-        Assert.Equal(new TileCoord(9, 7), entity.Tile);
+        Assert.Equal(new TileCoord(9, 7), entity.TileCoord);
         Assert.Equal(Direction8.NE, entity.Facing);
         Assert.True(result.Accepted);
         Assert.Equal("accepted", result.Reason);
@@ -218,14 +218,14 @@ public sealed class WorldEntityMovementTests
 
         var moved = entity.TryStep(Direction8.E, 10, 4, blockedAdjacent, out var openResult);
         Assert.True(moved); // cardinal E to (9,8): destination open, no side-tile rule
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
         Assert.True(openResult.Accepted);
 
         // Cardinal into a wall still holds (unchanged blocked behaviour).
         var wallEast = new TileGrid(16, 16, [new TileCoord(10, 8)]);
         var blocked = entity.TryStep(Direction8.E, 14, 4, wallEast, out var wallResult);
         Assert.False(blocked);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile); // held at the wall
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord); // held at the wall
         Assert.Equal("blocked", wallResult.Reason);
     }
 
@@ -239,7 +239,7 @@ public sealed class WorldEntityMovementTests
         Assert.True(first.TryStep(Direction8.E, 10, 4, grid));
         Assert.True(second.TryStep(Direction8.E, 10, 4, grid));
 
-        Assert.Equal(first.Tile, second.Tile);
+        Assert.Equal(first.TileCoord, second.TileCoord);
     }
 
     [Fact]

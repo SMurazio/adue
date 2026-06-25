@@ -34,7 +34,7 @@ internal sealed class SpatialEntityGrid
 
     public void Add(WorldEntity entity)
     {
-        var key = CellKey(entity.Tile);
+        var key = CellKey(entity.TileCoord);
         if (!_cells.TryGetValue(key, out var bucket))
         {
             bucket = [];
@@ -46,7 +46,7 @@ internal sealed class SpatialEntityGrid
 
     public void Remove(WorldEntity entity)
     {
-        RemoveFromCell(CellKey(entity.Tile), entity);
+        RemoveFromCell(CellKey(entity.TileCoord), entity);
     }
 
     // Migrates an entity that has moved from one tile to another. No-op when the move stayed inside the
@@ -56,7 +56,7 @@ internal sealed class SpatialEntityGrid
     public void Move(WorldEntity entity, TileCoord previousTile)
     {
         var previousKey = CellKey(previousTile);
-        var currentKey = CellKey(entity.Tile);
+        var currentKey = CellKey(entity.TileCoord);
         if (previousKey == currentKey)
         {
             return;

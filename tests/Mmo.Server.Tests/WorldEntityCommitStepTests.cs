@@ -30,7 +30,7 @@ public sealed class WorldEntityCommitStepTests
         Assert.True(committed);
         Assert.True(result.Accepted);
         Assert.Equal("committed", result.Reason);
-        Assert.Equal(new TileCoord(10, 8), entity.Tile); // advanced one tile east of (9,8)
+        Assert.Equal(new TileCoord(10, 8), entity.TileCoord); // advanced one tile east of (9,8)
         Assert.Equal(2u, entity.StepSequence);           // bumped once for the commit
     }
 
@@ -62,7 +62,7 @@ public sealed class WorldEntityCommitStepTests
         var grid = new TileGrid(16, 16, []);
 
         Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 10, grid)); // lastStep=0, tile (9,8)
-        var before = entity.Tile;
+        var before = entity.TileCoord;
         var beforeSeq = entity.StepSequence;
 
         var committed = entity.TryCommitStep(Direction8.E, 3, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
@@ -70,7 +70,7 @@ public sealed class WorldEntityCommitStepTests
         Assert.False(committed);
         Assert.False(result.Accepted);
         Assert.Equal("commit_too_early", result.Reason);
-        Assert.Equal(before, entity.Tile);
+        Assert.Equal(before, entity.TileCoord);
         Assert.Equal(beforeSeq, entity.StepSequence);
     }
 
@@ -87,7 +87,7 @@ public sealed class WorldEntityCommitStepTests
         Assert.False(committed);
         Assert.False(result.TargetWalkable);
         Assert.Equal("blocked", result.Reason);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile); // held at the wall
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord); // held at the wall
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public sealed class WorldEntityCommitStepTests
 
         Assert.False(committed);
         Assert.Equal("blocked", result.Reason);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
     }
 
     [Fact]
@@ -117,7 +117,7 @@ public sealed class WorldEntityCommitStepTests
         var committed = entity.TryCommitStep(Direction8.E, 5, stepCooldownTicks: 10, AcceptFraction, grid, out var result);
 
         Assert.True(committed);
-        Assert.Equal(new TileCoord(9, 8), entity.Tile);
+        Assert.Equal(new TileCoord(9, 8), entity.TileCoord);
         Assert.Equal(1u, entity.StepSequence);
         Assert.Equal("committed", result.Reason);
     }
@@ -181,7 +181,7 @@ public sealed class WorldEntityCommitStepTests
         Assert.True(c3);                                   // the recovered bundle's 2nd commit is ACCEPTED
         Assert.Equal("committed", r3.Reason);
         Assert.Equal(3u, entity.StepSequence);             // all 3 banked steps landed — no desync
-        Assert.Equal(new TileCoord(11, 8), entity.Tile);
+        Assert.Equal(new TileCoord(11, 8), entity.TileCoord);
     }
 
     [Fact]

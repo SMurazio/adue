@@ -170,7 +170,7 @@ public sealed class TailLossResendHarnessTests
                 }
 
                 // Emit the per-tick snapshot (downlink) carrying the server's current tile + accepted step-seq.
-                pendingSnaps.Add((serverWallMs + latencyMs, tick, server.Tile, server.StepSequence));
+                pendingSnaps.Add((serverWallMs + latencyMs, tick, server.TileCoord, server.StepSequence));
                 nextServerTick++;
             }
 
@@ -262,7 +262,7 @@ public sealed class TailLossResendHarnessTests
         var finalPred = predictor.PredictedStepSeq;
         var finalLead = finalPred > learnedConf ? finalPred - learnedConf : 0u;
         return new RunResult(
-            server.Tile, server.StepSequence, predictor.PredictedTile, finalPred,
+            server.TileCoord, server.StepSequence, predictor.PredictedTile, finalPred,
             learnedConf, finalLead, snapped, corrected, forceResyncs, resendCount);
     }
 

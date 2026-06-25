@@ -64,14 +64,14 @@ public static class FreeAimSectorResolver
         // the SAME spatial index as AOI so occupancy and replication can never diverge; then apply the exact
         // geometric test to each candidate.
         var gatherRadiusTiles = System.Math.Max(1, (int)System.Math.Ceiling(radiusTiles));
-        world.GatherInterestCandidates(attacker.Tile, gatherRadiusTiles, candidateScratch);
+        world.GatherInterestCandidates(attacker.TileCoord, gatherRadiusTiles, candidateScratch);
 
         // Treat each target as a CIRCLE of EntityHitRadiusTiles (a body), not a point: the wedge hits a target it
         // merely CLIPS, not only one whose tile-centre is dead inside it. The geometry (squared range vs radius+body,
         // sqrt + asin(body/dist) angular widen, point-blank always-hit, the NormalizePi reduction) lives in the
         // SHARED Mmo.Shared.Domain.FreeAimSector.IsHit so the client can predict its own swing with the SAME maths.
-        var attackerX = (double)attacker.Tile.X;
-        var attackerZ = (double)attacker.Tile.Y;
+        var attackerX = (double)attacker.TileCoord.X;
+        var attackerZ = (double)attacker.TileCoord.Y;
 
         var hits = 0;
         foreach (var candidate in candidateScratch)
@@ -88,8 +88,8 @@ public static class FreeAimSectorResolver
                     halfAngleRadians,
                     radiusTiles,
                     EntityHitRadiusTiles,
-                    candidate.Tile.X,
-                    candidate.Tile.Y))
+                    candidate.TileCoord.X,
+                    candidate.TileCoord.Y))
             {
                 continue;
             }

@@ -177,7 +177,7 @@ public sealed class TimingFaithfulReconcileHarnessTests
                 {
                     var deliverAt = serverWallMs + rig.LatencyMs
                         + (rig.JitterMs > 0 ? rig.JitterRng.Next(-rig.JitterMs, rig.JitterMs + 1) : 0);
-                    pending.Add((deliverAt, new PendingSnapshot(tick, rig.Server.Tile, rig.Server.StepSequence)));
+                    pending.Add((deliverAt, new PendingSnapshot(tick, rig.Server.TileCoord, rig.Server.StepSequence)));
                 }
 
                 nextServerTick++;
@@ -242,7 +242,7 @@ public sealed class TimingFaithfulReconcileHarnessTests
             result.RenderTrace.Add(rig.Predictor.Sample(movedNow));
         }
 
-        result.FinalServerTile = rig.Server.Tile;
+        result.FinalServerTile = rig.Server.TileCoord;
         result.FinalPredictedTile = rig.Predictor.PredictedTile;
         result.FinalServerStepSeq = rig.Server.StepSequence;
         result.FinalPredictedStepSeq = rig.Predictor.PredictedStepSeq;
@@ -539,7 +539,7 @@ public sealed class TimingFaithfulReconcileHarnessTests
         Assert.True(fixedC3);                                   // C3 ACCEPTED at authored tick 6 (a cadence after C2's 3)
         Assert.Equal("committed", fixedC3Result.Reason);
         Assert.Equal(3u, fixedEntity.StepSequence);             // server reached all 3 banked steps — no desync
-        Assert.Equal(new TileCoord(23, 20), fixedEntity.Tile);  // three tiles east, exactly the prediction
+        Assert.Equal(new TileCoord(23, 20), fixedEntity.TileCoord);  // three tiles east, exactly the prediction
 
         // Anti-speedhack preserved: a same-tick SPAM BURST cannot teleport. Drive 5 commits all authored at tick 0
         // at a LOW server tick (1) so the real-time cap (serverTick + futureLead) bites: paced to ticks 0, then
@@ -742,7 +742,7 @@ public sealed class TimingFaithfulReconcileHarnessTests
         }
 
         return new UoCommitRunResult(
-            server.Tile, server.StepSequence, predictor.PredictedTile, predictor.PredictedStepSeq);
+            server.TileCoord, server.StepSequence, predictor.PredictedTile, predictor.PredictedStepSeq);
     }
 
     // ====================================================================================================

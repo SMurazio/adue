@@ -99,7 +99,7 @@ internal sealed class ServerCadenceTrace : IDisposable
         for (var i = 0; i < entities.Count; i++)
         {
             var entity = entities[i];
-            var tile = entity.Tile;
+            var tile = entity.TileCoord;
             if (_entityStates.TryGetValue(entity.Id, out var state))
             {
                 if (state.Tile.X != tile.X || state.Tile.Y != tile.Y)

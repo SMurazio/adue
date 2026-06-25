@@ -124,7 +124,7 @@ internal sealed class ServerMovementTrace
             "mmo_trace side=server event=snapshot_carry" +
             $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)} snapshot={snapshotSequence.ToString(CultureInfo.InvariantCulture)}" +
             $" player={Quote(entity.DisplayName)} recipient={Quote(recipient.DisplayName)} networkId={entity.NetworkId.ToString(CultureInfo.InvariantCulture)}" +
-            $" tile={FormatTile(entity.Tile)} facing={entity.Facing} chunk={chunkIndex + 1}/{chunkCount}");
+            $" tile={FormatTile(entity.TileCoord)} facing={entity.Facing} chunk={chunkIndex + 1}/{chunkCount}");
     }
 
     private static string Timestamp()

@@ -50,7 +50,7 @@ public sealed class MonsterRoamAiTests
             grid.IsWalkable,
             (entity, direction, tick, cooldownTicks) =>
             {
-                var previous = entity.Tile;
+                var previous = entity.TileCoord;
                 var stepped = entity.TryStep(direction, tick, cooldownTicks, grid, out _);
                 if (stepped)
                 {
@@ -96,11 +96,11 @@ public sealed class MonsterRoamAiTests
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, 1, 2));
 
-            var dx = Math.Abs(monster.Tile.X - home.X);
-            var dy = Math.Abs(monster.Tile.Y - home.Y);
+            var dx = Math.Abs(monster.TileCoord.X - home.X);
+            var dy = Math.Abs(monster.TileCoord.Y - home.Y);
             Assert.True(
                 Math.Max(dx, dy) <= roamRadius,
-                $"monster left the leash at tick {tick}: tile={monster.Tile}, home={home}, radius={roamRadius}");
+                $"monster left the leash at tick {tick}: tile={monster.TileCoord}, home={home}, radius={roamRadius}");
         }
     }
 
@@ -161,7 +161,7 @@ public sealed class MonsterRoamAiTests
             Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == MonsterRoamAi.State.Idle,
                 $"expected Idle before pause elapses (tick {tick}).");
         }
-        var homeTile = monster.Tile;
+        var homeTile = monster.TileCoord;
         Assert.Equal(new TileCoord(32, 32), homeTile);
 
         // At/after the pause it picks a destination and starts Roaming (the open grid always has an open target).
@@ -214,11 +214,11 @@ public sealed class MonsterRoamAiTests
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, 1, 3));
 
             // Never standing on a wall.
-            Assert.True(grid.IsWalkable(monster.Tile), $"monster on a blocked tile {monster.Tile} at tick {tick}.");
+            Assert.True(grid.IsWalkable(monster.TileCoord), $"monster on a blocked tile {monster.TileCoord} at tick {tick}.");
             // Never outside the leash.
-            var dx = Math.Abs(monster.Tile.X - home.X);
-            var dy = Math.Abs(monster.Tile.Y - home.Y);
-            Assert.True(Math.Max(dx, dy) <= roamRadius, $"monster left the leash at tick {tick}: {monster.Tile}.");
+            var dx = Math.Abs(monster.TileCoord.X - home.X);
+            var dy = Math.Abs(monster.TileCoord.Y - home.Y);
+            Assert.True(Math.Max(dx, dy) <= roamRadius, $"monster left the leash at tick {tick}: {monster.TileCoord}.");
         }
     }
 
@@ -249,7 +249,7 @@ public sealed class MonsterRoamAiTests
         for (uint tick = 1; tick <= 500; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, 2, 4));
-            path.Add(monster.Tile);
+            path.Add(monster.TileCoord);
         }
 
         return path;
@@ -310,7 +310,7 @@ public sealed class MonsterRoamAiTests
                     return false;
                 }
 
-                var dist = Math.Max(Math.Abs(p.Tile.X - monster.Tile.X), Math.Abs(p.Tile.Y - monster.Tile.Y));
+                var dist = Math.Max(Math.Abs(p.TileCoord.X - monster.TileCoord.X), Math.Abs(p.TileCoord.Y - monster.TileCoord.Y));
                 if (dist > aggroRadius)
                 {
                     id = 0;
@@ -319,14 +319,14 @@ public sealed class MonsterRoamAiTests
                 }
 
                 id = p.Id;
-                tile = p.Tile;
+                tile = p.TileCoord;
                 return true;
             },
             tryResolve: (ulong id, out TileCoord tile, out bool alive) =>
             {
                 if (world.TryGet(id, out var e))
                 {
-                    tile = e.Tile;
+                    tile = e.TileCoord;
                     alive = e.Stats.Health > 0;
                     return true;
                 }
@@ -398,12 +398,12 @@ public sealed class MonsterRoamAiTests
         var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
         ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
 
-        var startDist = Chebyshev(monster.Tile, player.Tile);
+        var startDist = Chebyshev(monster.TileCoord, player.TileCoord);
         var minDist = startDist;
         for (uint tick = 1; tick <= 60; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables());
-            minDist = Math.Min(minDist, Chebyshev(monster.Tile, player.Tile));
+            minDist = Math.Min(minDist, Chebyshev(monster.TileCoord, player.TileCoord));
         }
 
         // It closed to adjacency (attackRange 1).
@@ -461,7 +461,7 @@ public sealed class MonsterRoamAiTests
         }
 
         Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == MonsterRoamAi.State.Chasing);
-        Assert.True(Chebyshev(monster.Tile, home) > 0, "monster should have left home while chasing.");
+        Assert.True(Chebyshev(monster.TileCoord, home) > 0, "monster should have left home while chasing.");
 
         // Remove the target. Next tick the monster must drop aggro (Returning), then walk home and resume Idle.
         world.Remove(player.Id, out _);
@@ -471,7 +471,7 @@ public sealed class MonsterRoamAiTests
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
             Assert.True(ai.TryGetPhase(monster.Id, out var phase));
             Assert.NotEqual(MonsterRoamAi.State.Chasing, phase); // never re-chases a gone target.
-            if (monster.Tile == home && phase == MonsterRoamAi.State.Idle)
+            if (monster.TileCoord == home && phase == MonsterRoamAi.State.Idle)
             {
                 resumed = true;
                 break;
@@ -502,20 +502,20 @@ public sealed class MonsterRoamAiTests
         // step, so this exercises the de-aggro-RANGE branch (not target-lost). Step at cooldown 1 with spaced ticks.
         for (var i = 0; i < 25; i++)
         {
-            var before = player.Tile;
+            var before = player.TileCoord;
             if (player.TryStep(Direction8.E, serverTick: (uint)(100 + i * 2), stepCooldownTicks: 1, grid, out _))
             {
                 world.OnEntityMoved(player, before);
             }
         }
 
-        Assert.True(Chebyshev(monster.Tile, player.Tile) > 12, "test setup: player not far enough to break leash.");
+        Assert.True(Chebyshev(monster.TileCoord, player.TileCoord) > 12, "test setup: player not far enough to break leash.");
 
         var returned = false;
         for (uint tick = 2; tick <= 200; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
-            if (ai.TryGetPhase(monster.Id, out var phase) && monster.Tile == home && phase == MonsterRoamAi.State.Idle)
+            if (ai.TryGetPhase(monster.Id, out var phase) && monster.TileCoord == home && phase == MonsterRoamAi.State.Idle)
             {
                 returned = true;
                 break;
@@ -551,9 +551,9 @@ public sealed class MonsterRoamAiTests
             ai.StepMonster(monster, tick, StepCooldownTicks, T());
             // The monster is bounded by the chase leash: it may reach chaseLeash (and step one tile past before the
             // next tick's leash check trips Returning), but never wanders far — assert a tight bound of leash+1.
-            Assert.True(Chebyshev(monster.Tile, home) <= 6,
-                $"monster exceeded the chase leash at tick {tick}: {monster.Tile}, home {home}.");
-            if (ai.TryGetPhase(monster.Id, out var phase) && monster.Tile == home && phase == MonsterRoamAi.State.Idle)
+            Assert.True(Chebyshev(monster.TileCoord, home) <= 6,
+                $"monster exceeded the chase leash at tick {tick}: {monster.TileCoord}, home {home}.");
+            if (ai.TryGetPhase(monster.Id, out var phase) && monster.TileCoord == home && phase == MonsterRoamAi.State.Idle)
             {
                 returnedHome = true;
                 break;
@@ -626,7 +626,7 @@ public sealed class MonsterRoamAiTests
 
         Assert.True(bailed, "monster froze on a corner-cut diagonal during chase (no-progress watchdog failed).");
         // And it never wedged onto a wall.
-        Assert.True(grid.IsWalkable(monster.Tile), $"monster on a blocked tile {monster.Tile}.");
+        Assert.True(grid.IsWalkable(monster.TileCoord), $"monster on a blocked tile {monster.TileCoord}.");
     }
 
     [Fact]
@@ -652,7 +652,7 @@ public sealed class MonsterRoamAiTests
         for (uint tick = 1; tick <= 2000; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(2, 2, 2));
-            Assert.True(grid.IsWalkable(monster.Tile), $"monster wedged on a wall {monster.Tile} at tick {tick}.");
+            Assert.True(grid.IsWalkable(monster.TileCoord), $"monster wedged on a wall {monster.TileCoord} at tick {tick}.");
             // It must keep returning to Idle (the cycle never permanently sticks in Roaming).
             if (tick > 50 && ai.TryGetPhase(monster.Id, out var phase) && phase == MonsterRoamAi.State.Idle)
             {

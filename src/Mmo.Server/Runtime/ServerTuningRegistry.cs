@@ -37,6 +37,11 @@ public static class ServerTuningRegistry
     // deadline). Bounded so a typo can't make corpses vanish instantly or linger for an hour.
     public const string CorpseDecayMsKey = "loot.corpseDecayMs";
 
+    // Phase 0 (continuous migration): the DORMANT base move speed in tiles/sec. Registered as a live knob so the
+    // extension surface is complete, but READ BY NOTHING in Phase 0 (the cooldown path still drives movement) —
+    // it only becomes live when Phase 1's integrator consumes the per-entity SpeedUnitsPerSecond derived from it.
+    public const string BaseMoveSpeedUnitsPerSecondKey = "continuous.baseMoveSpeed";
+
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys (P1 roam + P2 aggro/chase/attack) were
     // REPLACED by PER-TYPE keys ("<typeId>.<field>", e.g. slime.roamRadius) owned by MonsterTypeRegistry, which also
     // REPLICATES them to clients (MonsterTuningSnapshot) for the F1 Monster tab. The per-type keys are applied via a
@@ -71,6 +76,10 @@ public static class ServerTuningRegistry
     // a moment; ceil at 30 min so a typo can't strand corpses cluttering the world forever.
     private const int MinCorpseDecayMs = 1000;
     private const int MaxCorpseDecayMs = 1800000;
+    // Phase 0 dormant base move speed: 0.1 .. 100 tiles/sec. Wide enough to sweep once Phase 1 reads it, bounded
+    // so a typo can't store a degenerate value. > 0 always (a 0 speed would freeze the Phase 1 integrator).
+    private const double MinBaseMoveSpeedUnitsPerSecond = 0.1d;
+    private const double MaxBaseMoveSpeedUnitsPerSecond = 100d;
 
     // Applies a tuning key to the holder, clamping/validating first. Returns false for an unknown key (the
     // caller ignores + logs). On success, `applied` is the post-clamp value actually stored.
@@ -140,13 +149,21 @@ public static class ServerTuningRegistry
                 applied = clamped;
                 return true;
             }
+            case BaseMoveSpeedUnitsPerSecondKey:
+            {
+                var clamped = Math.Clamp(value, MinBaseMoveSpeedUnitsPerSecond, MaxBaseMoveSpeedUnitsPerSecond);
+                tuning.BaseMoveSpeedUnitsPerSecond = clamped;
+                applied = clamped;
+                return true;
+            }
             default:
                 return false;
         }
     }
 
     public static bool IsKnownKey(string key) =>
-        key is InterestRadiusKey or PlayerRespawnMsKey or CorpseDecayMsKey || IsCombatKey(key);
+        key is InterestRadiusKey or PlayerRespawnMsKey or CorpseDecayMsKey or BaseMoveSpeedUnitsPerSecondKey
+            || IsCombatKey(key);
 
     // COMBAT-TUNING: whether a key is one of the combat.* knobs. The GameServer broadcasts the replicated
     // CombatTuningSnapshot to all clients when (and only when) one of these changes, so the wedge/predictor/viz stay

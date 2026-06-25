@@ -107,18 +107,18 @@ public sealed class WorldEntityCombatTests
         const uint rootTicks = 4;
 
         entity.ApplyAttackMovementRoot(0, rootTicks);
-        var startTile = entity.Tile;
+        var startTile = entity.TileCoord;
 
         // Inside the root window [0, rootTicks): every step is rejected and the tile does not move.
         for (uint tick = 0; tick < rootTicks; tick++)
         {
             Assert.False(entity.TryStep(Direction8.E, tick, stepCooldownTicks: 3, grid, out _));
-            Assert.Equal(startTile, entity.Tile);
+            Assert.Equal(startTile, entity.TileCoord);
         }
 
         // At rootTicks the step is accepted (the root window has elapsed).
         Assert.True(entity.TryStep(Direction8.E, rootTicks, stepCooldownTicks: 3, grid, out _));
-        Assert.Equal(startTile.Offset(1, 0), entity.Tile);
+        Assert.Equal(startTile.Offset(1, 0), entity.TileCoord);
     }
 
     [Fact]
@@ -170,11 +170,11 @@ public sealed class WorldEntityCombatTests
         const uint receiveTick = 8;     // latency 2
 
         entity.ApplyAttackMovementRootAuthored(authoredTick, receiveTick, rootTicks, pastWindowTicks: 64, futureLeadTicks: 4);
-        var startTile = entity.Tile;
+        var startTile = entity.TileCoord;
 
         // Rejected at tick 9 (inside the authored window [6,10)); accepted at tick 10 (authored 6 + rootTicks 4).
         Assert.False(entity.TryStep(Direction8.S, 9, stepCooldownTicks: 3, grid, out _));
-        Assert.Equal(startTile, entity.Tile);
+        Assert.Equal(startTile, entity.TileCoord);
         Assert.True(entity.TryStep(Direction8.S, 10, stepCooldownTicks: 3, grid, out _));
     }
 

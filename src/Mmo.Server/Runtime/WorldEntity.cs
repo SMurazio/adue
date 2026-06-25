@@ -53,7 +53,9 @@ public sealed class WorldEntity
         Id = id;
         NetworkId = networkId;
         Kind = kind;
-        Tile = tile;
+        // Phase 0: position is the continuous WorldVector at the spawn tile's CENTRE. Movement stays tile-stepped,
+        // so Position only ever holds exact tile-centre values here; TileCoord (below) rounds it back to the tile.
+        Position = WorldVector.FromTile(tile);
         Facing = facing;
         DisplayName = displayName;
         CharacterId = characterId;
@@ -66,7 +68,29 @@ public sealed class WorldEntity
     public ulong Id { get; }
     public uint NetworkId { get; }
     public EntityKind Kind { get; }
-    public TileCoord Tile { get; private set; }
+
+    // Phase 0: the entity's CONTINUOUS world position (WorldVector, tile units). Behaviour is frozen
+    // tile-stepped, so in Phase 0 this is always an exact tile centre — every write goes through
+    // WorldVector.FromTile(targetTile) with the UNCHANGED integer step math. Phase 1's integrator is what
+    // first lets it hold fractional values. The wire/persistence/grid still speak TileCoord; they read the
+    // derived TileCoord accessor below, which round-trips losslessly while positions are tile centres.
+    public WorldVector Position { get; private set; }
+
+    // Phase 0: dormant. Velocity is added for the Phase 1 integrator but is NEVER set non-zero in Phase 0
+    // (movement is still discrete tile steps). Read by nothing yet.
+    public WorldVector Velocity { get; private set; } = WorldVector.Zero;
+
+    // Phase 0: dormant speed stat (tiles/sec). Stored on the entity (set by the server from the base move
+    // speed × SpeedMultiplier) but READ BY NOTHING in Phase 0 — the tile cadence is still driven by
+    // SpeedMultiplier / EffectiveStepCooldownTicks. Phase 1's integrator switches onto this and retires the
+    // cooldown machinery.
+    public double SpeedUnitsPerSecond { get; private set; }
+
+    // The entity's tile (nearest tile centre to Position). The single read accessor for every tile-needing
+    // server site (grid/AOI/wire build/traces): while Position is a tile centre (Phase 0) this is exact and
+    // lossless. Replaces the former stored Tile field; the many `.Tile` read sites became `.TileCoord`.
+    public TileCoord TileCoord => Position.ToTileRounded();
+
     public Direction8 Facing { get; private set; }
     public string DisplayName { get; }
     public Guid? CharacterId { get; }
@@ -96,6 +120,19 @@ public sealed class WorldEntity
 
         SpeedMultiplier = multiplier;
         return true;
+    }
+
+    // Phase 0: store the dormant tiles/sec speed stat. Set by the server from BaseMoveSpeedUnitsPerSecond ×
+    // SpeedMultiplier on spawn / speed change. Read by NOTHING in Phase 0 (the cooldown path still drives the
+    // cadence) — it only becomes live when Phase 1's integrator consumes it. Guards against non-finite values.
+    public void SetSpeedUnitsPerSecond(double unitsPerSecond)
+    {
+        if (!double.IsFinite(unitsPerSecond) || unitsPerSecond < 0)
+        {
+            return;
+        }
+
+        SpeedUnitsPerSecond = unitsPerSecond;
     }
 
     // COMBAT-S1: server-authoritative character vitals (HP / mana / stamina, each current + max). Defaults to
@@ -199,7 +236,8 @@ public sealed class WorldEntity
     // tile being walkable (the spawn tile always is). Returns nothing — a teleport is unconditional.
     public void TeleportTo(TileCoord tile)
     {
-        Tile = tile;
+        // Phase 0: teleport assigns the tile-centre position with the unchanged target tile (no behaviour change).
+        Position = WorldVector.FromTile(tile);
         Facing = Direction8.S;
         _nextEligibleTick = null;
         _lastStepTick = null;
@@ -402,16 +440,16 @@ public sealed class WorldEntity
         if (_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value)
         {
             var cooldownDelta = direction.Delta();
-            var cooldownTarget = Tile.Offset(cooldownDelta.X, cooldownDelta.Y);
+            var cooldownTarget = TileCoord.Offset(cooldownDelta.X, cooldownDelta.Y);
             result = new MovementStepResult(
                 direction,
-                Tile,
+                TileCoord,
                 cooldownTarget,
                 CooldownElapsed: false,
                 grid.IsWalkable(cooldownTarget),
                 Accepted: false,
                 "cooldown",
-                Tile);
+                TileCoord);
             return false;
         }
 
@@ -423,7 +461,7 @@ public sealed class WorldEntity
         Facing = direction;
 
         var delta = direction.Delta();
-        var target = Tile.Offset(delta.X, delta.Y);
+        var target = TileCoord.Offset(delta.X, delta.Y);
         // S75: reject diagonal corner-cutting. A diagonal step (both axes non-zero) also slices between the two
         // orthogonally-adjacent tiles it passes; if EITHER of those side tiles is blocked, the move would slip
         // diagonally THROUGH a wall corner. So a diagonal is walkable only when the destination AND both side
@@ -445,18 +483,19 @@ public sealed class WorldEntity
 
             result = new MovementStepResult(
                 direction,
-                Tile,
+                TileCoord,
                 target,
                 CooldownElapsed: true,
                 TargetWalkable: false,
                 Accepted: false,
                 grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                Tile);
+                TileCoord);
             return false;
         }
 
-        var from = Tile;
-        Tile = target;
+        var from = TileCoord;
+        // Phase 0: accepted step assigns the tile-centre position with the UNCHANGED integer target tile.
+        Position = WorldVector.FromTile(target);
         _lastStepTick = serverTick;
         _nextEligibleTick = serverTick + stepCooldownTicks;
         StateRevision++;
@@ -471,7 +510,7 @@ public sealed class WorldEntity
             TargetWalkable: true,
             Accepted: true,
             "accepted",
-            Tile);
+            TileCoord);
         return true;
     }
 
@@ -515,7 +554,7 @@ public sealed class WorldEntity
         RecvCommits++;
 
         var delta = direction.Delta();
-        var target = Tile.Offset(delta.X, delta.Y);
+        var target = TileCoord.Offset(delta.X, delta.Y);
 
         // Walkability gate first (same rule as TryStep). A commit into a wall / out of bounds changes nothing —
         // not even facing (a commit is a render-completion request, not a fresh direction input; the held-intent
@@ -525,13 +564,13 @@ public sealed class WorldEntity
             RejectsBlocked++; // DIAG1.
             result = new MovementStepResult(
                 direction,
-                Tile,
+                TileCoord,
                 target,
                 CooldownElapsed: true,
                 TargetWalkable: false,
                 Accepted: false,
                 grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                Tile);
+                TileCoord);
             return false;
         }
 
@@ -553,19 +592,20 @@ public sealed class WorldEntity
                 RejectsCommitTooEarly++; // DIAG1.
                 result = new MovementStepResult(
                     direction,
-                    Tile,
+                    TileCoord,
                     target,
                     CooldownElapsed: false,
                     TargetWalkable: true,
                     Accepted: false,
                     "commit_too_early",
-                    Tile);
+                    TileCoord);
                 return false;
             }
         }
 
-        var from = Tile;
-        Tile = target;
+        var from = TileCoord;
+        // Phase 0: accepted commit assigns the tile-centre position with the UNCHANGED integer target tile.
+        Position = WorldVector.FromTile(target);
         Facing = direction;
         // Schedule the committed step from its NOMINAL end so the early finish consumes the current step's remaining
         // cooldown rather than gaining time (the no-speedhack cap). nominalEnd = the tick the current step's cooldown
@@ -586,7 +626,7 @@ public sealed class WorldEntity
             TargetWalkable: true,
             Accepted: true,
             "committed",
-            Tile);
+            TileCoord);
         return true;
     }
 
@@ -661,18 +701,18 @@ public sealed class WorldEntity
             RejectsCommitTooEarly++;
             result = new MovementStepResult(
                 direction,
-                Tile,
-                Tile,
+                TileCoord,
+                TileCoord,
                 CooldownElapsed: false,
                 TargetWalkable: true,
                 Accepted: false,
                 "commit_too_early",
-                Tile);
+                TileCoord);
             return false;
         }
 
         var delta = direction.Delta();
-        var target = Tile.Offset(delta.X, delta.Y);
+        var target = TileCoord.Offset(delta.X, delta.Y);
 
         // Walkability gate (same S75 corner-cut rule as TryStep). A commit into a wall / out of bounds changes
         // nothing and does NOT advance the authored schedule, so a later commit in an open direction still applies.
@@ -681,18 +721,19 @@ public sealed class WorldEntity
             RejectsBlocked++; // DIAG1.
             result = new MovementStepResult(
                 direction,
-                Tile,
+                TileCoord,
                 target,
                 CooldownElapsed: true,
                 TargetWalkable: false,
                 Accepted: false,
                 grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                Tile);
+                TileCoord);
             return false;
         }
 
-        var from = Tile;
-        Tile = target;
+        var from = TileCoord;
+        // Phase 0: accepted authored commit assigns the tile-centre position with the UNCHANGED integer target.
+        Position = WorldVector.FromTile(target);
         Facing = direction;
         // Advance the authored-schedule anchor to the scheduled (paced) tick. The next commit must be scheduled at
         // least a cooldown later. _lastStepTick / _nextEligibleTick are kept coherent off the SAME anchor so a later
@@ -710,7 +751,7 @@ public sealed class WorldEntity
             TargetWalkable: true,
             Accepted: true,
             "committed",
-            Tile);
+            TileCoord);
         return true;
     }
 
@@ -728,7 +769,7 @@ public sealed class WorldEntity
 
         if (delta.X != 0 && delta.Y != 0)
         {
-            return grid.IsWalkable(Tile.Offset(delta.X, 0)) && grid.IsWalkable(Tile.Offset(0, delta.Y));
+            return grid.IsWalkable(TileCoord.Offset(delta.X, 0)) && grid.IsWalkable(TileCoord.Offset(0, delta.Y));
         }
 
         return true;

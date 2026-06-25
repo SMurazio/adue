@@ -114,9 +114,9 @@ public sealed class SpatialAoiParityTests
         Assert.DoesNotContain(1u, GridInInterest(state, viewer, session, interestRadius: 5f));
 
         // Walk the mover west until it is adjacent to the viewer, stepping through the grid every tile.
-        for (var tick = 1u; mover.Tile.X > 100; tick++)
+        for (var tick = 1u; mover.TileCoord.X > 100; tick++)
         {
-            var previous = mover.Tile;
+            var previous = mover.TileCoord;
             Assert.True(mover.TryStep(Direction8.W, tick, stepCooldownTicks: 1, grid));
             state.OnEntityMoved(mover, previous);
 
@@ -139,7 +139,7 @@ public sealed class SpatialAoiParityTests
         var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(100, 100), Direction8.E);
         var viewer = MakeViewer(new TileCoord(105, 100));
 
-        var previous = mover.Tile;
+        var previous = mover.TileCoord;
         Assert.True(mover.TryStep(Direction8.E, serverTick: 1, stepCooldownTicks: 1, grid)); // -> (101,100), same cell
         state.OnEntityMoved(mover, previous);
 
@@ -156,7 +156,7 @@ public sealed class SpatialAoiParityTests
     {
         var radiusTiles = (int)Math.Ceiling(interestRadius + ExitHysteresisTiles);
         var candidates = new List<WorldEntity>();
-        state.GatherInterestCandidates(viewer.Tile, radiusTiles, candidates);
+        state.GatherInterestCandidates(viewer.TileCoord, radiusTiles, candidates);
 
         var result = new SortedSet<uint>();
         foreach (var candidate in candidates)

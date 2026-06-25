@@ -488,7 +488,7 @@ public sealed class LocalPlayerPredictorTests
             entity.TryStep(held, tick, stepCooldownTicks, grid);
             predictor.Tick(TimeSpan.FromMilliseconds(tick * tickMs));
 
-            Assert.Equal(entity.Tile, predictor.PredictedTile);
+            Assert.Equal(entity.TileCoord, predictor.PredictedTile);
             Assert.Equal(entity.Facing, predictor.Facing);
             // S77: the predictor's step-seq mirrors the server's StepSequence by the SAME construction as the
             // tile parity — both bump only on an accepted tile move (never a turn/block), so they agree every
@@ -575,7 +575,7 @@ public sealed class LocalPlayerPredictorTests
                             lastServerHeld = serverHeld;
 
                             // Parity at this tick boundary: tile, facing, AND accepted-step count.
-                            if (entity.Tile != predictor.PredictedTile
+                            if (entity.TileCoord != predictor.PredictedTile
                                 || entity.Facing != predictor.Facing
                                 || entity.StepSequence != predictor.PredictedStepSeq)
                             {
@@ -687,20 +687,20 @@ public sealed class LocalPlayerPredictorTests
 
                     // Reconcile against the server's authoritative tile + step-seq, exactly as the client does on
                     // every snapshot.
-                    predictor.Reconcile(entity.Tile, entity.StepSequence, now);
+                    predictor.Reconcile(entity.TileCoord, entity.StepSequence, now);
 
                     if (tick < spamUntilTick)
                     {
                         var divergence = System.Math.Max(
-                            System.Math.Abs(predictor.PredictedTile.X - entity.Tile.X),
-                            System.Math.Abs(predictor.PredictedTile.Y - entity.Tile.Y));
+                            System.Math.Abs(predictor.PredictedTile.X - entity.TileCoord.X),
+                            System.Math.Abs(predictor.PredictedTile.Y - entity.TileCoord.Y));
                         maxDivergence = System.Math.Max(maxDivergence, divergence);
                     }
                 }
 
                 // After both sides stop and drain, the prediction must have converged EXACTLY onto the server's
                 // authoritative tile. A phase that does not converge is the stuck-at-rest desync.
-                if (predictor.PredictedTile != entity.Tile)
+                if (predictor.PredictedTile != entity.TileCoord)
                 {
                     notConvergedAtRest++;
                 }
@@ -771,7 +771,7 @@ public sealed class LocalPlayerPredictorTests
             {
                 var serverHeld = HeldAt(nextTick * tickMs);
                 entity.TryStep(serverHeld, nextTick, stepCooldownTicks, grid);
-                Assert.Equal(entity.Tile, predictor.PredictedTile);
+                Assert.Equal(entity.TileCoord, predictor.PredictedTile);
                 Assert.Equal(entity.Facing, predictor.Facing);
                 Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
                 nextTick++;
@@ -780,7 +780,7 @@ public sealed class LocalPlayerPredictorTests
 
         // After settling and running E, the avatar has actually travelled (no permanent stall), and stayed in
         // exact lockstep with the server the whole way.
-        Assert.Equal(entity.Tile, predictor.PredictedTile);
+        Assert.Equal(entity.TileCoord, predictor.PredictedTile);
         Assert.True(predictor.PredictedTile.X > start.X, "predicted avatar should have advanced east after settling");
     }
 
@@ -858,8 +858,8 @@ public sealed class LocalPlayerPredictorTests
 
             // Both must HOLD at the start tile (the diagonal is corner-cut-rejected) — tile AND facing parity
             // every tick, never slipping to (11,9).
-            Assert.Equal(new TileCoord(10, 10), entity.Tile);
-            Assert.Equal(entity.Tile, predictor.PredictedTile);
+            Assert.Equal(new TileCoord(10, 10), entity.TileCoord);
+            Assert.Equal(entity.TileCoord, predictor.PredictedTile);
             Assert.Equal(entity.Facing, predictor.Facing);
         }
     }
@@ -938,7 +938,7 @@ public sealed class LocalPlayerPredictorTests
             }
 
             // Tile / facing / accepted-step-count lockstep EVERY tick, through and after the root.
-            Assert.Equal(entity.Tile, predictor.PredictedTile);
+            Assert.Equal(entity.TileCoord, predictor.PredictedTile);
             Assert.Equal(entity.Facing, predictor.Facing);
             Assert.Equal(entity.StepSequence, predictor.PredictedStepSeq);
         }

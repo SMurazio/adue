@@ -19,7 +19,7 @@ public sealed class MeleeConeResolverTests
         // Spawn one tile WEST and step E so the attacker ends at (10,10) FACING E (TryStep sets facing on the step).
         var attacker = world.AddPlayer(1, Guid.NewGuid(), "Attacker", new TileCoord(9, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         FaceEast(attacker, world);
-        Assert.Equal(new TileCoord(10, 10), attacker.Tile);
+        Assert.Equal(new TileCoord(10, 10), attacker.TileCoord);
         Assert.Equal(Direction8.E, attacker.Facing);
         var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(11, 10), Direction8.S);
 
@@ -36,7 +36,7 @@ public sealed class MeleeConeResolverTests
         // Spawn one tile WEST and step E so the attacker ends at (10,10) FACING E (TryStep sets facing on the step).
         var attacker = world.AddPlayer(1, Guid.NewGuid(), "Attacker", new TileCoord(9, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         FaceEast(attacker, world);
-        Assert.Equal(new TileCoord(10, 10), attacker.Tile);
+        Assert.Equal(new TileCoord(10, 10), attacker.TileCoord);
         Assert.Equal(Direction8.E, attacker.Facing);
         // Facing E → flanks are NE (11,9) and SE (11,11). Put a dummy on the NE flank.
         var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(11, 9), Direction8.S);
@@ -54,7 +54,7 @@ public sealed class MeleeConeResolverTests
         // Spawn one tile WEST and step E so the attacker ends at (10,10) FACING E (TryStep sets facing on the step).
         var attacker = world.AddPlayer(1, Guid.NewGuid(), "Attacker", new TileCoord(9, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         FaceEast(attacker, world);
-        Assert.Equal(new TileCoord(10, 10), attacker.Tile);
+        Assert.Equal(new TileCoord(10, 10), attacker.TileCoord);
         Assert.Equal(Direction8.E, attacker.Facing);
         // Behind the attacker (W) is NOT in the E-facing cone.
         var dummy = world.AddTransient(2, EntityKind.Dummy, "Dummy", new TileCoord(9, 10), Direction8.S);
@@ -72,7 +72,7 @@ public sealed class MeleeConeResolverTests
         // Spawn one tile WEST and step E so the attacker ends at (10,10) FACING E (TryStep sets facing on the step).
         var attacker = world.AddPlayer(1, Guid.NewGuid(), "Attacker", new TileCoord(9, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         FaceEast(attacker, world);
-        Assert.Equal(new TileCoord(10, 10), attacker.Tile);
+        Assert.Equal(new TileCoord(10, 10), attacker.TileCoord);
         Assert.Equal(Direction8.E, attacker.Facing);
         // Another PLAYER standing on the forward cone tile must be untouched.
         var ally = world.AddPlayer(2, Guid.NewGuid(), "Ally", new TileCoord(11, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
@@ -90,7 +90,7 @@ public sealed class MeleeConeResolverTests
         // Spawn one tile WEST and step E so the attacker ends at (10,10) FACING E (TryStep sets facing on the step).
         var attacker = world.AddPlayer(1, Guid.NewGuid(), "Attacker", new TileCoord(9, 10), new ClientSession(null!), new Inventory(ItemRegistry.Default));
         FaceEast(attacker, world);
-        Assert.Equal(new TileCoord(10, 10), attacker.Tile);
+        Assert.Equal(new TileCoord(10, 10), attacker.TileCoord);
         Assert.Equal(Direction8.E, attacker.Facing);
         // Facing E → cone tiles E (11,10), NE (11,9), SE (11,11). A dummy on each.
         var d1 = world.AddTransient(2, EntityKind.Dummy, "D1", new TileCoord(11, 10), Direction8.S);
@@ -124,7 +124,7 @@ public sealed class MeleeConeResolverTests
     private static void FaceEast(WorldEntity entity, WorldState world)
     {
         var grid = new TileGrid(64, 64, []);
-        var previous = entity.Tile;
+        var previous = entity.TileCoord;
         Assert.True(entity.TryStep(Direction8.E, serverTick: 0, stepCooldownTicks: 0, grid));
         world.OnEntityMoved(entity, previous);
     }
