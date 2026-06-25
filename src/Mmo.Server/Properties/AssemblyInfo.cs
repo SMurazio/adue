@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("Mmo.Server.Tests")]
-// NET2: TEST1 (TimingFaithfulReconcileHarnessTests, in Mmo.Client.Core.Tests) drives the REAL
-// GameServer.ExtractFreshStepCommits to assert UO-commit-loss recovery against the production extractor.
+// Client-core integration/parity tests (MmoClientIntegrationTests, LocalPlayerPredictorTests,
+// TerrainParityTests, SnapshotGapConvergenceTests) drive the REAL server types (GameServer / WorldEntity /
+// TerrainGenerator) to assert client behaviour against production rather than a mock.
 [assembly: InternalsVisibleTo("Mmo.Client.Core.Tests")]

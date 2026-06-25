@@ -34,7 +34,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 0 | Position type + speed stat; retype ~243 `.Tile` sites | ✅ **DONE** | `9fdc65a`; gate green (Server 329/Core 251 unchanged, Shared +15); independent review SHIP (clean behavior-frozen seam) |
 | 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | ✅ **DONE** | `836befd`; review SHIP-WITH-FOLLOWUPS; cosmetic followup #1 done (`f41b8cb`); #2 (dead ClientSession members) → Phase 3 |
 | 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | ✅ **DONE** | `14c7fbe`; review SHIP (clean deterministic port — byte-identity verified for Phase-4 reuse; superset query, scope held) |
-| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | **IN PROGRESS** | plan: `docs/migration/phase-3-plan.md`. Pass A (additive: PositionEncoding Q12.4 + EntityStateSnapshot retype, green on v35) → Pass B (the v36 break + per-input server + dt-clamp + all clients). New: R-dt anti-speedhack clamp |
+| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | ✅ **DONE** | Pass A `f6b1ffa` + Pass B `899200c` (v36); review SHIP-WITH-FOLLOWUPS (dt-budget sound, diagonal-normalize correct, wire clean); followups in `todo/N-phase3-followups.md` (A: normalize guard test → Phase 4; C: idle send-gate). **Wire is now continuous.** |
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3. **MUST port the timing-faithful reconcile-harness rigor** (latency/jitter/drop, snapshot-vs-cadence mismatch) onto the continuous reconcile — the UO5/NET2/NET3 regression guard (`TimingFaithfulReconcileHarnessTests`/`TailLossResendHarnessTests`, deleted with the commit-step in Phase 1). Don't ship Phase 4 without it. |
 | 5 | Remote interpolation/extrapolation (port `RemoteContinuousEntity`); retire hop/TileInterpolator | pending | depends 3,4 |
 | 6 | AOI float retype | pending | depends 0 |
@@ -78,3 +78,10 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   `EntityStateSnapshot.Tile`→`WorldVector Position` internal retype, WIRE UNCHANGED (v35 round-trips). Shared 146
   (+14) / Client.Core 209 / Server 310, godot clean. **Pass B (the v35→v36 atomic break + per-input server + dt-clamp)
   HELD for the user's explicit go-ahead** (the wire point-of-no-return + a new anti-speedhack decision).
+- **2026-06-25** — User chose "Go". Phase 3 **Pass B SHIPPED** (`899200c`): the atomic v35→v36 break — fixed-point
+  continuous positions, per-input `MoveIntent{seq,dir,dt}`, server per-input-by-dt integration, `LastInputSeq`,
+  the wall-clock **dt-budget anti-speedhack**, all dead commit/mode/move-input machinery deleted (~2340 LOC), all 5
+  clients flipped (Godot renders RAW; predictor/interp unwired-not-deleted). Review **SHIP-WITH-FOLLOWUPS** —
+  dt-budget bound holds (a flood can't out-integrate real time; hostile dt neutralized), diagonal-normalize correct,
+  fixed-point round-trips ≤1/16 u, deletions clean, monsters/scope respected. Followups: B done (comment), A+C tracked.
+  **Phase 3 complete — the game runs on the continuous wire (client renders raw until Phase 4 prediction).**
