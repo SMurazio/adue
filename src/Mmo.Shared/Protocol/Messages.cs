@@ -17,91 +17,21 @@ public sealed record LoginRequestMessage(string AccountName, string DisplayName)
     public MessageType Type => MessageType.LoginRequest;
 }
 
-// Held-direction movement intent (protocol v15, replaces the per-step MoveStep stream). Input as
-// state, not events: the client declares what it intends (Moving + Direction) and the server steps
-// the entity at its own cooldown cadence from that intent. Moving=false means stopped (Direction is
-// then ignored). Sent reliable-ordered (a dropped "stop" must not be lost). Sequence rejects stale
-// intents (seq <= lastSeq) belt-and-suspenders + anti-cheat. See docs/movement-input-model.md.
-public sealed record MoveIntentMessage(uint Sequence, bool Moving, Direction8 Direction) : IProtocolMessage
+// CONTINUOUS MIGRATION (Phase 3, protocol v36): the per-INPUT continuous move intent (analog of the proven
+// exp:ContinuousInput). The client sends ONE of these per RENDER FRAME with that frame's dt: a monotonic InputSeq,
+// the RAW (un-normalized) world-axis direction the player is holding (DirX/DirY; WASD sums to {-1,0,1} per axis, a
+// zero vector means STOP), and DtSeconds — how much sim-time that frame represents. The server integrates each
+// FRESH input (InputSeq > session.LastInputSeq) by its own dt on the RECEIVE path (the experiment model), so the
+// authoritative path matches the Phase-4 client predictor's replayed path under variable frame timing.
+//
+// ANTI-SPEEDHACK (server-side, SECURITY-CRITICAL): the client now controls dt, so the server CANNOT trust it. A
+// per-input sanity clamp bounds DtSeconds into [0, ~0.25s], AND a per-peer WALL-CLOCK dt BUDGET caps the TOTAL
+// integrated sim-time to real elapsed time (+ a small burst allowance for jitter). Net: over any window a peer's
+// integrated distance cannot exceed real-time distance. See ClientSession.ConsumeMoveDtBudget + GameServer.
+// Sent UNRELIABLE-sequenced (latest frame wins; a dropped input is superseded by the next frame's).
+public sealed record MoveIntentMessage(uint InputSeq, float DirX, float DirY, float DtSeconds) : IProtocolMessage
 {
     public MessageType Type => MessageType.MoveIntent;
-}
-
-// NET1 Stage 1 (protocol v23): loss-robust held-intent delivery — reliability via REDUNDANCY, not
-// retransmission. Replaces the reliable-ordered MoveIntent send. Sent UNRELIABLE at a fixed rate
-// (~20 Hz while moving, plus a short tail of Moving=false after stop). Every packet carries the FULL
-// current intent (HeadSeq/Moving/Direction) so a lost packet is simply superseded by the next, PLUS a
-// sliding Window of the last few prior inputs as deltas so an intermediate state change dropped on the
-// wire is recovered from a later packet. The server dedupes by sequence (walk head+window, apply each
-// seq > LastMoveSeq via the EXISTING held-intent path) — no head-of-line stall, no retransmit bunching.
-// No authored ticks yet: this stage stays seq-based and server held-paced (those arrive in Stage 2+).
-// Window entries are deltas off HeadSeq: SeqDelta is (HeadSeq - entry.Seq), so entry seq = HeadSeq -
-// SeqDelta. The newest input is the head; Window holds strictly-older inputs in any order.
-public readonly record struct MoveInputWindowEntry(byte SeqDelta, bool Moving, Direction8 Direction);
-
-public sealed record MoveInputMessage(
-    uint HeadSeq,
-    bool Moving,
-    Direction8 Direction,
-    IReadOnlyList<MoveInputWindowEntry> Window) : IProtocolMessage
-{
-    public MessageType Type => MessageType.MoveInput;
-}
-
-// S103 commit-step on release (protocol v21). A client→server request to finish a near-complete cosmetic step:
-// when model B's render has glided past the commit threshold onto the NEXT tile at key-release, the client asks
-// the server to step there for real (one tile in Direction) instead of snapping back. The server validates it
-// like a normal step PLUS an anti-cheat floor (the entity must be at least CommitAcceptFraction of its cooldown
-// into the current step) and, on accept, borrows the next step's cooldown so the average step rate can never
-// exceed the normal cadence (no speedhack). There is no dedicated reply: the RESULT is observed via the normal
-// snapshot stream — the confirmed tile advancing to the requested tile = accepted; staying = rejected. Sent
-// reliable-ordered. Sequence rejects stale requests on the server's COMMIT cursor (NET6 — a dedicated commit
-// dedup cursor, separate from the MoveIntent cursor, so an intent seq can't burn an unconfirmed commit). The
-// wire seq is still minted off the client's single shared monotonic counter; only the server bookkeeping splits.
-public sealed record StepCommitRequestMessage(uint Sequence, Direction8 Direction) : IProtocolMessage
-{
-    public MessageType Type => MessageType.StepCommitRequest;
-}
-
-// NET2 (protocol v24) / NET3 (protocol v25): loss-robust UO commit delivery — the SAME redundancy-not-
-// retransmission trick NET1 applied to held intent, now for the UoClientDriven per-step commit stream. Replaces
-// the per-step reliable-ordered StepCommitRequest send. Sent UNRELIABLE: each packet carries the NEWEST committed
-// step (HeadSeq + Direction) PLUS a sliding Window of the last few prior committed steps as deltas, so a dropped
-// commit is recovered from a LATER packet's window (~one send interval late, spread out) instead of a reliable
-// retransmit BATCH that the server's cooldown gate would reject all at once (the GodotB speed-up/desync).
-//
-// NET3 adds the AUTHORED TICK per commit: HeadTick is the integer server tick the predictor's gate banked the
-// HEAD step on (the SAME tick the prediction advanced on — not a separately-sampled clock, which would reintroduce
-// snapping). The server APPLIES each commit at its authored tick (gating/scheduling the cooldown on authored time,
-// not receive time), so a bundled-recovered [C2,C3] no longer collides at one receive tick: C2 advances the
-// eligible schedule to its authored end, and C3 (authored a cadence later) is then ACCEPTED instead of rejected as
-// "too early". Window entries carry BOTH a SeqDelta (HeadSeq - entry.Seq) and a TickDelta (HeadTick - entry.Tick)
-// off the head, so entry seq = HeadSeq - SeqDelta and entry authored tick = HeadTick - TickDelta. A commit has no
-// Moving flag (it is always a step). The wire seq is minted off the client's single shared monotonic counter, but
-// the SERVER dedups commits on a dedicated COMMIT cursor (NET6), separate from the MoveIntent/MoveInput cursor, so
-// a higher-numbered intent (e.g. a keyup STOP) can no longer pre-dedup an unconfirmed commit's re-send.
-public readonly record struct StepCommitWindowEntry(byte SeqDelta, uint TickDelta, Direction8 Direction);
-
-public sealed record StepCommitBatchMessage(
-    uint HeadSeq,
-    uint HeadTick,
-    Direction8 Direction,
-    IReadOnlyList<StepCommitWindowEntry> Window) : IProtocolMessage
-{
-    public MessageType Type => MessageType.StepCommitBatch;
-}
-
-// UO1 client-driven movement mode signal (protocol v22). A one-bit declaration from the client that THIS session
-// drives its own movement UO-style: the client predicts + banks tiles locally and sends one StepCommitRequest per
-// accepted step, and the server must STOP auto-pacing the entity from the held MoveIntent (otherwise the held-
-// intent pacer AND the per-step commits would both step the entity — double-stepping / 2x speed). ClientDriven=true
-// enters the mode, false leaves it (reverts to server-paced held-intent stepping). The client keeps sending
-// MoveIntent for stop/keepalive/facing regardless; the server simply ignores it for PACING while the flag is set.
-// Sent reliable-ordered, and re-sent on (re)login / respawn so a lost flag can't silently double-step. See
-// docs/uo-client-driven-mode-plan.md.
-public sealed record MovementModeMessage(bool ClientDriven) : IProtocolMessage
-{
-    public MessageType Type => MessageType.MovementMode;
 }
 
 // COMBAT-S2B (protocol v28): the first combat action — a client->server attack request on its OWN dedup
@@ -206,6 +136,12 @@ public sealed record LoginResultMessage(
 // keep-alive) even when the recipient's own entity is delta'd out of the payload because it is idle. This
 // stage only emits it; the client decodes it but does not yet reconcile against it (S77). Defaults to 0 in the
 // convenience constructors (tests / non-recipient-scoped uses).
+//
+// CONTINUOUS MIGRATION (Phase 3, v36): LastInputSeq is a SECOND recipient-scoped header field, riding right after
+// RecipientStepSeq — the highest per-input MoveIntent seq the server has INTEGRATED for the recipient (session
+// .LastInputSeq) at build time. Like RecipientStepSeq it rides every snapshot (real-delta AND keep-alive) so the
+// Phase-4 client predictor can trim/replay its unacked input buffer against the server's integrated cursor. The
+// Phase-3 client stores it (unused until Phase 4 adds prediction). Defaults to 0 in the convenience constructors.
 public sealed record WorldSnapshotMessage(
     uint ServerTick,
     uint SnapshotSequence,
@@ -214,7 +150,8 @@ public sealed record WorldSnapshotMessage(
     int ChunkIndex,
     int ChunkCount,
     IReadOnlyList<EntityStateSnapshot> Entities,
-    uint RecipientStepSeq = 0) : IProtocolMessage
+    uint RecipientStepSeq = 0,
+    uint LastInputSeq = 0) : IProtocolMessage
 {
     public WorldSnapshotMessage(uint serverTick, IReadOnlyList<EntityStateSnapshot> entities)
         : this(serverTick, 0, entities.Count, true, 0, 1, entities)

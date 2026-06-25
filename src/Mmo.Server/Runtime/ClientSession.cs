@@ -52,30 +52,33 @@ public sealed class ClientSession
     // disconnected once total silence passes the larger threshold.
     private uint _lastAckOrFirstSendTick;
 
-    // Held-direction movement intent (protocol v15). The client declares Moving + Direction; the tick
-    // loop steps the entity at its own cooldown cadence while MoveIntentMoving is true. LastMoveSeq
-    // rejects stale intents; LastMoveIntentTick drives the keepalive safety timeout. See
-    // docs/movement-input-model.md.
-    private uint _lastMoveSeq;
+    // CONTINUOUS MIGRATION (Phase 3, v36): the tick a fresh per-input MoveIntent last arrived — drives the
+    // keepalive safety timeout (a "moving" session silent past the timeout is force-stopped). The integrate cursor
+    // itself is _lastInputSeq (below).
     private uint _lastMoveIntentTick;
 
-    // NET6: StepCommit gets its OWN dedup cursor, separate from the MoveInput-intent cursor (_lastMoveSeq).
-    // The client mints both commit seqs and intent seqs off one shared monotonic counter, so a keyup STOP
-    // intent (seq N+1) carries a HIGHER seq than an unconfirmed tail commit (seq N). When both streams shared
-    // ONE cursor, that stop intent burned the cursor past commit N, and every re-send of commit N was then
-    // deduped away ("already seen") before it could reach the (healthy) authored-tick commit gate — stranding
-    // the tail and forcing a ForceResync snap, and stranding mid-stream commits behind interleaved direction-
-    // change intents (the runaway). Splitting the cursor lets a stranded commit re-send actually land: the
-    // commit gate is `seq > _lastCommitSeq`, independent of how far intents have advanced _lastMoveSeq. Commit
-    // seqs may have GAPS where intents took numbers — fine: the redundancy window applies entries oldest-first
-    // and advances _lastCommitSeq incrementally, and a stale/duplicate commit is still rejected on `<=`.
-    private uint _lastCommitSeq;
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-INPUT continuous-move dedup cursor — the highest MoveIntent
+    // InputSeq the server has INTEGRATED for this session. The server integrates each fresh input (InputSeq >
+    // _lastInputSeq) by its dt on the receive path, then advances this; it rides every snapshot header (LastInputSeq)
+    // so the Phase-4 predictor can trim/replay its unacked input buffer. Replaces the v35 held-intent + commit
+    // cursors (deleted with the tile-step machinery).
+    private uint _lastInputSeq;
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-peer WALL-CLOCK dt BUDGET (the anti-speedhack core). The client
+    // now controls dt, so the server caps the TOTAL sim-time a peer may integrate to REAL elapsed time (+ a small
+    // burst allowance for jitter). _dtBudgetSeconds is the credit remaining: it accrues REAL elapsed seconds each
+    // tick (CreditMoveDtBudget, capped at the burst allowance) and each integrated input DEBITS by the dt it actually
+    // consumed (ConsumeMoveDtBudget). An input may consume at most the remaining budget — so over any window the
+    // peer's integrated sim-time <= real elapsed + burst. Starts at the burst allowance (a fresh peer may move
+    // immediately within the allowance).
+    private double _dtBudgetSeconds;
+    private bool _dtBudgetSeeded;
 
     // COMBAT-S2B: the ATTACK-stream dedup cursor (the highest AttackMessage seq accepted). A SEPARATE, INDEPENDENT
-    // stream from movement — it shares NOTHING with _lastMoveSeq / _lastCommitSeq. This is the #1 rule from the NET6
+    // stream from movement — it shares NOTHING with the move input cursor. This is the #1 rule from the NET6
     // desync bug: two streams on one cursor strand each other. The client mints attack seqs off its OWN dedicated
-    // _attackSeq counter, and HandleAttack gates on THIS cursor only. An attack seq never touches the move/commit
-    // cursors and vice-versa, so a movement input can never pre-dedup an attack (or the reverse). Attacks are
+    // _attackSeq counter, and HandleAttack gates on THIS cursor only. An attack seq never touches the move input
+    // cursor and vice-versa, so a movement input can never pre-dedup an attack (or the reverse). Attacks are
     // reliable-ordered + low-rate, so a strict `seq > cursor` monotonic gate is all the dedup needed.
     private uint _lastAttackSeq;
 
@@ -102,36 +105,17 @@ public sealed class ClientSession
     public int BadPacketCount { get; private set; }
     public uint LastAcknowledgedSnapshotSequence { get; private set; }
 
-    // Current held movement intent. When MoveIntentMoving is true the tick loop attempts one cooldown-
-    // gated tile step in MoveIntentDirection per tick. The last seq we accepted and the tick at which we
-    // last heard a (fresh) intent are exposed for the keepalive timeout.
-    public bool MoveIntentMoving { get; private set; }
-    public Direction8 MoveIntentDirection { get; private set; }
+    // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous-move state. IsMoving is true while the last
+    // integrated input carried a non-zero direction (the keepalive/animation "currently walking" flag); a fresh
+    // (0,0) input or the keepalive force-stop clears it. LastMoveIntentTick is the tick a fresh input last arrived
+    // (drives the keepalive safety timeout). LastInputSeq is the integrate cursor (rides the snapshot header).
+    public bool IsMoving { get; private set; }
     public uint LastMoveIntentTick => _lastMoveIntentTick;
-    public uint LastMoveSeq => _lastMoveSeq;
-
-    // NET6: the commit-stream dedup cursor (the highest StepCommit seq accepted). Separate from LastMoveSeq so
-    // an intent never burns the commit cursor (and vice-versa). HandleStepCommitBatch/ExtractFreshStepCommits
-    // gate the commit window on THIS, not LastMoveSeq.
-    public uint LastCommitSeq => _lastCommitSeq;
+    public uint LastInputSeq => _lastInputSeq;
 
     // COMBAT-S2B: the attack-stream dedup cursor (the highest accepted AttackMessage seq). Exposed for tests that
-    // assert the attack cursor advances independently of LastMoveSeq / LastCommitSeq.
+    // assert the attack cursor advances independently of the movement cursor.
     public uint LastAttackSeq => _lastAttackSeq;
-
-    // UO1: when true this session drives its own movement UO-style — it predicts + banks tiles locally and sends
-    // one StepCommitRequest per accepted step, so the tick loop must NOT auto-pace its entity from the held
-    // MoveIntent (StepHeldMovementIntents skips it). Set false (the default) the session is server-paced exactly
-    // as before. Toggled by the client's MovementModeMessage. The held MoveIntent is still recorded (for
-    // stop/keepalive/facing) — it is just ignored for PACING while this is set. Default false keeps the
-    // server-paced model byte-for-byte until a client opts in.
-    public bool ClientDrivenMovement { get; private set; }
-
-    // UO1: applies a MovementMode declaration from the client (true = client-driven, false = server-paced).
-    public void SetClientDrivenMovement(bool clientDriven)
-    {
-        ClientDrivenMovement = clientDriven;
-    }
 
     // LOOT P4c: the ENTITY id of the corpse this session currently has its loot window OPEN on, or null if no
     // window is open. Set when the player opens a corpse (InteractRequest on it, eligibility-passed); cleared on
@@ -222,49 +206,81 @@ public sealed class ClientSession
         return true;
     }
 
-    // Applies an inbound MoveIntent. Rejects stale sequences (seq <= lastSeq) and returns false without
-    // mutating state; otherwise records the new intent + the tick it arrived (for the keepalive timeout)
-    // and returns true. A fresh keepalive carrying the same Moving/Direction still refreshes the timeout.
-    public bool TryUpdateMoveIntent(uint sequence, bool moving, Direction8 direction, uint serverTick)
+    // CONTINUOUS MIGRATION (Phase 3, v36): claims a fresh per-input MoveIntent on the receive path. Rejects stale/
+    // duplicate inputs (InputSeq <= the cursor) and returns false WITHOUT mutating state; otherwise advances the
+    // integrate cursor (LastInputSeq) + refreshes the keepalive tick and returns true (the caller may then integrate
+    // by this input's dt). The cursor advances even for a fresh ROOTED/STOP input so the snapshot's LastInputSeq
+    // still ACKs it (the client trims its buffer) even though that input produces no motion.
+    public bool TryBeginMoveInput(uint inputSeq, uint serverTick)
     {
-        if (sequence <= _lastMoveSeq)
+        if (inputSeq <= _lastInputSeq)
         {
             return false;
         }
 
-        _lastMoveSeq = sequence;
+        _lastInputSeq = inputSeq;
         _lastMoveIntentTick = serverTick;
-        MoveIntentMoving = moving;
-        MoveIntentDirection = direction;
         return true;
     }
 
-    // S103 commit-step: advances the COMMIT-sequence cursor (_lastCommitSeq, NET6 — separate from the intent
-    // cursor _lastMoveSeq) for a StepCommitRequest without touching the held Moving/Direction intent (a commit
-    // is a one-shot "finish this step" request, not a new held intent — it must not, for example, set the
-    // session back to Moving after a keyup). Rejects stale sequences (seq <= the COMMIT cursor) so a re-ordered/
-    // duplicate commit can't fire twice, but does NOT consult or advance _lastMoveSeq — so a higher-numbered
-    // STOP/direction-change intent can no longer burn an unconfirmed commit's seq and strand it (the NET6 bug).
-    // Still refreshes the keepalive tick (preserving prior behavior: a fresh commit, like a fresh intent, proves
-    // the client alive and pushes back the keepalive safety timeout). Returns true iff the sequence was fresh on
-    // the commit cursor (the caller may then attempt the commit).
-    public bool TryConsumeCommitSequence(uint sequence, uint serverTick)
+    // CONTINUOUS MIGRATION (Phase 3, v36): records whether the session is currently moving (the last integrated
+    // input carried a non-zero direction). Drives the keepalive/animation "walking" flag, not the integration.
+    public void SetMoving(bool moving)
     {
-        if (sequence <= _lastCommitSeq)
+        IsMoving = moving;
+    }
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-peer wall-clock dt BUDGET — the anti-speedhack core (see the
+    // _dtBudgetSeconds field). CreditMoveDtBudget accrues REAL elapsed seconds each server tick, capped so the
+    // credit never exceeds burstAllowanceSeconds (a fresh/idle peer can burst up to the allowance, not unboundedly).
+    public void CreditMoveDtBudget(double realElapsedSeconds, double burstAllowanceSeconds)
+    {
+        if (!_dtBudgetSeeded)
         {
-            return false;
+            // Seed a fresh peer at the full burst allowance so it can move immediately within the jitter window.
+            _dtBudgetSeconds = burstAllowanceSeconds;
+            _dtBudgetSeeded = true;
+            return;
         }
 
-        _lastCommitSeq = sequence;
-        _lastMoveIntentTick = serverTick;
-        return true;
+        if (realElapsedSeconds > 0d)
+        {
+            _dtBudgetSeconds += realElapsedSeconds;
+        }
+
+        if (_dtBudgetSeconds > burstAllowanceSeconds)
+        {
+            _dtBudgetSeconds = burstAllowanceSeconds;
+        }
+    }
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): debits the dt budget for one integrated input, returning the dt the
+    // server is ALLOWED to integrate by — min(requestedDt, remaining budget). A peer flooding many max-dt inputs
+    // drains the budget faster than CreditMoveDtBudget refills it (real time), so the excess is clamped to 0 and
+    // those inputs advance nothing: over any window the peer's integrated sim-time <= real elapsed + the burst
+    // allowance. requestedDt is assumed already per-input-sanity-clamped to [0, max] by the caller.
+    public double ConsumeMoveDtBudget(double requestedDt)
+    {
+        if (requestedDt <= 0d)
+        {
+            return 0d;
+        }
+
+        var allowed = System.Math.Min(requestedDt, _dtBudgetSeconds);
+        if (allowed <= 0d)
+        {
+            return 0d;
+        }
+
+        _dtBudgetSeconds -= allowed;
+        return allowed;
     }
 
     // COMBAT-S2B: advances the ATTACK-sequence cursor (_lastAttackSeq) for an inbound AttackMessage. Rejects stale
     // sequences (seq <= the attack cursor) so a re-ordered/duplicate/replayed attack can't fire twice, and returns
-    // false WITHOUT mutating anything. Crucially it does NOT consult or advance _lastMoveSeq / _lastCommitSeq — the
-    // attack stream is fully independent of movement (the NET6 lesson). Returns true iff the seq was fresh on the
-    // attack cursor (the caller may then attempt to resolve the attack). The cursor advances even though the caller
+    // false WITHOUT mutating anything. Crucially it does NOT consult or advance the move input cursor — the
+    // attack stream is fully independent of movement (the NET6 lesson — never share a cursor with the move stream).
+    // Returns true iff the seq was fresh on the attack cursor (the caller may then resolve the attack). The cursor advances even though the caller
     // may later reject the attack on cooldown, so a re-sent already-seen attack is deduped here and never resolves.
     public bool TryConsumeAttackSequence(uint sequence)
     {
@@ -277,12 +293,11 @@ public sealed class ClientSession
         return true;
     }
 
-    // Clears the held intent to stopped (keepalive safety timeout, or any server-side halt). Does not
-    // touch the sequence cursor, so a later genuine intent still has to advance past the last accepted
-    // seq.
+    // Clears the moving flag to stopped (keepalive safety timeout, or any server-side halt). Does not
+    // touch the input cursor, so a later genuine input still has to advance past LastInputSeq.
     public void ClearMoveIntent()
     {
-        MoveIntentMoving = false;
+        IsMoving = false;
     }
 
     public bool KnowsEntity(uint networkId)

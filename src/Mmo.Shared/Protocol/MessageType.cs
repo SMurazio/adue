@@ -4,15 +4,17 @@ public enum MessageType : ushort
 {
     ClientHello = 1,
     LoginRequest = 2,
+    // CONTINUOUS MIGRATION (Phase 3, v36): MoveIntent is now the per-INPUT continuous move (one per client frame):
+    // {uint InputSeq, float DirX, float DirY, float DtSeconds}. The server integrates each fresh input by its dt on
+    // the receive path (anti-speedhack: per-input dt clamp + a per-peer wall-clock dt budget). Reuses tag 3.
     MoveIntent = 3,
     ChatSend = 4,
     SnapshotAck = 5,
     InteractRequest = 6,
     AdminSetTuning = 7,
-    StepCommitRequest = 8,
-    MovementMode = 9,
-    MoveInput = 10,
-    StepCommitBatch = 11,
+    // CONTINUOUS MIGRATION (Phase 3, v36): the tile-step commit/mode/move-input machinery is DELETED (per-input
+    // continuous movement replaces it). Tags 8 (StepCommitRequest), 9 (MovementMode), 10 (MoveInput), 11
+    // (StepCommitBatch) are left as numeric GAPS — survivors are NOT renumbered so the rest of the catalogue is stable.
     // COMBAT-S1: admin-gated client->server "set my local player's current vital" verb (dev-set window).
     AdminSetStat = 12,
     // COMBAT-S2B: client->server attack action (its OWN dedup cursor, never movement's). Reliable-ordered.

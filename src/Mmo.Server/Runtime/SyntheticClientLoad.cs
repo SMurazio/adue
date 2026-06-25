@@ -151,8 +151,13 @@ public sealed class SyntheticClientLoad : IDisposable
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
 
-        // Keepalive cadence for held-direction movement intent (protocol v15), mirroring the real clients.
+        // Keepalive cadence for the per-input continuous move intent (v36), mirroring the real clients.
         private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(500);
+
+        // CONTINUOUS MIGRATION (Phase 3, v36): the synthetic load client does not predict — it sends one continuous
+        // MoveIntent on change + keepalive with a fixed NOMINAL dt (≈ one 20 Hz tick) and a UNIT direction. The
+        // server's anti-speedhack budget caps the integrated distance to real elapsed regardless of this nominal dt.
+        private const float NominalMoveDtSeconds = 1f / 20f;
 
         private NetPeer? _serverPeer;
         private bool _disposed;
@@ -222,8 +227,10 @@ public sealed class SyntheticClientLoad : IDisposable
                 _nextDirectionAt = elapsed + TimeSpan.FromSeconds(1);
             }
 
-            // Held-direction movement intent (v15): send only on change plus a 500 ms keepalive, not a
-            // step every 250 ms. The server steps the avatar from the held intent on its own cooldown.
+            // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — send on change plus a 500 ms
+            // keepalive. The server integrates each fresh input by its dt on the receive path. A held direction sends
+            // its UNIT world vector + a nominal dt; a stop sends (0,0). Sent unreliable (latest input wins), matching
+            // the real client's per-frame model.
             var desiredMoving = _direction.HasValue;
             var desiredDirection = _direction ?? _intentDirection;
             var changed = desiredMoving != _intentMoving || (desiredMoving && desiredDirection != _intentDirection);
@@ -232,7 +239,11 @@ public sealed class SyntheticClientLoad : IDisposable
             {
                 _intentMoving = desiredMoving;
                 _intentDirection = desiredDirection;
-                Send(_serverPeer, new MoveIntentMessage(++_inputSequence, _intentMoving, _intentDirection), DeliveryMethod.ReliableOrdered);
+                var dir = desiredMoving ? _intentDirection.ToUnitVector() : WorldVector.Zero;
+                Send(
+                    _serverPeer,
+                    new MoveIntentMessage(++_inputSequence, (float)dir.X, (float)dir.Y, NominalMoveDtSeconds),
+                    DeliveryMethod.Unreliable);
                 _nextKeepaliveAt = elapsed + MoveIntentKeepalive;
             }
         }

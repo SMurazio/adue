@@ -154,14 +154,14 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _);
 
         client.HandleMessageForTests(Snapshot(1, isComplete: true, State(7, 0, 0)));
-        // 600ms cooldown → 600ms cadence → trimmed remote buffer max(0.5*600, 50)=300ms, so at the 200ms sample the
-        // refreshed entity is still buffered at its origin (X==0). Un-refreshed it would use the ~150ms-cadence default
-        // (~75ms buffer) and have moved by 200ms — so X==0 still proves ServerHello refreshed the early entity's cadence.
+        // CONTINUOUS MIGRATION (v36): render is RAW (no buffering), so the cadence refresh is no longer observable via
+        // a delayed render position. The interpolator cadence is still COMPUTED on confirm and surfaced via the
+        // MovementDebug.EffectiveCadenceMs read-out: a late ServerHello (600ms cooldown ⇒ 600ms cadence) must retune
+        // the early snapshot-created entity, so the confirmed-tile cadence reads 600ms (not the ~150ms default).
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 600, 30));
         client.HandleMessageForTests(Snapshot(2, isComplete: false, State(7, 1, 0)));
 
-        var render = Assert.Single(client.GetRenderStates(TimeSpan.FromMilliseconds(200)));
-        Assert.Equal(0, render.Position.X);
+        Assert.Equal(600d, client.MovementDebug.EffectiveCadenceMs);
     }
 
     [Fact]
@@ -194,20 +194,16 @@ public sealed class MmoClientProtocolTests
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
 
-        var sequence = client.SendMoveIntent(true, Direction8.E);
+        // CONTINUOUS MIGRATION (Phase 3, v36): SendMoveIntent ships ONE per-input continuous MoveIntentMessage (raw
+        // dir + dt). The returned seq matches the message's InputSeq; the snapshot still drives the tile_confirmed
+        // trace.
+        var sequence = client.SendMoveIntent(1f, 0f, 0.05f);
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.E)));
 
-        // NET1 Stage 1: SendMoveIntent now ships the redundant-unreliable MoveInputMessage (full current state +
-        // window), not the old reliable MoveIntentMessage. The head seq matches the returned sequence.
-        Assert.Contains(outbound.OfType<MoveInputMessage>(), move => move.HeadSeq == sequence && move.Moving && move.Direction == Direction8.E);
-        Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
-        Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
+        Assert.Contains(outbound.OfType<MoveIntentMessage>(), move => move.InputSeq == sequence && move.DirX == 1f && move.DirY == 0f);
         Assert.Equal(9u, client.MovementDebug.LastConfirmedNetworkId);
         Assert.Equal(new TileCoord(6, 5), client.MovementDebug.LastConfirmedTile);
         Assert.Equal(3u, client.MovementDebug.LastConfirmedSnapshotSequence);
-        Assert.True(client.MovementDebug.QueueDepth > 0);
-        Assert.Equal(150d, client.MovementDebug.EffectiveCadenceMs);
-        Assert.Contains(lines, line => line.Contains("event=move_intent", StringComparison.Ordinal));
         Assert.Contains(lines, line => line.Contains("event=tile_confirmed", StringComparison.Ordinal));
     }
 
@@ -217,16 +213,13 @@ public sealed class MmoClientProtocolTests
         var lines = new List<string>();
         using var client = CreateClient(out _, debugMovement: false, lines.Add);
 
-        var sequence = client.SendMoveIntent(true, Direction8.E);
+        client.SendMoveIntent(1f, 0f, 0.05f);
         client.RecordFrameHitch(40, 1, 0, 0);
 
         Assert.False(client.DebugMovementEnabled);
-        // Console trace stays silent when disabled (no spam, no I/O).
+        // Console trace stays silent when disabled (no spam, no I/O). CONTINUOUS MIGRATION (v36): the per-move
+        // trace recording rode the deleted MoveInput machinery, so LastSent* are no longer asserted here.
         Assert.Empty(lines);
-        // But the in-memory snapshot still tracks state so live debug HUDs (e.g. the Godot F3 panel)
-        // can read interpolation/movement state without enabling the console trace.
-        Assert.Equal(sequence, client.MovementDebug.LastSentSequence);
-        Assert.Equal(Direction8.E, client.MovementDebug.LastSentDirection);
     }
 
     [Fact]

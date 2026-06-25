@@ -21,6 +21,11 @@ public sealed class WebBridgeSession
     private uint _inputSequence;
     private volatile bool _closing;
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): the fixed nominal dt the web bridge stamps on each continuous MoveIntent
+    // (≈ one 20 Hz tick). The bridge does not predict; the server's anti-speedhack budget bounds the integrated
+    // distance to real elapsed time regardless of this nominal value.
+    private const float NominalMoveDtSeconds = 1f / 20f;
+
     public WebBridgeSession(WebSocket socket, BridgeOptions options)
     {
         _socket = socket;
@@ -140,13 +145,15 @@ public sealed class WebBridgeSession
         switch (type)
         {
             case "moveIntent":
-                // Held-direction movement intent (protocol v15). The browser sends this on change +
-                // keepalive; the server steps the avatar from the held intent at its own cooldown. When
-                // moving is false the direction is ignored (we still parse it, defaulting safely).
+                // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent. The browser declares a held
+                // Direction8 + moving flag; we convert it to the raw UNIT world vector (or (0,0) for stop) and send it
+                // with a fixed NOMINAL dt (the web bridge doesn't predict). The server integrates each fresh input by
+                // its dt; its anti-speedhack budget caps the integrated distance to real time regardless of cadence.
                 var moving = root.TryGetProperty("moving", out var movingProperty)
                     && movingProperty.ValueKind == JsonValueKind.True;
                 TryReadDirection(root, out var direction);
-                _toServer.Enqueue(new MoveIntentMessage(++_inputSequence, moving, direction));
+                var dir = moving ? direction.ToUnitVector() : WorldVector.Zero;
+                _toServer.Enqueue(new MoveIntentMessage(++_inputSequence, (float)dir.X, (float)dir.Y, NominalMoveDtSeconds));
                 break;
             case "chat":
                 var text = root.GetProperty("text").GetString() ?? "";

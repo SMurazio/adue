@@ -36,8 +36,8 @@ public sealed class ServerTuning
     // the shared CollisionDefaults.BodyRadius (0.5) so the default path matches the byte-identical baseline the future
     // client mirrors. A LIVE feel knob (continuous.bodyRadius) — the registry clamps it STRICTLY below 0.5 so a
     // 1-tile-wide corridor stays passable (a radius of exactly 0.5 would jam a body in a 1-wide gap). Read fresh each
-    // tick by the player integrator (GameServer.IntegrateHeldMovementIntents threads it into Zone.IntegrateMovement).
-    // This override is server-feel only until Phase 3 decides whether to replicate it.
+    // input by the per-input player integrator (GameServer.HandleMoveIntent threads it into Zone.IntegrateMovement).
+    // This override is server-feel only until a later phase decides whether to replicate it.
     public double BodyRadiusUnits { get; set; } = CollisionDefaults.BodyRadius;
 
     // COMBAT-TUNING (live): the free-aim combat feel-knobs, now LIVE-tunable (combat.* registry keys) and replicated

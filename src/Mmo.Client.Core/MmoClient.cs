@@ -6,14 +6,12 @@ namespace Mmo.Client.Core;
 
 public sealed class MmoClient : IDisposable
 {
-    // The local player is ALWAYS client-driven (Ultima-Online-style): it routes through the LocalPlayerPredictor
-    // (instant prediction + tick-grid stepping + step-seq reconcile), declares the session client-driven to the
-    // server (MovementModeMessage) so the server stops auto-pacing, and emits one StepCommitRequest per predicted
-    // accepted step so the server FOLLOWS the client's per-step requests (accept/reject). The reject path is the
-    // predictor's RecipientStepSeq reconcile (snap on divergence). This is the SOLE local-player render path —
-    // the former model-B "cosmetic lead" driver and its F6 render-mode selector were removed (cleanup/remove-model-b).
-    // See docs/movement-input-model.md. The only no-predictor case is pre-spawn / interpolation-only (predictor
-    // not yet attached), handled by the null-predictor branches below exactly as before.
+    // CONTINUOUS MIGRATION (Phase 3, v36): the local player sends ONE per-input continuous MoveIntent PER RENDER FRAME
+    // (raw direction + the frame's dt) and renders the RAW decoded server position — NO prediction/interpolation this
+    // phase (crude/laggy under latency, EXPECTED). The server integrates each input by its dt on the receive path.
+    // The LocalPlayerPredictor / TileInterpolator / MonsterHopInterpolator are left compiled-but-UNWIRED (never
+    // attached/sampled); Phase 4 re-adds the local-player predictor (additively, zero wire/server change) and Phase 5
+    // re-adds remote smoothing. The v35 UO client-driven commit/move-input/mode machinery is DELETED.
 
     // remote-interp-tighten Part A: the remote jitter buffer was 1.3 * cadence (~1.3 tiles of steady-state lag) —
     // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
@@ -40,11 +38,6 @@ public sealed class MmoClient : IDisposable
     // (1.3) if it still dips, lower if start-of-move feels laggy.
     public const double LocalInterpolationCadenceMultiplier = 1.0d;
     private const uint PlaceholderSnapshotTtl = 60;
-
-    // UO1: the max accepted steps a single predictor Tick can resolve (mirrors LocalPlayerPredictor.MaxTicksPerCall
-    // — the per-call action cap). The per-step commit buffer is sized to this so a laggy multi-step catch-up never
-    // overflows it and never drops a commit.
-    private const int UoCommitBurstCap = 8;
 
     private readonly ClientConnectionOptions _options;
     private readonly EventBasedNetListener _listener = new();
@@ -82,6 +75,11 @@ public sealed class MmoClient : IDisposable
     // match this against the predicted step to fix the reconcile rubberband.
     private uint _lastRecipientStepSeq;
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): the last INTEGRATED input seq from the most recent snapshot header — the
+    // highest MoveIntent InputSeq the server has applied for us. Stored only this phase (the Phase-4 predictor will
+    // trim/replay its unacked input buffer against it). Exposed read-only for diagnostics / Phase-4.
+    private uint _lastInputSeq;
+
     // DIAG1/NET5: snapshots-received-per-second rate (the `recv/s` confirm-channel-alive read-out). The original
     // DIAG1 metric used a tumbling 1-second window that ONLY republished on the next arrival after the window
     // elapsed: when arrivals slowed or stopped (idle, or a loss burst) the window never closed and the read-out
@@ -96,6 +94,9 @@ public sealed class MmoClient : IDisposable
     private int _snapshotRecvTimestampCount;
     private int _snapshotRecvTimestampHead; // index of the oldest entry
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-INPUT MoveIntent seq counter. Each render frame mints ++this and
+    // sends one continuous MoveIntent. The v35 move-input / step-commit redundancy rings + the ack-driven tail-resend
+    // machinery are DELETED — the per-frame model is self-redundant (the next frame supersedes a dropped one).
     private uint _moveSequence;
 
     // COMBAT-S2B: the attack stream's OWN monotonic sequence counter, entirely SEPARATE from _moveSequence (the
@@ -103,50 +104,6 @@ public sealed class MmoClient : IDisposable
     // counter only; it never touches _moveSequence, and _moveSequence never touches it. The server dedups attacks
     // on its matching independent _lastAttackSeq cursor.
     private uint _attackSeq;
-    // NET1 Stage 1: ring of the last N held inputs (newest last). Each MoveInputMessage repeats the full
-    // current state PLUS a window of these prior inputs (as deltas) so a dropped packet's state change is
-    // recovered from a later, still-redundant packet. Sized to ~the loss-recovery depth we send (≈8).
-    private const int MoveInputRingCapacity = 8;
-    private readonly (uint Seq, bool Moving, Direction8 Direction)[] _moveInputRing
-        = new (uint, bool, Direction8)[MoveInputRingCapacity];
-    private int _moveInputRingCount;
-    private int _moveInputRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
-    // NET2: ring of the last N committed steps (newest last). Each StepCommitBatch repeats the newest commit
-    // (head) PLUS a window of these prior committed steps (as deltas) so a dropped commit packet is recovered
-    // from a later, still-redundant packet's window instead of a reliable retransmit batch (which the server's
-    // cooldown gate would reject all at once → the GodotB speed-up/desync). Sized to ~the loss-recovery depth.
-    private const int StepCommitRingCapacity = 8;
-    // NET3: each ring entry also carries the commit's AUTHORED server tick (the predictor gate tick the step was
-    // banked on). Every batch repeats it as a tick delta off the head so the server applies each commit at its
-    // authored time, not the receive tick.
-    private readonly (uint Seq, uint Tick, Direction8 Direction)[] _stepCommitRing
-        = new (uint, uint, Direction8)[StepCommitRingCapacity];
-    private int _stepCommitRingCount;
-    private int _stepCommitRingHead; // index of the oldest entry; (_head + count - 1) % cap is the newest
-
-    // NET5: ack-driven re-send of unacked commits (tail-loss recovery). The redundant StepCommitBatch window rides
-    // SUBSEQUENT packets, so a mid-stream loss recovers within ~1 packet — but the LAST commit of a movement burst
-    // has no following packet to re-carry it. If it drops (and input has stopped) the server's accepted step-seq
-    // (`conf`) stays permanently behind the prediction (`pred`): a stuck `lead = pred - conf`. The fix: while
-    // lead > 0 AND the ack is OVERDUE (conf has not advanced for a grace > ~RTT + one cadence), re-ship the current
-    // ring (the same SendStepCommitBatch — deduped + applied at the authored tick by the server) at ~1 batch /
-    // cadence, INCLUDING after movement stops, until conf catches pred and lead drains to 0 with NO snap. In clean
-    // play conf advances every RTT, so the grace never elapses and NOT ONE extra packet is sent — the re-send is
-    // "the ack is overdue", never "there is something in flight". The bound (one batch per cadence, only while the
-    // ack is stalled) keeps it cheap and false-trip-proof.
-    //
-    // The fallback (RESYNC1): if the re-send has fired ResendFallbackCount times and conf STILL has not advanced
-    // (the commit is genuinely undeliverable — heavy/black loss), ForceResync converges the prediction onto the
-    // server. The K/T are chosen so a clean <=3% tail drop heals via re-send long before this trips.
-    private const double ResendStallGraceMs = 350d;        // ack overdue: > RTT(~200) + one cadence(~150)
-    private const int ResendFallbackCount = 6;             // K: re-sent this many times, conf still stuck
-    private const double ResendFallbackStuckMs = 1500d;    // T: conf stuck at least this long => ForceResync
-    private uint _resendLastConf;                          // last conf seen (detect ack progress)
-    private bool _hasResendLastConf;
-    private TimeSpan _resendConfStalledSince;              // when conf last advanced (the stall clock)
-    private TimeSpan _resendLastSentAt;                    // last re-send wall time (the cadence bound)
-    private bool _hasResendLastSentAt;
-    private int _resendsSinceConfAdvance;                  // re-sends since conf last moved (K counter)
 
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
@@ -263,6 +220,11 @@ public sealed class MmoClient : IDisposable
     // accepted tile moves). Exposed read-only for diagnostics / S77's reconcile; not yet consumed by the
     // predictor this stage.
     public uint LastRecipientStepSeq => _lastRecipientStepSeq;
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the last integrated input seq from the latest snapshot header (the
+    // server's count of our applied per-input MoveIntents). Read-only; stored for the Phase-4 predictor's input-buffer
+    // trim/replay.
+    public uint LastInputSeq => _lastInputSeq;
 
     // DIAG1: the live movement-debug read-out augmented with the local-player recovery-chain numbers. The base
     // snapshot (sent/confirmed tile, queue depth, cadence, latency, render) comes from the trace; we overlay the
@@ -463,116 +425,19 @@ public sealed class MmoClient : IDisposable
             _latency.FlushOutboundDue(now, SendNow);
         }
 
-        // Advance the local-player driver AFTER draining inbound messages, so a snapshot that arrived this poll
-        // re-bases the prediction before we project the render to "now". The local player ALWAYS runs through the
-        // predictor (client-driven UO mode is the sole render path) — tick the predictor AND emit the accepted steps
-        // this call (the multi-step catch-up loop can resolve up to MaxTicksPerCall=8 steps on a laggy frame). The
-        // server FOLLOWS these: it advances the entity only on accepted commits (the held-intent pacer is disabled
-        // for this session by the MovementModeMessage). NET2: each accepted step mints a FRESH ++_moveSequence on the
-        // SHARED move cursor (the same cursor MoveIntent/MoveInput use) and is recorded in the commit ring; then ONE
-        // redundant-unreliable StepCommitBatch ships the newest step plus a window of prior committed steps, so a
-        // dropped commit recovers from a later packet's window instead of a reliable retransmit batch. Pre-spawn
-        // (no predictor attached yet) this is a no-op.
-        if (_predictor is { } predictor)
-        {
-            Span<Direction8> accepted = stackalloc Direction8[UoCommitBurstCap];
-            Span<long> acceptedTicks = stackalloc long[UoCommitBurstCap];
-            predictor.Tick(now, accepted, acceptedTicks, out var acceptedCount);
-            var emit = Math.Min(acceptedCount, accepted.Length);
-            for (var i = 0; i < emit; i++)
-            {
-                // NET3: stamp the commit with the SAME gate tick the predictor banked the step on (acceptedTicks)
-                // so the server replays it at its authored time. The tick is a non-negative server tick here (the
-                // gate never fires before the calibrated frame); clamp at 0 defensively before the uint cast.
-                RecordStepCommit(++_moveSequence, (uint)Math.Max(0, acceptedTicks[i]), accepted[i]);
-            }
-
-            if (emit > 0)
-            {
-                SendStepCommitBatch();
-                // NET5: a fresh batch just covered this cadence — restart the re-send timer so the tail-recovery
-                // re-send doesn't pile a second packet on top of it.
-                _resendLastSentAt = now;
-                _hasResendLastSentAt = true;
-            }
-
-            // NET5: drive the ack-driven tail-recovery re-send (no-op unless a commit is genuinely stranded).
-            DriveAckDrivenResend(predictor, now, emittedFreshThisPoll: emit > 0);
-        }
+        // CONTINUOUS MIGRATION (Phase 3, v36): the local-player predictor is UNWIRED (Phase 4 re-adds it). The client
+        // renders the RAW decoded server position every frame (crude/laggy under latency, EXPECTED). Nothing more to
+        // drive here per poll — input is sent per-frame by the caller via SendMoveIntent, and the render reads the
+        // latest snapshot position directly. The LocalPlayerPredictor class is left compiled-but-unwired (never attached).
     }
 
-    // NET5: ack-driven re-send of unacked commits (tail-loss recovery) + the bounded ForceResync fallback. Called
-    // every Poll AFTER the fresh-commit emission. While the prediction LEADS the server's
-    // learned ack (lead = pred - conf > 0) AND that ack is OVERDUE (conf has not advanced for ResendStallGraceMs,
-    // i.e. longer than a normal RTT round-trip), re-ship the current commit ring at most once per cadence — the
-    // existing redundant-unreliable SendStepCommitBatch, which the server dedups (cursor) and applies at the
-    // authored tick, so a re-delivered tail commit just lands and `conf` catches `pred` with NO snap. The re-send
-    // continues INCLUDING after movement stops (the stranded tail's defining case) until lead == 0.
-    //
-    // Clean play sends NOTHING extra: conf advances every RTT, so the stall grace never elapses and the re-send
-    // never fires — it triggers only when an expected ack is genuinely overdue. The fallback: after
-    // ResendFallbackCount re-sends with conf STILL stalled (>= ResendFallbackStuckMs), the commit is
-    // undeliverable; ForceResync (RESYNC1) converges. K/T are tuned so a clean <=3% tail drop heals via re-send
-    // first and never reaches the fallback.
-    private void DriveAckDrivenResend(LocalPlayerPredictor predictor, TimeSpan now, bool emittedFreshThisPoll)
-    {
-        // NET5b: the decision rule lives in ONE pure place (AckDrivenResendPolicy.Decide) that the headless tests
-        // also call. This wrapper just packs the carried _resend* state into the helper's state struct, asks for the
-        // decision, writes the (possibly advanced) state back, and performs the side effects (SendStepCommitBatch /
-        // predictor.ForceResync). Behaviour is identical to the previous inline implementation.
-        var state = new AckResendState
-        {
-            LastConf = _resendLastConf,
-            HasLastConf = _hasResendLastConf,
-            ConfStalledSinceMs = _resendConfStalledSince.TotalMilliseconds,
-            LastSentAtMs = _resendLastSentAt.TotalMilliseconds,
-            HasLastSentAt = _hasResendLastSentAt,
-            ResendsSinceConfAdvance = _resendsSinceConfAdvance,
-        };
-
-        var config = new AckResendConfig(
-            StallGraceMs: ResendStallGraceMs,
-            FallbackCount: ResendFallbackCount,
-            FallbackStuckMs: ResendFallbackStuckMs,
-            CadenceMs: predictor.CadenceMs);
-
-        var decision = AckDrivenResendPolicy.Decide(
-            now.TotalMilliseconds, predictor.PredictedStepSeq, predictor.LastReconciledStepSeq,
-            emittedFreshThisPoll, state, config);
-
-        var next = decision.State;
-        _resendLastConf = next.LastConf;
-        _hasResendLastConf = next.HasLastConf;
-        _resendConfStalledSince = TimeSpan.FromMilliseconds(next.ConfStalledSinceMs);
-        _resendLastSentAt = TimeSpan.FromMilliseconds(next.LastSentAtMs);
-        _hasResendLastSentAt = next.HasLastSentAt;
-        _resendsSinceConfAdvance = next.ResendsSinceConfAdvance;
-
-        if (decision.SendBatch)
-        {
-            SendStepCommitBatch();
-        }
-
-        if (decision.ForceResync)
-        {
-            predictor.ForceResync();
-        }
-    }
-
-    // Whether local-player movement prediction is active (S53). Disabling it (e.g. for an A/B feel check)
-    // reverts the local player to the pre-S53 confirmed-tile interpolation path. Default on.
+    // CONTINUOUS MIGRATION (Phase 3, v36): kept for the Godot panel toggle that still references it. Prediction is
+    // UNWIRED in Phase 3 (the predictor is never attached), so this is now a stored flag with no effect until Phase 4
+    // re-wires the predictor. Setting it neither attaches nor detaches anything this phase.
     public bool PredictionEnabled
     {
         get => _predictionEnabled;
         set => _predictionEnabled = value;
-    }
-
-    // UO1: declares this session's movement model to the server (true = client-driven UO mode, false = server-paced).
-    // ReliableOrdered — a lost flag would desync the server's pacing decision (double-step or stall). No-op safe
-    // before connect (Send routes to the test sink / queues). Re-sent on (re)login/respawn via EnsurePredictor.
-    private void SendMovementModeSignal(bool clientDriven)
-    {
-        Send(new MovementModeMessage(clientDriven), DeliveryMethod.ReliableOrdered);
     }
 
     // UO4: whether the predictor settles-then-goes on a ~180° reversal (F6 "Stop on reversal"). Reflects the value
@@ -619,187 +484,17 @@ public sealed class MmoClient : IDisposable
         _serverPeer = null;
     }
 
-    // Sends a held-direction movement intent. NET1 Stage 1: the wire delivery is now an UNRELIABLE,
-    // REDUNDANT MoveInputMessage instead of a reliable-ordered MoveIntentMessage — the caller drives it at a
-    // fixed ~20 Hz while moving plus a short Moving=false tail after stop (see MmoClientRoot.SendHeldMovement).
-    // Each call mints a fresh sequence, records it in the ring, and ships the FULL current state plus a window
-    // of the last few prior inputs (deltas) so a dropped packet is superseded by the next and a dropped state
-    // change is recovered from a later packet's window. The server dedupes by sequence; reliability comes from
-    // redundancy, not retransmission, so a lost packet no longer head-of-line-stalls (freeze-then-jump gone).
-    // Direction is ignored by the server when moving is false. See docs/movement-input-model.md.
-    public uint SendMoveIntent(bool moving, Direction8 direction)
+    // CONTINUOUS MIGRATION (Phase 3, v36): send ONE per-input continuous MoveIntent — the raw world-axis direction
+    // (DirX/DirY; a zero vector is STOP) and the frame's dt. The caller (MmoClientRoot.SendHeldMovement) drives this
+    // once PER RENDER FRAME with that frame's delta. The Phase-3 client does NOT predict — it renders the raw decoded
+    // server position (crude/laggy under latency, EXPECTED; Phase 4 adds the predictor back, additively). The server
+    // integrates each fresh input by its dt on the receive path. Sent UNRELIABLE-sequenced (latest frame wins).
+    // Returns the input seq sent (for tests / diagnostics).
+    public uint SendMoveIntent(float dirX, float dirY, float dtSeconds)
     {
         var sequence = ++_moveSequence;
-        RecordMoveInput(sequence, moving, direction);
-        Send(new MoveInputMessage(sequence, moving, direction, BuildMoveInputWindow(sequence)), DeliveryMethod.Unreliable);
-        _movementTrace.MoveSent(sequence, moving, direction);
-        // S53: the held intent we just sent the server is exactly what the local predictor mirrors. Feed it
-        // so the first step on keydown / the stop on keyup is predicted with no round-trip wait. The
-        // predictor steps forward on each Poll(now); SetIntent only records the held state + arms the first
-        // step. Created lazily here once the zone + local entity + cadence are all available.
-        EnsurePredictor();
-        // The local player ALWAYS routes through the predictor (client-driven UO mode is the sole render path):
-        // feed it the held intent so the first step on keydown / the stop on keyup is predicted with no round-trip
-        // wait. No-op pre-spawn (predictor not yet attached).
-        _predictor?.SetIntent(moving, direction, _currentTime);
-
+        Send(new MoveIntentMessage(sequence, dirX, dirY, dtSeconds), DeliveryMethod.Unreliable);
         return sequence;
-    }
-
-    // NET1 Stage 1: push the just-sent input into the redundancy ring (newest last, dropping the oldest once
-    // full). The ring feeds the window of every subsequent MoveInputMessage.
-    private void RecordMoveInput(uint sequence, bool moving, Direction8 direction)
-    {
-        if (_moveInputRingCount < MoveInputRingCapacity)
-        {
-            var slot = (_moveInputRingHead + _moveInputRingCount) % MoveInputRingCapacity;
-            _moveInputRing[slot] = (sequence, moving, direction);
-            _moveInputRingCount++;
-        }
-        else
-        {
-            _moveInputRing[_moveInputRingHead] = (sequence, moving, direction);
-            _moveInputRingHead = (_moveInputRingHead + 1) % MoveInputRingCapacity;
-        }
-    }
-
-    // NET1 Stage 1: build the redundancy window for a packet whose head is headSeq — the prior inputs still in
-    // the ring (every entry except the head itself), encoded as deltas (headSeq - entrySeq). Newest-first so a
-    // truncated read still recovers the most recent changes. Returns empty when the ring holds only the head.
-    private IReadOnlyList<MoveInputWindowEntry> BuildMoveInputWindow(uint headSeq)
-    {
-        if (_moveInputRingCount <= 1)
-        {
-            return Array.Empty<MoveInputWindowEntry>();
-        }
-
-        var window = new List<MoveInputWindowEntry>(_moveInputRingCount - 1);
-        // Walk newest-to-oldest, skipping the head entry.
-        for (var i = _moveInputRingCount - 1; i >= 0; i--)
-        {
-            var slot = (_moveInputRingHead + i) % MoveInputRingCapacity;
-            var entry = _moveInputRing[slot];
-            if (entry.Seq == headSeq)
-            {
-                continue;
-            }
-
-            var delta = headSeq - entry.Seq;
-            if (delta == 0 || delta > byte.MaxValue)
-            {
-                continue;
-            }
-
-            window.Add(new MoveInputWindowEntry((byte)delta, entry.Moving, entry.Direction));
-        }
-
-        return window;
-    }
-
-    // NET2/NET3: push a just-committed step (seq + AUTHORED tick + direction) into the redundancy ring (newest
-    // last, dropping the oldest once full). The ring feeds the window of every subsequent StepCommitBatch.
-    private void RecordStepCommit(uint sequence, uint authoredTick, Direction8 direction)
-    {
-        if (_stepCommitRingCount < StepCommitRingCapacity)
-        {
-            var slot = (_stepCommitRingHead + _stepCommitRingCount) % StepCommitRingCapacity;
-            _stepCommitRing[slot] = (sequence, authoredTick, direction);
-            _stepCommitRingCount++;
-        }
-        else
-        {
-            _stepCommitRing[_stepCommitRingHead] = (sequence, authoredTick, direction);
-            _stepCommitRingHead = (_stepCommitRingHead + 1) % StepCommitRingCapacity;
-        }
-    }
-
-    // NET2: ship the current commit ring as ONE redundant-unreliable StepCommitBatch. The head is the NEWEST
-    // committed step in the ring; the window carries the prior committed steps as deltas (headSeq - entrySeq),
-    // newest-first. The server dedupes by sequence and applies each fresh commit through the EXISTING
-    // TryCommitStep. A dropped batch is recovered from the next batch's window (no reliable retransmit batch
-    // that the cooldown gate would reject all at once). No-op if nothing has been committed yet.
-    private void SendStepCommitBatch()
-    {
-        if (_stepCommitRingCount == 0)
-        {
-            return;
-        }
-
-        var headSlot = (_stepCommitRingHead + _stepCommitRingCount - 1) % StepCommitRingCapacity;
-        var head = _stepCommitRing[headSlot];
-        Send(
-            new StepCommitBatchMessage(head.Seq, head.Tick, head.Direction, BuildStepCommitWindow(head.Seq, head.Tick)),
-            DeliveryMethod.Unreliable);
-    }
-
-    // NET2/NET3: build the redundancy window for a batch whose head is (headSeq, headTick) — the prior committed
-    // steps still in the ring (every entry except the head), encoded as a seq delta (headSeq - entrySeq) AND a tick
-    // delta (headTick - entryTick) off the head. Newest-first so a truncated read still recovers the most recent
-    // commits. An entry whose authored tick is NOT strictly older than the head's (tickDelta <= 0 — should never
-    // happen since seq and authored tick both increase monotonically, but a clock nudge could tie them) is dropped
-    // so the server never reads a non-positive tick delta. Returns empty when the ring holds only the head.
-    private IReadOnlyList<StepCommitWindowEntry> BuildStepCommitWindow(uint headSeq, uint headTick)
-    {
-        if (_stepCommitRingCount <= 1)
-        {
-            return Array.Empty<StepCommitWindowEntry>();
-        }
-
-        var window = new List<StepCommitWindowEntry>(_stepCommitRingCount - 1);
-        // Walk newest-to-oldest, skipping the head entry.
-        for (var i = _stepCommitRingCount - 1; i >= 0; i--)
-        {
-            var slot = (_stepCommitRingHead + i) % StepCommitRingCapacity;
-            var entry = _stepCommitRing[slot];
-            if (entry.Seq == headSeq)
-            {
-                continue;
-            }
-
-            var delta = headSeq - entry.Seq;
-            if (delta == 0 || delta > byte.MaxValue)
-            {
-                continue;
-            }
-
-            // The authored tick must be strictly older than the head's (the head is the newest step). A tie or an
-            // inversion (a calibration nudge could in theory equalise two ticks) would make a 0/underflowing tick
-            // delta — drop that entry rather than ship an ambiguous authored tick.
-            if (entry.Tick >= headTick)
-            {
-                continue;
-            }
-
-            window.Add(new StepCommitWindowEntry((byte)delta, headTick - entry.Tick, entry.Direction));
-        }
-
-        return window;
-    }
-
-    // Creates the local-player predictor once everything it mirrors is known: prediction enabled, a zone
-    // (the blocked map), and the local entity (its start tile + per-entity cadence). Idempotent — no-op once
-    // created or while a prerequisite is missing. Anchored to the local entity's current confirmed tile so
-    // it starts in lockstep with the server.
-    private void EnsurePredictor()
-    {
-        if (_predictor is not null || !_predictionEnabled || Zone is null
-            || !LocalNetworkId.HasValue || !_entities.TryGetValue(LocalNetworkId.Value, out var local))
-        {
-            return;
-        }
-
-        _predictor = local.AttachPredictor(ResolveCadence(local.StepCooldownMs), IsWalkableForPrediction, ResolveTickMs());
-        // The local player is ALWAYS client-driven (the sole render path). A freshly-attached predictor defaults to
-        // server-paced, so re-declare the client-driven flag so its release/at-rest reconcile holds for banked
-        // commits, in step with the MovementModeMessage re-sent below.
-        _predictor.SetClientDriven(true);
-        // UO4: re-seed the stop-on-reversal lever onto the freshly-attached (or respawn-recreated) predictor so a
-        // value set before attach / after a respawn is honoured.
-        _predictor.SetStopOnReversal(_stopOnReversal);
-        // UO1: the local entity just (re)attached — a fresh login / respawn / AOI re-entry. (Re-)declare the
-        // client-driven mode to the server so a flag lost across that lifecycle event can't leave the server
-        // auto-pacing AND the client committing (double-stepping). ReliableOrdered; harmless if redundant.
-        SendMovementModeSignal(clientDriven: true);
     }
 
     // S81: resolves the server tick interval in ms (1000 / TickRate) — the unit of the predictor's tick-grid
@@ -1263,6 +958,9 @@ public sealed class MmoClient : IDisposable
         // S76: stash the recipient-scoped step sequence off the header. Rides every snapshot (real-delta AND
         // keep-alive). Stash only — no reconcile change this stage (S77 consumes it).
         _lastRecipientStepSeq = snapshot.RecipientStepSeq;
+        // CONTINUOUS MIGRATION (Phase 3, v36): stash the last integrated input seq too (rides every snapshot header).
+        // Stored only — the Phase-4 predictor consumes it to trim/replay the unacked input buffer.
+        _lastInputSeq = snapshot.LastInputSeq;
 
         if (snapshot.ChunkCount <= 1)
         {
@@ -1903,34 +1601,14 @@ public sealed class MmoClient : IDisposable
 
         public EntityRenderState ToRenderState(TimeSpan now)
         {
-            // S53: the local predicted player renders from the predictor's OWN present-time tween (snappy, no
-            // playout delay). Everything else (remote players, resources) keeps the buffered interpolator.
-            // Render-source selection only — Tile stays confirmed.
-            RenderPosition position;
-            Direction8 facing;
-            var hopHeight = 0d;
-            if (_predictor is not null)
-            {
-                position = _predictor.Sample(now);
-                // S59: render the predictor's LIVE facing for the local entity, so a predicted turn (no tile
-                // move) rotates the avatar immediately instead of waiting for the next snapshot to sync Facing.
-                facing = _predictor.Facing;
-            }
-            else if (_hop is not null)
-            {
-                // MONSTER-HOP: the monster renders from its hop driver — rests on the latest confirmed tile and
-                // arcs to the next tile when it changes. The vertical arc rides EntityRenderState.HopHeight; the
-                // ground position sits on the authoritative tile at rest. Facing tracks the confirmed facing.
-                position = _hop.Sample(now);
-                hopHeight = _hop.VerticalOffset;
-                facing = Facing;
-            }
-            else
-            {
-                position = _interpolator.Sample(now);
-                facing = Facing;
-            }
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, facing, IsLocal, Depleted, Health, MaxHealth, hopHeight);
+            // CONTINUOUS MIGRATION (Phase 3, v36): RAW render — every entity (local player, remote players, monsters,
+            // resources) renders straight off its latest decoded CONTINUOUS server Position, no prediction/smoothing/
+            // interpolation/hop. This is crude/laggy under latency BY DESIGN (Phase 4 re-adds the local-player
+            // predictor; Phase 5 re-adds remote smoothing). The LocalPlayerPredictor / TileInterpolator /
+            // MonsterHopInterpolator are left compiled-but-unwired (constructed but never sampled) — `now` is unused.
+            _ = now;
+            var position = RenderPosition.FromWorld(Position);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth, 0d);
         }
     }
 

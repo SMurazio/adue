@@ -422,16 +422,18 @@ public sealed class AoiIntegrationTests
             _client.PollEvents();
         }
 
-        // Held-direction intent (protocol v15): starts/redirects continuous movement; the server steps at
-        // its own cooldown while the intent stands. StopMove halts at the current tile.
+        // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — the held direction's UNIT vector + a
+        // nominal dt. The server integrates each fresh input by its dt; repeated SendMove calls (the StepUntil loop)
+        // walk the avatar tile-by-tile as real time refills the anti-speedhack budget. StopMove sends a (0,0) input.
         public void SendMove(Direction8 direction)
         {
-            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+            var dir = direction.ToUnitVector();
+            Send(new MoveIntentMessage(++_moveSequence, (float)dir.X, (float)dir.Y, 1f / 20f), DeliveryMethod.Unreliable);
         }
 
         public void StopMove()
         {
-            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
+            Send(new MoveIntentMessage(++_moveSequence, 0f, 0f, 1f / 20f), DeliveryMethod.Unreliable);
         }
 
         public void ClearMessages()

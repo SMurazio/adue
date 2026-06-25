@@ -106,6 +106,10 @@ static void ReadInputLoop(
     CancellationTokenSource shutdown,
     Func<uint> nextSequence)
 {
+    // CONTINUOUS MIGRATION (Phase 3, v36): the fixed nominal dt stamped on each continuous MoveIntent (≈ one 20 Hz
+    // tick). The console REPL doesn't predict; the server's anti-speedhack budget bounds the integrated distance.
+    const float NominalMoveDtSeconds = 1f / 20f;
+
     while (!shutdown.IsCancellationRequested)
     {
         var line = Console.ReadLine();
@@ -150,14 +154,15 @@ static void ReadInputLoop(
 
         if (direction.HasValue)
         {
-            // Held-direction intent (protocol v15): the server steps the avatar at its own cooldown while
-            // this intent stands. Type "stop" to halt; the server's keepalive timeout also stops a
-            // forgotten intent after ~1 s of silence (this REPL sends no keepalive).
-            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), true, direction.Value));
+            // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — the held direction's UNIT world
+            // vector + a fixed nominal dt. This REPL does not predict and sends one input per typed command, so a
+            // single "w" integrates ≈ one tick of motion (type repeatedly to walk; "stop" sends a (0,0) input).
+            var unit = direction.Value.ToUnitVector();
+            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), (float)unit.X, (float)unit.Y, NominalMoveDtSeconds));
         }
         else if (command == "stop")
         {
-            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), false, Direction8.S));
+            outgoing.Enqueue(new MoveIntentMessage(nextSequence(), 0f, 0f, NominalMoveDtSeconds));
         }
         else
         {

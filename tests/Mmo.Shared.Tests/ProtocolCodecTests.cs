@@ -31,22 +31,57 @@ public sealed class ProtocolCodecTests
             {
                 new EntityStateSnapshot(99, WorldVector.FromTile(12, -25), Direction8.NE)
             },
-            RecipientStepSeq: 555);
+            RecipientStepSeq: 555,
+            LastInputSeq: 909);
 
         var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(original.ServerTick, decoded.ServerTick);
         Assert.Equal(77u, decoded.SnapshotSequence);
         Assert.Equal(555u, decoded.RecipientStepSeq);
+        // CONTINUOUS MIGRATION (v36): the LastInputSeq header field round-trips after RecipientStepSeq.
+        Assert.Equal(909u, decoded.LastInputSeq);
         Assert.Equal(120, decoded.TotalEntities);
         Assert.False(decoded.IsComplete);
         Assert.Equal(2, decoded.ChunkIndex);
         Assert.Equal(6, decoded.ChunkCount);
         var entity = Assert.Single(decoded.Entities);
         Assert.Equal(99u, entity.NetworkId);
-        // The wire still carries tiles (Pass A): the decoded Position is the tile centre, byte-identical to v35.
+        // CONTINUOUS MIGRATION (v36): the wire now carries the CONTINUOUS fixed-point position. A tile-centre encodes
+        // losslessly, so this exact-integer position round-trips byte-for-byte.
         Assert.Equal(WorldVector.FromTile(12, -25), entity.Position);
         Assert.Equal(Direction8.NE, entity.Facing);
+    }
+
+    // CONTINUOUS MIGRATION (v36): a genuinely FRACTIONAL position round-trips within the fixed-point quantum (1/16
+    // tile = 0.0625 u) — the Q12.4 wire precision the migration locked in.
+    [Fact]
+    public void WorldSnapshotContinuousPositionRoundTripsWithinOneSixteenth()
+    {
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(7, new WorldVector(3.3333, -8.77), Direction8.S)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.True(System.Math.Abs(entity.Position.X - 3.3333) <= 1d / 16d);
+        Assert.True(System.Math.Abs(entity.Position.Y - (-8.77)) <= 1d / 16d);
+    }
+
+    // CONTINUOUS MIGRATION (v36): a v35 packet (the old version byte) is no longer decodable — the atomic break is
+    // mutually undecodable. The codec rejects any version != ProtocolCodec.Version.
+    [Fact]
+    public void V35PacketFailsToDecode()
+    {
+        var bytes = ProtocolCodec.Encode(new MoveIntentMessage(1, 1f, 0f, 0.05f));
+        // The version byte rides immediately after the 4-byte magic (little-endian uint).
+        bytes[4] = 35;
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(bytes));
     }
 
     // LIVING-ENEMIES P2-POLISH (v33): the per-monster-TYPE tuning snapshot round-trips (count-prefixed list of
@@ -226,109 +261,32 @@ public sealed class ProtocolCodecTests
         Assert.Equal(0u, decoded.RecipientStepSeq);
     }
 
+    // CONTINUOUS MIGRATION (v36): the reshaped per-input MoveIntent round-trips — InputSeq + raw DirX/DirY + DtSeconds.
     [Fact]
     public void MoveIntentRoundTrips()
     {
-        var original = new MoveIntentMessage(123, true, Direction8.SW);
+        var original = new MoveIntentMessage(123, 0.7071f, -0.7071f, 0.0166f);
 
         var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
-        Assert.Equal(123u, decoded.Sequence);
-        Assert.True(decoded.Moving);
-        Assert.Equal(Direction8.SW, decoded.Direction);
+        Assert.Equal(123u, decoded.InputSeq);
+        Assert.Equal(0.7071f, decoded.DirX);
+        Assert.Equal(-0.7071f, decoded.DirY);
+        Assert.Equal(0.0166f, decoded.DtSeconds);
     }
 
+    // CONTINUOUS MIGRATION (v36): a (0,0) direction (STOP) round-trips intact.
     [Fact]
-    public void MoveIntentStoppedRoundTrips()
+    public void MoveIntentStopRoundTrips()
     {
-        var original = new MoveIntentMessage(7, false, Direction8.N);
+        var original = new MoveIntentMessage(7, 0f, 0f, 0.05f);
 
         var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
-        Assert.Equal(7u, decoded.Sequence);
-        Assert.False(decoded.Moving);
-        Assert.Equal(Direction8.N, decoded.Direction);
-    }
-
-    // NET1 Stage 1: the redundant MoveInput packet round-trips its full head state plus the window of prior
-    // inputs (deltas off HeadSeq). Window entries carry their own Moving/Direction.
-    [Fact]
-    public void MoveInputRoundTripsHeadAndWindow()
-    {
-        var original = new MoveInputMessage(
-            HeadSeq: 100,
-            Moving: true,
-            Direction: Direction8.E,
-            Window:
-            [
-                new MoveInputWindowEntry(SeqDelta: 1, Moving: true, Direction: Direction8.NE),
-                new MoveInputWindowEntry(SeqDelta: 2, Moving: false, Direction: Direction8.S),
-                new MoveInputWindowEntry(SeqDelta: 3, Moving: true, Direction: Direction8.W),
-            ]);
-
-        var decoded = Assert.IsType<MoveInputMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(100u, decoded.HeadSeq);
-        Assert.True(decoded.Moving);
-        Assert.Equal(Direction8.E, decoded.Direction);
-        Assert.Equal(3, decoded.Window.Count);
-        Assert.Equal(new MoveInputWindowEntry(1, true, Direction8.NE), decoded.Window[0]);
-        Assert.Equal(new MoveInputWindowEntry(2, false, Direction8.S), decoded.Window[1]);
-        Assert.Equal(new MoveInputWindowEntry(3, true, Direction8.W), decoded.Window[2]);
-    }
-
-    [Fact]
-    public void MoveInputRoundTripsEmptyWindow()
-    {
-        var original = new MoveInputMessage(5, false, Direction8.N, Window: []);
-
-        var decoded = Assert.IsType<MoveInputMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(5u, decoded.HeadSeq);
-        Assert.False(decoded.Moving);
-        Assert.Equal(Direction8.N, decoded.Direction);
-        Assert.Empty(decoded.Window);
-    }
-
-    // NET2/NET3: the redundant StepCommitBatch round-trips its newest committed step (head seq + AUTHORED tick +
-    // direction) plus the window of prior committed steps (seq/tick deltas off the head). Window entries carry their
-    // own Direction (no Moving flag — a commit is always a step) and a per-entry tick delta.
-    [Fact]
-    public void StepCommitBatchRoundTripsHeadAndWindow()
-    {
-        var original = new StepCommitBatchMessage(
-            HeadSeq: 200,
-            HeadTick: 1000,
-            Direction: Direction8.E,
-            Window:
-            [
-                new StepCommitWindowEntry(SeqDelta: 1, TickDelta: 3, Direction: Direction8.NE),
-                new StepCommitWindowEntry(SeqDelta: 2, TickDelta: 6, Direction: Direction8.S),
-                new StepCommitWindowEntry(SeqDelta: 5, TickDelta: 15, Direction: Direction8.W),
-            ]);
-
-        var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(200u, decoded.HeadSeq);
-        Assert.Equal(1000u, decoded.HeadTick);
-        Assert.Equal(Direction8.E, decoded.Direction);
-        Assert.Equal(3, decoded.Window.Count);
-        Assert.Equal(new StepCommitWindowEntry(1, 3, Direction8.NE), decoded.Window[0]);
-        Assert.Equal(new StepCommitWindowEntry(2, 6, Direction8.S), decoded.Window[1]);
-        Assert.Equal(new StepCommitWindowEntry(5, 15, Direction8.W), decoded.Window[2]);
-    }
-
-    [Fact]
-    public void StepCommitBatchRoundTripsEmptyWindow()
-    {
-        var original = new StepCommitBatchMessage(7, 42, Direction8.SW, Window: []);
-
-        var decoded = Assert.IsType<StepCommitBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(7u, decoded.HeadSeq);
-        Assert.Equal(42u, decoded.HeadTick);
-        Assert.Equal(Direction8.SW, decoded.Direction);
-        Assert.Empty(decoded.Window);
+        Assert.Equal(7u, decoded.InputSeq);
+        Assert.Equal(0f, decoded.DirX);
+        Assert.Equal(0f, decoded.DirY);
+        Assert.Equal(0.05f, decoded.DtSeconds);
     }
 
     [Fact]
@@ -357,12 +315,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyFive()
+    public void ProtocolVersionIsThirtySix()
     {
-        // LOOT P4c protocol bump (v34 -> v35): two new messages — client->server LootActionMessage (corpse loot-window
-        // verb) and server->owner CorpseContentsMessage (the open corpse's rarity-tagged contents). Corpse contents now
-        // replicate where P4b kept them server-side. Server + client ship together. Pin it so a change is caught.
-        Assert.Equal(35, ProtocolCodec.Version);
+        // CONTINUOUS MIGRATION (v35 -> v36): the atomic continuous wire break — fixed-point continuous snapshot
+        // positions + the LastInputSeq header field + the reshaped per-input MoveIntent (dead tile-step machinery
+        // deleted). Mutually undecodable with v35; server + every client ship together. Pin it so a change is caught.
+        Assert.Equal(36, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).
@@ -528,29 +486,8 @@ public sealed class ProtocolCodecTests
         Assert.Equal(-17, decoded.Value);
     }
 
-    [Fact]
-    public void StepCommitRequestRoundTrips()
-    {
-        var original = new StepCommitRequestMessage(4242, Direction8.SW);
-
-        var decoded = Assert.IsType<StepCommitRequestMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(4242u, decoded.Sequence);
-        Assert.Equal(Direction8.SW, decoded.Direction);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void MovementModeRoundTrips(bool clientDriven)
-    {
-        // UO1: the one-bit client-driven movement signal round-trips both ways.
-        var original = new MovementModeMessage(clientDriven);
-
-        var decoded = Assert.IsType<MovementModeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
-
-        Assert.Equal(clientDriven, decoded.ClientDriven);
-    }
+    // CONTINUOUS MIGRATION (v36): the tile-step commit/mode message types (StepCommitRequest/MovementMode/MoveInput/
+    // StepCommitBatch) are DELETED — their round-trip tests are removed with them.
 
     [Fact]
     public void EntitySpawnRoundTrips()
@@ -620,6 +557,7 @@ public sealed class ProtocolCodecTests
             42,
             77,
             555,
+            909, // CONTINUOUS MIGRATION (v36): lastInputSeq header arg
             120,
             false,
             2,
@@ -630,6 +568,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(42u, snapshot.ServerTick);
         Assert.Equal(77u, snapshot.SnapshotSequence);
         Assert.Equal(555u, snapshot.RecipientStepSeq);
+        Assert.Equal(909u, snapshot.LastInputSeq);
         Assert.Equal(120, snapshot.TotalEntities);
         Assert.False(snapshot.IsComplete);
         Assert.Equal(2, snapshot.ChunkIndex);
@@ -726,13 +665,14 @@ public sealed class ProtocolCodecTests
 
         stream.Position = 0;
         stream.SetLength(0);
-        ProtocolCodec.Encode(new MoveIntentMessage(42, true, Direction8.NW), writer);
+        ProtocolCodec.Encode(new MoveIntentMessage(42, -0.7071f, -0.7071f, 0.05f), writer);
         writer.Flush();
 
         var packet = stream.ToArray();
         var decoded = Assert.IsType<MoveIntentMessage>(ProtocolCodec.Decode(packet));
-        Assert.Equal(42u, decoded.Sequence);
-        Assert.True(decoded.Moving);
-        Assert.Equal(Direction8.NW, decoded.Direction);
+        Assert.Equal(42u, decoded.InputSeq);
+        Assert.Equal(-0.7071f, decoded.DirX);
+        Assert.Equal(-0.7071f, decoded.DirY);
+        Assert.Equal(0.05f, decoded.DtSeconds);
     }
 }

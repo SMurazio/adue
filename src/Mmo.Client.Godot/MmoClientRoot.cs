@@ -291,18 +291,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Direction8? _injectedDirection;
 	private double _injectedUntilSeconds;
 
-	// Held-direction movement intent. NET1 Stage 1: input now rides an UNRELIABLE, REDUNDANT MoveInput
-	// channel, so we drive it at a FIXED rate (~20 Hz) while moving instead of on-change + a 0.5 s keepalive.
-	// Each send mints a fresh sequence and repeats the full current state plus a window of prior inputs, so a
-	// dropped packet is superseded within one interval (no head-of-line freeze-then-jump). After a STOP we keep
-	// sending the Moving=false state for a short tail (MoveInputStopTailCount packets) so a dropped STOP is
-	// recovered by redundancy. A direction change still sends immediately (a fresh sequence next tick anyway).
-	// _lastSentMoving/_lastSentDirection track the most recent intent; the server keepalive timeout (~1 s) is
-	// the safety net if every redundant packet in a tail is lost.
-	private const double MoveInputSendInterval = 1.0 / 20.0; // ~20 Hz
-	private const int MoveInputStopTailCount = 8; // packets of Moving=false re-sent after a stop
-	private double _nextMoveInputSendAt;
-	private int _stopTailRemaining;
+	// CONTINUOUS MIGRATION (Phase 3, v36): movement input is now one per-input continuous MoveIntent PER RENDER FRAME
+	// (raw direction + the frame's dt) — self-redundant (the next frame supersedes a dropped one), so the v35 fixed-
+	// rate / stop-tail scheduling is gone. _lastSentMoving/_lastSentDirection still track the most recent intent for
+	// the HUD facing + the mouse-heading "last heading" feed.
 
 	// S64 mouse-heading feel constants. Dead-zone: ~0.6 tile (between the S64 0.5–0.75 guidance) — inside it the
 	// held octant is kept so the heading doesn't whip when the cursor sits on/near the player. Hysteresis: 6° of
@@ -451,12 +443,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var now = TimeSpan.FromSeconds(_elapsedSeconds);
 		SampleFrameTiming(delta);
 
-		// S86: feed THIS frame's held intent to the predictor BEFORE Poll ticks it forward, so prediction reflects
-		// the current frame's WASD/mouse input instead of lagging it by one frame (phase-mismatched during fast
-		// direction spam, adding to the visible wobble). The network send is unchanged (on-change + keepalive).
-		// Injected/autopilot directions are still set below (after Poll) and read here one frame later — the same
-		// as before this reorder (they were already fed after the tick); only human input gains the frame.
-		SendHeldMovement(now);
+		// CONTINUOUS MIGRATION (Phase 3, v36): send THIS frame's continuous MoveIntent (raw direction + this frame's
+		// dt). One input per render frame — the server integrates each by its dt. No prediction this phase (the render
+		// is the raw decoded server position).
+		SendHeldMovement(now, delta);
 
 		var tPoll0 = Time.GetTicksUsec();
 		_client?.Poll(now);
@@ -3007,7 +2997,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetTextIfChanged(_perfLabel, _perfText.ToString());
 	}
 
-	private void SendHeldMovement(TimeSpan now)
+	private void SendHeldMovement(TimeSpan now, double frameDelta)
 	{
 		if (_client is null || !_client.IsLoggedIn)
 		{
@@ -3016,8 +3006,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		// Determine the desired intent. While the chat box has focus we force "stopped" so held keys
 		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > mouse hold-to-move
-		// heading > injected (debug-channel) direction. A held WASD key overrides the mouse heading while it
-		// is down; the mouse heading re-aims live off the PREDICTED tile (what the player sees) each frame.
+		// heading > injected (debug-channel) direction. A held WASD key overrides the mouse heading while it is down.
 		var chatFocused = _chatInput?.HasFocus() == true;
 		var keyboard = chatFocused ? null : CurrentDirection();
 
@@ -3025,32 +3014,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var injected = keyboard.HasValue || mouseDir.HasValue || chatFocused ? null : CurrentInjectedDirection();
 		var direction = keyboard ?? mouseDir ?? injected;
 		var moving = direction.HasValue;
-		var resolvedDirection = direction ?? _lastSentDirection;
 
-		// NET1 Stage 1: input rides an unreliable, redundant channel, so drive it at a FIXED ~20 Hz while
-		// moving plus a short Moving=false tail after stop. We send when ANY of:
-		//   - the intent changed (immediate edge — keydown / keyup / direction change), OR
-		//   - we're moving and the ~20 Hz fixed-rate interval is due, OR
-		//   - we're stopped but still owe stop-tail packets (recover a dropped STOP via redundancy).
-		// A change arms the stop tail on a transition to stopped; each tail packet repeats Moving=false.
-		var changed = moving != _lastSentMoving || (moving && resolvedDirection != _lastSentDirection);
-		if (changed && !moving)
+		// CONTINUOUS MIGRATION (Phase 3, v36): send ONE per-input continuous MoveIntent PER RENDER FRAME — the RAW
+		// direction (the held Direction8's unit world vector, or (0,0) when stopped) and THIS frame's dt. The server
+		// integrates each fresh input by its dt (its anti-speedhack budget caps the integrated distance to real time).
+		// The per-frame model is self-redundant: a dropped frame is superseded by the next, so no on-change/keepalive/
+		// stop-tail scheduling is needed (that was the v35 redundant-MoveInput machinery). dt is clamped to a sane
+		// frame duration so a long Godot hitch can't request a huge integrate (the server re-clamps regardless).
+		var dt = (float)Math.Clamp(frameDelta, 0d, 0.25d);
+		if (moving)
 		{
-			_stopTailRemaining = MoveInputStopTailCount;
+			var unit = direction!.Value.ToUnitVector();
+			_client.SendMoveIntent((float)unit.X, (float)unit.Y, dt);
+			_lastSentMoving = true;
+			_lastSentDirection = direction.Value;
 		}
-
-		var rateDue = moving && now.TotalSeconds >= _nextMoveInputSendAt;
-		var tailDue = !moving && _stopTailRemaining > 0 && now.TotalSeconds >= _nextMoveInputSendAt;
-		if (changed || rateDue || tailDue)
+		else
 		{
-			_client.SendMoveIntent(moving, resolvedDirection);
-			_lastSentMoving = moving;
-			_lastSentDirection = resolvedDirection;
-			_nextMoveInputSendAt = now.TotalSeconds + MoveInputSendInterval;
-			if (!moving && _stopTailRemaining > 0)
-			{
-				_stopTailRemaining--;
-			}
+			// Stopped: send a (0,0) input each frame so the server's last-integrated input is a stop (it acks the
+			// seq and zeroes velocity). Cheap; the server dedups by seq and the budget makes this harmless.
+			_client.SendMoveIntent(0f, 0f, dt);
+			_lastSentMoving = false;
 		}
 	}
 

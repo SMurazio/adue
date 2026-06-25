@@ -27,10 +27,14 @@ public sealed class LoadClient : IDisposable
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _client;
 
-    // Held-direction movement intent keepalive (protocol v15): mirror the real clients, which resend the
-    // current intent ~every 500 ms so a dropped intent can't wedge the avatar. This (plus on-change
-    // sends), not a per-step stream, is what the server now sees — inbound move/s drops accordingly.
+    // Continuous move-intent keepalive (v36): mirror the real clients, which resend the current intent so a dropped
+    // one can't wedge the avatar. This (plus on-change sends), not a per-step stream, is what the server now sees.
     private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(500);
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the stress client does not predict — it sends one continuous MoveIntent on
+    // change + keepalive with a fixed NOMINAL dt (≈ one 20 Hz tick) and a UNIT direction. The server's anti-speedhack
+    // budget caps the integrated distance to real elapsed regardless of this nominal dt.
+    private const float NominalMoveDtSeconds = 1f / 20f;
 
     private NetPeer? _serverPeer;
     private uint _inputSequence;
@@ -124,7 +128,11 @@ public sealed class LoadClient : IDisposable
         {
             _intentMoving = desiredMoving;
             _intentDirection = desiredDirection;
-            Send(_serverPeer, new MoveIntentMessage(++_inputSequence, _intentMoving, _intentDirection), DeliveryMethod.ReliableOrdered);
+            var dir = desiredMoving ? _intentDirection.ToUnitVector() : WorldVector.Zero;
+            Send(
+                _serverPeer,
+                new MoveIntentMessage(++_inputSequence, (float)dir.X, (float)dir.Y, NominalMoveDtSeconds),
+                DeliveryMethod.Unreliable);
             _nextKeepaliveAt = elapsed + MoveIntentKeepalive;
         }
 

@@ -34,7 +34,15 @@ public static class ProtocolCodec
     // (corpse net id + Open flag + a CorpseItem[] of {template key, quantity, rarity}). Opening the window reuses the
     // existing InteractRequest on a corpse. Corpse contents now replicate (eligibility-gated) where P4b kept them
     // server-side. Server + client ship together.
-    public const byte Version = 35;
+    // CONTINUOUS MIGRATION (v36): the ATOMIC continuous wire break (mutually undecodable with v35 — server + every
+    // in-repo client flip together). Three changes: (1) the per-entity snapshot POSITION is now fixed-point Q12.4
+    // CONTINUOUS (PositionEncoding.Encode/Decode, two signed shorts of sixteenths-of-a-tile) instead of the rounded
+    // tile — same 4 bytes/entity, now sub-tile precise. (2) the WorldSnapshot header gains LastInputSeq (uint, after
+    // RecipientStepSeq) — the highest per-input MoveIntent seq the server integrated for the recipient. (3) MoveIntent
+    // is RESHAPED to the per-input continuous move {uint InputSeq, float DirX, float DirY, float DtSeconds}, and the
+    // dead tile-step machinery (MoveInput / StepCommitRequest / StepCommitBatch / MovementMode) is DELETED (its tags
+    // 8–11 left as gaps). Server integrates each fresh input by its dt on the receive path with anti-speedhack clamps.
+    public const byte Version = 36;
 
     private const int MaxMonsterTypes = 256;
 
@@ -45,14 +53,6 @@ public static class ProtocolCodec
     // LOOT P4c: a corpse holds a handful of rolled stacks; bound the decoded list so a malformed/hostile packet
     // can't allocate unboundedly (same defensive cap idea as the inventory-update bound).
     private const int MaxCorpseItems = 256;
-
-    // NET1 Stage 1: an unreliable MoveInput packet carries the head input plus a small redundancy window
-    // of prior inputs (deltas). Bound the decoded window so a malformed/hostile packet can't allocate
-    // unboundedly; the client only ever fills ~4–8.
-    private const int MaxMoveInputWindow = 32;
-
-    // NET2: same bound for the unreliable StepCommitBatch redundancy window (the client only ever fills ~7).
-    private const int MaxStepCommitWindow = 32;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -78,22 +78,11 @@ public static class ProtocolCodec
                 WriteString(writer, value.DisplayName);
                 break;
             case MoveIntentMessage value:
-                writer.Write(value.Sequence);
-                writer.Write(value.Moving);
-                writer.Write((byte)value.Direction);
-                break;
-            case StepCommitRequestMessage value:
-                writer.Write(value.Sequence);
-                writer.Write((byte)value.Direction);
-                break;
-            case MoveInputMessage value:
-                WriteMoveInput(writer, value);
-                break;
-            case StepCommitBatchMessage value:
-                WriteStepCommitBatch(writer, value);
-                break;
-            case MovementModeMessage value:
-                writer.Write(value.ClientDriven);
+                // CONTINUOUS MIGRATION (v36): per-input continuous move — InputSeq, raw DirX/DirY, DtSeconds.
+                writer.Write(value.InputSeq);
+                writer.Write(value.DirX);
+                writer.Write(value.DirY);
+                writer.Write(value.DtSeconds);
                 break;
             case AttackMessage value:
                 writer.Write(value.Sequence);
@@ -154,6 +143,7 @@ public static class ProtocolCodec
                     value.ServerTick,
                     value.SnapshotSequence,
                     value.RecipientStepSeq,
+                    value.LastInputSeq,
                     value.TotalEntities,
                     value.IsComplete,
                     value.ChunkIndex,
@@ -220,6 +210,7 @@ public static class ProtocolCodec
         uint serverTick,
         uint snapshotSequence,
         uint recipientStepSeq,
+        uint lastInputSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -227,7 +218,7 @@ public static class ProtocolCodec
         IReadOnlyList<EntityStateSnapshot> entities)
     {
         WriteHeader(writer, MessageType.WorldSnapshot);
-        WriteWorldSnapshotPayload(writer, serverTick, snapshotSequence, recipientStepSeq, totalEntities, isComplete, chunkIndex, chunkCount, entities);
+        WriteWorldSnapshotPayload(writer, serverTick, snapshotSequence, recipientStepSeq, lastInputSeq, totalEntities, isComplete, chunkIndex, chunkCount, entities);
     }
 
     public static void EncodeEntitySpawn(
@@ -278,11 +269,8 @@ public static class ProtocolCodec
         {
             MessageType.ClientHello => new ClientHelloMessage(ReadString(reader)),
             MessageType.LoginRequest => new LoginRequestMessage(ReadString(reader), ReadString(reader)),
-            MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadBoolean(), ReadDirection(reader)),
-            MessageType.StepCommitRequest => new StepCommitRequestMessage(reader.ReadUInt32(), ReadDirection(reader)),
-            MessageType.MoveInput => ReadMoveInput(reader),
-            MessageType.StepCommitBatch => ReadStepCommitBatch(reader),
-            MessageType.MovementMode => new MovementModeMessage(reader.ReadBoolean()),
+            // CONTINUOUS MIGRATION (v36): per-input continuous move — InputSeq, raw DirX/DirY, DtSeconds.
+            MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()),
             MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16(), reader.ReadUInt32()),
             MessageType.LootAction => new LootActionMessage(reader.ReadUInt32(), ReadLootActionKind(reader), ReadString(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
@@ -369,12 +357,13 @@ public static class ProtocolCodec
         foreach (var entity in entities)
         {
             writer.Write(ToSnapshotNetworkId(entity.NetworkId));
-            // MIGRATION (Phase 3 Pass A): the snapshot now carries a continuous WorldVector Position, but the
-            // WIRE is unchanged — quantize it to its tile centre here (exactly as the field used to be a tile),
-            // so v35 still round-trips byte-for-byte. Pass B replaces this with PositionEncoding (fixed-point).
-            var tile = entity.Position.ToTileRounded();
-            WriteSnapshotTileCoordinate(writer, tile.X);
-            WriteSnapshotTileCoordinate(writer, tile.Y);
+            // CONTINUOUS MIGRATION (v36): the snapshot position is now CONTINUOUS — fixed-point Q12.4 (two signed
+            // shorts of sixteenths-of-a-tile via the shared PositionEncoding), so the wire carries the sub-tile
+            // position (was the rounded tile in v35). Same 4 bytes/entity. Quantize ON SEND ONLY — the server's
+            // authoritative double Position is never rounded by this.
+            var (qx, qy) = PositionEncoding.Encode(entity.Position);
+            writer.Write(qx);
+            writer.Write(qy);
             writer.Write((byte)entity.Facing);
             writer.Write(entity.Depleted);
             // COMBAT-S2A (v27): public HP rides each per-entity state, after Depleted. MaxHealth == 0 means
@@ -391,106 +380,12 @@ public static class ProtocolCodec
         writer.Write((ushort)type);
     }
 
-    // NET1 Stage 1: wire layout is HeadSeq, Moving, Direction (full current state), then Count + that many
-    // {SeqDelta, Moving, Direction} window entries (prior inputs as deltas off HeadSeq). Mirrored in ReadMoveInput.
-    private static void WriteMoveInput(BinaryWriter writer, MoveInputMessage value)
-    {
-        if (value.Window.Count > MaxMoveInputWindow)
-        {
-            throw new ProtocolException($"MoveInput window too large: {value.Window.Count}.");
-        }
-
-        writer.Write(value.HeadSeq);
-        writer.Write(value.Moving);
-        writer.Write((byte)value.Direction);
-        writer.Write((byte)value.Window.Count);
-        for (var i = 0; i < value.Window.Count; i++)
-        {
-            var entry = value.Window[i];
-            writer.Write(entry.SeqDelta);
-            writer.Write(entry.Moving);
-            writer.Write((byte)entry.Direction);
-        }
-    }
-
-    private static MoveInputMessage ReadMoveInput(BinaryReader reader)
-    {
-        var headSeq = reader.ReadUInt32();
-        var moving = reader.ReadBoolean();
-        var direction = ReadDirection(reader);
-        var count = reader.ReadByte();
-        if (count > MaxMoveInputWindow)
-        {
-            throw new ProtocolException($"MoveInput window too large: {count}.");
-        }
-
-        var window = count == 0
-            ? (IReadOnlyList<MoveInputWindowEntry>)Array.Empty<MoveInputWindowEntry>()
-            : new List<MoveInputWindowEntry>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var seqDelta = reader.ReadByte();
-            var entryMoving = reader.ReadBoolean();
-            var entryDirection = ReadDirection(reader);
-            ((List<MoveInputWindowEntry>)window).Add(new MoveInputWindowEntry(seqDelta, entryMoving, entryDirection));
-        }
-
-        return new MoveInputMessage(headSeq, moving, direction, window);
-    }
-
-    // NET2/NET3: wire layout is HeadSeq, HeadTick, Direction (newest committed step + its authored tick), then
-    // Count + that many {SeqDelta, TickDelta, Direction} window entries (prior committed steps as seq/tick deltas
-    // off the head). Mirrored in ReadStepCommitBatch. A commit has no Moving flag — it is always a step.
-    private static void WriteStepCommitBatch(BinaryWriter writer, StepCommitBatchMessage value)
-    {
-        if (value.Window.Count > MaxStepCommitWindow)
-        {
-            throw new ProtocolException($"StepCommitBatch window too large: {value.Window.Count}.");
-        }
-
-        writer.Write(value.HeadSeq);
-        writer.Write(value.HeadTick);
-        writer.Write((byte)value.Direction);
-        writer.Write((byte)value.Window.Count);
-        for (var i = 0; i < value.Window.Count; i++)
-        {
-            var entry = value.Window[i];
-            writer.Write(entry.SeqDelta);
-            writer.Write(entry.TickDelta);
-            writer.Write((byte)entry.Direction);
-        }
-    }
-
-    private static StepCommitBatchMessage ReadStepCommitBatch(BinaryReader reader)
-    {
-        var headSeq = reader.ReadUInt32();
-        var headTick = reader.ReadUInt32();
-        var direction = ReadDirection(reader);
-        var count = reader.ReadByte();
-        if (count > MaxStepCommitWindow)
-        {
-            throw new ProtocolException($"StepCommitBatch window too large: {count}.");
-        }
-
-        var window = count == 0
-            ? (IReadOnlyList<StepCommitWindowEntry>)Array.Empty<StepCommitWindowEntry>()
-            : new List<StepCommitWindowEntry>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var seqDelta = reader.ReadByte();
-            var tickDelta = reader.ReadUInt32();
-            var entryDirection = ReadDirection(reader);
-            ((List<StepCommitWindowEntry>)window).Add(new StepCommitWindowEntry(seqDelta, tickDelta, entryDirection));
-        }
-
-        return new StepCommitBatchMessage(headSeq, headTick, direction, window);
-    }
-
     private static void WriteWorldSnapshotPayload(
         BinaryWriter writer,
         uint serverTick,
         uint snapshotSequence,
         uint recipientStepSeq,
+        uint lastInputSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -502,6 +397,9 @@ public static class ProtocolCodec
         // S76 (v19): recipient-scoped step sequence rides the header, immediately after SnapshotSequence and
         // before the chunk/entity metadata. Mirrored at the same position in ReadWorldSnapshot.
         writer.Write(recipientStepSeq);
+        // CONTINUOUS MIGRATION (v36): the recipient-scoped last INTEGRATED input seq rides right after
+        // RecipientStepSeq (mirrored in ReadWorldSnapshot). Phase-4 predictor trims/replays its input buffer to it.
+        writer.Write(lastInputSeq);
         WriteSnapshotMetadata(writer, totalEntities, isComplete, chunkIndex, chunkCount, entities.Count);
         WriteEntityStates(writer, entities);
     }
@@ -547,6 +445,8 @@ public static class ProtocolCodec
         var sequence = reader.ReadUInt32();
         // S76 (v19): mirrors the write order — recipient step seq immediately after SnapshotSequence.
         var recipientStepSeq = reader.ReadUInt32();
+        // CONTINUOUS MIGRATION (v36): mirrors the write order — last integrated input seq right after RecipientStepSeq.
+        var lastInputSeq = reader.ReadUInt32();
         var totalEntities = reader.ReadUInt16();
         var isComplete = reader.ReadBoolean();
         var chunkIndex = reader.ReadUInt16();
@@ -562,7 +462,7 @@ public static class ProtocolCodec
             throw new ProtocolException($"Invalid snapshot chunk {chunkIndex}/{chunkCount}.");
         }
 
-        return new WorldSnapshotMessage(tick, sequence, totalEntities, isComplete, chunkIndex, chunkCount, entities, recipientStepSeq);
+        return new WorldSnapshotMessage(tick, sequence, totalEntities, isComplete, chunkIndex, chunkCount, entities, recipientStepSeq, lastInputSeq);
     }
 
     private static IReadOnlyList<EntityStateSnapshot> ReadEntityStates(BinaryReader reader)
@@ -577,16 +477,17 @@ public static class ProtocolCodec
         for (var i = 0; i < count; i++)
         {
             var networkId = reader.ReadUInt16();
-            var x = reader.ReadInt16();
-            var y = reader.ReadInt16();
+            // CONTINUOUS MIGRATION (v36): the two shorts are now fixed-point Q12.4 (sixteenths of a tile), decoded
+            // back to the continuous WorldVector via the shared PositionEncoding (mirrors WriteEntityStates).
+            var qx = reader.ReadInt16();
+            var qy = reader.ReadInt16();
+            var position = PositionEncoding.Decode(qx, qy);
             var facing = ReadDirection(reader);
             var depleted = reader.ReadBoolean();
             // COMBAT-S2A (v27): mirrors WriteEntityStates — Health then MaxHealth, ushort each.
             var health = reader.ReadUInt16();
             var maxHealth = reader.ReadUInt16();
-            // MIGRATION (Phase 3 Pass A): the wire still carries the two tile shorts; rebuild the snapshot's
-            // continuous Position from the tile centre so behaviour is byte-identical to the tile-only field.
-            entities.Add(new EntityStateSnapshot(networkId, WorldVector.FromTile(x, y), facing, depleted, health, maxHealth));
+            entities.Add(new EntityStateSnapshot(networkId, position, facing, depleted, health, maxHealth));
         }
 
         return entities;

@@ -15,9 +15,12 @@ public sealed class GameServer
     private const string ServerName = "mmo-learning-server";
     private const int MaxSequencedSnapshotBytes = 1000;
     private const int ProtocolHeaderBytes = 7;
-    private const int SnapshotHeaderBytes = 17;
-    // Per-entity snapshot state wire size: networkId(2) + x(2) + y(2) + facing(1) + depleted(1) = 8, plus
-    // COMBAT-S2A's public HP Health(2) + MaxHealth(2) = 12.
+    // serverTick(4) + snapshotSeq(4) + recipientStepSeq(4) + lastInputSeq(4, v36) + totalEntities(2) + isComplete(1)
+    // + chunkIndex(2) + chunkCount(2). The +4 over v35 is the new continuous-migration LastInputSeq header field.
+    private const int SnapshotHeaderBytes = 21;
+    // Per-entity snapshot state wire size: networkId(2) + qx(2) + qy(2) + facing(1) + depleted(1) = 8, plus
+    // COMBAT-S2A's public HP Health(2) + MaxHealth(2) = 12. CONTINUOUS MIGRATION (v36): qx/qy are the fixed-point
+    // Q12.4 continuous position (two shorts) — same 4 bytes as the v35 tile shorts, so the per-entity size is unchanged.
     private const int EntityStateFixedBytes = 12;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
@@ -51,6 +54,21 @@ public sealed class GameServer
     // client), the tick loop clears its intent so it stops walking. A real disconnect already despawns
     // the entity, so this only guards the wedged-client edge case. See docs/movement-input-model.md.
     private static readonly TimeSpan MoveIntentKeepaliveTimeout = TimeSpan.FromSeconds(1);
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): anti-speedhack clamps for the per-input continuous move. The client now
+    // sends DtSeconds (how much sim-time a frame represents), which the server integrates by — so it must be bounded
+    // two ways:
+    //   * MaxMoveInputDtSeconds: a per-input SANITY clamp. One frame's dt is tiny (~1/60s); 0.25s caps a single
+    //     input to ~5 server ticks of motion so a lone huge-dt packet can't teleport (and a legitimately laggy
+    //     frame still integrates fully).
+    //   * MoveDtBurstAllowanceSeconds: the per-peer wall-clock dt BUDGET ceiling. The budget accrues REAL elapsed
+    //     time each tick (capped at this) and each integrated input debits it; an input may consume only the
+    //     remaining budget. So the TOTAL integrated sim-time over any window cannot exceed real elapsed time + this
+    //     allowance — a flood of max-dt inputs advances ≈ real-time distance, never faster. The allowance (~0.4s)
+    //     absorbs network/frame jitter (a burst of buffered inputs after a hitch) without ever permitting a
+    //     sustained over-rate.
+    private const double MaxMoveInputDtSeconds = 0.25d;
+    private const double MoveDtBurstAllowanceSeconds = 0.4d;
 
     private readonly ServerOptions _options;
     // S60 live-tuning holder, seeded from _options. The game loop reads the tunable params (step cooldown,
@@ -419,25 +437,10 @@ public sealed class GameServer
             case MoveIntentMessage intent:
                 if (session.IsAuthenticated)
                 {
-                    // Input is state, not events: record the held intent (rejecting stale sequences) and
-                    // let TickCore step the entity at the server's own cooldown cadence. No stepping
-                    // happens on the receive path anymore. See docs/movement-input-model.md.
-                    session.TryUpdateMoveIntent(intent.Sequence, intent.Moving, intent.Direction, _serverTick);
+                    // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous movement — integrate this input by its
+                    // own dt ON THE RECEIVE PATH (the experiment model), with the anti-speedhack clamps applied.
+                    HandleMoveIntent(session, intent);
                 }
-                break;
-            case MoveInputMessage input:
-                if (session.IsAuthenticated)
-                {
-                    HandleMoveInput(session, input);
-                }
-                break;
-            // Phase 1 (continuous migration): the client-driven commit-step machinery is RETIRED — player movement is
-            // now server-authoritative continuous integration off the held MoveIntent (IntegrateHeldMovementIntents).
-            // The wire message TYPES + codec survive (Phase 3 removes them); these dispatch arms are now NO-OPS so an
-            // older client's StepCommit*/MovementMode packets are accepted and ignored rather than erroring.
-            case StepCommitRequestMessage:
-            case StepCommitBatchMessage:
-            case MovementModeMessage:
                 break;
             case ChatSendMessage chat:
                 if (session.IsAuthenticated)
@@ -490,8 +493,7 @@ public sealed class GameServer
     // LIVING-ENEMIES P3: the action message types suppressed while a player is dead (movement + attacks). Non-action
     // messages (chat, snapshot ack, admin tuning/stat, hello/login) are NOT suppressed so the client stays responsive.
     private static bool IsSuppressedWhileDead(MessageType type) =>
-        type is MessageType.MoveIntent or MessageType.MoveInput or MessageType.StepCommitRequest
-            or MessageType.StepCommitBatch or MessageType.MovementMode or MessageType.Attack
+        type is MessageType.MoveIntent or MessageType.Attack
 			or MessageType.InteractRequest or MessageType.LootAction;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
@@ -650,10 +652,15 @@ public sealed class GameServer
         tickBudget.RecordElapsed(TickBudgetCategory.Movement, DrainPendingMovementElapsedTicks());
         using (tickBudget.Measure(TickBudgetCategory.Movement))
         {
-            IntegrateHeldMovementIntents();
+            // CONTINUOUS MIGRATION (Phase 3, v36): PLAYER integration is now 100% input-driven (HandleMoveIntent on the
+            // receive path). This tick pass no longer integrates — it (a) credits each session's anti-speedhack dt
+            // budget by the elapsed tick time and (b) does the keepalive/stop housekeeping (a wedged "moving" client
+            // is force-stopped; a stale player's velocity is zeroed for AOI/animation). Monsters keep the fixed-cadence
+            // tile-step path below, UNTOUCHED.
+            CreditMoveDtBudgetsAndKeepalive();
             // LIVING-ENEMIES P1: a sibling movement pass that steps each roaming Monster off the step cooldown
-            // (the TILE-STEP path — monsters stay tile-stepped in Phase 1; the continuous integrator above is
-            // PLAYER-only), so monsters idle near home and occasionally stroll within a leash.
+            // (the TILE-STEP path — monsters stay tile-stepped; the continuous integrator is PLAYER-only), so
+            // monsters idle near home and occasionally stroll within a leash.
             StepMonsterAi();
         }
 
@@ -846,6 +853,9 @@ public sealed class GameServer
         // ride it on every snapshot header (real-delta AND keep-alive), even when that entity is idle and gets
         // delta'd out of the payload below — it is recipient metadata, not entity payload.
         var recipientStepSeq = recipientEntity.StepSequence;
+        // CONTINUOUS MIGRATION (Phase 3, v36): the recipient-scoped last INTEGRATED input seq rides the header too
+        // (after RecipientStepSeq), so the Phase-4 predictor can trim/replay its unacked input buffer against it.
+        var recipientLastInputSeq = recipient.LastInputSeq;
 
         // Acked-baseline selection (S46): send an entity iff its current revision differs from the revision
         // the CLIENT has acknowledged. A dropped snapshot is never acked, so its entities stay unacked and
@@ -876,7 +886,7 @@ public sealed class GameServer
             // win (no full resend) is preserved.
             if (recipient.ShouldSendKeepAlive(_serverTick, SnapshotKeepAliveTicks))
             {
-                SendKeepAliveSnapshot(recipient, recipientStepSeq, visible.Count, tickBudget, ref sentBytes, ref sentPackets);
+                SendKeepAliveSnapshot(recipient, recipientStepSeq, recipientLastInputSeq, visible.Count, tickBudget, ref sentBytes, ref sentPackets);
             }
 
             visibleCount = visible.Count;
@@ -923,6 +933,7 @@ public sealed class GameServer
                     _serverTick,
                     snapshotSequence,
                     recipientStepSeq,
+                    recipientLastInputSeq,
                     visible.Count,
                     isComplete,
                     chunkIndex,
@@ -962,6 +973,7 @@ public sealed class GameServer
     private void SendKeepAliveSnapshot(
         ClientSession recipient,
         uint recipientStepSeq,
+        uint recipientLastInputSeq,
         int totalVisible,
         TickBudgetRecorder tickBudget,
         ref int sentBytes,
@@ -975,11 +987,13 @@ public sealed class GameServer
         {
             // S76: the keep-alive carries the recipient's step seq in the header even though its payload is
             // empty — an idle player's own entity is exactly the case that gets no entity delta, so without
-            // this the seq would never reach an idle client.
+            // this the seq would never reach an idle client. CONTINUOUS MIGRATION (v36): the LastInputSeq rides
+            // the keep-alive too (same reason — an idle player's input ack must still reach the client).
             packet = _snapshotEncodeBuffer.EncodeWorldSnapshot(
                 _serverTick,
                 snapshotSequence,
                 recipientStepSeq,
+                recipientLastInputSeq,
                 totalVisible,
                 isComplete: false,
                 chunkIndex: 0,
@@ -2609,41 +2623,93 @@ public sealed class GameServer
     }
 
     // Refresh an entity's tiles/sec speed stat from the base move speed × its current SpeedMultiplier. Called on
-    // spawn + on every SpeedMultiplier change so the stat tracks the live multiplier. Phase 1: this is now LIVE for
-    // PLAYERS — IntegrateHeldMovementIntents consumes SpeedUnitsPerSecond as the continuous integrator's speed (base
-    // 1000/StepCooldownMs ⇒ one tile per StepCooldownMs at multiplier 1.0, so the tile-crossing cadence ≈ the old
-    // tile-step cadence). Monsters keep the EffectiveStepCooldownTicks tile-step path, so for them this stat is still
-    // dormant. No replication change (the wire still carries the cadence ms).
+    // spawn + on every SpeedMultiplier change so the stat tracks the live multiplier. PLAYERS consume
+    // SpeedUnitsPerSecond as the per-input continuous integrator's speed (base 1000/StepCooldownMs ⇒ one tile per
+    // StepCooldownMs at multiplier 1.0, so a held cardinal crosses tiles at ≈ the old tile-step cadence). Monsters
+    // keep the EffectiveStepCooldownTicks tile-step path, so for them this stat is dormant.
     private void RefreshSpeedStat(WorldEntity entity)
     {
         entity.SetSpeedUnitsPerSecond(_tuning.BaseMoveSpeedUnitsPerSecond * entity.SpeedMultiplier);
     }
 
-    // Per-tick held-movement stepping. For every authenticated session whose intent is "moving", attempt
-    // exactly one tile step in the held direction. WorldEntity.TryStep enforces the per-entity cooldown,
-    // bounds, and walkability (the same validation as before) — a session that is still inside its
-    // cooldown simply doesn't move this tick, and a blocked target keeps the intent so the entity steps
-    // as soon as it is unblocked or redirected. A "moving" session that has not sent any intent (not even
-    // a keepalive) within MoveIntentKeepaliveTimeout is force-stopped. See docs/movement-input-model.md.
-    // Phase 1 (continuous migration): the PLAYER continuous-integrator pass (the behavioural flip — formerly
-    // StepHeldMovementIntents, which tile-stepped each held intent off the step cooldown). Per tick, per
-    // authenticated session: a MOVING player integrates its Position by Velocity x dt in the held direction
-    // (Zone.IntegrateMovement, no-walls — players walk through walls until Phase 2 adds swept-circle collision); a
-    // RELEASED / DEAD / keepalive-timed-out / attack-rooted player is force-STOPPED (Velocity = Zero) so it never
-    // glides (R6). dt is FIXED at 1/TickRate (R4 — Phase 4's predictor must replay with this same dt). The wire is
-    // unchanged: the snapshot still emits the rounded tile, and IntegrateMovement only bumps StateRevision/StepSequence
-    // on a rounded-tile crossing (R1) so the tile cadence/bandwidth match today's.
-    //
-    // MONSTERS are untouched — they still tile-step via StepMonsterAi/Zone.TryStep (R3); this pass only drives
-    // player-owned session entities.
-    private void IntegrateHeldMovementIntents()
+    // CONTINUOUS MIGRATION (Phase 3, v36): integrate ONE per-input continuous MoveIntent on the RECEIVE path (the
+    // experiment model). Only a FRESH input (InputSeq > session.LastInputSeq) is processed; a stale/duplicate input is
+    // ignored. The fresh input ALWAYS advances LastInputSeq (so the snapshot ACKs it — the client trims its buffer),
+    // then integrates by its OWN dt with the guards that formerly lived on the fixed-tick pass moved here:
+    //   * dead player (downed) → no motion (the dead-player guard);
+    //   * swing-root freeze (IsMovementFrozen) → the input ACKs but produces ZERO motion (the rooted player);
+    //   * a (0,0) direction → STOP (zero velocity, IsMoving=false);
+    //   * otherwise integrate Position by the dt-clamped velocity in the RAW direction (normalized by the integrator),
+    //     through the shared swept-circle wall collision (Zone.IntegrateMovement).
+    // ANTI-SPEEDHACK: the client-supplied dt is first SANITY-clamped to [0, MaxMoveInputDtSeconds], then debited
+    // against the per-peer wall-clock dt BUDGET (ConsumeMoveDtBudget) — so the integration uses at most the dt the
+    // budget allows. Over any window the peer's integrated sim-time cannot exceed real elapsed + the burst allowance.
+    // MONSTERS are untouched (they never send MoveIntent; they tile-step via StepMonsterAi).
+    private void HandleMoveIntent(ClientSession session, MoveIntentMessage intent)
     {
+        if (!session.TryBeginMoveInput(intent.InputSeq, _serverTick))
+        {
+            return; // stale/duplicate input — ignore (no integrate, no re-ack).
+        }
+
+        if (!TryGetSessionEntity(session, out var entity))
+        {
+            return;
+        }
+
+        // The RAW client direction. A zero vector is the explicit STOP. NaN/Inf (tamper) collapses to a stop. The
+        // continuous integrator (ComputeMoveDelta) scales the passed vector by SpeedUnitsPerSecond WITHOUT
+        // normalizing, so NORMALIZE here — otherwise a (1,1) diagonal would travel √2 faster than a cardinal (the
+        // whole point of Direction8.ToUnitVector in the old path). Magnitude therefore never throttles or boosts.
+        var rawDir = new WorldVector(SanitizeAxis(intent.DirX), SanitizeAxis(intent.DirY));
+        var moving = rawDir.LengthSquared > 0d;
+        var unitDir = moving ? rawDir.Normalized() : WorldVector.Zero;
+
+        // Guards: a DEAD (downed) player or a swing-root-frozen player ACKs the input but does NOT move. A (0,0)
+        // input is a stop. In every non-moving case zero the velocity so the entity never glides.
+        if (!moving || session.IsDead || entity.IsMovementFrozen(_serverTick))
+        {
+            session.SetMoving(false);
+            entity.StopMovement();
+            return;
+        }
+
+        // ANTI-SPEEDHACK: sanity-clamp the per-input dt, then debit the per-peer wall-clock budget. The integration
+        // dt is whatever the budget allows (0 when a flood has drained it) — so a peer cannot out-integrate real time.
+        var sanitizedDt = Math.Clamp(SanitizeAxis(intent.DtSeconds), 0d, MaxMoveInputDtSeconds);
+        var dtSeconds = session.ConsumeMoveDtBudget(sanitizedDt);
+
+        session.SetMoving(true);
+        if (dtSeconds <= 0d)
+        {
+            // Budget exhausted (flood) — the input is acked + faces the direction (ComputeMoveDelta sets Velocity +
+            // Facing), but a zero dt advances no distance. The entity holds position; no tile crossing.
+            entity.ComputeMoveDelta(unitDir, 0d);
+            return;
+        }
+
+        // Integrate through the shared swept-circle wall collision (the SAME walls + radius the Phase-4 predictor
+        // will replay against). bodyRadius is read fresh from the live tuning so a continuous.bodyRadius retune
+        // takes effect on the next input.
+        if (_zone.IntegrateMovement(entity, unitDir, dtSeconds, _tuning.BodyRadiusUnits))
+        {
+            // A rounded-tile crossing — persist the new durable tile (mirrors the old tile-step path).
+            MarkDirtyDurableTile(entity);
+        }
+    }
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-tick housekeeping that replaced the fixed-tick player integrator.
+    // Player integration is now 100% input-driven (HandleMoveIntent); this pass only (a) CREDITS each authenticated
+    // session's anti-speedhack dt budget by the elapsed tick time (so the budget tracks real elapsed time) and (b)
+    // does the keepalive/stop housekeeping for AOI/animation: a "moving" session that has gone silent past the
+    // keepalive timeout (a wedged-but-connected client) is force-STOPPED (velocity zeroed, IsMoving cleared) so its
+    // avatar doesn't appear stuck mid-stride and AOI/animation see it at rest. A dead/rooted player that is still
+    // flagged moving is likewise zeroed. dtBudget credit is the FIXED tick interval (the server ticks at a fixed
+    // cadence, so this equals real elapsed time over many ticks — and is deterministic for the flood test).
+    private void CreditMoveDtBudgetsAndKeepalive()
+    {
+        var tickSeconds = 1.0 / _options.TickRate;
         var keepaliveTimeoutTicks = (uint)Math.Max(1, (int)Math.Ceiling(MoveIntentKeepaliveTimeout.TotalMilliseconds / (1000d / _options.TickRate)));
-        var dtSeconds = 1.0 / _options.TickRate;
-        // CONTINUOUS MIGRATION (Phase 2): the player body radius for swept-circle wall collision, read fresh from the
-        // live tuning each pass (so a continuous.bodyRadius retune takes effect next tick). Threaded into
-        // Zone.IntegrateMovement; Phase 4's predictor must replay with this IDENTICAL radius + dt.
-        var bodyRadius = _tuning.BodyRadiusUnits;
 
         foreach (var session in _sessions.Values)
         {
@@ -2652,51 +2718,30 @@ public sealed class GameServer
                 continue;
             }
 
+            // Credit the anti-speedhack budget by the elapsed tick time (capped at the burst allowance inside).
+            session.CreditMoveDtBudget(tickSeconds, MoveDtBurstAllowanceSeconds);
+
             if (!TryGetSessionEntity(session, out var entity))
             {
                 continue;
             }
 
-            // Decide whether this player integrates this tick. A non-moving intent, a DEAD (downed) player during its
-            // respawn delay, a keepalive-timed-out (wedged) client, or an attack-rooted player (R2) all STOP instead
-            // of moving — StopMovement zeroes velocity so the entity does not glide (R6).
-            var moving = session.MoveIntentMoving;
-
-            // LIVING-ENEMIES P3: a DEAD (downed) player doesn't walk during its respawn delay (the dead-player guard).
-            if (moving && session.IsDead)
-            {
-                moving = false;
-            }
-
-            // Keepalive safety: a "moving" session silent past the timeout is force-stopped (its intent is cleared so
-            // it does not resume without a fresh intent).
-            if (moving && _serverTick - session.LastMoveIntentTick >= keepaliveTimeoutTicks)
+            // Keepalive/stop housekeeping. If the session is still flagged moving but has gone silent past the
+            // timeout, or is dead/rooted, force it to rest so it neither animates as walking nor glides.
+            var stale = _serverTick - session.LastMoveIntentTick >= keepaliveTimeoutTicks;
+            if (session.IsMoving && (stale || session.IsDead || entity.IsMovementFrozen(_serverTick)))
             {
                 session.ClearMoveIntent();
-                moving = false;
-            }
-
-            // R2: the attack-movement-root still freezes the player. While the swing-root window is active
-            // (serverTick < the entity's next-eligible tick, set by ApplyAttackMovementRoot[Authored]) the player is
-            // rooted — it neither integrates nor glides.
-            if (moving && entity.IsMovementFrozen(_serverTick))
-            {
-                moving = false;
-            }
-
-            if (!moving)
-            {
                 entity.StopMovement();
-                continue;
-            }
-
-            var unitDir = session.MoveIntentDirection.ToUnitVector();
-            if (_zone.IntegrateMovement(entity, unitDir, dtSeconds, bodyRadius))
-            {
-                // A rounded-tile crossing — persist the new durable tile (mirrors the tile-step path).
-                MarkDirtyDurableTile(entity);
             }
         }
+    }
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): collapse a NaN/Inf wire axis (tamper / corruption) to 0 before it reaches
+    // the integrator, so a hostile DirX/DirY/DtSeconds can never produce a NaN position or an unbounded step.
+    private static double SanitizeAxis(float value)
+    {
+        return float.IsFinite(value) ? value : 0d;
     }
 
     // LIVING-ENEMIES P1: the per-tick monster AI pass (sibling to StepHeldMovementIntents). For each Monster
@@ -2914,61 +2959,6 @@ public sealed class GameServer
         };
     }
 
-    // NET1 Stage 1: ingest a redundant-unreliable MoveInput packet. The packet carries the newest input
-    // (HeadSeq/Moving/Direction) plus a window of prior inputs as deltas off HeadSeq. We reconstruct each
-    // input's sequence, then apply them in ASCENDING seq order through the EXISTING TryUpdateMoveIntent,
-    // which dedups (seq <= LastMoveSeq dropped) and advances the held intent. Because every packet repeats
-    // the full window, a dropped packet's intermediate state change is recovered from any later packet that
-    // still carries it — no head-of-line stall, no retransmit bunching. The movement model is untouched:
-    // IntegrateHeldMovementIntents still integrates the entity off the held intent this fed.
-    private void HandleMoveInput(ClientSession session, MoveInputMessage input)
-    {
-        foreach (var (seq, moving, direction) in ExtractFreshMoveInputs(input, session.LastMoveSeq))
-        {
-            // The EXISTING held-intent path dedups (seq <= LastMoveSeq dropped) and advances the cursor; we
-            // pre-filtered + ordered so each fresh seq applies exactly once, oldest-first, landing on the head.
-            session.TryUpdateMoveIntent(seq, moving, direction, _serverTick);
-        }
-    }
-
-    // NET1 Stage 1 (pure, unit-testable): given a redundant MoveInput packet and the last seq already accepted,
-    // returns the fresh inputs (seq > lastSeq) in ASCENDING seq order — head plus window entries reconstructed
-    // from their deltas (entrySeq = HeadSeq - SeqDelta). Already-seen and malformed (delta 0 / underflowing)
-    // entries are dropped. Applying the result oldest-first feeds the held-intent path each new input once and
-    // ends on the newest (head) state; a "dropped head" packet's state change is recovered from a later
-    // packet's window because that window still carries it.
-    internal static IReadOnlyList<(uint Seq, bool Moving, Direction8 Direction)> ExtractFreshMoveInputs(
-        MoveInputMessage input,
-        uint lastSeq)
-    {
-        var fresh = new List<(uint Seq, bool Moving, Direction8 Direction)>(input.Window.Count + 1);
-        if (input.HeadSeq > lastSeq)
-        {
-            fresh.Add((input.HeadSeq, input.Moving, input.Direction));
-        }
-
-        for (var i = 0; i < input.Window.Count; i++)
-        {
-            var entry = input.Window[i];
-            if (entry.SeqDelta == 0 || entry.SeqDelta > input.HeadSeq)
-            {
-                // 0 would alias the head; a delta past HeadSeq underflows — drop the malformed entry.
-                continue;
-            }
-
-            var entrySeq = input.HeadSeq - entry.SeqDelta;
-            if (entrySeq > lastSeq)
-            {
-                fresh.Add((entrySeq, entry.Moving, entry.Direction));
-            }
-        }
-
-        // Ascending by seq (small n). Distinct seqs are guaranteed by construction (head once; window deltas
-        // are distinct off a single head), so a stable insertion sort suffices.
-        fresh.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
-        return fresh;
-    }
-
     private void MarkDirtyDurableTile(WorldEntity entity)
     {
         if (!entity.IsDurable || !entity.CharacterId.HasValue)
@@ -3093,6 +3083,7 @@ internal sealed class ProtocolEncodeBuffer
         uint serverTick,
         uint snapshotSequence,
         uint recipientStepSeq,
+        uint lastInputSeq,
         int totalEntities,
         bool isComplete,
         int chunkIndex,
@@ -3105,6 +3096,7 @@ internal sealed class ProtocolEncodeBuffer
             serverTick,
             snapshotSequence,
             recipientStepSeq,
+            lastInputSeq,
             totalEntities,
             isComplete,
             chunkIndex,

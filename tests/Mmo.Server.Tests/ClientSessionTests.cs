@@ -267,59 +267,76 @@ public sealed class ClientSessionTests
         return entity;
     }
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): a fresh per-input MoveIntent advances the integrate cursor + the keepalive
+    // tick.
     [Fact]
-    public void MoveIntentUpdateRecordsStateAndTick()
+    public void MoveInputAdvancesCursorAndTick()
     {
         var session = new ClientSession(null!);
 
-        Assert.True(session.TryUpdateMoveIntent(1, moving: true, Direction8.E, serverTick: 10));
+        Assert.True(session.TryBeginMoveInput(1, serverTick: 10));
 
-        Assert.True(session.MoveIntentMoving);
-        Assert.Equal(Direction8.E, session.MoveIntentDirection);
-        Assert.Equal(1u, session.LastMoveSeq);
+        Assert.Equal(1u, session.LastInputSeq);
         Assert.Equal(10u, session.LastMoveIntentTick);
     }
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): a stale/duplicate input seq (<= the cursor) is rejected and mutates nothing.
     [Fact]
-    public void MoveIntentRejectsStaleSequence()
+    public void MoveInputRejectsStaleSequence()
     {
         var session = new ClientSession(null!);
-        session.TryUpdateMoveIntent(5, moving: true, Direction8.E, serverTick: 10);
+        Assert.True(session.TryBeginMoveInput(5, serverTick: 10));
 
-        // Equal-or-lower sequences are stale: state and the intent tick must not change.
-        Assert.False(session.TryUpdateMoveIntent(5, moving: false, Direction8.W, serverTick: 20));
-        Assert.False(session.TryUpdateMoveIntent(4, moving: false, Direction8.W, serverTick: 20));
+        Assert.False(session.TryBeginMoveInput(5, serverTick: 20));
+        Assert.False(session.TryBeginMoveInput(4, serverTick: 20));
 
-        Assert.True(session.MoveIntentMoving);
-        Assert.Equal(Direction8.E, session.MoveIntentDirection);
+        Assert.Equal(5u, session.LastInputSeq);
         Assert.Equal(10u, session.LastMoveIntentTick);
     }
 
+    // CONTINUOUS MIGRATION (Phase 3, v36): SetMoving tracks the "currently walking" flag; ClearMoveIntent stops it
+    // WITHOUT touching the input cursor (a stale seq is still rejected after a force-stop).
     [Fact]
-    public void MoveIntentKeepaliveRefreshesTickWithSameDirection()
+    public void ClearMoveIntentStopsButKeepsInputCursor()
     {
         var session = new ClientSession(null!);
-        session.TryUpdateMoveIntent(1, moving: true, Direction8.E, serverTick: 10);
-
-        Assert.True(session.TryUpdateMoveIntent(2, moving: true, Direction8.E, serverTick: 30));
-
-        Assert.True(session.MoveIntentMoving);
-        Assert.Equal(30u, session.LastMoveIntentTick);
-    }
-
-    [Fact]
-    public void ClearMoveIntentStopsButKeepsSequenceCursor()
-    {
-        var session = new ClientSession(null!);
-        session.TryUpdateMoveIntent(3, moving: true, Direction8.N, serverTick: 5);
+        Assert.True(session.TryBeginMoveInput(3, serverTick: 5));
+        session.SetMoving(true);
+        Assert.True(session.IsMoving);
 
         session.ClearMoveIntent();
 
-        Assert.False(session.MoveIntentMoving);
-        // The sequence cursor is unchanged, so a stale seq is still rejected after a force-stop.
-        Assert.False(session.TryUpdateMoveIntent(3, moving: true, Direction8.N, serverTick: 9));
-        Assert.True(session.TryUpdateMoveIntent(4, moving: true, Direction8.N, serverTick: 9));
-        Assert.True(session.MoveIntentMoving);
+        Assert.False(session.IsMoving);
+        Assert.False(session.TryBeginMoveInput(3, serverTick: 9));
+        Assert.True(session.TryBeginMoveInput(4, serverTick: 9));
+    }
+
+    // CONTINUOUS MIGRATION (Phase 3, v36): the per-peer wall-clock dt BUDGET — the anti-speedhack core. A fresh peer
+    // is seeded at the burst allowance, the budget accrues real elapsed time (capped at the allowance), and each
+    // input may consume only the remaining budget so a FLOOD of max-dt inputs cannot out-integrate real time.
+    [Fact]
+    public void MoveDtBudgetClampsAFloodToRealElapsedTime()
+    {
+        const double burst = 0.4d;
+        var session = new ClientSession(null!);
+
+        // Seed (first credit) puts the budget at the burst allowance.
+        session.CreditMoveDtBudget(0.05d, burst);
+
+        // A flood of huge-dt inputs in a single tick can consume AT MOST the burst allowance, not more.
+        var consumed = 0d;
+        for (var i = 0; i < 100; i++)
+        {
+            consumed += session.ConsumeMoveDtBudget(1.0d); // each asks for a full second
+        }
+
+        Assert.True(consumed <= burst + 1e-9, $"flood consumed {consumed}s, exceeds the {burst}s burst allowance");
+        // Budget drained: further inputs get nothing until real time credits it again.
+        Assert.Equal(0d, session.ConsumeMoveDtBudget(1.0d));
+
+        // Crediting a tick of real time re-credits ~that much (capped at the allowance), so steady play continues.
+        session.CreditMoveDtBudget(0.05d, burst);
+        Assert.True(session.ConsumeMoveDtBudget(1.0d) <= 0.05d + 1e-9);
     }
 
     // COMBAT-S2B: the attack cursor dedups stale/duplicate attack seqs, monotonically advancing on accept.
@@ -341,32 +358,30 @@ public sealed class ClientSessionTests
         Assert.Equal(5u, session.LastAttackSeq);
     }
 
-    // COMBAT-S2B (the #1 rule): the attack stream's dedup cursor is FULLY INDEPENDENT of the movement cursors.
-    // Advancing the attack cursor must not touch LastMoveSeq / LastCommitSeq, and advancing those must not touch
-    // the attack cursor — so an attack can never pre-dedup a movement input (or vice-versa), the NET6 desync bug.
+    // COMBAT-S2B (the #1 rule): the attack stream's dedup cursor is FULLY INDEPENDENT of the move INPUT cursor.
+    // Advancing the attack cursor must not touch LastInputSeq, and advancing that must not touch the attack cursor —
+    // so an attack can never pre-dedup a movement input (or vice-versa), the NET6 desync bug. (v36: the move/commit
+    // split is gone — there is one move INPUT cursor now.)
     [Fact]
-    public void AttackCursorIsIndependentOfMovementCursors()
+    public void AttackCursorIsIndependentOfMoveInputCursor()
     {
         var session = new ClientSession(null!);
 
-        // Advance the movement intent + commit cursors to high values.
-        Assert.True(session.TryUpdateMoveIntent(50, moving: true, Direction8.E, serverTick: 1));
-        Assert.True(session.TryConsumeCommitSequence(60, serverTick: 1));
-        Assert.Equal(50u, session.LastMoveSeq);
-        Assert.Equal(60u, session.LastCommitSeq);
+        // Advance the move input cursor to a high value.
+        Assert.True(session.TryBeginMoveInput(50, serverTick: 1));
+        Assert.Equal(50u, session.LastInputSeq);
 
-        // A LOW attack seq (1) is still fresh on the attack cursor — the move/commit cursors did not burn it.
+        // A LOW attack seq (1) is still fresh on the attack cursor — the move cursor did not burn it.
         Assert.True(session.TryConsumeAttackSequence(1));
         Assert.Equal(1u, session.LastAttackSeq);
 
-        // The attack did not move the movement cursors.
-        Assert.Equal(50u, session.LastMoveSeq);
-        Assert.Equal(60u, session.LastCommitSeq);
+        // The attack did not move the input cursor.
+        Assert.Equal(50u, session.LastInputSeq);
 
-        // And a LOW movement seq is still rejected as stale (its own cursor is intact, untouched by the attack).
-        Assert.False(session.TryUpdateMoveIntent(1, moving: true, Direction8.W, serverTick: 2));
-        // While the move/commit cursors continue to advance independently, the attack cursor stays put.
-        Assert.True(session.TryUpdateMoveIntent(51, moving: true, Direction8.W, serverTick: 2));
+        // And a LOW move input seq is still rejected as stale (its own cursor is intact, untouched by the attack).
+        Assert.False(session.TryBeginMoveInput(1, serverTick: 2));
+        // While the move input cursor continues to advance independently, the attack cursor stays put.
+        Assert.True(session.TryBeginMoveInput(51, serverTick: 2));
         Assert.Equal(1u, session.LastAttackSeq);
     }
 

@@ -251,11 +251,15 @@ public sealed class AdminTuningIntegrationTests
 
         public void Poll() => _client.PollEvents();
 
-        public void SendMove(Direction8 direction) =>
-            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+        // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — unit dir + nominal dt; (0,0) = stop.
+        public void SendMove(Direction8 direction)
+        {
+            var dir = direction.ToUnitVector();
+            Send(new MoveIntentMessage(++_moveSequence, (float)dir.X, (float)dir.Y, 1f / 20f), DeliveryMethod.Unreliable);
+        }
 
         public void StopMove() =>
-            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
+            Send(new MoveIntentMessage(++_moveSequence, 0f, 0f, 1f / 20f), DeliveryMethod.Unreliable);
 
         public void SendAdminSetTuning(string key, double value) =>
             Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);

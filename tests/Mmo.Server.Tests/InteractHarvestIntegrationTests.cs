@@ -686,16 +686,16 @@ public sealed class InteractHarvestIntegrationTests
             }
         }
 
-        // Held-direction intent (protocol v15): starts/redirects continuous movement. The server steps at
-        // its own cooldown while the intent stands; call StopMove to halt at the current tile.
+        // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — unit dir + nominal dt; (0,0) = stop.
         public void SendMove(Direction8 direction)
         {
-            Send(new MoveIntentMessage(++_moveSequence, true, direction), DeliveryMethod.ReliableOrdered);
+            var dir = direction.ToUnitVector();
+            Send(new MoveIntentMessage(++_moveSequence, (float)dir.X, (float)dir.Y, 1f / 20f), DeliveryMethod.Unreliable);
         }
 
         public void StopMove()
         {
-            Send(new MoveIntentMessage(++_moveSequence, false, Direction8.S), DeliveryMethod.ReliableOrdered);
+            Send(new MoveIntentMessage(++_moveSequence, 0f, 0f, 1f / 20f), DeliveryMethod.Unreliable);
         }
 
         public void SendInteract(uint targetNetworkId)
