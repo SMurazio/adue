@@ -201,9 +201,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// selection handler can read the multiplier without re-deriving it.
 	private OptionButton? _moveSpeedDropdown;
 	private IReadOnlyList<MovementSpeedOptions.SpeedOption> _moveSpeedOptions = Array.Empty<MovementSpeedOptions.SpeedOption>();
-	// UO4: the "Stop on reversal" (settle-then-go) toggle. The stop-on-reversal lever lives in the predictor (the
-	// sole local-player render path), so it is always shown on the F6 panel.
-	private CheckBox? _stopOnReversalCheck;
 
 	// ---- Vitals tab (was F7) ----------------------------------------------------------------------
 	// Set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row is a label + LineEdit; Apply sends the
@@ -574,27 +571,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// DIAG1: Alt+Shift+R zeroes the local predictor's reconcile-outcome tallies (rec[M/C/S] in the F3
-		// read-out) so the human can reset them just before a loss burst and read fresh counts. A live in-client
-		// control (no restart); ignored while typing in chat. Measurement only. (Alt+R is reserved for RESYNC1's
-		// Force Resync.)
-		if (key.Keycode == Key.R && key.AltPressed && key.ShiftPressed && _chatInput?.HasFocus() != true)
-		{
-			_client?.ResetReconcileCounters();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-
-		// RESYNC1: Alt+R (NOT Shift -- Alt+Shift+R above is DIAG1's counter reset) manually forces a resync of
-		// the local prediction onto the last server-confirmed position, clearing any stranded in-flight lead
-		// under loss. The same reusable predictor primitive as the F6 "Force Resync" button. A live in-client
-		// control (no restart); ignored while typing in chat.
-		if (key.Keycode == Key.R && key.AltPressed && !key.ShiftPressed && _chatInput?.HasFocus() != true)
-		{
-			_client?.ForceResync();
-			GetViewport().SetInputAsHandled();
-			return;
-		}
+		// CONTINUOUS MIGRATION (Phase 4): the Alt+Shift+R "reset reconcile counters" and Alt+R "Force Resync"
+		// hotkeys drove the deleted tile LocalPlayerPredictor (ResetReconcileCounters / ForceResync). The continuous
+		// predictor has no step-seq tallies and reconciles every snapshot, so both are gone.
 
 		if (key.Keycode == Key.F11)
 		{
@@ -1316,6 +1295,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		predictionTiles.Toggled += ApplyPredictionTiles;
 		rows.AddChild(predictionTiles);
 
+		// CONTINUOUS MIGRATION (Phase 4): the live A/B raw-vs-predicted lever. ON (default) = the local player renders
+		// the smooth client-side prediction (predict -> reconcile -> replay); OFF = renders the RAW confirmed server
+		// position (crude/laggy under latency) so the human can feel the difference with no restart. Flips
+		// MmoClient.PredictionEnabled live, which nulls/re-attaches the predictor. A runtime in-client toggle (project
+		// rule: diagnostics are live toggles, never launch flags).
+		var prediction = new CheckBox
+		{
+			Name = "PredictLocalPlayer",
+			Text = "Prediction (predict local player)",
+			ButtonPressed = _client?.PredictionEnabled ?? true
+		};
+		prediction.AddThemeFontSizeOverride("font_size", 13);
+		prediction.Toggled += enabled =>
+		{
+			if (_client is not null)
+			{
+				_client.PredictionEnabled = enabled;
+			}
+		};
+		rows.AddChild(prediction);
+
 		// Spawner tiles: debug viz of the monster spawner anchors (red tiles), default off — like prediction tiles.
 		var spawnerTiles = new CheckBox { Name = "SpawnerTiles", Text = "Spawner tiles", ButtonPressed = _showSpawnerTiles };
 		spawnerTiles.AddThemeFontSizeOverride("font_size", 13);
@@ -1345,8 +1345,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// Movement tab (was F6): the movement/camera-FEEL levers — Move speed dropdown, net latency, camera follow
-	// blend + smoothing + teleport-snap, the stop-on-reversal toggle, and the Force Resync button. All live (no
-	// restart) via the same Apply-all / live-toggle pattern. Verbatim from the old F6 panel.
+	// blend + smoothing + teleport-snap, the camera track-predicted-tile toggle. All live (no restart) via the same
+	// Apply-all / live-toggle pattern. (CONTINUOUS MIGRATION Phase 4: the tile-predictor "Stop on reversal" toggle and
+	// "Force Resync" button were removed with LocalPlayerPredictor.)
 	private void BuildMovementTab(TabContainer tabs)
 	{
 		var rows = AddDebugTab(tabs, "Movement");
@@ -1391,21 +1392,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Applied live to all monster hop interpolators. The hop HEIGHT is a fixed constant (no knob this pass).
 		_moveMonsterHopDurationMs = AddTuningField(rows, "Monster hop duration (ms)", OnMovementApplyPressed);
 
-		// UO4 live toggle — flips on click, no Apply needed: settle-then-go on a ~180° reversal. ON = a 180°
-		// flip while moving settles to a clean tile stop, then resumes the new direction (kills the left-right
-		// bounce). OFF (default) = the current immediate reverse. The predictor (the sole local-player render path)
-		// reads it.
-		var stopOnReversal = new CheckBox
-		{
-			Name = "StopOnReversal",
-			Text = "Stop on reversal",
-			ButtonPressed = _client?.StopOnReversal ?? false
-		};
-		stopOnReversal.AddThemeFontSizeOverride("font_size", 13);
-		stopOnReversal.Toggled += ApplyStopOnReversal;
-		rows.AddChild(stopOnReversal);
-		_stopOnReversalCheck = stopOnReversal;
-
 		// CAMERA-EXPERIMENT live toggle — flips on click, no Apply: the camera targets the DISCRETE predicted tile
 		// instead of the smooth character render. Pair with "Camera smoothing" > 0 to glide the tile-to-tile jumps
 		// (smoothing 0 makes it hard-jump per step). OFF (default) = follow the character.
@@ -1418,15 +1404,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		trackPredictedTile.AddThemeFontSizeOverride("font_size", 13);
 		trackPredictedTile.Toggled += ApplyCameraTrackPredictedTile;
 		rows.AddChild(trackPredictedTile);
-
-		// RESYNC1: manual Force Resync button. Calls MmoClient.ForceResync() -> LocalPlayerPredictor.ForceResync(),
-		// which hard-snaps the local prediction (tile, step-seq, render) onto the last server-confirmed position and
-		// clears any stranded in-flight lead. USER-TRIGGERED escape hatch for a loss-induced desync; the same primitive
-		// as the Alt+R hotkey, and the one UO5/NET4 auto-tiers will call. Live, no restart.
-		var forceResync = new Button { Name = "ForceResync", Text = "Force Resync" };
-		forceResync.AddThemeFontSizeOverride("font_size", 14);
-		forceResync.Pressed += () => _client?.ForceResync();
-		rows.AddChild(forceResync);
 
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -1593,13 +1570,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var option = _moveSpeedOptions[(int)index];
 		_client.SendChat($"/speed {MovementSpeedOptions.FormatSpeedCommandArgument(option.Multiplier)}");
 		ShowInteractFeedback($"Move speed: {option.Label}");
-	}
-
-	// UO4 F6 live toggle ("Stop on reversal"). Route the flag to the client (and the active predictor) immediately
-	// — no restart. ON = settle-then-go on a ~180° reversal; OFF = the current immediate reverse.
-	private void ApplyStopOnReversal(bool enabled)
-	{
-		_client?.SetStopOnReversal(enabled);
 	}
 
 	// CAMERA-EXPERIMENT live toggle ("Camera: track predicted tile"). Flips the camera target between the discrete
@@ -2012,17 +1982,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var localState = local.Value;
 		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally smoothed
 		// (frame-rate independent). Defaults (blend 1.0, smoothing 0) = hard-follow the rendered character.
-		// CAMERA-EXPERIMENT (F1 Movement "track predicted tile"): target the DISCRETE predicted tile instead of the
-		// character render — both inputs become the predicted tile so the blend is moot. Needs smoothing > 0 to glide
-		// the tile-to-tile jumps. The tracker snaps on the first frame and on teleports.
+		// CAMERA-EXPERIMENT (F1 Movement "track predicted tile"): target the DISCRETE confirmed tile instead of the
+		// character render — both inputs become the tile so the blend is moot. Needs smoothing > 0 to glide the
+		// tile-to-tile jumps. The tracker snaps on the first frame and on teleports. CONTINUOUS MIGRATION (Phase 4):
+		// the continuous predictor exposes no predicted TILE (its predicted position is for render only, never a tile —
+		// targeting reads the confirmed tile, S53 invariant), so this now tracks the confirmed LocalTile.
 		double tileX = localState.AuthoritativeTile.X, tileY = localState.AuthoritativeTile.Y;
 		double cosX = localState.Position.X, cosY = localState.Position.Y;
-		if (_cameraTrackPredictedTile && _client?.PredictedLocalTile is { } predTile)
+		if (_cameraTrackPredictedTile && _client?.LocalTile is { } trackTile)
 		{
-			tileX = predTile.X;
-			tileY = predTile.Y;
-			cosX = predTile.X;
-			cosY = predTile.Y;
+			tileX = trackTile.X;
+			tileY = trackTile.Y;
+			cosX = trackTile.X;
+			cosY = trackTile.Y;
 		}
 		var (focusX, focusY) = _cameraFocus.Advance(
 			tileX, tileY, cosX, cosY,
@@ -2594,8 +2566,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
 		// default walk. Done here (first open) since ServerHello has landed by login.
 		PopulateMoveSpeedDropdown();
-		// UO4: seed the stop-on-reversal toggle from the live client value (default OFF).
-		_stopOnReversalCheck?.SetPressedNoSignal(_client?.StopOnReversal ?? false);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -3015,17 +2985,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var direction = keyboard ?? mouseDir ?? injected;
 		var moving = direction.HasValue;
 
-		// CONTINUOUS MIGRATION (Phase 3, v36): send ONE per-input continuous MoveIntent PER RENDER FRAME — the RAW
-		// direction (the held Direction8's unit world vector, or (0,0) when stopped) and THIS frame's dt. The server
-		// integrates each fresh input by its dt (its anti-speedhack budget caps the integrated distance to real time).
-		// The per-frame model is self-redundant: a dropped frame is superseded by the next, so no on-change/keepalive/
-		// stop-tail scheduling is needed (that was the v35 redundant-MoveInput machinery). dt is clamped to a sane
-		// frame duration so a long Godot hitch can't request a huge integrate (the server re-clamps regardless).
+		// CONTINUOUS MIGRATION (Phase 4): predict + send ONE per-input continuous MoveIntent PER RENDER FRAME — the RAW
+		// direction (the held Direction8's unit world vector, or (0,0) when stopped) and THIS frame's dt. The predictor
+		// integrates the predicted present immediately (zero latency) and MINTS the seq we stamp on the wire (sent ==
+		// buffered). The server integrates each fresh input by its dt (its anti-speedhack budget caps the integrated
+		// distance to real time). The per-frame model is self-redundant: a dropped frame is superseded by the next, so
+		// no on-change/keepalive/stop-tail scheduling is needed. dt is clamped to a sane frame duration so a long Godot
+		// hitch can't request a huge integrate (PredictAndBuffer + the server both re-clamp regardless).
 		var dt = (float)Math.Clamp(frameDelta, 0d, 0.25d);
+
+		// CONTINUOUS MIGRATION (Phase 4): advance the predictor's cosmetic render catch-up exactly ONCE per frame
+		// (decays the post-reconcile correction offset). Called here (the single per-frame movement path) for both the
+		// moving and stopped cases; no-op when no predictor is attached.
+		_client.AdvanceRender(dt);
+
 		if (moving)
 		{
 			var unit = direction!.Value.ToUnitVector();
-			_client.SendMoveIntent((float)unit.X, (float)unit.Y, dt);
+			_client.PredictAndSendMove((float)unit.X, (float)unit.Y, dt);
 			_lastSentMoving = true;
 			_lastSentDirection = direction.Value;
 		}
@@ -3033,7 +3010,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			// Stopped: send a (0,0) input each frame so the server's last-integrated input is a stop (it acks the
 			// seq and zeroes velocity). Cheap; the server dedups by seq and the budget makes this harmless.
-			_client.SendMoveIntent(0f, 0f, dt);
+			_client.PredictAndSendMove(0f, 0f, dt);
 			_lastSentMoving = false;
 		}
 	}
@@ -3342,22 +3319,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var divergence = _hasLocalRender && _hasConfirmed ? _renderDivergence.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
 		var frameDelta = _hasLocalRender ? _renderFrameDelta.ToString("0.####", CultureInfo.InvariantCulture) : string.Empty;
 
-		// RENDER-VELOCITY DIAG: the local predictor's internals this frame so a velocity jump (renderX/frameDelta)
-		// can be pinned to its trigger — a predicted-tile RE-PROJECTION (predX/predY jump >1 in a frame) or a
-		// reconcile CATCH-UP (recCorrected/recSnapped tick up). Counts are cumulative; analysis reads the deltas.
-		// Blank when no predictor is attached (pre-spawn / interpolation-only).
+		// CONTINUOUS MIGRATION (Phase 4): the tile-predictor frame-diag (LocalPredictorFrameDiagnostics: predicted-tile
+		// X/Y, step-seq, reconcile Matched/Corrected/Snapped tallies, cadence) was deleted with LocalPlayerPredictor —
+		// the continuous predictor has no step-seq / tile / reconcile-outcome counters. These CSV columns are kept
+		// (stable schema for existing capture tooling) but always blank now. A continuous-predictor frame-diag
+		// (PredictedX/Y, BufferedInputCount, LastCorrectionUnits, RenderVsPredictedUnits, Speed) can be wired here in a
+		// followup if the render-velocity capture needs it.
 		string predX = string.Empty, predY = string.Empty, stepSeq = string.Empty,
 			recMatched = string.Empty, recCorrected = string.Empty, recSnapped = string.Empty, cadenceMs = string.Empty;
-		if (_client?.LocalPredictorFrameDiagnostics is { } diag)
-		{
-			predX = diag.PredictedX.ToString(CultureInfo.InvariantCulture);
-			predY = diag.PredictedY.ToString(CultureInfo.InvariantCulture);
-			stepSeq = diag.PredictedStepSeq.ToString(CultureInfo.InvariantCulture);
-			recMatched = diag.ReconcileMatched.ToString(CultureInfo.InvariantCulture);
-			recCorrected = diag.ReconcileCorrected.ToString(CultureInfo.InvariantCulture);
-			recSnapped = diag.ReconcileSnapped.ToString(CultureInfo.InvariantCulture);
-			cadenceMs = diag.CadenceMs.ToString("0.###", CultureInfo.InvariantCulture);
-		}
 
 		var row = string.Create(CultureInfo.InvariantCulture,
 			$"{_elapsedSeconds:0.###},{_lastFrameMs:0.###},{_lastPollMs:0.###},{_lastRenderStateMs:0.###},{_lastEntitiesMs:0.###},{_lastCameraMs:0.###},{_lastOverlayMs:0.###},{dGc0},{dGc1},{dGc2},{renderX},{renderY},{confX},{confY},{divergence},{frameDelta},{predX},{predY},{stepSeq},{recMatched},{recCorrected},{recSnapped},{cadenceMs}");
@@ -3488,7 +3457,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var confirmed = _client?.LocalTile;
-		var predicted = _client?.LocalPredictedTile;
+		// CONTINUOUS MIGRATION (Phase 4): the continuous predictor exposes no predicted TILE (its predicted position is
+		// render-only; targeting reads the confirmed tile, S53 invariant), so the "predicted" marker now coincides with
+		// the confirmed tile. The green/magenta markers overlap; the overlay no longer shows a tile-level divergence.
+		var predicted = _client?.LocalTile;
 		if (confirmed is not TileCoord confirmedTile || predicted is not TileCoord predictedTile)
 		{
 			_predictedTileMarker.Visible = false;
@@ -4035,17 +4007,12 @@ void fragment() {
 		return $"MOVE sent={sent} confirmedSeq={debug.LastConfirmedSnapshotSequence} tile={confirmedTile} q={debug.QueueDepth} cadence={debug.EffectiveCadenceMs:0.#}ms latency={debug.LastLatencyMs}ms render={render}";
 	}
 
-	// DIAG1: the 3-link recovery-chain read-out for the LOCAL player, refreshed every overlay tick (~10 Hz).
-	//   pred  = the predictor's accepted-step count (the snappy local head).
-	//   conf  = the last RecipientStepSeq the client has LEARNED the server accepted.
-	//   lead  = pred - conf, the in-flight steps that must DRAIN for the prediction to recover. A lead that never
-	//           returns toward 0 under loss is the permanent strand DIAG1 is hunting.
-	//   recv/s= snapshots applied per second (is the server->client confirm channel alive?).
-	//   rec   = reconcile outcomes since the last reset (Matched / Corrected / Snapped). Mostly-Matched = the lead
-	//           drained via benign confirms; climbing Corrected/Snapped = the server's confirm is diverging from
-	//           the prediction (forced re-base). Reset with Alt+Shift+R (ResetReconcileCounters).
-	// Pair this with the server-side trace (srvSeq / recvCommits / rejects, ServerMovementTrace mmo_trace
-	// event=commit_counters) to localise the stuck link per docs/movement-loss-degradation-tiers.md.
+	// DIAG1: the LOCAL-player movement read-out, refreshed every overlay tick (~10 Hz). recv/s (snapshots applied per
+	// second — is the server->client confirm channel alive?) is the only live field now.
+	// CONTINUOUS MIGRATION (Phase 4): the tile-predictor recovery-chain fields (pred / conf / lead and the reconcile
+	// Matched/Corrected/Snapped tallies) were retired with LocalPlayerPredictor — the continuous predictor has no
+	// step-seq or tile-reconcile outcomes, so MovementDebugSnapshot reports them as 0 and this readout shows zeros for
+	// pred/conf/lead/rec. The fields are kept on MovementDebugSnapshot for schema/test stability.
 	private static string FormatRecoveryDiag(MovementDebugSnapshot d)
 	{
 		return $"DIAG pred={d.PredictedStepSeq} conf={d.ConfirmedStepSeq} lead={d.LeadSteps} " +

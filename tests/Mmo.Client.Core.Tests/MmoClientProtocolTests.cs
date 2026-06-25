@@ -158,7 +158,7 @@ public sealed class MmoClientProtocolTests
         // a delayed render position. The interpolator cadence is still COMPUTED on confirm and surfaced via the
         // MovementDebug.EffectiveCadenceMs read-out: a late ServerHello (600ms cooldown ⇒ 600ms cadence) must retune
         // the early snapshot-created entity, so the confirmed-tile cadence reads 600ms (not the ~150ms default).
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 600, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 600, 30, 0.5f));
         client.HandleMessageForTests(Snapshot(2, isComplete: false, State(7, 1, 0)));
 
         Assert.Equal(600d, client.MovementDebug.EffectiveCadenceMs);
@@ -190,14 +190,14 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out var outbound, debugMovement: true, lines.Add);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30, 0.5f));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
 
-        // CONTINUOUS MIGRATION (Phase 3, v36): SendMoveIntent ships ONE per-input continuous MoveIntentMessage (raw
+        // CONTINUOUS MIGRATION (Phase 4): PredictAndSendMove ships ONE per-input continuous MoveIntentMessage (raw
         // dir + dt). The returned seq matches the message's InputSeq; the snapshot still drives the tile_confirmed
-        // trace.
-        var sequence = client.SendMoveIntent(1f, 0f, 0.05f);
+        // trace. (No Zone here, so no predictor attaches — the seq comes from the pre-spawn fallback counter.)
+        var sequence = client.PredictAndSendMove(1f, 0f, 0.05f);
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.E)));
 
         Assert.Contains(outbound.OfType<MoveIntentMessage>(), move => move.InputSeq == sequence && move.DirX == 1f && move.DirY == 0f);
@@ -213,7 +213,7 @@ public sealed class MmoClientProtocolTests
         var lines = new List<string>();
         using var client = CreateClient(out _, debugMovement: false, lines.Add);
 
-        client.SendMoveIntent(1f, 0f, 0.05f);
+        client.PredictAndSendMove(1f, 0f, 0.05f);
         client.RecordFrameHitch(40, 1, 0, 0);
 
         Assert.False(client.DebugMovementEnabled);
@@ -229,7 +229,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _, debugMovement: true, lines.Add);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30, 0.5f));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
         client.HandleMessageForTests(Snapshot(3, isComplete: true, new EntityStateSnapshot(9, WorldVector.FromTile(6, 5), Direction8.E)));
@@ -255,7 +255,7 @@ public sealed class MmoClientProtocolTests
 
         // Global cadence is 140ms (=150ms quantised), but this entity's spawn advertises a 70ms cooldown
         // (=100ms quantised), so its tween must use the per-entity cadence, not the global.
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30, 0.5f));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(9, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 70));
 
@@ -274,7 +274,7 @@ public sealed class MmoClientProtocolTests
         using var client = CreateClient(out _);
         var characterId = Guid.NewGuid();
 
-        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 200, 30));
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 200, 30, 0.5f));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
 
         // A snapshot-created placeholder (no EntitySpawn yet) carries no per-entity cooldown, so it tweens

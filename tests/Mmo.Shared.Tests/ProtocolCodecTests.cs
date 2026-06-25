@@ -302,8 +302,9 @@ public sealed class ProtocolCodecTests
     [Fact]
     public void ServerHelloRoundTripsStepCooldownAndInterestRadius()
     {
-        // S98: ServerHello no longer carries turnDelayMs (turn-then-move removed); protocol bumped to v20.
-        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 40.5f);
+        // CONTINUOUS MIGRATION (v37): ServerHello now also carries the replicated BodyRadiusUnits (a NON-default value
+        // here so a dropped field is caught, not masked by the 0.5 default).
+        var original = new ServerHelloMessage("server", ProtocolCodec.Version, 20, 140, 40.5f, 0.375f);
 
         var decoded = Assert.IsType<ServerHelloMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -312,15 +313,16 @@ public sealed class ProtocolCodecTests
         Assert.Equal(20, decoded.TickRate);
         Assert.Equal(140, decoded.StepCooldownMs);
         Assert.Equal(40.5f, decoded.InterestRadiusTiles);
+        Assert.Equal(0.375f, decoded.BodyRadiusUnits);
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtySix()
+    public void ProtocolVersionIsThirtySeven()
     {
-        // CONTINUOUS MIGRATION (v35 -> v36): the atomic continuous wire break — fixed-point continuous snapshot
-        // positions + the LastInputSeq header field + the reshaped per-input MoveIntent (dead tile-step machinery
-        // deleted). Mutually undecodable with v35; server + every client ship together. Pin it so a change is caught.
-        Assert.Equal(36, ProtocolCodec.Version);
+        // CONTINUOUS MIGRATION (v37, Phase 4): ServerHello gains a trailing BodyRadiusUnits float (the replicated
+        // authoritative body radius for the client predictor). Intra-branch bump on top of the v36 continuous break.
+        // Pin it so a change is caught.
+        Assert.Equal(37, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).

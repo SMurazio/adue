@@ -42,7 +42,11 @@ public static class ProtocolCodec
     // is RESHAPED to the per-input continuous move {uint InputSeq, float DirX, float DirY, float DtSeconds}, and the
     // dead tile-step machinery (MoveInput / StepCommitRequest / StepCommitBatch / MovementMode) is DELETED (its tags
     // 8–11 left as gaps). Server integrates each fresh input by its dt on the receive path with anti-speedhack clamps.
-    public const byte Version = 36;
+    // CONTINUOUS MIGRATION (v37, Phase 4): ServerHello gains a trailing float BodyRadiusUnits — the server's
+    // authoritative player body radius, replicated so the new client predictor collides against the SAME radius the
+    // server integrates with (the determinism contract at walls). Intra-branch bump (no deployed clients); server +
+    // every in-repo client flip together. Otherwise identical to v36.
+    public const byte Version = 37;
 
     private const int MaxMonsterTypes = 256;
 
@@ -128,6 +132,8 @@ public static class ProtocolCodec
                 writer.Write(value.TickRate);
                 writer.Write(value.StepCooldownMs);
                 writer.Write(value.InterestRadiusTiles);
+                // CONTINUOUS MIGRATION (v37): replicate the authoritative body radius (mirrored in the decode below).
+                writer.Write(value.BodyRadiusUnits);
                 break;
             case LoginResultMessage value:
                 writer.Write(value.Accepted);
@@ -280,7 +286,8 @@ public static class ProtocolCodec
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
             MessageType.InventoryUpdate => ReadInventoryUpdate(reader),
-            MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle()),
+            // CONTINUOUS MIGRATION (v37): trailing BodyRadiusUnits float mirrors the write order.
+            MessageType.ServerHello => new ServerHelloMessage(ReadString(reader), reader.ReadByte(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadSingle(), reader.ReadSingle()),
             MessageType.LoginResult => new LoginResultMessage(
                 reader.ReadBoolean(),
                 ReadGuid(reader),

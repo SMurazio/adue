@@ -85,3 +85,17 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   dt-budget bound holds (a flood can't out-integrate real time; hostile dt neutralized), diagonal-normalize correct,
   fixed-point round-trips ≤1/16 u, deletions clean, monsters/scope respected. Followups: B done (comment), A+C tracked.
   **Phase 3 complete — the game runs on the continuous wire (client renders raw until Phase 4 prediction).**
+- **2026-06-25** — Phase 4 implemented (the local-player continuous predictor — first live-playable build), gated green,
+  awaiting independent review. Stage 0 (shared de-risk): extracted `TileWalls.NeighborhoodWallsForMove` (server
+  `QueryNearbyWalls` is now a byte-identical forwarder — parity test pins it); replicated `BodyRadiusUnits` on
+  `ServerHello` (**wire v36→v37**, intra-branch); lifted `MaxInputDtSeconds` to shared `ContinuousMovement`. Stage 1:
+  ported `ContinuousPredictor` to `Mmo.Client.Core/Continuous` (Z→Y, SHARED resolver/walls, dt-clamp-and-buffer,
+  `Reconcile(in WorldVector, uint)`, pinned consts). Stage 2 (the flip): `PredictAndSendMove` (predictor mints seq →
+  send; retired `_moveSequence`), `AdvanceRender` once/frame, reconcile local entity vs `(Position, LastInputSeq)`,
+  render seam (local = predicted RenderX/Y; remote/monsters RAW), respawn/AOI re-attach anchored to confirmed Position,
+  live speed retune on `MovementSpeedChanged`, F5 `Prediction` A/B toggle. Stage 3: timing-faithful reconcile harness
+  (real 20Hz server integrate + Q12.4 + latency/jitter/drop, 144Hz client) — 5 invariants green. Stage 4: ported
+  predictor unit tests + collision-slide + **Followup A** (server raw-dir-normalize guard). Stage 5: deleted the
+  obsolete tile `LocalPlayerPredictor` (+ tests + dead plumbing, ~2620 LOC), kept `TileInterpolator`/
+  `MonsterHopInterpolator` (Phase 5) + `MovementCadence.EffectiveStepCadenceMs`. Gate: Shared 141 / Client.Core 160 /
+  Server 313, godot-build clean.

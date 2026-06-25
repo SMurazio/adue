@@ -67,7 +67,11 @@ public sealed class GameServer
     //     allowance — a flood of max-dt inputs advances ≈ real-time distance, never faster. The allowance (~0.4s)
     //     absorbs network/frame jitter (a burst of buffered inputs after a hitch) without ever permitting a
     //     sustained over-rate.
-    private const double MaxMoveInputDtSeconds = 0.25d;
+    // CONTINUOUS MIGRATION (Phase 4): the per-input dt SANITY clamp is now the SHARED Mmo.Shared.Domain.ContinuousMovement
+    // .MaxInputDtSeconds — the SAME constant the client predictor clamps its predicted (and buffered) dt to AND the send
+    // path clamps the frame dt to, so buffered == sent == server-integrated dt under normal play (the dt-alignment
+    // linchpin; replay reproduces the server path with no correction).
+    private const double MaxMoveInputDtSeconds = ContinuousMovement.MaxInputDtSeconds;
     private const double MoveDtBurstAllowanceSeconds = 0.4d;
 
     private readonly ServerOptions _options;
@@ -339,7 +343,9 @@ public sealed class GameServer
     {
         _sessions[peer] = new ClientSession(peer);
         _metrics.RecordPeerConnected();
-        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate, _options.StepCooldownMs, _options.InterestRadius), DeliveryMethod.ReliableOrdered);
+        // CONTINUOUS MIGRATION (Phase 4, v37): replicate the live authoritative body radius (the ServerTuning knob, default
+        // 0.5) so the client predictor collides against the SAME radius the server integrates with (the wall-determinism gap).
+        TrySend(peer, new ServerHelloMessage(ServerName, ProtocolCodec.Version, _options.TickRate, _options.StepCooldownMs, _options.InterestRadius, (float)_tuning.BodyRadiusUnits), DeliveryMethod.ReliableOrdered);
         Log.Info($"Peer connected: {FormatPeer(peer)}.");
     }
 

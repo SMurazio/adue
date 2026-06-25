@@ -95,7 +95,7 @@ public sealed class MmoClientIntegrationTests
                 beforePoll: () => SendMove(bob, Direction8.E),
                 alice,
                 bob);
-            bob.SendMoveIntent(0f, 0f, 1f / 20f); // stop
+            bob.PredictAndSendMove(0f, 0f, 1f / 20f); // stop
 
             var aliceStart = alice.LocalTile!.Value;
             await WaitUntilAsync(
@@ -103,7 +103,7 @@ public sealed class MmoClientIntegrationTests
                 beforePoll: () => SendMove(alice, Direction8.S),
                 alice,
                 bob);
-            alice.SendMoveIntent(0f, 0f, 1f / 20f);
+            alice.PredictAndSendMove(0f, 0f, 1f / 20f);
 
             alice.SendChat("hello from core");
             await WaitUntilAsync(
@@ -182,6 +182,6 @@ public sealed class MmoClientIntegrationTests
     private static void SendMove(MmoClient client, Direction8 direction)
     {
         var dir = direction.ToUnitVector();
-        client.SendMoveIntent((float)dir.X, (float)dir.Y, 1f / 20f);
+        client.PredictAndSendMove((float)dir.X, (float)dir.Y, 1f / 20f);
     }
 }

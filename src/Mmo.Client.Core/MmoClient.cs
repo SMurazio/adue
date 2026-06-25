@@ -1,4 +1,5 @@
 using LiteNetLib;
+using Mmo.Client.Core.Continuous;
 using Mmo.Shared.Domain;
 using Mmo.Shared.Protocol;
 
@@ -6,12 +7,15 @@ namespace Mmo.Client.Core;
 
 public sealed class MmoClient : IDisposable
 {
-    // CONTINUOUS MIGRATION (Phase 3, v36): the local player sends ONE per-input continuous MoveIntent PER RENDER FRAME
-    // (raw direction + the frame's dt) and renders the RAW decoded server position — NO prediction/interpolation this
-    // phase (crude/laggy under latency, EXPECTED). The server integrates each input by its dt on the receive path.
-    // The LocalPlayerPredictor / TileInterpolator / MonsterHopInterpolator are left compiled-but-UNWIRED (never
-    // attached/sampled); Phase 4 re-adds the local-player predictor (additively, zero wire/server change) and Phase 5
-    // re-adds remote smoothing. The v35 UO client-driven commit/move-input/mode machinery is DELETED.
+    // CONTINUOUS MIGRATION (Phase 4, v37): the local player PREDICTS per render frame — PredictAndSendMove mints the
+    // input seq via the continuous ContinuousPredictor (PredictAndBuffer), sends the {seq, raw dir, dt} MoveIntent, and
+    // the predictor integrates the predicted present immediately (zero render lag). It RECONCILES against each
+    // snapshot's (Position, LastInputSeq), replaying its unacked buffer over the SHARED collision resolver / walls /
+    // radius / speed the server uses, so steady walking and wall slides open NO correction (the determinism contract).
+    // The LOCAL player renders the predictor's RenderX/Y; REMOTE entities + monsters still render RAW (Phase 5 re-adds
+    // remote smoothing via TileInterpolator / MonsterHopInterpolator, kept here for that). The obsolete tile
+    // LocalPlayerPredictor + its dead plumbing were DELETED this phase; targeting/harvest still read the CONFIRMED tile,
+    // never the predicted position. The PredictionEnabled F-key toggle is the live raw-vs-predicted A/B lever.
 
     // remote-interp-tighten Part A: the remote jitter buffer was 1.3 * cadence (~1.3 tiles of steady-state lag) —
     // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
@@ -94,14 +98,9 @@ public sealed class MmoClient : IDisposable
     private int _snapshotRecvTimestampCount;
     private int _snapshotRecvTimestampHead; // index of the oldest entry
 
-    // CONTINUOUS MIGRATION (Phase 3, v36): the per-INPUT MoveIntent seq counter. Each render frame mints ++this and
-    // sends one continuous MoveIntent. The v35 move-input / step-commit redundancy rings + the ack-driven tail-resend
-    // machinery are DELETED — the per-frame model is self-redundant (the next frame supersedes a dropped one).
-    private uint _moveSequence;
-
-    // COMBAT-S2B: the attack stream's OWN monotonic sequence counter, entirely SEPARATE from _moveSequence (the
+    // COMBAT-S2B: the attack stream's OWN monotonic sequence counter, entirely SEPARATE from the move seq (the
     // NET6 lesson — two streams must never share a cursor). Every SendAttack mints the next attack seq off THIS
-    // counter only; it never touches _moveSequence, and _moveSequence never touches it. The server dedups attacks
+    // counter only; it never touches the move seq, and the move seq never touches it. The server dedups attacks
     // on its matching independent _lastAttackSeq cursor.
     private uint _attackSeq;
 
@@ -110,24 +109,21 @@ public sealed class MmoClient : IDisposable
     private TimeSpan _currentTime;
     private bool _disposed;
 
-    // S53 local-player movement prediction. Created lazily once we know the zone (the blocked map), the
-    // local entity, and its cadence; null until then (and on the web/headless paths that never input).
-    // Local player ONLY — remote entities stay pure interpolation. See LocalPlayerPredictor.
-    // ENABLED (S53 redo): the predictor now renders the local player at the predicted tile with its OWN
-    // present-time step-tween (NOT the buffered interpolator that smoothed remote jitter by rendering the
-    // past — that was the attempt-1 rubber-band), and reconciles UO-style by snapping/blending to the
-    // server's truth on divergence. Click-to-move re-aims off the predicted tile. Revert criterion: a visible
-    // rubber-band on keyboard OR mouse -> set this back to false (restores the pre-S53 confirmed-state path).
-    private LocalPlayerPredictor? _predictor;
+    // CONTINUOUS MIGRATION (Phase 4): the LOCAL-player continuous predictor (predict -> reconcile -> replay, smooth
+    // zero-lag render). Created lazily by EnsurePredictor once we know the zone (blocked map), the local entity, and
+    // the server body radius; null until then (and on the web/headless paths that never input, and while prediction
+    // is toggled OFF for the live A/B raw-vs-predicted compare). Local player ONLY — remote entities stay raw
+    // (Phase 5). Lives on THIS outer class (not ClientEntity): the predicted RenderX/RenderY overrides only the
+    // local entity's rendered position in the render-state builders; the confirmed Tile/Position stay authoritative
+    // for targeting (S53 invariant). See Continuous.ContinuousPredictor.
+    private ContinuousPredictor? _predictor;
     private bool _predictionEnabled = true;
 
-    // UO4: "stop on reversal" (settle-then-go) lever for the predictor modes. When ON, a ~180° flip of the held
-    // direction while moving inserts one clean settle beat before resuming the new direction (kills the left-right
-    // bounce) instead of reversing mid-step. Held at the client level (like the other movement levers) so a value
-    // set before the predictor attaches — or after a respawn re-creates it — is honoured: EnsurePredictor re-seeds
-    // it onto the freshly-attached predictor. SetStopOnReversal routes it live (no restart). Default OFF so the
-    // current behaviour is unchanged until opted in.
-    private bool _stopOnReversal;
+    // CONTINUOUS MIGRATION (Phase 4): pre-spawn fallback MoveIntent seq counter. The predictor MINTS the input seq
+    // (PredictAndBuffer) once attached so sent == buffered; but before a predictor is attached (pre-spawn, or while
+    // prediction is toggled OFF) there is nothing to predict, so PredictAndSendMove falls back to ++this so the
+    // pre-spawn send path still stamps a monotonic seq on the wire.
+    private uint _preSpawnMoveSeq;
 
     // remote-interp-tighten Part A: a LIVE override (ms) for the remote jitter buffer, set by the F1 Movement-tab
     // "Remote interp buffer" knob so the user dials remote-render lag-vs-smoothness in-client with no restart. < 0
@@ -226,78 +222,21 @@ public sealed class MmoClient : IDisposable
     // trim/replay.
     public uint LastInputSeq => _lastInputSeq;
 
-    // DIAG1: the live movement-debug read-out augmented with the local-player recovery-chain numbers. The base
-    // snapshot (sent/confirmed tile, queue depth, cadence, latency, render) comes from the trace; we overlay the
-    // predictor's live pred/conf/lead + reconcile-outcome counters and the snapshot `recv/s` rate so the F3 HUD
-    // can show which of the three recovery links is stuck under loss. All overlay fields are read-outs — reading
-    // them changes nothing. When no predictor is attached (pre-spawn / interpolation-only mode) the predictor
-    // fields stay 0 and only recv/s is meaningful.
+    // DIAG1: the live movement-debug read-out. The base snapshot (sent/confirmed tile, queue depth, cadence, latency,
+    // render) comes from the trace; we overlay only the snapshot `recv/s` rate. CONTINUOUS MIGRATION (Phase 4): the
+    // legacy tile-predictor overlay (pred/conf/lead + reconcile-outcome counters) is gone — the continuous predictor
+    // has no step-seq, so those MovementDebugSnapshot fields stay 0 and only recv/s is meaningful here.
     public MovementDebugSnapshot MovementDebug
     {
         get
         {
-            var snapshot = _movementTrace.Snapshot with { SnapshotsPerSecond = SnapshotsPerSecond };
-            if (_predictor is { } predictor)
-            {
-                var pred = predictor.PredictedStepSeq;
-                var conf = predictor.LastReconciledStepSeq;
-                snapshot = snapshot with
-                {
-                    PredictedStepSeq = pred,
-                    ConfirmedStepSeq = conf,
-                    LeadSteps = pred > conf ? pred - conf : 0u,
-                    ReconcileMatched = predictor.ReconcileMatched,
-                    ReconcileCorrected = predictor.ReconcileCorrected,
-                    ReconcileSnapped = predictor.ReconcileSnapped,
-                };
-            }
-
-            return snapshot;
+            // CONTINUOUS MIGRATION (Phase 4): the continuous predictor has NO step-seq / tile-reconcile tallies, so the
+            // legacy predictor-overlay fields (PredictedStepSeq/ConfirmedStepSeq/LeadSteps/ReconcileMatched/Corrected/
+            // Snapped) on MovementDebugSnapshot stay at their defaults (0). Only the trace + recv/s rate are live. The
+            // struct's fields are left in place (other code/tests reference them); they simply read 0 now.
+            return _movementTrace.Snapshot with { SnapshotsPerSecond = SnapshotsPerSecond };
         }
     }
-
-    // RENDER-VELOCITY DIAG: a per-frame snapshot of the local predictor's internals for the F5 frame-log, so a
-    // live capture can correlate a render-velocity jump (renderX/frameDelta) to its TRIGGER — a predicted-tile
-    // re-projection (PredictedX/Y jumping >1 tile in one frame) or a reconcile catch-up (ReconcileCorrected/Snapped
-    // ticking up). Null when no predictor is attached (pre-spawn / interpolation-only). Measurement only — it reads
-    // the predictor and mutates nothing.
-    public readonly record struct LocalPredictorFrameDiag(
-        int PredictedX,
-        int PredictedY,
-        uint PredictedStepSeq,
-        uint ReconcileMatched,
-        uint ReconcileCorrected,
-        uint ReconcileSnapped,
-        double CadenceMs);
-
-    public LocalPredictorFrameDiag? LocalPredictorFrameDiagnostics =>
-        _predictor is { } predictor
-            ? new LocalPredictorFrameDiag(
-                predictor.PredictedTile.X,
-                predictor.PredictedTile.Y,
-                predictor.PredictedStepSeq,
-                predictor.ReconcileMatched,
-                predictor.ReconcileCorrected,
-                predictor.ReconcileSnapped,
-                predictor.CadenceMs)
-            : null;
-
-    // S106: the local predictor's live cadence (ms), for tests asserting a live MovementSpeedChanged retunes the
-    // predictor (not just the interpolator). Null when no predictor is attached.
-    internal double? LocalPredictorCadenceMsForTests => _predictor?.CadenceMs;
-
-    // DIAG1: zeroes the local predictor's reconcile-outcome tallies (Matched / Corrected / Snapped) so the human
-    // can reset them just before a loss burst and read fresh counts in the F3 read-out. No-op (safe) when no
-    // predictor is attached. Measurement only — touches no prediction/reconcile state.
-    public void ResetReconcileCounters() => _predictor?.ResetReconcileCounters();
-
-    // RESYNC1: manual Force Resync — snaps the local prediction (tile, step-seq, render) onto the last
-    // server-confirmed position and clears any in-flight/banked-but-unconfirmed state so nothing stale replays
-    // forward. The reusable resync primitive the auto-tiers (UO5 tier-2, NET4 tier-3) will call; here it is wired
-    // to the F6 "Force Resync" button and the Alt+R hotkey. USER-TRIGGERED only — it changes nothing unless
-    // called, so the normal Tick/Reconcile movement path is untouched. No-op (safe) when no predictor is attached
-    // or the prediction is already in sync. Pass-through mirrors ResetReconcileCounters (DIAG1).
-    public void ForceResync() => _predictor?.ForceResync();
 
     // Client-side mirror of the owner's private inventory, updated by InventoryUpdate deltas. Read-only
     // view for the renderer; the server stays authoritative (each delta sets the new total).
@@ -365,7 +304,7 @@ public sealed class MmoClient : IDisposable
 
     public IReadOnlyList<EntityRenderState> GetRenderStates(TimeSpan now)
     {
-        return _entities.Values.Select(entity => entity.ToRenderState(now)).ToArray();
+        return _entities.Values.Select(entity => entity.ToRenderState(now, LocalRenderOverride(entity))).ToArray();
     }
 
     public void CopyRenderStatesTo(ICollection<EntityRenderState> destination, TimeSpan now)
@@ -373,9 +312,18 @@ public sealed class MmoClient : IDisposable
         destination.Clear();
         foreach (var entity in _entities.Values)
         {
-            destination.Add(entity.ToRenderState(now));
+            destination.Add(entity.ToRenderState(now, LocalRenderOverride(entity)));
         }
     }
+
+    // CONTINUOUS MIGRATION (Phase 4): the predicted RENDER position for the LOCAL player when a predictor is attached,
+    // else null (raw render). The predictor lives on this outer class, so the render-state builders inject its smooth
+    // RenderX/RenderY here; ClientEntity.ToRenderState applies it only to the local entity and only for the rendered
+    // Position (the confirmed Tile stays authoritative for targeting — S53 invariant).
+    private RenderPosition? LocalRenderOverride(ClientEntity entity) =>
+        entity.IsLocal && _predictor is { } predictor
+            ? new RenderPosition(predictor.RenderX, predictor.RenderY)
+            : null;
 
     public bool TryGetEntity(uint networkId, out ReplicatedEntity entity)
     {
@@ -425,46 +373,41 @@ public sealed class MmoClient : IDisposable
             _latency.FlushOutboundDue(now, SendNow);
         }
 
-        // CONTINUOUS MIGRATION (Phase 3, v36): the local-player predictor is UNWIRED (Phase 4 re-adds it). The client
-        // renders the RAW decoded server position every frame (crude/laggy under latency, EXPECTED). Nothing more to
-        // drive here per poll — input is sent per-frame by the caller via SendMoveIntent, and the render reads the
-        // latest snapshot position directly. The LocalPlayerPredictor class is left compiled-but-unwired (never attached).
+        // CONTINUOUS MIGRATION (Phase 4): the per-frame predict + AdvanceRender are driven by the Godot caller on the
+        // input/render path (PredictAndSendMove mints/sends the input and integrates the predicted present;
+        // AdvanceRender once/frame decays the cosmetic render offset). Reconcile happens on snapshot apply. Nothing
+        // extra to drive here per poll.
     }
 
-    // CONTINUOUS MIGRATION (Phase 3, v36): kept for the Godot panel toggle that still references it. Prediction is
-    // UNWIRED in Phase 3 (the predictor is never attached), so this is now a stored flag with no effect until Phase 4
-    // re-wires the predictor. Setting it neither attaches nor detaches anything this phase.
+    // CONTINUOUS MIGRATION (Phase 4): live A/B raw-vs-predicted lever (F5 checkbox). When flipped OFF we null the
+    // predictor so the local player renders the RAW confirmed position; EnsurePredictor re-attaches a fresh predictor
+    // (anchored to the current confirmed position) on the next snapshot when flipped back ON. A runtime in-client
+    // toggle (project rule: diagnostics are live toggles, never launch flags).
     public bool PredictionEnabled
     {
         get => _predictionEnabled;
-        set => _predictionEnabled = value;
+        set
+        {
+            if (_predictionEnabled == value)
+            {
+                return;
+            }
+
+            _predictionEnabled = value;
+            if (!value)
+            {
+                // OFF: drop the predictor so the render reverts to raw immediately. EnsurePredictor is a no-op while
+                // disabled, and re-attaches on the next snapshot once re-enabled.
+                _predictor = null;
+            }
+            else
+            {
+                // ON: attach now if we already have everything (local entity + zone + radius); else the next snapshot
+                // attaches it via EnsurePredictor.
+                EnsurePredictor();
+            }
+        }
     }
-
-    // UO4: whether the predictor settles-then-goes on a ~180° reversal (F6 "Stop on reversal"). Reflects the value
-    // last set (seeded into the F6 toggle on panel open). Read by the predictor (the sole local-player render path).
-    public bool StopOnReversal => _stopOnReversal;
-
-    // UO4: live-toggles the predictor's stop-on-reversal (settle-then-go) behaviour. Routed to the active predictor
-    // immediately (no restart); stored at the client level so a value set before attach / after a respawn is
-    // re-applied by EnsurePredictor. No-op safe when no predictor yet.
-    public void SetStopOnReversal(bool enabled)
-    {
-        _stopOnReversal = enabled;
-        _predictor?.SetStopOnReversal(enabled);
-    }
-
-    // The predicted local-player tile (S53), or null when prediction is inactive. This is the snappy,
-    // ahead-of-confirmation position used for MOVEMENT rendering only. Harvest/interact targeting must use
-    // LocalTile (the server-confirmed tile) instead — prediction must never authorize an interaction the
-    // server will reject from its authoritative position.
-    public TileCoord? PredictedLocalTile => _predictor?.PredictedTile;
-
-    // S79 diagnostic accessor: the local player's predicted tile when prediction is active, else the
-    // confirmed/server tile. Unlike PredictedLocalTile (which is null whenever no predictor is attached),
-    // this always yields a usable tile once the local entity exists, so the F5 "Prediction tiles" overlay
-    // can paint the predicted marker without special-casing the pre-prediction path — when prediction is
-    // off/not yet attached the predicted marker simply coincides with the confirmed one.
-    public TileCoord? LocalPredictedTile => _predictor?.PredictedTile ?? LocalTile;
 
     public void Disconnect()
     {
@@ -484,31 +427,46 @@ public sealed class MmoClient : IDisposable
         _serverPeer = null;
     }
 
-    // CONTINUOUS MIGRATION (Phase 3, v36): send ONE per-input continuous MoveIntent — the raw world-axis direction
-    // (DirX/DirY; a zero vector is STOP) and the frame's dt. The caller (MmoClientRoot.SendHeldMovement) drives this
-    // once PER RENDER FRAME with that frame's delta. The Phase-3 client does NOT predict — it renders the raw decoded
-    // server position (crude/laggy under latency, EXPECTED; Phase 4 adds the predictor back, additively). The server
-    // integrates each fresh input by its dt on the receive path. Sent UNRELIABLE-sequenced (latest frame wins).
-    // Returns the input seq sent (for tests / diagnostics).
-    public uint SendMoveIntent(float dirX, float dirY, float dtSeconds)
+    // CONTINUOUS MIGRATION (Phase 4): the predictor MINTS the seq (PredictAndBuffer) then we Send the MoveIntent with
+    // that SAME seq — sent == buffered. When no predictor is attached yet (pre-spawn) we fall back to a local counter so
+    // the pre-spawn send path still works. AdvanceRender is driven once/frame by the caller (Poll path), not here.
+    //
+    // The raw world-axis direction (DirX/DirY; a zero vector is STOP) + the frame's dt. The caller drives this once PER
+    // RENDER FRAME with that frame's delta (already clamped to 0.25 caller-side). PredictAndBuffer re-clamps to the
+    // shared MaxInputDtSeconds and BUFFERS the clamped dt (buffered == sent == server-integrated). We Send the dt
+    // AS-IS (the server re-clamps too). When prediction is DISABLED we do NOT predict (so the render stays raw, A/B
+    // lever) but still send via the fallback counter. Sent UNRELIABLE (latest frame wins). Returns the seq sent.
+    public uint PredictAndSendMove(float dirX, float dirY, float dtSeconds)
     {
-        var sequence = ++_moveSequence;
-        Send(new MoveIntentMessage(sequence, dirX, dirY, dtSeconds), DeliveryMethod.Unreliable);
-        return sequence;
+        uint seq;
+        if (_predictionEnabled && _predictor is { } predictor)
+        {
+            // The predictor integrates the predicted present immediately (zero latency) and returns the monotonic
+            // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile.
+            seq = predictor.PredictAndBuffer(dirX, dirY, dtSeconds);
+        }
+        else
+        {
+            // Pre-spawn / prediction-off: nothing to predict — fall back to a local monotonic counter so the send
+            // path still stamps a seq.
+            seq = ++_preSpawnMoveSeq;
+        }
+
+        Send(new MoveIntentMessage(seq, dirX, dirY, dtSeconds), DeliveryMethod.Unreliable);
+        return seq;
     }
 
-    // S81: resolves the server tick interval in ms (1000 / TickRate) — the unit of the predictor's tick-grid
-    // gate. Falls back to 50 ms (20 Hz, the ServerOptions default) until ServerHello lands. The predictor maps
-    // wall-clock to serverTick at this granularity and derives its integer step/turn tick counts from it.
-    private double ResolveTickMs()
+    // CONTINUOUS MIGRATION (Phase 4): advance the predictor's cosmetic render catch-up once per render frame (decays
+    // the correction offset toward zero so a reconcile correction slides on smoothly). Driven by the Godot caller
+    // exactly ONCE per frame. No-op when no predictor is attached (pre-spawn / prediction off).
+    public void AdvanceRender(double frameDtSeconds)
     {
-        var tickRate = Server?.TickRate ?? 20;
-        return tickRate > 0 ? 1000d / tickRate : 50d;
+        _predictor?.AdvanceRender(frameDtSeconds);
     }
 
     // Drops the local entity reference and its predictor (local despawn / AOI exit / logout). Nulling the
-    // predictor lets EnsurePredictor re-attach a fresh one (anchored to the new confirmed tile) when the
-    // local entity respawns, so a stale predictor never drives a removed entity's interpolator (S47b guard).
+    // predictor lets EnsurePredictor re-attach a fresh one (anchored to the new confirmed position) when the
+    // local entity respawns, so a stale predictor never drives a removed entity (S47b guard).
     private void ClearLocalEntity()
     {
         LocalNetworkId = null;
@@ -518,16 +476,52 @@ public sealed class MmoClient : IDisposable
         LocalStats = null;
     }
 
-    // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
-    // tile is walkable iff it is in bounds and not blocked, so prediction and the server agree on every step
-    // except timing.
-    private bool IsWalkableForPrediction(TileCoord tile)
+    // CONTINUOUS MIGRATION (Phase 4): attach a fresh continuous predictor for the LOCAL player when one isn't already
+    // attached, anchored to the local entity's CURRENT confirmed Position. Idempotent (no-op if already attached) and
+    // guarded so it only attaches once prediction is enabled AND we have everything the predictor needs to stay
+    // deterministic with the server: the local entity (start position + speed), the zone (blocked map for collision),
+    // and the server body radius (replicated on ServerHello). Called at the lifecycle seams — after the local entity
+    // is upserted/spawned and at the end of ApplySnapshot — so a respawn / AOI re-entry (which nulls the predictor via
+    // ClearLocalEntity) re-attaches to the fresh confirmed position (the S47b-class guard).
+    private void EnsurePredictor()
     {
-        var zone = Zone;
-        return zone is not null
-            && tile.X >= 0 && tile.X < zone.Width
-            && tile.Y >= 0 && tile.Y < zone.Height
-            && !zone.IsBlocked(tile);
+        if (_predictor is not null
+            || !_predictionEnabled
+            || Zone is null
+            || Server is null
+            || LocalNetworkId is not { } localId
+            || !_entities.TryGetValue(localId, out var localEntity))
+        {
+            return;
+        }
+
+        _predictor = new ContinuousPredictor(
+            DerivePredictorSpeed(localEntity),
+            localEntity.Position.X,
+            localEntity.Position.Y,
+            Zone.BlockedTiles,
+            Server.BodyRadiusUnits);
+    }
+
+    // CONTINUOUS MIGRATION (Phase 4): derive the predictor integrate speed (units/sec) from the entity's tick-quantized
+    // effective cadence — speed = 1000 / EffectiveStepCooldownMs. EXACT at multiplier 1.0; the fractional-multiplier
+    // residual is bounded by one tick-quant and absorbed by the reconcile budget (documented accepted mispredict).
+    // Matches the server's BaseMoveSpeedUnitsPerSecond = 1000/StepCooldownMs derivation at multiplier 1.0.
+    private double DerivePredictorSpeed(ClientEntity entity)
+    {
+        var cadenceMs = ResolveCadence(entity.StepCooldownMs);
+        return cadenceMs > 0d ? 1000d / cadenceMs : 0d;
+    }
+
+    // CONTINUOUS MIGRATION (Phase 4): reconcile the local predictor against the just-applied confirmed state — snap
+    // the replay base to the server's authoritative Position and drop/replay the unacked input buffer against the
+    // latest integrated input seq (stashed in _lastInputSeq off the snapshot header). Called from BOTH ApplySnapshot
+    // paths: the in-snapshot path (local entity present in the payload while moving) AND the delta'd-out path (an idle
+    // local player is absent from the payload but the header still rides LastInputSeq — without this the prediction
+    // never re-anchors at rest). No-op when no predictor is attached.
+    private void ReconcileLocalPredictor(ClientEntity localEntity)
+    {
+        _predictor?.Reconcile(localEntity.Position, _lastInputSeq);
     }
 
     public void SendChat(string text)
@@ -554,16 +548,12 @@ public sealed class MmoClient : IDisposable
     {
         var sequence = ++_attackSeq;
 
-        // SWING-COMMIT-FIX: stamp the swing with an AUTHORED TICK — the predictor's monotonic-clamped estimate of the
-        // current server tick (the SAME EstimateServerTick the NET3 step-commit path uses). This is the tick the
-        // predictor will root its OWN movement on, and the server will root the attacker's movement at this SAME
-        // authored tick (clamped to a window around its receive tick) instead of its receive tick — so under latency
-        // the two root windows are identical and the predictor never steps where the server rejects (the
-        // swing-then-move rubberband the receive-tick anchor caused). No predictor (pre-spawn) => authored tick 0;
-        // the server still roots authoritatively (clamped up into its past window) and there is no prediction to
-        // disagree with it.
-        var authoredTick = _predictor is { } p ? (uint)Math.Max(0, p.EstimateServerTick(_currentTime)) : 0u;
-        Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle, authoredTick), DeliveryMethod.ReliableOrdered);
+        // CONTINUOUS MIGRATION (Phase 4): the continuous predictor has NO server-tick estimator and NO swing-root —
+        // it reconciles every snapshot, so the client does NOT predict the attack-movement root this phase. Send
+        // authoredTick = 0; the server still roots the attacker's movement authoritatively (clamped into its receive
+        // window) and the predictor's reconcile absorbs any brief root mismatch. (The tile-predictor's
+        // EstimateServerTick / ApplyAttackMovementRootAt swing-root mirror was deleted with LocalPlayerPredictor.)
+        Send(new AttackMessage(sequence, AttackKind.MeleeCone, aimAngle, AuthoredTick: 0u), DeliveryMethod.ReliableOrdered);
 
         // COMBAT-TUNING (radial cooldown): record this swing's send time + the cooldown duration in effect now (the
         // replicated attackCooldownMs, falling back to the shared default before the first snapshot) so the HUD's
@@ -571,20 +561,6 @@ public sealed class MmoClient : IDisposable
         // the server stays authoritative for whether the attack actually resolved.
         _lastAttackSentAt = _currentTime;
         _lastAttackCooldownMs = CombatTuning?.AttackCooldownMs ?? DefaultAttackCooldownMs;
-
-        // SWING-COMMIT (predictor mirror): the local player just committed a swing, so root the predicted movement
-        // IDENTICALLY to the server's WorldEntity.ApplyAttackMovementRoot (driven from GameServer.HandleAttack). We
-        // compute rootTicks from the SAME Mmo.Shared.Domain.CombatTuning source the server uses, off the predictor's
-        // tick interval AND the LIVE replicated rootMs (combat.rootMs) — so steady-state both sides root for the
-        // identical window. Falls back to the shared default rootMs before the first snapshot. Anchored on the SAME
-        // authoredTick we put on the wire (not a re-estimate). No predictor => nothing to root; the server still roots.
-        if (_predictor is { } predictor)
-        {
-            var rootMs = CombatTuning?.RootMs ?? Mmo.Shared.Domain.CombatTuning.MovementRootMs;
-            predictor.ApplyAttackMovementRootAt(
-                authoredTick,
-                Mmo.Shared.Domain.CombatTuning.RootTicksFromTickMs(predictor.TickMs, rootMs));
-        }
 
         return sequence;
     }
@@ -893,12 +869,12 @@ public sealed class MmoClient : IDisposable
 
     private void HandleServerHello(ServerHelloMessage hello)
     {
-        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles);
+        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles, hello.BodyRadiusUnits);
         RefreshInterpolatorCadence();
-        // S81: adopt the advertised tick interval if the predictor is already attached (ServerHello can arrive
-        // after the local entity spawned in a re-hello). New predictors seed it via EnsurePredictor.
-        _entities.TryGetValue(LocalNetworkId ?? 0, out var local);
-        local?.SetPredictorTickMs(ResolveTickMs());
+        // CONTINUOUS MIGRATION (Phase 4): ServerHello now carries the body radius the predictor needs. If the local
+        // entity already exists (a re-hello after spawn), attach the predictor now that Server (radius) is known;
+        // EnsurePredictor is idempotent and no-ops until the local entity + zone are also present.
+        EnsurePredictor();
     }
 
     // DIAG1/NET5: records one applied-snapshot arrival timestamp into the trailing-window ring (the `recv/s`
@@ -1027,18 +1003,24 @@ public sealed class MmoClient : IDisposable
                     confirmation.EffectiveCadenceMs,
                     confirmation.RenderPosition);
             }
+
+            // CONTINUOUS MIGRATION (Phase 4): the LOCAL player reconciles the predictor against its freshly-confirmed
+            // Position + the snapshot's LastInputSeq (in-snapshot path — local player present while moving).
+            if (entity.IsLocal)
+            {
+                ReconcileLocalPredictor(entity);
+            }
         }
 
-        // S84: the local player must reconcile on EVERY snapshot, even when it is delta'd out of the entity
-        // list. The server delta-compresses (re-sends an entity only while its StateRevision changes), so an
-        // IDLE local player is absent from the payload — but the header still rides RecipientStepSeq + ServerTick
-        // (S76) for exactly this. Without re-running calibrate+reconcile here, any over-prediction left by a turn
-        // spam latches at rest and never closes (the "static, gap won't close" symptom). We re-apply the entity's
-        // CURRENT (last-known, unchanged) Tile/Facing — NOT a fabricated move; the confirmed position is genuinely
-        // unchanged (that's why it was delta'd out) — so CalibrateToServerTick keeps tracking the server clock and
-        // Reconcile re-anchors the prediction to truth while idle (converging down to the confirmed tile at rest).
-        // Only the delta'd-out case is affected; while moving the local player is in every snapshot and takes the
-        // in-snapshot path above unchanged.
+        // S84 / CONTINUOUS MIGRATION (Phase 4): the local player must reconcile on EVERY snapshot, even when it is
+        // delta'd out of the entity list. The server delta-compresses (re-sends an entity only while its StateRevision
+        // changes), so an IDLE local player is absent from the payload — but the header still rides LastInputSeq for
+        // exactly this. Without re-running reconcile here, any residual over-prediction latches at rest and never
+        // closes. We re-apply the entity's CURRENT (last-known, unchanged) Position/Facing — NOT a fabricated move;
+        // the confirmed position is genuinely unchanged (that's why it was delta'd out) — then ReconcileLocalPredictor
+        // re-anchors the prediction to truth while idle (converging down to the confirmed position at rest). Only the
+        // delta'd-out case is affected; while moving the local player is in every snapshot and takes the in-snapshot
+        // path above unchanged.
         if (LocalNetworkId is { } localId
             && !_snapshotVisibleScratch.Contains(localId)
             && _entities.TryGetValue(localId, out var localEntity))
@@ -1053,6 +1035,11 @@ public sealed class MmoClient : IDisposable
                 localEntity.Depleted,
                 localEntity.Health,
                 localEntity.MaxHealth);
+
+            // CONTINUOUS MIGRATION (Phase 4): an IDLE local player is delta'd out of the payload but still reconciles
+            // on the header (LastInputSeq) so any residual over-prediction converges down to the confirmed position at
+            // rest. Mirrors the in-snapshot reconcile above.
+            ReconcileLocalPredictor(localEntity);
         }
 
         if (isComplete)
@@ -1089,6 +1076,13 @@ public sealed class MmoClient : IDisposable
         // mirroring it here makes the HUD's current HP track damage live; MaxHealth/mana/stamina still come from
         // PlayerStatsMessage. Done after the snapshot is fully applied so the local entity's Health is the latest.
         SyncLocalStatsHealthFromSnapshot();
+
+        // CONTINUOUS MIGRATION (Phase 4): attach the local predictor once the local entity + zone + radius are all
+        // known (idempotent). Placed at the end of ApplySnapshot so a respawn / AOI re-entry that re-created the local
+        // entity this snapshot re-attaches a fresh predictor anchored to the confirmed Position. If it attaches THIS
+        // snapshot, the freshly-anchored predictor already sits on truth, so missing this snapshot's reconcile is a
+        // no-op; subsequent snapshots reconcile normally.
+        EnsurePredictor();
 
         _lastAppliedSnapshotSequence = sequence;
     }
@@ -1192,6 +1186,9 @@ public sealed class MmoClient : IDisposable
             if (isLocal)
             {
                 LocalNetworkId = networkId;
+                // CONTINUOUS MIGRATION (Phase 4): attach the predictor on the spawn/upsert seam too (idempotent), so an
+                // EntitySpawn that arrives before a snapshot anchors the predictor to the confirmed position.
+                EnsurePredictor();
             }
 
             return existing;
@@ -1218,6 +1215,9 @@ public sealed class MmoClient : IDisposable
         if (isLocal)
         {
             LocalNetworkId = networkId;
+            // CONTINUOUS MIGRATION (Phase 4): attach the predictor as soon as the local entity exists (idempotent;
+            // no-op until zone + radius are also known). The end-of-ApplySnapshot EnsurePredictor covers the rest.
+            EnsurePredictor();
         }
 
         return entity;
@@ -1234,6 +1234,14 @@ public sealed class MmoClient : IDisposable
         ushort? cooldown = speed.StepCooldownMs > 0 ? speed.StepCooldownMs : null;
         var speedCadence = ResolveCadence(cooldown);
         entity.SetStepCooldownMs(cooldown, speedCadence, ResolveInterpolationDelay(speedCadence, entity.IsLocal));
+
+        // CONTINUOUS MIGRATION (Phase 4): live-retune the LOCAL predictor's integrate speed to track the server's new
+        // SpeedUnitsPerSecond (derived from the just-updated effective cadence). Mirrors the server adopting the new
+        // speed on its next input; only future predicted frames/replays use it (no re-base).
+        if (entity.NetworkId == LocalNetworkId && _predictor is { } predictor)
+        {
+            predictor.SetSpeed(DerivePredictorSpeed(entity));
+        }
     }
 
     // Resolves the tween step duration (ms) for a given per-entity cooldown: the entity's own advertised
@@ -1389,11 +1397,6 @@ public sealed class MmoClient : IDisposable
         // the placeholder's interpolator currently rests on, so the hand-off doesn't snap).
         private MonsterHopInterpolator? _hop;
         private double _hopDurationMs;
-        // S53: non-null only for the local player while prediction is active. When present, the predictor
-        // OWNS the render position via its own present-time step-tween (the buffered _interpolator — which
-        // renders confirmed state in the past for jitter smoothing — is bypassed for the local player, the
-        // attempt-1 rubber-band fix). Snapshots re-base the predictor instead of confirming the interpolator.
-        private LocalPlayerPredictor? _predictor;
 
         public ClientEntity(
             uint networkId,
@@ -1504,32 +1507,12 @@ public sealed class MmoClient : IDisposable
             Health = health;
             MaxHealth = maxHealth;
             LastSeenSnapshotSequence = snapshotSequence;
-            if (_predictor is not null)
-            {
-                // S81: re-anchor the predictor's wall-clock -> serverTick calibration to this snapshot's
-                // authoritative tick (smoothed/clamped internally so jitter can't jump the grid) BEFORE
-                // reconciling, so the gate runs on the server's true tick phase. Only when a real snapshot tick
-                // is available (the EntitySpawn path passes null).
-                if (serverTick.HasValue)
-                {
-                    _predictor.CalibrateToServerTick(serverTick.Value, receivedAt);
-                }
-
-                // Local predicted entity: re-base the prediction off the confirmed tile, matched by the
-                // recipient-scoped step sequence (S77) so a benign trailing/old-direction confirm is recognised
-                // by the step it confirms instead of being yanked backward. The predictor owns its own
-                // present-time render tween (the buffered interpolator is bypassed here). Facing follows the
-                // prediction while moving, else the confirmed facing.
-                _predictor.Reconcile(tile, recipientStepSeq, receivedAt);
-                _predictor.ConfirmFacing(facing);
-                Facing = _predictor.Facing;
-                return new EntityConfirmationDebug(
-                    tile != previousTile,
-                    0,
-                    _predictor.CadenceMs,
-                    _predictor.RenderPosition);
-            }
-
+            // CONTINUOUS MIGRATION (Phase 4): the LOCAL predictor lives on the OUTER MmoClient (continuous), not here.
+            // ClientEntity always tracks the SERVER-CONFIRMED state — the outer class reconciles the predictor against
+            // this confirmed Position and overrides only the RENDERED local position. recipientStepSeq/serverTick are
+            // no longer consumed by a tile predictor here (kept on the signature for the trace/hop/interp callers).
+            _ = recipientStepSeq;
+            _ = serverTick;
             Facing = facing;
             // MONSTER-HOP: a monster confirms onto the hop driver (rest-on-latest-tile + arc), never the buffered
             // interpolator — so it tracks its authoritative tile with no playout delay. Everything else interpolates.
@@ -1549,22 +1532,6 @@ public sealed class MmoClient : IDisposable
                 _interpolator.QueueDepth,
                 _interpolator.StepDurationMs,
                 _interpolator.RenderPosition);
-        }
-
-        // S53: attaches a local-player predictor that takes over the render position with its own present-time
-        // step-tween (the buffered interpolator is bypassed for the local player). Anchored to the current
-        // confirmed tile + facing. Returns the predictor so the client can feed it held intent and tick it.
-        // Idempotent: returns the existing one if already set.
-        public LocalPlayerPredictor AttachPredictor(double cadenceMs, Func<TileCoord, bool> isWalkable, double tickMs)
-        {
-            _predictor ??= new LocalPlayerPredictor(Tile, Facing, cadenceMs, isWalkable, tickMs);
-            return _predictor;
-        }
-
-        // S81: live-sets the predictor's server tick interval (ServerHello TickRate). No-op if no predictor.
-        public void SetPredictorTickMs(double tickMs)
-        {
-            _predictor?.SetTickMs(tickMs);
         }
 
         public void UpdateInterpolationCadence(double stepDurationMs, double interpolationDelayMs)
@@ -1589,9 +1556,8 @@ public sealed class MmoClient : IDisposable
         {
             StepCooldownMs = stepCooldownMs;
             _interpolator.UpdateCadence(cadenceMs, interpolationDelayMs);
-            // S53: adopt the new cadence for prediction immediately (mirrors the server applying the new
-            // EffectiveStepCooldown on MovementSpeedChanged) so predicted steps stay in lockstep.
-            _predictor?.SetCadence(cadenceMs);
+            // CONTINUOUS MIGRATION (Phase 4): the local predictor's speed retune lives on the OUTER MmoClient
+            // (HandleMovementSpeedChanged calls _predictor.SetSpeed), not here — ClientEntity no longer owns a predictor.
         }
 
         public ReplicatedEntity ToSnapshot()
@@ -1599,15 +1565,17 @@ public sealed class MmoClient : IDisposable
             return new ReplicatedEntity(NetworkId, CharacterId, Kind, DisplayName, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
         }
 
-        public EntityRenderState ToRenderState(TimeSpan now)
+        // CONTINUOUS MIGRATION (Phase 4): the LOCAL player renders the predictor's smooth RenderX/RenderY when a
+        // predictor is attached (passed in by the outer MmoClient as localOverride, since the predictor lives there).
+        // Remote players / monsters / resources still render RAW off the latest decoded CONTINUOUS server Position
+        // (Phase 5 re-adds remote smoothing). The AuthoritativeTile (Tile) ALWAYS stays the confirmed tile — targeting/
+        // harvest reads it and must NEVER see the predicted position (S53 invariant). Only the rendered Position moves.
+        public EntityRenderState ToRenderState(TimeSpan now, RenderPosition? localOverride = null)
         {
-            // CONTINUOUS MIGRATION (Phase 3, v36): RAW render — every entity (local player, remote players, monsters,
-            // resources) renders straight off its latest decoded CONTINUOUS server Position, no prediction/smoothing/
-            // interpolation/hop. This is crude/laggy under latency BY DESIGN (Phase 4 re-adds the local-player
-            // predictor; Phase 5 re-adds remote smoothing). The LocalPlayerPredictor / TileInterpolator /
-            // MonsterHopInterpolator are left compiled-but-unwired (constructed but never sampled) — `now` is unused.
             _ = now;
-            var position = RenderPosition.FromWorld(Position);
+            var position = IsLocal && localOverride.HasValue
+                ? localOverride.Value
+                : RenderPosition.FromWorld(Position);
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth, 0d);
         }
     }

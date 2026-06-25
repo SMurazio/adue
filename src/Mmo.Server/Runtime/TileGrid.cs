@@ -72,31 +72,17 @@ public sealed class TileGrid
     // outside the swept region is simply absent from `_blockedTiles`/out of range of the probe, and the perimeter
     // ring is always blocked anyway; probing a few out-of-bounds coords is a cheap Contains miss and keeps the box
     // math branch-simple (the resolver only ever sees in-set blocked tiles).
+    // CONTINUOUS MIGRATION (Phase 4): now a thin FORWARDER to the shared Mmo.Shared.Domain.TileWalls.NeighborhoodWallsForMove,
+    // which owns the swept-AABB box-math + wall derivation that formerly lived inline here. The extraction is byte-identical
+    // (a server-collision parity test asserts QueryNearbyWalls == NeighborhoodWallsForMove); the point is that the Phase-4
+    // client predictor calls the SAME shared helper against ZoneModel.BlockedTiles, so server and prediction derive an
+    // identical wall set from the same (blocked, start, delta, radius) — the determinism linchpin.
     public void QueryNearbyWalls(
         WorldVector start,
         WorldVector delta,
         double radius,
         List<ContinuousCollision.Wall> scratch)
     {
-        var endX = start.X + delta.X;
-        var endY = start.Y + delta.Y;
-
-        // Swept AABB of the body centre over the move, expanded by the radius on every side.
-        var minX = Math.Min(start.X, endX) - radius;
-        var maxX = Math.Max(start.X, endX) + radius;
-        var minY = Math.Min(start.Y, endY) - radius;
-        var maxY = Math.Max(start.Y, endY) + radius;
-
-        // Floor/ceil to the inclusive tile box. A tile (tx,ty) occupies [tx-0.5 .. tx+0.5]; a body AABB edge at world
-        // X overlaps tile column tx whenever tx-0.5 <= maxX and tx+0.5 >= minX, i.e. tx in [Round(minX)..Round(maxX)]
-        // — but to stay a conservative SUPERSET we floor the lower bound minus 0.5 and ceil the upper bound plus 0.5
-        // so any partially-overlapped tile is included. Using floor(minX) / ceil(maxX) over-covers by at most one
-        // tile each side, which the resolver harmlessly ignores.
-        var minTileX = (int)Math.Floor(minX);
-        var maxTileX = (int)Math.Ceiling(maxX);
-        var minTileY = (int)Math.Floor(minY);
-        var maxTileY = (int)Math.Ceiling(maxY);
-
-        TileWalls.NeighborhoodWalls(_blockedTiles, minTileX, minTileY, maxTileX, maxTileY, scratch);
+        TileWalls.NeighborhoodWallsForMove(_blockedTiles, start, delta, radius, scratch);
     }
 }
