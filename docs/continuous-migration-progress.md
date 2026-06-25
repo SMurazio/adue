@@ -35,7 +35,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | **IN PROGRESS** | plan: `docs/migration/phase-1-plan.md`; PLAYERS-only continuous (monsters tile-stepped till Phase 8), no collision till Phase 2, wire tile till Phase 3 |
 | 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | pending | depends 1 — proven in spike |
 | 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1 |
-| 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3 |
+| 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3. **MUST port the timing-faithful reconcile-harness rigor** (latency/jitter/drop, snapshot-vs-cadence mismatch) onto the continuous reconcile — the UO5/NET2/NET3 regression guard (`TimingFaithfulReconcileHarnessTests`/`TailLossResendHarnessTests`, deleted with the commit-step in Phase 1). Don't ship Phase 4 without it. |
 | 5 | Remote interpolation/extrapolation (port `RemoteContinuousEntity`); retire hop/TileInterpolator | pending | depends 3,4 |
 | 6 | AOI float retype | pending | depends 0 |
 | 7 | Combat: positional via FreeAimSector | pending | depends 0,2 |
@@ -57,3 +57,8 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   Shared 108 +15 WorldVector tests; godot-build clean). Independent reviewer verdict **SHIP** — all six axes clean
   (no test expected-value changed, integer math parity held, exact round-trip, dormancy confirmed, surfaces frozen,
   double). Phase 1 (server continuous integrator — the first real behavioral change) planning started.
+- **2026-06-25** — Phase 1 implemented + gated green + committed (`836befd`). Players integrate continuously
+  server-side; commit-step/client-driven machinery deleted; monsters + client + wire untouched. Fork resolved:
+  deleted 2 client-project commit-step harnesses (`TimingFaithfulReconcileHarnessTests`, `TailLossResendHarnessTests`
+  — they tested the deleted commit-step model); their timing-faithful regression-guard lesson re-targeted to Phase 4
+  (see the Phase 4 row). Gate: Shared 118 / Client.Core 209 / Server 304, godot-build clean. Independent review in flight.
