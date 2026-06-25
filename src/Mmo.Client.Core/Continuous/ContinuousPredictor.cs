@@ -92,18 +92,27 @@ public sealed class ContinuousPredictor
 
     private double _lastCorrectionUnits;
 
+    // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): the input seq is a SINGLE persistent monotonic counter
+    // owned by MmoClient, not per-predictor-instance — otherwise a mid-session re-attach (F5 prediction toggle,
+    // respawn, AOI re-entry) would build a FRESH predictor whose counter restarts at 0, mint 1,2,3… all <= the
+    // server's already-high acked cursor N, and have EVERY MoveIntent rejected (inputSeq <= _lastInputSeq) until the
+    // local counter climbed back past N — a multi-second freeze proportional to session length. `startInputSeq` seeds
+    // the new predictor from the client's high-water so the very next minted seq (++_nextInputSeq) is strictly above
+    // every previously-sent seq, hence above the server cursor → always accepted. First spawn passes 0 (cursor N=0).
     public ContinuousPredictor(
         double speed,
         double startX = 0d,
         double startY = 0d,
         IReadOnlySet<TileCoord>? blocked = null,
-        double radius = 0d)
+        double radius = 0d,
+        uint startInputSeq = 0u)
     {
         _speed = speed;
         _predictedX = _baseX = startX;
         _predictedY = _baseY = startY;
         _blocked = blocked;
         _radius = radius;
+        _nextInputSeq = startInputSeq;
     }
 
     // The predicted (truth-consistent) present position. Targeting/aim must NOT read this (it reads the confirmed
@@ -133,6 +142,11 @@ public sealed class ContinuousPredictor
 
     // The live integrate speed (units/sec).
     public double Speed => _speed;
+
+    // CONTINUOUS MIGRATION (Phase 4a): the highest input seq this predictor has minted so far (== the last value
+    // PredictAndBuffer returned, or the seeded startInputSeq before any mint). MmoClient reads this to keep its
+    // persistent high-water counter in sync, so a later re-attach seeds the next predictor strictly above it.
+    public uint LastMintedInputSeq => _nextInputSeq;
 
     // CONTINUOUS MIGRATION (Phase 4): live-update the integrate speed on a MovementSpeedChanged / spawn retune, so the
     // predicted integration keeps tracking the server's SpeedUnitsPerSecond. No re-base — only future frames/replays use

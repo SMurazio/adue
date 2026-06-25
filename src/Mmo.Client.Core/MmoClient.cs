@@ -119,11 +119,16 @@ public sealed class MmoClient : IDisposable
     private ContinuousPredictor? _predictor;
     private bool _predictionEnabled = true;
 
-    // CONTINUOUS MIGRATION (Phase 4): pre-spawn fallback MoveIntent seq counter. The predictor MINTS the input seq
-    // (PredictAndBuffer) once attached so sent == buffered; but before a predictor is attached (pre-spawn, or while
-    // prediction is toggled OFF) there is nothing to predict, so PredictAndSendMove falls back to ++this so the
-    // pre-spawn send path still stamps a monotonic seq on the wire.
-    private uint _preSpawnMoveSeq;
+    // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): the SINGLE persistent monotonic input-seq high-water for
+    // ALL movement — the source of truth that survives predictor re-attach (F5 prediction toggle, respawn, AOI
+    // re-entry — each nulls the predictor then rebuilds one) AND the prediction on/off toggle. Both the predictor path
+    // and the pre-spawn / prediction-off path mint from THIS, so a sent seq is ALWAYS strictly above every
+    // previously-sent seq, hence above the server's acked cursor (_lastInputSeq) → the server NEVER rejects a
+    // post-re-attach MoveIntent as a stale dup. (The bug it fixes: a fresh per-predictor counter restarted at 0 and
+    // minted 1,2,3… <= the server's already-high cursor N → every MoveIntent rejected until it climbed back past N → a
+    // multi-second rubberband/freeze proportional to session length.) EnsurePredictor SEEDS the new predictor from
+    // this; PredictAndSendMove updates this from the seq actually minted each frame (both paths).
+    private uint _inputSeqHighWater;
 
     // remote-interp-tighten Part A: a LIVE override (ms) for the remote jitter buffer, set by the F1 Movement-tab
     // "Remote interp buffer" knob so the user dials remote-render lag-vs-smoothness in-client with no restart. < 0
@@ -442,14 +447,17 @@ public sealed class MmoClient : IDisposable
         if (_predictionEnabled && _predictor is { } predictor)
         {
             // The predictor integrates the predicted present immediately (zero latency) and returns the monotonic
-            // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile.
+            // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile. The
+            // predictor was seeded from _inputSeqHighWater on attach (EnsurePredictor), so its minted seq is already
+            // above the high-water; capture it back so the next re-attach seeds above THIS seq (re-attach freeze fix).
             seq = predictor.PredictAndBuffer(dirX, dirY, dtSeconds);
+            _inputSeqHighWater = seq;
         }
         else
         {
-            // Pre-spawn / prediction-off: nothing to predict — fall back to a local monotonic counter so the send
-            // path still stamps a seq.
-            seq = ++_preSpawnMoveSeq;
+            // Pre-spawn / prediction-off: nothing to predict — mint the next seq off the SAME persistent high-water so
+            // a later predictor attach (EnsurePredictor) seeds strictly above it and the server never sees a stale dup.
+            seq = ++_inputSeqHighWater;
         }
 
         Send(new MoveIntentMessage(seq, dirX, dirY, dtSeconds), DeliveryMethod.Unreliable);
@@ -495,12 +503,17 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
+        // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): SEED the fresh predictor's input-seq counter from the
+        // client's persistent high-water so its first minted seq (++_nextInputSeq) is strictly above every
+        // previously-sent seq — hence above the server's acked cursor. Without this seed a mid-session re-attach
+        // restarts at 0 and the server rejects every MoveIntent until the counter climbs back past the cursor.
         _predictor = new ContinuousPredictor(
             DerivePredictorSpeed(localEntity),
             localEntity.Position.X,
             localEntity.Position.Y,
             Zone.BlockedTiles,
-            Server.BodyRadiusUnits);
+            Server.BodyRadiusUnits,
+            _inputSeqHighWater);
     }
 
     // CONTINUOUS MIGRATION (Phase 4): derive the predictor integrate speed (units/sec) from the entity's tick-quantized
