@@ -33,8 +33,8 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 |---|---|---|---|
 | 0 | Position type + speed stat; retype ~243 `.Tile` sites | ✅ **DONE** | `9fdc65a`; gate green (Server 329/Core 251 unchanged, Shared +15); independent review SHIP (clean behavior-frozen seam) |
 | 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | ✅ **DONE** | `836befd`; review SHIP-WITH-FOLLOWUPS; cosmetic followup #1 done (`f41b8cb`); #2 (dead ClientSession members) → Phase 3 |
-| 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | **IN PROGRESS** | plan: `docs/migration/phase-2-plan.md`; resolver→Mmo.Shared (Phase-4 determinism); client already regenerates the blocked set (no map payload); per-tile AABBs + swept-neighborhood query |
-| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1. Also delete dead `ClientSession` commit members (`ClientDrivenMovement`/`SetClientDrivenMovement`/`TryConsumeCommitSequence`/`LastCommitSeq`) — Phase 1 review followup #2 |
+| 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | ✅ **DONE** | `14c7fbe`; review SHIP (clean deterministic port — byte-identity verified for Phase-4 reuse; superset query, scope held) |
+| 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | **PLANNING** | depends 0,1. The R4 convergence: per-input seq+dt MoveIntent (the experiment model) so Phase-4 predict reconciles deterministically. Also delete dead `ClientSession` commit members (Phase 1 followup #2) |
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3. **MUST port the timing-faithful reconcile-harness rigor** (latency/jitter/drop, snapshot-vs-cadence mismatch) onto the continuous reconcile — the UO5/NET2/NET3 regression guard (`TimingFaithfulReconcileHarnessTests`/`TailLossResendHarnessTests`, deleted with the commit-step in Phase 1). Don't ship Phase 4 without it. |
 | 5 | Remote interpolation/extrapolation (port `RemoteContinuousEntity`); retire hop/TileInterpolator | pending | depends 3,4 |
 | 6 | AOI float retype | pending | depends 0 |
@@ -68,3 +68,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   anti-speedhack intrinsic. Followup #1 (stale dormant-speed comments + `RefreshDormantSpeedStat`→`RefreshSpeedStat`)
   done in `f41b8cb`. Followup #2 (dead `ClientSession` commit members) deferred to Phase 3 wire cleanup. Phase 2
   (collision) planning started.
+- **2026-06-25** — **Phase 2 SHIPPED** (`14c7fbe`). Review verdict SHIP — clean deterministic resolver port to
+  `Mmo.Shared` (line-by-line vs the spike: substeps/passes/epsilons/X-tie-break verbatim, Z→Y complete), byte-identity
+  verified (the `IReadOnlyList` change is safe; row-major positional wall order, never HashSet iteration), the
+  swept-neighborhood query is a strict superset (no tunnel), wall-block flip pinned, monsters/client/wire untouched.
+  **Server-side continuous foundation complete (position + integrator + collision, all green + independently reviewed).**
+  Phase 3 (the protocol-major wire break) planning started.
