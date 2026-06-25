@@ -31,8 +31,8 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 0 | Position type + speed stat; retype ~243 `.Tile` sites | **IN PROGRESS** | plan: `docs/migration/phase-0-plan.md`; behavior-frozen tile-center retype |
-| 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | pending | depends 0 |
+| 0 | Position type + speed stat; retype ~243 `.Tile` sites | ✅ **DONE** | `9fdc65a`; gate green (Server 329/Core 251 unchanged, Shared +15); independent review SHIP (clean behavior-frozen seam) |
+| 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | **PLANNING** | depends 0; first behavioral change (movement goes continuous server-side; wire still tile until Phase 3) |
 | 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | pending | depends 1 — proven in spike |
 | 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1 |
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | pending | depends 1,3 |
@@ -53,3 +53,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
   (roadmap was wrong) — Phase 0 creates it as `record struct(double X, double Y)` (double, to match the proven
   experiment's determinism; NOT the roadmap's float). Phase 0 = behavior-frozen tile-center-valued retype; existing
   tests stay green via accessor-rename only. Implementation started.
+- **2026-06-25** — **Phase 0 SHIPPED** (`9fdc65a`). Gate green (build OK; Server 329 / Client.Core 251 unchanged;
+  Shared 108 +15 WorldVector tests; godot-build clean). Independent reviewer verdict **SHIP** — all six axes clean
+  (no test expected-value changed, integer math parity held, exact round-trip, dormancy confirmed, surfaces frozen,
+  double). Phase 1 (server continuous integrator — the first real behavioral change) planning started.
