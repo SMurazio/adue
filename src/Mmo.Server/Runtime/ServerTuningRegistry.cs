@@ -37,9 +37,8 @@ public static class ServerTuningRegistry
     // deadline). Bounded so a typo can't make corpses vanish instantly or linger for an hour.
     public const string CorpseDecayMsKey = "loot.corpseDecayMs";
 
-    // Phase 0 (continuous migration): the DORMANT base move speed in tiles/sec. Registered as a live knob so the
-    // extension surface is complete, but READ BY NOTHING in Phase 0 (the cooldown path still drives movement) —
-    // it only becomes live when Phase 1's integrator consumes the per-entity SpeedUnitsPerSecond derived from it.
+    // The base move speed in tiles/sec, a live knob. LIVE since Phase 1: the player integrator consumes the
+    // per-entity SpeedUnitsPerSecond derived from it (= base × SpeedMultiplier). Monsters still tile-step (Phase 8).
     public const string BaseMoveSpeedUnitsPerSecondKey = "continuous.baseMoveSpeed";
 
     // LIVING-ENEMIES P2-POLISH: the former global monster.* tuning keys (P1 roam + P2 aggro/chase/attack) were
@@ -76,8 +75,8 @@ public static class ServerTuningRegistry
     // a moment; ceil at 30 min so a typo can't strand corpses cluttering the world forever.
     private const int MinCorpseDecayMs = 1000;
     private const int MaxCorpseDecayMs = 1800000;
-    // Phase 0 dormant base move speed: 0.1 .. 100 tiles/sec. Wide enough to sweep once Phase 1 reads it, bounded
-    // so a typo can't store a degenerate value. > 0 always (a 0 speed would freeze the Phase 1 integrator).
+    // Base move speed bounds: 0.1 .. 100 tiles/sec. Wide enough to sweep, bounded so a typo can't store a
+    // degenerate value. > 0 always (a 0 speed would freeze the player integrator).
     private const double MinBaseMoveSpeedUnitsPerSecond = 0.1d;
     private const double MaxBaseMoveSpeedUnitsPerSecond = 100d;
 

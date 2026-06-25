@@ -531,8 +531,8 @@ public sealed class GameServer
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current, inventory);
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
-                        // Phase 0: seed the player's dormant tiles/sec speed stat (read by nothing yet).
-                        RefreshDormantSpeedStat(entity);
+                        // Seed the player's tiles/sec speed stat — LIVE in Phase 1 (the integrator reads it).
+                        RefreshSpeedStat(entity);
                         _metrics.RecordLogin(true, Stopwatch.GetElapsedTime(loginStartedAt));
                         TrySend(peer, new LoginResultMessage(true, character.CharacterId, character.DisplayName, role, entity.TileCoord, ""), DeliveryMethod.ReliableOrdered);
                         TrySend(peer, CreateZoneInfoMessage(), DeliveryMethod.ReliableOrdered);
@@ -1789,8 +1789,8 @@ public sealed class GameServer
         }
 
         var changed = entity.TrySetSpeedMultiplier(multiplier);
-        // Phase 0: keep the dormant tiles/sec stat tracking the multiplier (read by nothing yet).
-        RefreshDormantSpeedStat(entity);
+        // Keep the player's tiles/sec speed stat tracking the multiplier — LIVE in Phase 1 (the integrator reads it).
+        RefreshSpeedStat(entity);
         var effectiveMs = EffectiveStepCooldownMs(entity);
         if (changed)
         {
@@ -1864,8 +1864,8 @@ public sealed class GameServer
         // type for the AI step.
         monster.SetMaxHealthFull(type.MaxHealth);
         monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
-        // Phase 0: seed the dormant tiles/sec stat from the monster's type multiplier (read by nothing yet).
-        RefreshDormantSpeedStat(monster);
+        // Seed the monster's tiles/sec speed stat from its type multiplier — still dormant for monsters (they tile-step until Phase 8).
+        RefreshSpeedStat(monster);
         _monsterTypeOf[monster.Id] = type;
 
         // Register with the roam AI: the spawner tile is the leash home; start Idle with an initial randomized pause,
@@ -2157,8 +2157,8 @@ public sealed class GameServer
 
             if (entity.TrySetSpeedMultiplier(editedType.MoveSpeedMultiplier))
             {
-                // Phase 0: keep the dormant tiles/sec stat tracking the retuned multiplier (read by nothing yet).
-                RefreshDormantSpeedStat(entity);
+                // Keep the tiles/sec speed stat tracking the retuned multiplier — LIVE for players in Phase 1.
+                RefreshSpeedStat(entity);
                 BroadcastMovementSpeedChanged(entity, EffectiveStepCooldownMs(entity));
             }
         }
@@ -2611,7 +2611,7 @@ public sealed class GameServer
     // 1000/StepCooldownMs ⇒ one tile per StepCooldownMs at multiplier 1.0, so the tile-crossing cadence ≈ the old
     // tile-step cadence). Monsters keep the EffectiveStepCooldownTicks tile-step path, so for them this stat is still
     // dormant. No replication change (the wire still carries the cadence ms).
-    private void RefreshDormantSpeedStat(WorldEntity entity)
+    private void RefreshSpeedStat(WorldEntity entity)
     {
         entity.SetSpeedUnitsPerSecond(_tuning.BaseMoveSpeedUnitsPerSecond * entity.SpeedMultiplier);
     }

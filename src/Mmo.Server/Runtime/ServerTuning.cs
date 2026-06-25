@@ -22,15 +22,14 @@ public sealed class ServerTuning
         _tickRate = options.TickRate;
         StepCooldownMs = options.StepCooldownMs;
         InterestRadius = options.InterestRadius;
-        // Phase 0 (continuous migration): the DORMANT base move speed in tiles/sec, derived to reproduce today's
-        // tile cadence (1 tile per StepCooldownMs ⇒ 1000/StepCooldownMs tiles/sec). Read by NOTHING in Phase 0 —
-        // the cooldown path (StepCooldownTicks / SpeedMultiplier) still drives movement. Phase 1's integrator
-        // switches the entity's SpeedUnitsPerSecond (= this × SpeedMultiplier) into the live mover.
+        // The base move speed in tiles/sec, derived to reproduce the original tile cadence (1 tile per
+        // StepCooldownMs ⇒ 1000/StepCooldownMs tiles/sec). LIVE since Phase 1: the player integrator consumes the
+        // entity's SpeedUnitsPerSecond (= this × SpeedMultiplier). Monsters still tile-step (Phase 8) — dormant for them.
         BaseMoveSpeedUnitsPerSecond = 1000d / StepCooldownMs;
     }
 
-    // Phase 0 dormant: see the ctor. Settable so it can be exposed as a live knob (continuous.baseMoveSpeed),
-    // but read by nothing until Phase 1. The base walk speed in tiles/sec.
+    // See the ctor. Settable as a live knob (continuous.baseMoveSpeed); consumed by the player integrator since
+    // Phase 1. The base walk speed in tiles/sec.
     public double BaseMoveSpeedUnitsPerSecond { get; set; }
 
     // COMBAT-TUNING (live): the free-aim combat feel-knobs, now LIVE-tunable (combat.* registry keys) and replicated
