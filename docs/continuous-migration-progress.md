@@ -31,7 +31,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 0 | Position type + speed stat; retype ~243 `.Tile` sites | **PLANNING** | architect plan in flight |
+| 0 | Position type + speed stat; retype ~243 `.Tile` sites | **IN PROGRESS** | plan: `docs/migration/phase-0-plan.md`; behavior-frozen tile-center retype |
 | 1 | Server continuous integrator (port `ContinuousMover`/integrate-per-input) | pending | depends 0 |
 | 2 | Continuous collision (port `ContinuousCollision`; AABBs from blocked tiles) | pending | depends 1 — proven in spike |
 | 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | pending | depends 0,1 |
@@ -49,3 +49,7 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 
 - **2026-06-25** — Migration approved (collision spike de-risked the last unknown). Branch + tag created; Phase 0
   planning dispatched. Design decisions resolved per roadmap §4 (above).
+- **2026-06-25** — Phase 0 planned (`docs/migration/phase-0-plan.md`). Correction: `WorldVector` does NOT exist
+  (roadmap was wrong) — Phase 0 creates it as `record struct(double X, double Y)` (double, to match the proven
+  experiment's determinism; NOT the roadmap's float). Phase 0 = behavior-frozen tile-center-valued retype; existing
+  tests stay green via accessor-rename only. Implementation started.
