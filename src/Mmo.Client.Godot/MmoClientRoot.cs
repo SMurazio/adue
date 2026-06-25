@@ -68,9 +68,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private CheckBox? _uncapFpsCheck;
 	private bool _fpsUncapped;
 	private CheckBox? _frameCsvCheck;
-	private CheckBox? _debugFacingBoxCheck;
-	private CheckBox? _catoSpriteCheck;
-	private CheckBox? _predictionTilesCheck;
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
 	private bool _showSpawnerTiles;
@@ -318,9 +315,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
 	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
 	// the PREDICTED local tile toward the cursor tile (CursorHeading) — exactly the keyboard path, re-aimed
-	// live. WASD takes priority while a key is down. The S53 click-a-destination DRIVE PATH is retired: the
-	// ClickMoveController and TilePathfinder CLASSES are kept (a "click once to path there" mode may return
-	// later) but no longer instantiated or driven here.
+	// live. WASD takes priority while a key is down. The S53 click-a-destination DRIVE PATH is retired (its
+	// ClickMoveController/TilePathfinder/PathDriver scaffold was removed); a future "click once to path there"
+	// mode would re-introduce A* pathing if wanted.
 
 	// Autopilot: a scripted movement loop that also streams per-frame telemetry to .run/client-frames.csv.
 	private Direction8[]? _autopilotPattern;
@@ -1310,7 +1307,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		debugFacingBox.AddThemeFontSizeOverride("font_size", 13);
 		debugFacingBox.Toggled += ApplyDebugFacingBox;
 		rows.AddChild(debugFacingBox);
-		_debugFacingBoxCheck = debugFacingBox;
 
 		// S96 live toggle — flips on click, no Apply needed: render every Player (local + remote) as the "Cato"
 		// AnimatedSprite3D billboard (idle/walk PNG frames, side-view directional flip) instead of the character
@@ -1320,7 +1316,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		catoSprite.AddThemeFontSizeOverride("font_size", 13);
 		catoSprite.Toggled += ApplyCatoSprite;
 		rows.AddChild(catoSprite);
-		_catoSpriteCheck = catoSprite;
 
 		// S79 live debug toggle — flips on click, no Apply needed: paint the local player's PREDICTED tile (green)
 		// and CONFIRMED/server tile (magenta) as flat ground markers, refreshed each frame. They overlap when in
@@ -1330,7 +1325,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		predictionTiles.AddThemeFontSizeOverride("font_size", 13);
 		predictionTiles.Toggled += ApplyPredictionTiles;
 		rows.AddChild(predictionTiles);
-		_predictionTilesCheck = predictionTiles;
 
 		// Spawner tiles: debug viz of the monster spawner anchors (red tiles), default off — like prediction tiles.
 		var spawnerTiles = new CheckBox { Name = "SpawnerTiles", Text = "Spawner tiles", ButtonPressed = _showSpawnerTiles };

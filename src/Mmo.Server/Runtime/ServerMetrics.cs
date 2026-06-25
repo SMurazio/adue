@@ -54,16 +54,6 @@ public sealed class ServerMetrics
         }
     }
 
-    public void RecordTick(TimeSpan elapsed)
-    {
-        RecordTick(elapsed, TimeSpan.Zero, TickBudgetSample.Zero, GcCollectionSample.Zero);
-    }
-
-    public void RecordTick(TimeSpan elapsed, TimeSpan scheduleDrift, TickBudgetSample budget)
-    {
-        RecordTick(elapsed, scheduleDrift, budget, GcCollectionSample.Zero);
-    }
-
     public void RecordTick(TimeSpan elapsed, TimeSpan scheduleDrift, TickBudgetSample budget, GcCollectionSample gc)
     {
         var elapsedMs = elapsed.TotalMilliseconds;

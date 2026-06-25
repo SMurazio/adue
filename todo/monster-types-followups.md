@@ -1,27 +1,22 @@
 # N — monster-types follow-ups (from the P2-polish independent review)
 
 The P2-polish pass (monster types / slime / F1 Monster tab / HP fix / red home tile) shipped SHIP-with-followups.
-Three non-blocking items the reviewer flagged:
+Two of the four flagged items have since SHIPPED and are trimmed from this file:
 
-## 1. `slime.moveSpeed` doesn't apply to already-spawned monsters (liveness inconsistency)
-Every other knob on the Monster tab edits live, but `MoveSpeedMultiplier` is copied to `entity.SpeedMultiplier`
-ONCE at spawn (`GameServer.cs` ~:1557) and the cadence reads the entity value via `EffectiveStepCooldownTicks(entity)`
-— so editing "move speed" in the tab affects only NEW spawns. Surprising (9 live, 1 not).
-**Fix (pick one):** (a) compute the monster's step cadence from its TYPE's live `MoveSpeed` in `StepMonsterAi`
-(consistent with how the other Tunables are read fresh each tick — the cleanest; keep the `SlimeMoveSpeed…` test's
-`6u` expectation); or (b) on a `<type>.moveSpeed` admin change, re-apply `SpeedMultiplier` to every spawned monster
-of that type. Then it dials live like the rest.
+- ~~#1 `slime.moveSpeed` liveness~~ — **DONE.** `StepMonsterAi` now paces each monster off its TYPE's LIVE
+  `MoveSpeedMultiplier`, read fresh every tick (`GameServer.cs:2719-2727`), so the F1 tab dials already-spawned
+  monsters live like the other tunables.
+- ~~#2 `_monsterTypeOf` despawn cleanup~~ — **DONE.** P3 despawn now calls `_monsterAi.Forget(id)` and
+  `_monsterTypeOf.Remove(id)` (`GameServer.cs:1929-1931`); the former add-only leak is fixed and the `:131`
+  comment matches.
 
-## 2. `_monsterTypeOf` cleanup on despawn (lands with P3) + stale comment
-`GameServer.cs:131` comments that `_monsterTypeOf` is "cleared on despawn (Forget)", but nothing removes from it
-and `MonsterRoamAi.Forget` is never called (monsters have no despawn path pre-P3) — so NO leak today, but it
-becomes one the moment **P3 adds monster death/despawn**. When wiring P3 despawn: remove from `_monsterTypeOf`
-AND call `_monsterAi.Forget(id)`. Until then, correct the comment to say "add-only until P3 despawn."
+The two genuinely-live items remain below.
 
 ## 3. (nit) "~312 ms" prose vs 300 ms reality
-The doc + `MonsterType.cs:16` + some comments say the slime steps "~312 ms," but tick-quantised at 20 Hz it's
-exactly `round(5/0.8)=6` ticks = **300 ms**. Cosmetic; behaviour (slower than the player) is correct. Correct the
-prose to ~300 ms when convenient.
+`docs/living-enemies-design.md:64` still says the slime steps "~312 ms," but tick-quantised at 20 Hz it's
+exactly `round(5/0.8)=6` ticks = **300 ms**. (The `MonsterType.cs` code comment was already corrected; only the
+design doc prose remains.) Cosmetic; behaviour (slower than the player) is correct. Correct the prose to ~300 ms
+when convenient.
 
 ## 4. (P3 nit) Spawners are never removed
 `GameServer._spawners` only grows — `/monster` adds a spawner; nothing deletes one. Fine for the phase, but a long

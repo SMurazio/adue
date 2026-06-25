@@ -2,10 +2,15 @@
 
 ## Prerequisites
 
-Install:
+The .NET 8 SDK ships **in-repo** at `.tools\dotnet\dotnet.exe` — all the commands below invoke it directly,
+so a separate machine-wide SDK install is **not required** (the dev scripts fall back to a global `dotnet`
+only if the repo-local one is absent). Use the repo-local SDK per the project guardrails.
 
-- .NET 8 SDK
-- Docker Desktop only if you want the optional Postgres path later
+- **.NET SDK:** repo-local at `.tools\dotnet\dotnet.exe` (no global install needed).
+- **Godot 4.7 (.NET / Mono build):** required only for the Godot visual client. See the README for the
+  fresh-clone setup. The headless server, tests, and stress tooling do not need Godot.
+- **Docker / Postgres:** NOT required. The default database is SQLite (see below); Postgres is an optional
+  future path only.
 
 Verify:
 
@@ -34,7 +39,7 @@ Start the server first, then run a conservative synthetic-client load:
 .\.shared\skills\mmo-dev\scripts\stress-test.cmd
 ```
 
-The stress client opens many LiteNetLib connections, logs in unique local characters, drives movement via `MoveIntent` (held-direction intent: change direction periodically plus a low-rate keepalive — protocol v15), receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
+The stress client opens many LiteNetLib connections, logs in unique local characters, drives movement via held-direction intent (change direction periodically plus a low-rate keepalive), receives snapshots, and reports active peers, authenticated clients, snapshot throughput, protocol bandwidth, latency, and errors.
 
 Useful examples:
 
@@ -270,7 +275,7 @@ Remove-Item .\data\mmo.db
 
 ## Common Failures
 
-- `No .NET SDKs were found`: install the .NET 8 SDK, not just the runtime.
+- `No .NET SDKs were found`: invoke the repo-local SDK at `.tools\dotnet\dotnet.exe` (not a global `dotnet`); confirm the `.tools\dotnet` folder is present after clone.
 - `docker is not recognized`: ignore unless using the optional Postgres path.
 - `SQLite Error 14`: confirm the server can create the `data` directory.
 - client never connects: confirm UDP port, host, and `MMO_CONNECTION_KEY`.

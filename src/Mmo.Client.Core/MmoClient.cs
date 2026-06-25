@@ -824,8 +824,8 @@ public sealed class MmoClient : IDisposable
     }
 
     // Walkability oracle for the local predictor: mirrors WorldEntity.TryStep / TileGrid.IsWalkable — a
-    // tile is walkable iff it is in bounds and not blocked. Same rule TilePathfinder uses, so prediction and
-    // the server agree on every step except timing.
+    // tile is walkable iff it is in bounds and not blocked, so prediction and the server agree on every step
+    // except timing.
     private bool IsWalkableForPrediction(TileCoord tile)
     {
         var zone = Zone;

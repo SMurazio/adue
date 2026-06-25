@@ -6,8 +6,8 @@ namespace Mmo.Client.Core;
 // cursor tile onto the NEAREST of the 8 movement directions — the heading the avatar should hold while the
 // right mouse button is down, re-aimed live every frame off the predicted position.
 //
-// Unlike ClickMoveController.HeadingToward (which signs each axis, so a shallow 10-east/1-south delta reads as
-// SE), this picks the nearest of 8 angular sectors: a mostly-east cursor walks E, a true diagonal walks the
+// Rather than signing each axis independently (which would read a shallow 10-east/1-south delta as SE), this
+// picks the nearest of 8 angular sectors: a mostly-east cursor walks E, a true diagonal walks the
 // diagonal. That matches "hold toward the cursor" — you walk the way you're pointing, not the way the sign of
 // each axis happens to fall. Pure and allocation-free so it unit-tests headlessly across all 8 sectors plus
 // the same-tile (no heading) case.

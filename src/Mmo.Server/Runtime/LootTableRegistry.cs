@@ -41,8 +41,6 @@ public sealed class LootTableRegistry
         }
     }
 
-    public IReadOnlyCollection<LootTable> Tables => _byId.Values;
-
     public bool TryGet(string id, out LootTable table) => _byId.TryGetValue(id, out table!);
 
     public bool Contains(string id) => _byId.ContainsKey(id);
