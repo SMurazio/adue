@@ -609,6 +609,18 @@ public sealed class WorldEntity
         return _nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value;
     }
 
+    // CONTINUOUS MIGRATION (Phase 10): restore a freshly-spawned durable player's persisted CONTINUOUS position
+    // (the off-grid WorldVector loaded from pos_x/pos_y), overriding the tile-centre the constructor seeded from
+    // the resolved spawn tile. Caller guarantees the rounded tile is unchanged from the resolved spawn tile (so
+    // the entity lands in the same walkable cell, just at its true sub-tile offset). No StateRevision bump: the
+    // entity has not been replicated yet (this runs during login, before the first snapshot), so the initial
+    // EntitySpawn/snapshot simply carries this position. Distinct from TeleportTo (which snaps to a tile centre
+    // and bumps revision for an in-world jump).
+    public void RestorePosition(WorldVector position)
+    {
+        Position = position;
+    }
+
     // Phase 1: instant stop — zero the velocity so the entity does not glide. Called on release / dead / keepalive
     // timeout (R6: without this the entity keeps its last Velocity and integrates forever). Position is untouched
     // (the entity stays exactly where it is — fractional tile position is fine; the wire rounds it). No StateRevision

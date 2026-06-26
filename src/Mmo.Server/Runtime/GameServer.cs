@@ -371,7 +371,7 @@ public sealed class GameServer
             if (_zone.Despawn(session.EntityId!.Value, out var entity))
             {
                 _networkIds.Return(entity.NetworkId);
-                QueueTileSave(session, entity.TileCoord);
+                QueueTileSave(session, entity.Position);
                 FlushInventory(entity);
             }
             else
@@ -539,7 +539,13 @@ public sealed class GameServer
                     {
                         var role = ResolveRole(login.AccountName, character.DisplayName);
                         var takeover = KickExistingSessionForCharacter(current, character.CharacterId);
-                        var loginTile = ResolveLoginTile(takeover.Tile ?? character.Tile);
+                        // CONTINUOUS MIGRATION (Phase 10): the persisted (or handed-off) CONTINUOUS position is the
+                        // login truth. Resolve the SPAWN TILE from its rounded tile (walkability + default-spawn
+                        // scatter logic is tile-based); only when the resolver keeps that exact tile do we restore
+                        // the off-grid sub-tile position below — otherwise the player was relocated to a fresh
+                        // spawn tile and must sit at that tile's centre.
+                        var loginPosition = takeover.Position ?? character.Position;
+                        var loginTile = ResolveLoginTile(loginPosition.ToTileRounded());
                         networkId = _networkIds.Rent();
                         // On account takeover, hand off the kicked session's in-memory Inventory (which may
                         // hold harvested items not yet flushed to the DB) instead of the DB-loaded stacks
@@ -547,6 +553,14 @@ public sealed class GameServer
                         // pre-harvest inventory and can later overwrite the kicked session's flushed gains.
                         var inventory = takeover.Inventory ?? new Inventory(_itemRegistry, items);
                         var entity = _zone.SpawnPlayer(networkId, character.CharacterId, character.DisplayName, loginTile, current, inventory);
+                        // Restore the exact off-grid position only when the resolved spawn tile matches the
+                        // persisted position's rounded tile (i.e. it was walkable and not relocated). If the player
+                        // was scattered to a different spawn tile, keep the tile-centre the spawn seeded.
+                        if (loginTile == loginPosition.ToTileRounded())
+                        {
+                            entity.RestorePosition(loginPosition);
+                        }
+
                         current.Authenticate(entity.NetworkId, character.CharacterId, character.DisplayName, role, character.ZoneId);
                         current.AttachEntity(entity);
                         // Seed the player's tiles/sec speed stat — LIVE in Phase 1 (the integrator reads it).
@@ -629,17 +643,19 @@ public sealed class GameServer
         _sessions.Remove(session.Peer);
         _metrics.RecordPeerDisconnected();
 
-        TileCoord? tile = null;
+        WorldVector? position = null;
         Inventory? inventory = null;
         if (session.EntityId.HasValue && _zone.Despawn(session.EntityId.Value, out var entity))
         {
-            tile = entity.TileCoord;
+            // CONTINUOUS MIGRATION (Phase 10): hand the kicked entity's CONTINUOUS position to the taking-over
+            // login so a relog-elsewhere restores the exact sub-tile spot, not the rounded tile centre.
+            position = entity.Position;
             // Hand the live in-memory inventory to the taking-over login so any not-yet-flushed harvest
             // gains survive the relogin. FlushInventory still enqueues its dirty changes for persistence;
             // the quantities live on this same object, so nothing is lost either way.
             inventory = entity.Inventory;
             _networkIds.Return(entity.NetworkId);
-            QueueTileSave(session, entity.TileCoord);
+            QueueTileSave(session, entity.Position);
             FlushInventory(entity);
         }
         else
@@ -650,7 +666,7 @@ public sealed class GameServer
 
         _netManager.DisconnectPeer(session.Peer);
         Log.Info($"Kicked {session.DisplayName}: {message}");
-        return new TakeoverState(tile, inventory);
+        return new TakeoverState(position, inventory);
     }
 
     private void Tick(TickBudgetRecorder tickBudget)
@@ -3006,10 +3022,13 @@ public sealed class GameServer
             return;
         }
 
+        // CONTINUOUS MIGRATION (Phase 10): checkpoint the entity's CONTINUOUS position (the float WorldVector), not
+        // the rounded tile, so a relog restores the exact sub-tile spot. Still triggered only on a rounded-tile
+        // crossing (the caller's existing cadence gate), so the write frequency is unchanged.
         _dirtyDurableTiles[entity.CharacterId.Value] = new PendingTileSave(
             entity.CharacterId.Value,
             entity.DisplayName,
-            entity.TileCoord);
+            entity.Position);
     }
 
     // Single write-behind checkpoint for all durable per-character state. Gated to the configured
@@ -3037,7 +3056,7 @@ public sealed class GameServer
 
         foreach (var save in _dirtyDurableTiles.Values)
         {
-            _persistence.EnqueueTile(save.CharacterId, save.DisplayName, save.Tile);
+            _persistence.EnqueuePosition(save.CharacterId, save.DisplayName, save.Position);
         }
 
         _dirtyDurableTiles.Clear();
@@ -3081,22 +3100,24 @@ public sealed class GameServer
     {
         if (TryGetSessionEntity(session, out var entity))
         {
-            QueueTileSave(session, entity.TileCoord);
+            QueueTileSave(session, entity.Position);
             FlushInventory(entity);
         }
     }
 
-    private void QueueTileSave(ClientSession session, TileCoord tile)
+    // CONTINUOUS MIGRATION (Phase 10): queue the CONTINUOUS position (the float WorldVector) for write-behind —
+    // disconnect/takeover/checkpoint flushes now persist the exact sub-tile spot, not the rounded tile.
+    private void QueueTileSave(ClientSession session, WorldVector position)
     {
         _dirtyDurableTiles.Remove(session.CharacterId);
-        _persistence.EnqueueTile(session.CharacterId, session.DisplayName, tile);
+        _persistence.EnqueuePosition(session.CharacterId, session.DisplayName, position);
     }
 
-    private readonly record struct PendingTileSave(Guid CharacterId, string DisplayName, TileCoord Tile);
+    private readonly record struct PendingTileSave(Guid CharacterId, string DisplayName, WorldVector Position);
 
     // What a kicked session hands off to the login that took it over: its last tile and its live
     // in-memory inventory (both null when there was no existing session to kick).
-    private readonly record struct TakeoverState(TileCoord? Tile, Inventory? Inventory);
+    private readonly record struct TakeoverState(WorldVector? Position, Inventory? Inventory);
 }
 
 internal readonly record struct EncodedPacket(byte[] Buffer, int Length);

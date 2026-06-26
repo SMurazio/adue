@@ -24,17 +24,40 @@ public sealed class SqliteCharacterRepositoryTests
     }
 
     [Fact]
-    public async Task SaveTilePersistsForSubsequentLoad()
+    public async Task SavePositionPersistsForSubsequentLoad()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var repository = new SqliteCharacterRepository(database.ConnectionString);
         var character = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
-        var savedTile = new TileCoord(12, 7);
+        var savedPosition = WorldVector.FromTile(new TileCoord(12, 7));
 
-        await repository.SaveTileAsync(character.CharacterId, savedTile, CancellationToken.None);
+        await repository.SavePositionAsync(character.CharacterId, savedPosition, CancellationToken.None);
         var reloaded = await repository.LoadOrCreateAsync("account-two", "PlayerTwo", CancellationToken.None);
 
-        Assert.Equal(savedTile, reloaded.Tile);
+        Assert.Equal(savedPosition, reloaded.Position);
+        Assert.Equal(new TileCoord(12, 7), reloaded.Tile);
+    }
+
+    // CONTINUOUS MIGRATION (Phase 10): a SUB-TILE continuous position must round-trip losslessly (to float
+    // precision) through save+load — the exact thing the old integer tile_x/tile_y columns could NOT store
+    // (they snapped (10.4, 8.7) to the (10, 9) tile centre on relog). pos_x/pos_y are double precision, so the
+    // reloaded Position must equal the saved one within a tight tolerance.
+    [Fact]
+    public async Task SaveSubTilePositionRoundTrips()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var character = await repository.LoadOrCreateAsync("account-subtile", "SubTilePlayer", CancellationToken.None);
+        var savedPosition = new WorldVector(10.4d, 8.7d);
+
+        await repository.SavePositionAsync(character.CharacterId, savedPosition, CancellationToken.None);
+        var reloaded = await repository.LoadOrCreateAsync("account-subtile", "SubTilePlayer", CancellationToken.None);
+
+        Assert.Equal(savedPosition.X, reloaded.Position.X, precision: 9);
+        Assert.Equal(savedPosition.Y, reloaded.Position.Y, precision: 9);
+        // The derived tile is the NEAREST centre — (10.4, 8.7) rounds to (10, 9). The point of the float columns
+        // is that the sub-tile offset survives even though the tile rounds away from it.
+        Assert.Equal(new TileCoord(10, 9), reloaded.Tile);
     }
 
     [Fact]
@@ -51,7 +74,7 @@ public sealed class SqliteCharacterRepositoryTests
         await using var command = connection.CreateCommand();
         command.CommandText = "select count(*) from schema_migrations;";
         var count = Convert.ToInt32(await command.ExecuteScalarAsync());
-        Assert.Equal(4, count);
+        Assert.Equal(5, count);
 
         command.CommandText = "select count(*) from accounts;";
         Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
@@ -60,6 +83,9 @@ public sealed class SqliteCharacterRepositoryTests
         Assert.False(await ColumnExistsAsync(connection, "position_y"));
         Assert.True(await ColumnExistsAsync(connection, "tile_x"));
         Assert.True(await ColumnExistsAsync(connection, "tile_y"));
+        // Phase 10: the continuous float position columns exist alongside the kept tile columns.
+        Assert.True(await ColumnExistsAsync(connection, "pos_x"));
+        Assert.True(await ColumnExistsAsync(connection, "pos_y"));
     }
 
     [Fact]

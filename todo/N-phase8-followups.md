@@ -16,3 +16,11 @@ next revisited, retire `AttackRange` (or replace the F1 display with `AttackRang
 ## C — HopDistanceUnits/AttackRangeUnits live-tunability (optional)
 They're per-type fields read fresh but not live AdminSetTuning keys (would add MonsterTuningSnapshot wire
 fields + F1 UI). Add if live-tuning the hop distance / attack range becomes useful.
+
+# Phase 10 (persistence) follow-up
+
+## D — make the new-character pos explicit on INSERT (minor)
+Phase 10 fixed "new char loads at (0,0)" by setting the `pos_x`/`pos_y` column DEFAULT to 8 (mirroring the
+spawn-tile default), so a defaults-only INSERT lands at the spawn centre. This couples the pos default to the
+tile default (both 8). Cleaner: have the create/upsert INSERT set `pos_x = tile_x`, `pos_y = tile_y` explicitly
+(or from the actual spawn point) rather than relying on a matching column default. Low priority; works today.

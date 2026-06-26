@@ -38,6 +38,14 @@ public sealed class PersistenceWriteBehindIntegrationTests
                 TimeSpan.FromSeconds(10));
 
             Assert.True(save.Tile.X > start.X);
+            // CONTINUOUS MIGRATION (Phase 10): the write-behind path now carries the CONTINUOUS WorldVector, not
+            // the rounded tile. The continuous integrator advances off-grid, so the checkpoint fired at a tile
+            // crossing persists a position that is NOT snapped to a tile centre on at least one axis — the exact
+            // sub-tile fidelity the old integer columns discarded. (A pure tile-step save would land both axes on
+            // an integer.)
+            var offGrid = save.Position.X != Math.Round(save.Position.X)
+                || save.Position.Y != Math.Round(save.Position.Y);
+            Assert.True(offGrid, $"Persisted position {save.Position.X},{save.Position.Y} was snapped to a tile centre.");
         }
         finally
         {
@@ -320,7 +328,7 @@ public sealed class PersistenceWriteBehindIntegrationTests
                         Guid.NewGuid(),
                         displayName.Trim(),
                         Zone.DefaultId,
-                        TileGrid.DefaultSpawnTile);
+                        WorldVector.FromTile(TileGrid.DefaultSpawnTile));
                     _characters.Add(key, character);
                 }
 
@@ -328,14 +336,14 @@ public sealed class PersistenceWriteBehindIntegrationTests
             }
         }
 
-        public Task SaveTileAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
+        public Task SavePositionAsync(Guid characterId, WorldVector position, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             TaskCompletionSource signal;
             lock (_lock)
             {
-                _saves.Add(new SaveRecord(characterId, tile));
+                _saves.Add(new SaveRecord(characterId, position));
                 signal = _saveSignal;
                 _saveSignal = NewSignal();
             }
@@ -397,5 +405,8 @@ public sealed class PersistenceWriteBehindIntegrationTests
         }
     }
 
-    private readonly record struct SaveRecord(Guid CharacterId, TileCoord Tile);
+    private readonly record struct SaveRecord(Guid CharacterId, WorldVector Position)
+    {
+        public TileCoord Tile => Position.ToTileRounded();
+    }
 }

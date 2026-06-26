@@ -524,7 +524,7 @@ public sealed class InteractHarvestIntegrationTests
         TreePlacement placement)
     {
         var character = await repository.LoadOrCreateAsync(accountName, accountName, CancellationToken.None);
-        await repository.SaveTileAsync(character.CharacterId, placement.SpawnTile, CancellationToken.None);
+        await repository.SavePositionAsync(character.CharacterId, WorldVector.FromTile(placement.SpawnTile), CancellationToken.None);
     }
 
     // After login, resolves the network id of the Tree node at the expected (deterministic) tile from the

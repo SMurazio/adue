@@ -24,14 +24,17 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
         _workerTask = Task.Run(ProcessAsync);
     }
 
-    public void EnqueueTile(Guid characterId, string displayName, TileCoord tile)
+    // CONTINUOUS MIGRATION (Phase 10): enqueue the character's CONTINUOUS position for write-behind persistence
+    // (the float pos_x/pos_y + the derived tile). Replaces the former tile-only EnqueuTile — the dirty-position
+    // checkpoint now carries the exact WorldVector so a relog restores the sub-tile spot, not the rounded centre.
+    public void EnqueuePosition(Guid characterId, string displayName, WorldVector position)
     {
         if (characterId == Guid.Empty)
         {
             return;
         }
 
-        Enqueue(new TileSaveRequest(characterId, displayName, tile));
+        Enqueue(new PositionSaveRequest(characterId, displayName, position));
     }
 
     public void EnqueueItems(Guid characterId, string displayName, IReadOnlyList<ItemStack> changes)
@@ -170,11 +173,11 @@ internal sealed class PersistenceWriteBehindWorker : IAsyncDisposable
         Task PersistAsync(ICharacterRepository characters, CancellationToken cancellationToken);
     }
 
-    private sealed record TileSaveRequest(Guid CharacterId, string DisplayName, TileCoord Tile) : IPersistenceSaveRequest
+    private sealed record PositionSaveRequest(Guid CharacterId, string DisplayName, WorldVector Position) : IPersistenceSaveRequest
     {
         public Task PersistAsync(ICharacterRepository characters, CancellationToken cancellationToken)
         {
-            return characters.SaveTileAsync(CharacterId, Tile, cancellationToken);
+            return characters.SavePositionAsync(CharacterId, Position, cancellationToken);
         }
     }
 

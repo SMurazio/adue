@@ -31,19 +31,27 @@ public sealed class PostgresCharacterRepository : ICharacterRepository
         return character;
     }
 
-    public async Task SaveTileAsync(Guid characterId, TileCoord tile, CancellationToken cancellationToken)
+    public async Task SavePositionAsync(Guid characterId, WorldVector position, CancellationToken cancellationToken)
     {
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        // Persist the continuous position (pos_x/pos_y) AND the derived rounded tile (tile_x/tile_y) together —
+        // the float columns are the truth login restores; the tile columns are kept coherent so any tile-keyed
+        // query still works.
+        var tile = position.ToTileRounded();
         await using var command = connection.CreateCommand();
         command.CommandText = """
             update characters
-            set tile_x = @tile_x,
+            set pos_x = @pos_x,
+                pos_y = @pos_y,
+                tile_x = @tile_x,
                 tile_y = @tile_y,
                 updated_at = now()
             where id = @character_id;
             """;
+        command.Parameters.AddWithValue("pos_x", position.X);
+        command.Parameters.AddWithValue("pos_y", position.Y);
         command.Parameters.AddWithValue("tile_x", tile.X);
         command.Parameters.AddWithValue("tile_y", tile.Y);
         command.Parameters.AddWithValue("character_id", characterId);
@@ -161,7 +169,7 @@ public sealed class PostgresCharacterRepository : ICharacterRepository
             values (@account_id, @display_name)
             on conflict (account_id, display_name)
             do update set updated_at = now()
-            returning account_id, id, display_name, zone_id, tile_x, tile_y;
+            returning account_id, id, display_name, zone_id, tile_x, tile_y, pos_x, pos_y;
             """;
         command.Parameters.AddWithValue("account_id", accountId);
         command.Parameters.AddWithValue("display_name", displayName);
@@ -177,7 +185,20 @@ public sealed class PostgresCharacterRepository : ICharacterRepository
             reader.GetGuid(1),
             reader.GetString(2),
             reader.GetString(3),
-            new TileCoord(reader.GetInt32(4), reader.GetInt32(5)));
+            ReadPosition(reader, tileXOrdinal: 4, tileYOrdinal: 5, posXOrdinal: 6, posYOrdinal: 7));
+    }
+
+    // CONTINUOUS MIGRATION (Phase 10): build the loaded continuous position from pos_x/pos_y, falling back to the
+    // tile centre (FromTile(tile_x, tile_y)) if the float columns are null/absent (defensive — the migration
+    // backfills them not-null, so the fallback only guards a DB that somehow predates/skipped migration 005).
+    private static WorldVector ReadPosition(System.Data.Common.DbDataReader reader, int tileXOrdinal, int tileYOrdinal, int posXOrdinal, int posYOrdinal)
+    {
+        if (reader.IsDBNull(posXOrdinal) || reader.IsDBNull(posYOrdinal))
+        {
+            return WorldVector.FromTile(reader.GetInt32(tileXOrdinal), reader.GetInt32(tileYOrdinal));
+        }
+
+        return new WorldVector(reader.GetDouble(posXOrdinal), reader.GetDouble(posYOrdinal));
     }
 
     private static string NormalizeName(string value, string fallback)

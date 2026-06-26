@@ -100,9 +100,13 @@ public sealed class SqliteCharacterItemsTests
             var legacyMigrations = new SqliteMigrationRunner(database.ConnectionString, legacyMigrationsPath);
             await legacyMigrations.ApplyAsync(CancellationToken.None);
 
-            var legacyRepository = new SqliteCharacterRepository(database.ConnectionString);
-            var character = await legacyRepository.LoadOrCreateAsync("legacy-acct", "LegacyPlayer", CancellationToken.None);
-            await legacyRepository.SaveTileAsync(character.CharacterId, new TileCoord(5, 9), CancellationToken.None);
+            // This DB is at the pre-S37 schema (001-003): it has tile_x/tile_y but NOT the Phase-10 pos_x/pos_y
+            // columns. The production repo's LoadOrCreate/SavePosition now reference pos_x (insert ... returning
+            // pos_x, save writes pos_x), so neither can run against this pre-005 schema yet. Seed the account +
+            // character row (at tile 5,9) DIRECTLY to mimic a legacy DB, then verify it survives the 004 (and,
+            // transitively, 005) upgrade applied below — at which point the production repo can read it again.
+            var characterId = await SeedLegacyCharacterAsync(
+                database.ConnectionString, "legacy-acct", "LegacyPlayer", new TileCoord(5, 9));
 
             await using (var connection = new SqliteConnection(database.ConnectionString))
             {
@@ -120,13 +124,15 @@ public sealed class SqliteCharacterItemsTests
                 Assert.True(await TableExistsAsync(connection, "character_items"));
             }
 
-            // Pre-existing character data survived the upgrade, and the new table is usable.
-            var reloaded = await legacyRepository.LoadOrCreateAsync("legacy-acct", "LegacyPlayer", CancellationToken.None);
-            Assert.Equal(character.CharacterId, reloaded.CharacterId);
+            // Pre-existing character data survived the upgrade, and the new table is usable. The production repo
+            // works again now that 005 added pos_x/pos_y (its returning clause references them).
+            var repository = new SqliteCharacterRepository(database.ConnectionString);
+            var reloaded = await repository.LoadOrCreateAsync("legacy-acct", "LegacyPlayer", CancellationToken.None);
+            Assert.Equal(characterId, reloaded.CharacterId);
             Assert.Equal(new TileCoord(5, 9), reloaded.Tile);
 
-            await legacyRepository.SaveItemsAsync(reloaded.CharacterId, [new ItemStack("fiber", 4)], CancellationToken.None);
-            var items = await legacyRepository.LoadItemsAsync(reloaded.CharacterId, CancellationToken.None);
+            await repository.SaveItemsAsync(reloaded.CharacterId, [new ItemStack("fiber", 4)], CancellationToken.None);
+            var items = await repository.LoadItemsAsync(reloaded.CharacterId, CancellationToken.None);
             Assert.Equal(new ItemStack("fiber", 4), Assert.Single(items));
         }
         finally
@@ -148,6 +154,44 @@ public sealed class SqliteCharacterItemsTests
         }
 
         return directory;
+    }
+
+    // Inserts an account + character row DIRECTLY against the 001-003 legacy schema (tile_x/tile_y present, no
+    // pos_x/pos_y). The production SqliteCharacterRepository can't create here — its upsert returns pos_x, which
+    // this pre-005 schema lacks — so we hand-write the legacy rows to mimic a DB that predates Phase 10, then
+    // verify they survive the 004/005 upgrade. Returns the new character id.
+    private static async Task<Guid> SeedLegacyCharacterAsync(
+        string connectionString, string accountName, string displayName, TileCoord tile)
+    {
+        var accountId = Guid.NewGuid();
+        var characterId = Guid.NewGuid();
+
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        await using (var accountCommand = connection.CreateCommand())
+        {
+            accountCommand.CommandText = "insert into accounts (id, dev_name) values (@id, @dev_name);";
+            accountCommand.Parameters.AddWithValue("@id", accountId.ToString());
+            accountCommand.Parameters.AddWithValue("@dev_name", accountName);
+            await accountCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var characterCommand = connection.CreateCommand())
+        {
+            characterCommand.CommandText = """
+                insert into characters (id, account_id, display_name, tile_x, tile_y)
+                values (@id, @account_id, @display_name, @tile_x, @tile_y);
+                """;
+            characterCommand.Parameters.AddWithValue("@id", characterId.ToString());
+            characterCommand.Parameters.AddWithValue("@account_id", accountId.ToString());
+            characterCommand.Parameters.AddWithValue("@display_name", displayName);
+            characterCommand.Parameters.AddWithValue("@tile_x", tile.X);
+            characterCommand.Parameters.AddWithValue("@tile_y", tile.Y);
+            await characterCommand.ExecuteNonQueryAsync();
+        }
+
+        return characterId;
     }
 
     private static async Task<bool> TableExistsAsync(SqliteConnection connection, string tableName)
