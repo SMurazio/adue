@@ -1336,7 +1336,7 @@ public sealed class GameServer
 
     // COMBAT-QOL: heal stationary enemy targets (Dummy/Npc) toward MaxHealth at a HEAVY per-tick rate so a hit dummy
     // refills fast and stays a permanent test target. Gated on the SAME kinds that can TAKE damage
-    // (MeleeConeResolver.IsAttackableEnemy) so we never "regen" a player or a resource. TryRegenHealth clamps at max,
+    // (CombatTargeting.IsAttackableEnemy) so we never "regen" a player or a resource. TryRegenHealth clamps at max,
     // no-ops at full (so a healthy dummy costs nothing), and bumps StateRevision only on a real change — the refilled
     // HP rides the existing snapshot HP field, so the overhead bar fills automatically. NO DamageEventMessage is ever
     // emitted here: only real damage floats a number. Iterates the live entity collection directly (no per-tick
@@ -1354,7 +1354,7 @@ public sealed class GameServer
             // LIVING-ENEMIES P1: regen the STATIONARY targets only (Dummy/Npc), NOT roaming Monsters — a Monster
             // is attackable but does not heal back this phase (its HP depletes and stays). Gate on the narrower
             // IsRegeneratingEnemy, not IsAttackableEnemy (which now also includes Monster).
-            if (MeleeConeResolver.IsRegeneratingEnemy(entity))
+            if (CombatTargeting.IsRegeneratingEnemy(entity))
             {
                 entity.TryRegenHealth(perTick);
             }
@@ -1847,7 +1847,7 @@ public sealed class GameServer
     // LIVING-ENEMIES P1: admin dev command /monster — spawns an EntityKind.Monster at the CALLER's current tile
     // (mirroring the SpawnDummies setup but at the sender, like a "/dummy here"), records that tile as the
     // monster's leash HOME, and registers it with the roam AI. The monster carries CharacterStats (full HP) so it
-    // shows an overhead HP bar and is hittable (MeleeConeResolver.IsAttackableEnemy now includes Monster). The
+    // shows an overhead HP bar and is hittable (CombatTargeting.IsAttackableEnemy now includes Monster). The
     // server then idles it near home and occasionally strolls it within the leash. It spawns on the caller's own
     // tile (always walkable — the caller stands there); replication + client interpolation render it as a moving
     // cube for free. LIVING-ENEMIES P2: it now also AGGROS the nearest player in range, CHASES (leashed to home),
