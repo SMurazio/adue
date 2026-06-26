@@ -37,8 +37,8 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 3 | Wire: float/fixed-point positions, continuous MoveIntent, drop StepCommit — **protocol-major** | ✅ **DONE** | Pass A `f6b1ffa` + Pass B `899200c` (v36); review SHIP-WITH-FOLLOWUPS (dt-budget sound, diagonal-normalize correct, wire clean); followups in `todo/N-phase3-followups.md` (A: normalize guard test → Phase 4; C: idle send-gate). **Wire is now continuous.** |
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | ✅ **DONE** | `ded8622` + Finding-A fix `29b3103`; review SHIP-WITH-FOLLOWUPS → caught a BLOCK re-attach seq-freeze (fixed + guarded); 3 determinism gaps resolved, timing-faithful harness green. Followups B/C/D in `todo/N-phase4-followups.md`. **Local player predicts smoothly.** |
 | 5 | Remote interpolation; retire hop/TileInterpolator | ✅ **DONE** | `ef8286d`; review SHIP (clean cosmetic swap — no lifecycle leak, local/targeting untouched, deletions clean, can't extrapolate). Followups in `todo/N-phase5-followups.md`. **MOVEMENT MIGRATION (0–5) COMPLETE — drivable build ready for live feel-test.** |
-| 6 | AOI float retype | **IN PROGRESS** | float the interest DISTANCE filter (Phase 0 kept it integer `.TileCoord`); keep the SpatialEntityGrid cell-gather (coarse superset), float the precise distance vs `InterestRadius` |
-| 7 | Combat: positional via FreeAimSector | pending | depends 0,2 |
+| 6 | AOI float retype | ✅ **DONE** | `e3ea5b8`; review SHIP (superset guarantee re-derived independently — `+1` margin provably sufficient on both axes, over-includes never drops) |
+| 7 | Combat: positional via FreeAimSector | **PLANNING** | depends 0,2. Free-aim already continuous (near no-op); float the attacker/candidate positions + candidate-by-radius + facing-from-aim; legacy melee-cone disposition |
 | 8 | Monster AI: steering + avoidance; Euclidean leash/aggro | pending | depends 2,7 |
 | 9 | Interaction: adjacency → interaction radius; continuous scatter | pending | depends 0 |
 | 10 | Persistence: float position columns (SQLite + Postgres) | pending | depends 0 |
