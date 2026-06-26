@@ -79,26 +79,28 @@ public sealed class WorldEntitySpeedTests
         Assert.False(entity.TrySetSpeedMultiplier(1.5));
     }
 
-    // The behavioural contract: a 2x entity steps about twice as often as a default entity, and a 0.5x
-    // entity steps about half as often, when both are driven every tick over a fixed window via TryStep.
+    // The behavioural contract: a 2x entity moves about twice as often as a default entity, and a 0.5x entity
+    // about half as often, when both are paced every tick over a fixed window by the SAME cadence gate. The
+    // effective cooldown derived from the multiplier drives the movement-cadence clock (_nextEligibleTick) via
+    // TryBeginHop — the surviving consumer of EffectiveStepCooldownTicks (the monster hop; the player path is
+    // now continuous and ungated). Counting accepted hops over the window pins the faster=more invariant.
     [Fact]
-    public void FasterEntityStepsMoreOftenOverAFixedWindow()
+    public void FasterEntityMovesMoreOftenOverAFixedWindow()
     {
         const int ticks = 40;
-        var defaultSteps = CountSteps(multiplier: 1.0, ticks);
-        var fastSteps = CountSteps(multiplier: 2.0, ticks);
-        var slowSteps = CountSteps(multiplier: 0.5, ticks);
+        var defaultMoves = CountMoves(multiplier: 1.0, ticks);
+        var fastMoves = CountMoves(multiplier: 2.0, ticks);
+        var slowMoves = CountMoves(multiplier: 0.5, ticks);
 
         // base 4-tick cooldown over 40 ticks: default ~10, fast (2-tick) ~20, slow (8-tick) ~5.
-        Assert.Equal(10, defaultSteps);
-        Assert.Equal(20, fastSteps);
-        Assert.Equal(5, slowSteps);
-        Assert.True(fastSteps > defaultSteps && defaultSteps > slowSteps);
+        Assert.Equal(10, defaultMoves);
+        Assert.Equal(20, fastMoves);
+        Assert.Equal(5, slowMoves);
+        Assert.True(fastMoves > defaultMoves && defaultMoves > slowMoves);
     }
 
-    private static int CountSteps(double multiplier, int ticks)
+    private static int CountMoves(double multiplier, int ticks)
     {
-        var grid = new TileGrid(256, 256, []);
         var entity = CreateEntity(tile: new TileCoord(128, 128), facing: Direction8.E);
         // Note: setting 1.0 on an already-default entity is a no-op that returns false, so don't assert the
         // return here — we only need the entity to END at `multiplier` (it does, including the 1.0 case).
@@ -106,18 +108,19 @@ public sealed class WorldEntitySpeedTests
         Assert.Equal(multiplier, entity.SpeedMultiplier);
         var cooldown = entity.EffectiveStepCooldownTicks(BaseCooldownTicks, MinTicks, MaxTicks);
 
-        var steps = 0;
+        var moves = 0;
         for (uint tick = 1; tick <= ticks; tick++)
         {
-            // March a CONSTANT direction so every accepted step moves. The entity faces E from the start, and
-            // 40 ticks of E stays within the 256-wide grid.
-            if (entity.TryStep(Direction8.E, tick, cooldown, grid))
+            // Pace the entity every tick via the movement-cadence gate (TryBeginHop arms _nextEligibleTick =
+            // tick + cooldown, exactly the cadence the old tile-step path armed on an accepted step). An accepted
+            // begin counts as one move; a begin inside the cooldown window is rejected and mutates nothing.
+            if (entity.TryBeginHop(tick, cooldown))
             {
-                steps++;
+                moves++;
             }
         }
 
-        return steps;
+        return moves;
     }
 
     private static WorldEntity CreateEntity(TileCoord? tile = null, Direction8 facing = Direction8.S)

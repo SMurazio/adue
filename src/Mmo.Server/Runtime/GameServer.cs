@@ -130,9 +130,10 @@ public sealed class GameServer
 
     // LIVING-ENEMIES P1: the server-side leashed-roam brain for EntityKind.Monster. Owns every monster's per-AI
     // state + a seeded PRNG (seeded off the map seed so a given world's roaming is reproducible in tests/repro
-    // runs), and steps each monster through the SAME Zone.TryStep path players use. Constructed after _zone since
-    // it closes over _zone.IsWalkable / _zone.TryStep. Stepped each tick by StepMonsterAi (a sibling pass to
-    // StepHeldMovementIntents), paced off the step cooldown — so a monster never steps every tick.
+    // runs), and hops each monster through the continuous HopLocomotion (the same shared swept-circle wall collision
+    // players integrate against). Constructed after _zone since it closes over _zone.IsWalkable / _zone.QueryNearbyWalls.
+    // Stepped each tick by StepMonsterAi (a sibling pass to StepHeldMovementIntents), paced off the hop cadence — so a
+    // monster never hops every tick.
     private readonly MonsterRoamAi _monsterAi;
 
     // LIVING-ENEMIES P2-POLISH: the table of monster TYPES (named templates — slime now) + their live-tunable,

@@ -254,14 +254,14 @@ public sealed class ClientSessionTests
             ownerSession: null,
             isDurable: false);
 
-        // StateRevision starts at 1 and is only bumped through movement/deplete; step the entity to reach
-        // the requested revision so tests can assert against a known baseline value.
-        var grid = new TileGrid(64, 64, []);
-        var tick = 0u;
+        // StateRevision starts at 1 and is only bumped through movement/deplete; drive the entity through the
+        // continuous integrator until its rounded tile crosses enough times to reach the requested revision
+        // (ApplyResolvedMove bumps StateRevision once per rounded-tile crossing) so tests can assert against a
+        // known baseline value. A 1-unit/tick eastward integrate crosses one tile per call.
+        entity.SetSpeedUnitsPerSecond(10d);
         while (entity.StateRevision < revision)
         {
-            entity.TryStep(entity.Facing == Direction8.S ? Direction8.N : Direction8.S, tick, 0, grid);
-            tick++;
+            entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.1d); // +1 tile east per tick
         }
 
         return entity;

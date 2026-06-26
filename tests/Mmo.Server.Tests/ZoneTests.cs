@@ -17,22 +17,38 @@ public sealed class ZoneTests
     }
 
     [Fact]
-    public void TryStepValidatesAgainstOwnedTileGrid()
+    public void IntegrateMovementValidatesAgainstOwnedTileGrid()
     {
+        // CONTINUOUS MIGRATION: the player moves through Zone.IntegrateMovement, which collides the continuous
+        // body against walls derived from the Zone's OWNED tile grid. This pins that the Zone wires movement to
+        // its own grid: driving EAST toward the blocked (3,2) tile never lets the body enter it, while driving
+        // SOUTH into open ground advances the rounded tile. (The exhaustive surface/slide geometry is pinned in
+        // ZoneContinuousCollisionTests; this asserts the Zone-spawn-and-own-grid wiring.)
         var session = new ClientSession(null!);
         var characterId = Guid.NewGuid();
         session.Authenticate(1, characterId, "Player", ClientRole.Player, Zone.DefaultId);
         var zone = new Zone("test", new TileGrid(8, 8, [new TileCoord(3, 2)]), [new TileCoord(2, 2)]);
         var entity = zone.SpawnPlayer(1, characterId, "Player", new TileCoord(2, 2), session, new Inventory(ItemRegistry.Default));
         session.AttachEntity(entity);
+        entity.SetSpeedUnitsPerSecond(5d);
+        const double radius = CollisionDefaults.BodyRadius;
 
-        // S98: a step in a new direction steps immediately. A step E into the blocked (3,2) tile is rejected
-        // (held in place, facing updated).
-        Assert.False(zone.TryStep(entity, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(2, 2), entity.TileCoord);
+        // Drive EAST into the blocked (3,2): the swept-circle collision stops the body at the wall surface, so it
+        // never enters the blocked tile (rounded tile stays at (2,2), never (3,2)).
+        for (var i = 0; i < 50; i++)
+        {
+            zone.IntegrateMovement(entity, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, radius);
+        }
+        Assert.NotEqual(new TileCoord(3, 2), entity.TileCoord);
+        Assert.False(zone.BlockedTiles.Contains(entity.TileCoord));
 
-        // A valid step S into the open tile succeeds immediately (no separate turn beat).
-        Assert.True(zone.TryStep(entity, Direction8.S, serverTick: 18, stepCooldownTicks: 4));
+        // Drive SOUTH into the open (2,3): the body advances unobstructed and its rounded tile crosses to (2,3).
+        // Integrate until the rounded tile first reaches y=3 (a bounded loop; 0.25 units/tick reaches y=2.5 in
+        // two ticks), then assert it landed on the open tile.
+        for (var i = 0; i < 20 && entity.TileCoord.Y < 3; i++)
+        {
+            zone.IntegrateMovement(entity, Direction8.S.ToUnitVector(), dtSeconds: 0.05d, radius);
+        }
         Assert.Equal(new TileCoord(2, 3), entity.TileCoord);
     }
 

@@ -8,8 +8,8 @@ namespace Mmo.Server.Tests;
 // player walk straight through blocked tiles (WorldEntityMovementTests.PlayerWalksThroughBlockedTiles_NoCollisionInPhase1);
 // Phase 2 collides the PLAYER continuous integrator against walls derived from the tile map. These pin the INVERSE of
 // the Phase-1 walk-through (stop at the surface), the slide on a glancing hit, the open-field regression (unchanged),
-// and the server-layer determinism (same start + dir + map => byte-identical Position). Monsters are unaffected
-// (they tile-step via TryStep — covered by ZoneTests / MonsterRoamAiTests).
+// and the server-layer determinism (same start + dir + map => byte-identical Position). Monsters take a SEPARATE
+// continuous path (the HopLocomotion, Phase 8) — their collision-valid hops are covered by MonsterRoamAiTests.
 //
 // Geometry: a blocked tile (tx,ty) is the 1x1 box [tx-0.5..tx+0.5]; the default body radius is 0.5, so a player
 // driving into the -X face of a blocked tile stops with its CENTRE at (tx-0.5) - 0.5 = tx-1.0 (one tile-pitch shy of
@@ -117,19 +117,9 @@ public sealed class ZoneContinuousCollisionTests
         Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.Y), BitConverter.DoubleToInt64Bits(b.Position.Y));
     }
 
-    [Fact]
-    public void MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression()
-    {
-        // R-monster-divergence: monsters keep the disjoint TryStep path (Velocity stays Zero; never the continuous
-        // integrator). A monster stepping into a blocked tile is rejected by IsStepWalkable, exactly as before Phase 2
-        // — the new swept-circle collision does NOT touch them.
-        var grid = new TileGrid(32, 32, new[] { new TileCoord(9, 8) });
-        var zone = new Zone("test", grid, new[] { new TileCoord(8, 8) });
-        var monster = zone.SpawnTransient(2, EntityKind.Monster, "Slime", new TileCoord(8, 8), Direction8.S);
-
-        // Step E into the blocked (9,8): rejected, held in place, velocity untouched (tile-step path only).
-        Assert.False(zone.TryStep(monster, Direction8.E, serverTick: 10, stepCooldownTicks: 4));
-        Assert.Equal(new TileCoord(8, 8), monster.TileCoord);
-        Assert.Equal(WorldVector.Zero, monster.Velocity);
-    }
+    // NOTE (Phase 11 coherence sweep): the former MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression
+    // test was DELETED here. It asserted monsters block via the tile-step path (Zone.TryStep / IsStepWalkable), but
+    // after Phase 8 monsters move via the continuous HopLocomotion (no TryStep), and the hop's collision-valid landing
+    // (a hop never lands inside a wall) is covered by MonsterRoamAiTests.HopsLandCollisionValid_AndSomeLandSubTile.
+    // The tile-step path it exercised has since been removed, so the test was testing deleted behaviour.
 }

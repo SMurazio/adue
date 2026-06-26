@@ -83,59 +83,63 @@ public sealed class WorldEntityCombatTests
     [Fact]
     public void AttackCooldownIsIndependentOfMoveCooldown()
     {
-        var entity = CreateDummy(); // spawns at DefaultSpawnTile (8,8), well inside a 16x16 empty grid.
-        var grid = new TileGrid(16, 16, []);
+        var entity = CreateDummy(); // spawns at DefaultSpawnTile (8,8).
+        entity.SetSpeedUnitsPerSecond(5d);
 
         // Arm the ATTACK cooldown at tick 0.
         Assert.True(entity.TryBeginAttack(0, 100));
 
-        // A movement step at tick 0 must still be allowed (its own _nextEligibleTick clock is separate) — the
-        // attack cooldown does NOT gate movement.
-        Assert.True(entity.TryStep(Direction8.E, 0, stepCooldownTicks: 3, grid, out _));
+        // Movement at tick 0 must still be allowed — the attack cooldown is a SEPARATE clock and does NOT freeze
+        // the movement integrator (IsMovementFrozen reads only the movement gate, untouched by TryBeginAttack).
+        Assert.False(entity.IsMovementFrozen(0));
+        Assert.True(IntegrateIfNotFrozen(entity, Direction8.E, serverTick: 0)); // moved
 
         // And the attack cooldown is unaffected by the move: still on cooldown at tick 1.
         Assert.False(entity.TryBeginAttack(1, 100));
     }
 
     [Fact]
-    public void AttackMovementRootDelaysNextStepByRootTicksThenAllowsIt()
+    public void AttackMovementRootDelaysNextMoveByRootTicksThenAllowsIt()
     {
-        // SWING-COMMIT: an accepted swing roots MOVEMENT — the next held step is withheld for rootTicks, then
-        // accepted. Start fresh (no prior step), root at tick 0 for 4 ticks, hold E into open space.
+        // SWING-COMMIT: an accepted swing roots MOVEMENT — the player is frozen (IsMovementFrozen) for rootTicks,
+        // so the integrator caller withholds the move, then it resumes. Start fresh, root at tick 0 for 4 ticks,
+        // hold E. The invariant: a swing-rooted player does NOT move inside the window and DOES at the boundary.
         var entity = CreateDummy();
-        var grid = new TileGrid(16, 16, []);
+        entity.SetSpeedUnitsPerSecond(5d);
         const uint rootTicks = 4;
 
         entity.ApplyAttackMovementRoot(0, rootTicks);
-        var startTile = entity.TileCoord;
+        var startPosition = entity.Position;
 
-        // Inside the root window [0, rootTicks): every step is rejected and the tile does not move.
+        // Inside the root window [0, rootTicks): frozen, so the gated integrator withholds the move — position
+        // does not change.
         for (uint tick = 0; tick < rootTicks; tick++)
         {
-            Assert.False(entity.TryStep(Direction8.E, tick, stepCooldownTicks: 3, grid, out _));
-            Assert.Equal(startTile, entity.TileCoord);
+            Assert.True(entity.IsMovementFrozen(tick));
+            Assert.False(IntegrateIfNotFrozen(entity, Direction8.E, tick)); // suppressed
+            Assert.Equal(startPosition, entity.Position);
         }
 
-        // At rootTicks the step is accepted (the root window has elapsed).
-        Assert.True(entity.TryStep(Direction8.E, rootTicks, stepCooldownTicks: 3, grid, out _));
-        Assert.Equal(startTile.Offset(1, 0), entity.TileCoord);
+        // At rootTicks the freeze has elapsed: the integrator runs and the entity advances.
+        Assert.False(entity.IsMovementFrozen(rootTicks));
+        Assert.True(IntegrateIfNotFrozen(entity, Direction8.E, rootTicks)); // moved
+        Assert.True(entity.Position.X > startPosition.X);
     }
 
     [Fact]
     public void AttackMovementRootIsAFloorNeverShortensALongerExistingCooldown()
     {
-        // The root is max(existing, serverTick + rootTicks) — it must never pull an already-LATER movement cooldown
-        // earlier. Step at tick 10 with a long cooldown (so _nextEligibleTick = 30), then root with a SHORT window
-        // anchored at tick 12: the root window (12 + 4 = 16) is earlier than 30, so it must change nothing.
+        // The root is max(existing, serverTick + rootTicks) — it must never pull an already-LATER movement freeze
+        // earlier. Apply a LONG root at tick 10 (freeze until tick 30), then a SHORT root anchored at tick 12 (its
+        // window 12 + 4 = 16 is earlier than 30): the floor must leave the freeze at 30, unchanged.
         var entity = CreateDummy();
-        var grid = new TileGrid(16, 16, []);
 
-        Assert.True(entity.TryStep(Direction8.E, 10, stepCooldownTicks: 20, grid, out _)); // next eligible = 30
-        entity.ApplyAttackMovementRoot(12, rootTicks: 4); // 16 < 30 -> floor leaves it at 30
+        entity.ApplyAttackMovementRoot(10, rootTicks: 20); // frozen until 30
+        entity.ApplyAttackMovementRoot(12, rootTicks: 4);  // 16 < 30 -> floor leaves it at 30
 
-        // Still rejected at 29 (the longer step cooldown wins), accepted at 30.
-        Assert.False(entity.TryStep(Direction8.E, 29, stepCooldownTicks: 20, grid, out _));
-        Assert.True(entity.TryStep(Direction8.E, 30, stepCooldownTicks: 20, grid, out _));
+        // Still frozen at 29 (the longer root wins), free at 30.
+        Assert.True(entity.IsMovementFrozen(29));
+        Assert.False(entity.IsMovementFrozen(30));
     }
 
     [Fact]
@@ -164,18 +168,15 @@ public sealed class WorldEntityCombatTests
         // authored(6) + rootTicks(4) = 10 — the SAME tick the predictor (which rooted at the authored tick) resumes —
         // NOT at receive(8) + 4 = 12. So the step is rejected up to 9 and accepted at 10.
         var entity = CreateDummy();
-        var grid = new TileGrid(16, 16, []);
         const uint rootTicks = 4;
         const uint authoredTick = 6;
         const uint receiveTick = 8;     // latency 2
 
         entity.ApplyAttackMovementRootAuthored(authoredTick, receiveTick, rootTicks, pastWindowTicks: 64, futureLeadTicks: 4);
-        var startTile = entity.TileCoord;
 
-        // Rejected at tick 9 (inside the authored window [6,10)); accepted at tick 10 (authored 6 + rootTicks 4).
-        Assert.False(entity.TryStep(Direction8.S, 9, stepCooldownTicks: 3, grid, out _));
-        Assert.Equal(startTile, entity.TileCoord);
-        Assert.True(entity.TryStep(Direction8.S, 10, stepCooldownTicks: 3, grid, out _));
+        // Frozen at tick 9 (inside the authored window [6,10)); free at tick 10 (authored 6 + rootTicks 4).
+        Assert.True(entity.IsMovementFrozen(9));
+        Assert.False(entity.IsMovementFrozen(10));
     }
 
     [Fact]
@@ -185,7 +186,6 @@ public sealed class WorldEntityCombatTests
         // root window arbitrarily far out. The authored tick is clamped to receiveTick + futureLead before use, so the
         // root ends at (receiveTick + futureLead) + rootTicks, not (absurdFutureTick) + rootTicks.
         var entity = CreateDummy();
-        var grid = new TileGrid(16, 16, []);
         const uint rootTicks = 4;
         const uint receiveTick = 10;
         const uint futureLead = 4;
@@ -194,8 +194,8 @@ public sealed class WorldEntityCombatTests
         entity.ApplyAttackMovementRootAuthored(absurdFutureAuthored, receiveTick, rootTicks, pastWindowTicks: 64, futureLeadTicks: futureLead);
 
         // Clamped authored = receiveTick(10) + futureLead(4) = 14; root window ends at 14 + 4 = 18 — NOT 10_004.
-        Assert.False(entity.TryStep(Direction8.S, 17, stepCooldownTicks: 3, grid, out _));
-        Assert.True(entity.TryStep(Direction8.S, 18, stepCooldownTicks: 3, grid, out _));
+        Assert.True(entity.IsMovementFrozen(17));
+        Assert.False(entity.IsMovementFrozen(18));
     }
 
     [Fact]
@@ -205,7 +205,6 @@ public sealed class WorldEntityCombatTests
         // committed-swing penalty by making the root a no-op. The authored tick is clamped UP to
         // receiveTick - pastWindow, so the root still withholds movement for a window anchored there.
         var entity = CreateDummy();
-        var grid = new TileGrid(16, 16, []);
         const uint rootTicks = 4;
         const uint receiveTick = 100;
         const uint pastWindow = 64;
@@ -213,8 +212,8 @@ public sealed class WorldEntityCombatTests
         // Authored tick 2 is far below the floor (100 - 64 = 36); it is clamped up to 36, so the window ends at 40.
         entity.ApplyAttackMovementRootAuthored(2, receiveTick, rootTicks, pastWindowTicks: pastWindow, futureLeadTicks: 4);
 
-        Assert.False(entity.TryStep(Direction8.S, 39, stepCooldownTicks: 3, grid, out _));
-        Assert.True(entity.TryStep(Direction8.S, 40, stepCooldownTicks: 3, grid, out _));
+        Assert.True(entity.IsMovementFrozen(39));
+        Assert.False(entity.IsMovementFrozen(40));
     }
 
     [Fact]
@@ -295,6 +294,21 @@ public sealed class WorldEntityCombatTests
 
         Assert.True(entity.TryRegenHealth(10));
         Assert.True(entity.StateRevision > before);
+    }
+
+    // Mirrors GameServer.HandleMoveIntent's freeze gate: a frozen player's input is withheld (no integrate); an
+    // unfrozen player integrates one tick. Returns true iff the entity actually moved. This is the exact path the
+    // attack-movement-root protects — the root pushes _nextEligibleTick forward, IsMovementFrozen reports it, and
+    // the caller skips the move while frozen.
+    private static bool IntegrateIfNotFrozen(WorldEntity entity, Direction8 direction, uint serverTick)
+    {
+        if (entity.IsMovementFrozen(serverTick))
+        {
+            return false;
+        }
+
+        entity.IntegrateMovement(direction.ToUnitVector(), dtSeconds: 0.05d);
+        return true;
     }
 
     private static WorldEntity CreateDummy()

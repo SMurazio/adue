@@ -116,33 +116,8 @@ public sealed class Zone
         return _spawnTiles[index];
     }
 
-    public bool TryStep(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks)
-    {
-        return TryStep(entity, direction, serverTick, stepCooldownTicks, out _);
-    }
-
-    public bool TryStep(
-        WorldEntity entity,
-        Direction8 direction,
-        uint serverTick,
-        uint stepCooldownTicks,
-        out MovementStepResult result)
-    {
-        // Capture the pre-step tile so the spatial index can migrate the entity's bucket if the step is
-        // accepted. WorldEntity.TryStep mutates Tile in place, so the previous tile must be read before
-        // the call. Same-cell steps are a no-op inside the grid.
-        var previousTile = entity.TileCoord;
-        var stepped = entity.TryStep(direction, serverTick, stepCooldownTicks, _tileGrid, out result);
-        if (stepped)
-        {
-            World.OnEntityMoved(entity, previousTile);
-        }
-
-        return stepped;
-    }
-
-    // CONTINUOUS MIGRATION (Phase 2): the PLAYER continuous-integrator wrapper (sibling to TryStep for the tile-step
-    // path) — now WITH swept-circle WALL COLLISION (the behavioural flip; Phase 1 walked through walls). Per tick for
+    // CONTINUOUS MIGRATION (Phase 2): the PLAYER continuous-integrator wrapper — WITH swept-circle WALL COLLISION
+    // (the behavioural flip; Phase 1 walked through walls). Per tick for
     // a moving player:
     //   1. delta  = entity.ComputeMoveDelta(unitDir, dt)            // velocity + facing set here; raw delta returned
     //   2. walls  = TileGrid.QueryNearbyWalls(pos, delta, radius)   // shared TileWalls, stable row-major, scratch

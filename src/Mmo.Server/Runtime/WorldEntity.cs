@@ -53,14 +53,15 @@ public sealed class WorldEntity
     public EntityKind Kind { get; }
 
     // The entity's CONTINUOUS world position (WorldVector, tile units). Phase 1: for PLAYERS this now holds
-    // FRACTIONAL values — IntegrateMovement advances it by Velocity x dt off-grid. For MONSTERS it stays an exact
-    // tile centre (every TryStep write goes through WorldVector.FromTile(targetTile)). The wire/persistence/grid
-    // still speak TileCoord; they read the derived TileCoord accessor below, which rounds to the nearest tile.
+    // FRACTIONAL values — IntegrateMovement advances it by Velocity x dt off-grid. For MONSTERS it holds the
+    // continuous hop landing (HopLocomotion applies a collision-resolved position via ApplyResolvedMove, often
+    // sub-tile). The wire/persistence/grid still speak TileCoord; they read the derived TileCoord accessor below,
+    // which rounds to the nearest tile.
     public WorldVector Position { get; private set; }
 
     // The entity's current world-space velocity (units/sec). Phase 1: LIVE for PLAYERS — IntegrateMovement sets it
     // to unitDir x SpeedUnitsPerSecond each tick (and StopMovement zeroes it on release). Stays Zero for MONSTERS
-    // (they tile-step via TryStep, which never touches Velocity).
+    // (the hop applies position directly via ApplyResolvedMove and never routes through the velocity integrator).
     public WorldVector Velocity { get; private set; } = WorldVector.Zero;
 
     // The entity's speed stat (tiles/sec), set by the server from base move speed x SpeedMultiplier. Phase 1: LIVE
@@ -392,96 +393,6 @@ public sealed class WorldEntity
         return true;
     }
 
-    public bool TryStep(Direction8 direction, uint serverTick, uint stepCooldownTicks, TileGrid grid)
-    {
-        return TryStep(direction, serverTick, stepCooldownTicks, grid, out _);
-    }
-
-    public bool TryStep(
-        Direction8 direction,
-        uint serverTick,
-        uint stepCooldownTicks,
-        TileGrid grid,
-        out MovementStepResult result)
-    {
-        // Gate on the next-eligible tick (set by the previous step). A step that arrives early — before its
-        // cooldown has elapsed — is dropped, unchanged from the pre-S63 cooldown behaviour for accepted steps.
-        if (_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value)
-        {
-            var cooldownDelta = direction.Delta();
-            var cooldownTarget = TileCoord.Offset(cooldownDelta.X, cooldownDelta.Y);
-            result = new MovementStepResult(
-                direction,
-                TileCoord,
-                cooldownTarget,
-                CooldownElapsed: false,
-                grid.IsWalkable(cooldownTarget),
-                Accepted: false,
-                "cooldown",
-                TileCoord);
-            return false;
-        }
-
-        // S98: a direction change steps IMMEDIATELY in the new direction — there is no separate turn beat. The
-        // step itself faces you, so set Facing unconditionally up front. Capture whether the facing actually
-        // changed so a blocked-into-a-wall step (no tile move) can STILL bump StateRevision and replicate the
-        // new facing (the Cato sprite flip depends on it).
-        var facingChanged = Facing != direction;
-        Facing = direction;
-
-        var delta = direction.Delta();
-        var target = TileCoord.Offset(delta.X, delta.Y);
-        // S75: reject diagonal corner-cutting. A diagonal step (both axes non-zero) also slices between the two
-        // orthogonally-adjacent tiles it passes; if EITHER of those side tiles is blocked, the move would slip
-        // diagonally THROUGH a wall corner. So a diagonal is walkable only when the destination AND both side
-        // tiles ((Tile.X+dx, Tile.Y) and (Tile.X, Tile.Y+dy)) are walkable. Cardinal steps (one axis zero) are
-        // unchanged: only the destination matters. The client predictor (LocalPlayerPredictor.Tick) applies the
-        // IDENTICAL rule via its walkability oracle so prediction still mirrors the server exactly.
-        if (!IsStepWalkable(delta, target, grid))
-        {
-            // Blocked at a wall: HOLD in place (no tile move). The cooldown is NOT consumed (_nextEligibleTick
-            // is left where it is — already <= serverTick — so the held intent re-tests next tick), unchanged
-            // from the pre-S98 blocked behaviour. But if this blocked step also CHANGED facing (a direction
-            // change into a wall), bump StateRevision so the new facing replicates even though the tile didn't
-            // move (S98 — the Cato sprite flip on a press-into-a-wall depends on this). A repeated press into the
-            // same wall (no facing change) bumps nothing, so it does not spam snapshot deltas.
-            if (facingChanged)
-            {
-                StateRevision++;
-            }
-
-            result = new MovementStepResult(
-                direction,
-                TileCoord,
-                target,
-                CooldownElapsed: true,
-                TargetWalkable: false,
-                Accepted: false,
-                grid.IsInBounds(target) ? "blocked" : "out_of_bounds",
-                TileCoord);
-            return false;
-        }
-
-        var from = TileCoord;
-        // Phase 0: accepted step assigns the tile-centre position with the UNCHANGED integer target tile.
-        Position = WorldVector.FromTile(target);
-        _nextEligibleTick = serverTick + stepCooldownTicks;
-        StateRevision++;
-        // S76: count this accepted tile move. ONLY here — blocked/cooldown steps above return early without
-        // touching StepSequence, so it advances in lockstep with the actual tile.
-        StepSequence++;
-        result = new MovementStepResult(
-            direction,
-            from,
-            target,
-            CooldownElapsed: true,
-            TargetWalkable: true,
-            Accepted: true,
-            "accepted",
-            TileCoord);
-        return true;
-    }
-
     // The PLAYER continuous integrator — a direct port of the proven exp:ContinuousMover.Step (Z->Y, on WorldVector),
     // the GRID-AGNOSTIC open-field path (NO wall collision at THIS layer — Phase 2's swept-circle collision lives in
     // Zone.IntegrateMovement, which interposes ContinuousCollision.Resolve between the velocity/facing step and the
@@ -496,8 +407,9 @@ public sealed class WorldEntity
     // bucket, so the tile-keyed wire/grid stay at exactly today's cadence and the snapshot bandwidth is unchanged
     // (R1: do NOT bump every sub-tile tick). A zero unitDir is treated as a stop (Velocity = Zero, no move).
     //
-    // Distinct from TryStep (the tile-step path monsters still use): a player uses IntegrateMovement (Velocity goes
-    // non-zero); a monster uses TryStep (Velocity stays Zero). NEVER both on one entity (R3).
+    // Distinct from the monster hop (HopLocomotion): a player uses IntegrateMovement (Velocity goes non-zero); a
+    // monster applies a discrete collision-resolved hop via ApplyResolvedMove (Velocity stays Zero). NEVER both on
+    // one entity (R3).
     public bool IntegrateMovement(WorldVector unitDir, double dtSeconds)
     {
         // Phase 2: the NO-WALLS integrator, now expressed as the two-step split the collided Zone path uses
@@ -654,25 +566,5 @@ public sealed class WorldEntity
             (-1, -1) => Direction8.NW,
             _ => null,
         };
-    }
-
-    // S75: walkability of a step from the current tile, with diagonal corner-cutting rejected. The destination
-    // must always be walkable. For a DIAGONAL step (both delta axes non-zero) the two orthogonally-adjacent
-    // tiles it cuts between must ALSO be walkable, so the entity can't slip diagonally through a wall corner.
-    // Cardinal steps (one axis zero) check the destination only. The client predictor mirrors this rule exactly
-    // (LocalPlayerPredictor) so server and prediction reject the identical set of diagonal steps.
-    private bool IsStepWalkable(TileCoord delta, TileCoord target, TileGrid grid)
-    {
-        if (!grid.IsWalkable(target))
-        {
-            return false;
-        }
-
-        if (delta.X != 0 && delta.Y != 0)
-        {
-            return grid.IsWalkable(TileCoord.Offset(delta.X, 0)) && grid.IsWalkable(TileCoord.Offset(0, delta.Y));
-        }
-
-        return true;
     }
 }

@@ -142,18 +142,19 @@ public sealed class SpatialAoiParityTests
         var session = new ClientSession(null!);
 
         var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(120, 100), Direction8.W);
-        var grid = new TileGrid(256, 256, blockedTiles: []);
+        mover.SetSpeedUnitsPerSecond(10d); // 1 tile per integrate tick (10 units/s * 0.1s)
 
         var viewer = MakeViewer(new TileCoord(98, 100));
 
         // Initially out of a radius-5 interest box (dx = 22).
         Assert.DoesNotContain(1u, GridInInterest(state, viewer, session, interestRadius: 5f));
 
-        // Walk the mover west until it is adjacent to the viewer, stepping through the grid every tile.
-        for (var tick = 1u; mover.TileCoord.X > 100; tick++)
+        // Walk the mover west via the continuous integrator until it is adjacent to the viewer, migrating its
+        // grid bucket on every rounded-tile crossing (the bookkeeping Zone.IntegrateMovement does for a player).
+        while (mover.TileCoord.X > 100)
         {
             var previous = mover.TileCoord;
-            Assert.True(mover.TryStep(Direction8.W, tick, stepCooldownTicks: 1, grid));
+            Assert.True(mover.IntegrateMovement(Direction8.W.ToUnitVector(), dtSeconds: 0.1d)); // crossed one tile west
             state.OnEntityMoved(mover, previous);
 
             var naive = NaiveInInterest(viewer, [mover], session, interestRadius: 5f);
@@ -170,13 +171,13 @@ public sealed class SpatialAoiParityTests
     {
         var state = new WorldState(gridCellSize: 32);
         var session = new ClientSession(null!);
-        var grid = new TileGrid(256, 256, blockedTiles: []);
+        var viewer = MakeViewer(new TileCoord(100, 100));
 
         var mover = state.AddTransient(1, EntityKind.Player, "Mover", new TileCoord(100, 100), Direction8.E);
-        var viewer = MakeViewer(new TileCoord(105, 100));
+        mover.SetSpeedUnitsPerSecond(10d); // 1 tile per integrate tick
 
         var previous = mover.TileCoord;
-        Assert.True(mover.TryStep(Direction8.E, serverTick: 1, stepCooldownTicks: 1, grid)); // -> (101,100), same cell
+        Assert.True(mover.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.1d)); // -> (101,100), same cell
         state.OnEntityMoved(mover, previous);
 
         Assert.Contains(1u, GridInInterest(state, viewer, session, interestRadius: 10f));

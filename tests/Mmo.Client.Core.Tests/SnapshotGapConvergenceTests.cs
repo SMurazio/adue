@@ -176,16 +176,14 @@ public sealed class SnapshotGapConvergenceTests
 
     private static void Step(WorldEntity entity)
     {
-        var grid = new TileGrid(64, 64, []);
-        var direction = entity.Facing == Direction8.S ? Direction8.N : Direction8.S;
-        // Step until the revision actually advances (a blocked step would not bump it).
+        // Advance the entity through the continuous integrator until its rounded tile crosses (which bumps
+        // StateRevision exactly once, in ApplyResolvedMove). A 1-unit/tick eastward integrate crosses one tile
+        // per call, so this advances the revision by one — the convergence harness only needs a real bump.
+        entity.SetSpeedUnitsPerSecond(10d);
         var before = entity.StateRevision;
-        var tick = entity.StateRevision; // any monotonic tick value works for the cooldown gate
         while (entity.StateRevision == before)
         {
-            entity.TryStep(direction, tick, 0, grid);
-            direction = direction == Direction8.S ? Direction8.N : Direction8.S;
-            tick++;
+            entity.IntegrateMovement(Direction8.E.ToUnitVector(), dtSeconds: 0.1d);
         }
     }
 

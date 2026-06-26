@@ -74,22 +74,6 @@ internal sealed class ServerMovementTrace
             $" unbudgetedMs={FormatMs(unbudgetedMs)}");
     }
 
-    public void MoveStep(ClientSession session, uint sequence, MovementStepResult result, uint serverTick)
-    {
-        if (!ShouldTrace(session))
-        {
-            return;
-        }
-
-        _write(
-            "mmo_trace side=server event=move_step" +
-            $" ts={Timestamp()} tick={serverTick.ToString(CultureInfo.InvariantCulture)} player={Quote(session.DisplayName)}" +
-            $" seq={sequence.ToString(CultureInfo.InvariantCulture)} dir={result.Direction}" +
-            $" from={FormatTile(result.From)} target={FormatTile(result.Target)} result={FormatTile(result.Result)}" +
-            $" cooldown={FormatBool(result.CooldownElapsed)} walkable={FormatBool(result.TargetWalkable)}" +
-            $" accepted={FormatBool(result.Accepted)} reason={result.Reason}");
-    }
-
     public void SnapshotCarried(ClientSession recipient, WorldEntity entity, uint snapshotSequence, uint serverTick, int chunkIndex, int chunkCount)
     {
         if (!ShouldTrace(entity))
@@ -122,11 +106,6 @@ internal sealed class ServerMovementTrace
     private static string FormatTile(TileCoord tile)
     {
         return $"{tile.X.ToString(CultureInfo.InvariantCulture)},{tile.Y.ToString(CultureInfo.InvariantCulture)}";
-    }
-
-    private static string FormatBool(bool value)
-    {
-        return value ? "true" : "false";
     }
 
     private static string Quote(string value)
