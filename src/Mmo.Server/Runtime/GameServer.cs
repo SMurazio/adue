@@ -1402,7 +1402,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.TileCoord, target.TileCoord))
+        if (!IsInInteractionRange(actor, target))
         {
             SendInteractResult(session, false, "too_far");
             return;
@@ -1452,7 +1452,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.TileCoord, corpseEntity.TileCoord))
+        if (!IsInInteractionRange(actor, corpseEntity))
         {
             SendInteractResult(session, false, "too_far");
             return;
@@ -1509,7 +1509,7 @@ public sealed class GameServer
             return;
         }
 
-        if (!IsAdjacent(actor.TileCoord, corpseEntity.TileCoord))
+        if (!IsInInteractionRange(actor, corpseEntity))
         {
             // Walked out of range with the window open: close it (the client drops the panel on this Open=false).
             session.SetOpenCorpse(null);
@@ -1658,9 +1658,15 @@ public sealed class GameServer
 
     // Adjacency = Chebyshev distance <= 1 tile, so a player standing on or in any of the 8 tiles around
     // a node (matching 8-directional movement) may harvest it.
-    private static bool IsAdjacent(TileCoord a, TileCoord b)
+    // CONTINUOUS MIGRATION (Phase 9): the interact REACH gate (harvest a node / open + loot a corpse). Floats the
+    // former tile Chebyshev <= 1 adjacency to a Euclidean distance on the CONTINUOUS positions — same int->float
+    // pattern as Phase 6 (AOI) and Phase 7 (combat). The actor moves off-grid, so its sub-tile offset now counts;
+    // the target (resource node / corpse) is still authored on a tile centre, so target.Position is that centre.
+    // The radius (InteractionTuning.InteractionRadiusTiles, 1.5) is SHARED with the client's HarvestTargeting so
+    // the player sees harvestable exactly what this gate accepts; compared squared to skip the sqrt.
+    private static bool IsInInteractionRange(WorldEntity actor, WorldEntity target)
     {
-        return Math.Abs(a.X - b.X) <= 1 && Math.Abs(a.Y - b.Y) <= 1;
+        return (actor.Position - target.Position).LengthSquared <= InteractionTuning.InteractionRadiusTilesSquared;
     }
 
     private ZoneInfoMessage CreateZoneInfoMessage()

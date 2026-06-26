@@ -779,14 +779,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	private void TryHarvest()
 	{
-		if (_client?.IsLoggedIn != true || _client.LocalTile is not TileCoord actorTile)
+		// CONTINUOUS MIGRATION (Phase 9): targeting reads the SERVER-CONFIRMED continuous position (off-grid,
+		// sub-tile), NOT the predicted render position — so the client's Euclidean reach check matches the server's
+		// interact gate (S53: targeting uses confirmed state).
+		if (_client?.IsLoggedIn != true || _client.LocalConfirmedPosition is not WorldVector actorPosition)
 		{
 			return;
 		}
 
 		// _renderStates is refreshed every frame in SampleRenderStates; it is the same data the renderer
 		// sees, so nearest-node selection matches what the player is looking at.
-		if (HarvestTargeting.TryFindNearestHarvestable(_renderStates, actorTile, out var targetNetworkId))
+		if (HarvestTargeting.TryFindNearestHarvestable(_renderStates, actorPosition, out var targetNetworkId))
 		{
 			_client.SendInteractRequest(targetNetworkId);
 		}

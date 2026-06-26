@@ -186,6 +186,15 @@ public sealed class MmoClient : IDisposable
         ? entity.Tile
         : _loginTile;
 
+    // CONTINUOUS MIGRATION (Phase 9): the local player's SERVER-CONFIRMED continuous position (WorldVector), the
+    // authoritative state harvest/interact targeting reads — NOT the predicted/interpolated render position (S53).
+    // Mirrors LocalTile but keeps the sub-tile offset (the player moves off-grid now), so the client's Euclidean
+    // interact-reach check (HarvestTargeting) matches the server's gate, which reads actor.Position continuous. Falls
+    // back to the login tile centre before the first snapshot, exactly like LocalTile.
+    public WorldVector? LocalConfirmedPosition => LocalNetworkId.HasValue && _entities.TryGetValue(LocalNetworkId.Value, out var entity)
+        ? entity.Position
+        : (_loginTile is { } tile ? WorldVector.FromTile(tile) : null);
+
     public IReadOnlyList<ChatLine> ChatLog => _chatLog;
 
     public IReadOnlyList<ClientError> Errors => _errors;

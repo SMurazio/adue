@@ -87,8 +87,9 @@ public sealed class InteractHarvestIntegrationTests
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
             var node = await ResolveSpawnedNodeAsync(client, placement);
-            // We spawn adjacent to the scattered node; step away (in whichever vertical direction has room)
-            // until we are no longer adjacent, so the interact must be rejected too_far.
+            // We spawn in reach of the scattered node; step away (in whichever vertical direction has room) until we
+            // are 2+ tiles off — comfortably past the Phase-9 Euclidean interaction radius (1.5 tiles) — so the
+            // interact must be rejected too_far.
             var away = client.OwnTile.Y <= node.Tile.Y ? Direction8.N : Direction8.S;
             await StepUntilAsync(client, away, () => Math.Abs(client.OwnTile.Y - node.Tile.Y) > 1);
 
@@ -431,7 +432,8 @@ public sealed class InteractHarvestIntegrationTests
     }
 
     // Where the deterministically-scattered Tree node sits and the walkable tile the player should spawn
-    // on to be Chebyshev-adjacent to it (no in-sim movement, no wall pathing).
+    // on to be in interaction reach of it (no in-sim movement, no wall pathing). The chosen stand tile is a
+    // Chebyshev-1 neighbour, so it is within the Phase-9 Euclidean radius (<= sqrt(2) ≈ 1.414 < 1.5).
     private readonly record struct TreePlacement(TileCoord NodeTile, TileCoord SpawnTile);
 
     // Resource-node placement is deterministic and seeded (S44): identical (seed, size, density, registry)
