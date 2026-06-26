@@ -43,7 +43,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 9 | Interaction: adjacency → Euclidean interaction radius | ✅ **DONE** | `a04547f`; shared `InteractionRadiusTiles=1.5` (preserves Chebyshev≤1 reach), client/server parity off the shared const, gate green |
 | 10 | Persistence: float position columns (SQLite + Postgres) | ✅ **DONE** | `a70a9a3`; additive migration 005 (both DBs), sub-tile (10.4,8.7) round-trips, login-restore, write-behind. Gate green |
 | 11 | Test sweep + delete the dead tile-step path | ✅ **DONE** | `c019819`; review SHIP (attack-movement-root genuinely preserved + strengthened — helper mirrors the production gate, asserts no Position change while rooted; deletion clean; no coverage lost). Minor followup (3 authored tests) logged. **Last tile-step code gone.** |
-| 12 | Stress re-baseline (120/30s) + bandwidth study | **IN PROGRESS** | run the standard 120/30s stress on the continuous build + measure per-client bandwidth (fixed-point wire = ~parity with tile, no per-entity inflation) |
+| 12 | Stress re-baseline + bandwidth study | ✅ **DONE** | 120 clients / 60s: 120/120 authed, **0 errors**, avg 7.1ms/max 15ms, ~1900 snap/s, max 81 entities/snap, ~7kbps/client in. Fixed-point = 4 bytes/entity (parity with tile — zero inflation). PASS. |
+
+### 🎉 MIGRATION COMPLETE — all 12 phases shipped + reviewed. The game on `feat/continuous-migration` is fully continuous-native, stress-validated. `main` (tile) + `tile-stepped-stable` untouched. Next: user's full feel-test → merge decision (hard replacement of tile `main`).
 
 ## Log
 
