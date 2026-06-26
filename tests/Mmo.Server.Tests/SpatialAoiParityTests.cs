@@ -10,11 +10,20 @@ namespace Mmo.Server.Tests;
 // positions, and hysteresis (last-snapshot) state. A drop at the cell-coverage edge would be both a
 // visible bug and an anti-cheat hole, so this is the critical correctness test. Also covers the
 // security invariant (outside-AOI ⇒ never selected) and index maintenance on spawn/move/despawn.
+//
+// CONTINUOUS MIGRATION (Phase 6): IsEntityInInterest now measures distance on the continuous float
+// Position, while the grid still keys/gathers on the rounded TileCoord. The random layout therefore
+// scatters entities at FRACTIONAL positions (not just tile centres) so the parity gate exercises the
+// rounded-superset-vs-float-disc seam — the exact place the +1-tile gather margin (Phase 6) is
+// load-bearing. If the gather were not a strict superset of the float disc, a sub-tile-further
+// candidate would round into a cell just outside the gathered box and the grid set would drop it.
 public sealed class SpatialAoiParityTests
 {
-    // Hysteresis margin GameServer adds to the interest radius for already-known entities. Kept in sync
-    // with GameServer.InterestExitHysteresisTiles (1 tile) so the query-radius computation matches.
+    // Hysteresis margin GameServer adds to the interest radius for already-known entities, plus the Phase 6
+    // rounded-gather superset margin. Kept in sync with GameServer.InterestExitHysteresisTiles (1 tile) +
+    // GameServer.RoundedGatherMarginTiles (1 tile) so the query-radius computation matches the server's.
     private const float ExitHysteresisTiles = 1f;
+    private const float RoundedGatherMarginTiles = GameServer.RoundedGatherMarginTiles;
 
     [Theory]
     [InlineData(1)]
@@ -38,20 +47,47 @@ public sealed class SpatialAoiParityTests
                 for (var i = 0; i < entityCount; i++)
                 {
                     var tile = new TileCoord(random.Next(0, worldSize), random.Next(0, worldSize));
-                    entities.Add(state.AddTransient(
+                    var entity = state.AddTransient(
                         (uint)(i + 1),
                         EntityKind.Resource,
                         $"E{i}",
                         tile,
-                        Direction8.S));
+                        Direction8.S);
+                    // Phase 6: nudge most entities OFF the tile centre to a fractional position so the
+                    // float interest test and the rounded-tile gather diverge. ApplyResolvedMove writes the
+                    // continuous Position; OnEntityMoved re-keys the grid bucket to the (possibly new)
+                    // rounded tile — exactly what the live integrator does on a sub-tile advance.
+                    if (random.Next(4) != 0)
+                    {
+                        var previous = entity.TileCoord;
+                        var fx = tile.X + (random.NextDouble() - 0.5) * 1.9;
+                        var fy = tile.Y + (random.NextDouble() - 0.5) * 1.9;
+                        entity.ApplyResolvedMove(new WorldVector(fx, fy));
+                        state.OnEntityMoved(entity, previous);
+                    }
+
+                    entities.Add(entity);
                 }
 
                 // Try several viewers (some are world entities, so always self-visible).
                 for (var v = 0; v < 6; v++)
                 {
-                    var viewer = entities.Count > 0 && random.Next(2) == 0
-                        ? entities[random.Next(entities.Count)]
-                        : MakeViewer(new TileCoord(random.Next(-10, worldSize + 10), random.Next(-10, worldSize + 10)));
+                    WorldEntity viewer;
+                    if (entities.Count > 0 && random.Next(2) == 0)
+                    {
+                        viewer = entities[random.Next(entities.Count)];
+                    }
+                    else
+                    {
+                        var viewerTile = new TileCoord(random.Next(-10, worldSize + 10), random.Next(-10, worldSize + 10));
+                        viewer = MakeViewer(viewerTile);
+                        // Phase 6: a synthetic viewer is also nudged off its tile centre so the gather (keyed
+                        // on the viewer's ROUNDED tile) is centred up to 0.5 tile away from the true float
+                        // position the interest test uses — the other half of the rounded-superset margin.
+                        viewer.ApplyResolvedMove(new WorldVector(
+                            viewerTile.X + (random.NextDouble() - 0.5) * 1.9,
+                            viewerTile.Y + (random.NextDouble() - 0.5) * 1.9));
+                    }
 
                     // Randomly mark a subset as "in last snapshot" to exercise the hysteresis path, which
                     // is exactly where an off-by-one in cell coverage would drop an edge entity.
@@ -146,6 +182,100 @@ public sealed class SpatialAoiParityTests
         Assert.Contains(1u, GridInInterest(state, viewer, session, interestRadius: 10f));
     }
 
+    // Phase 6: a candidate whose ROUNDED tile sits OUTSIDE the integer interest radius but whose true
+    // continuous position is just INSIDE the float radius must now be selected — the inclusion the old
+    // integer-tile distance could not express. Viewer at tile (100,100); radius 5. A candidate at tile
+    // (105,100) is at integer distance exactly 5 (on the boundary), but nudged to x=104.6 its true float
+    // distance is 4.6 < 5, so it is unambiguously inside. The mirror: nudged to x=105.4 (float distance
+    // 5.4 > 5) it is unambiguously outside, even though its rounded tile (105) was on the integer boundary.
+    [Fact]
+    public void SubTilePositionJustInsideFloatRadiusIsSelected()
+    {
+        var state = new WorldState(gridCellSize: 8);
+        var session = new ClientSession(null!);
+        var viewer = MakeViewer(new TileCoord(100, 100));
+
+        var inside = state.AddTransient(1, EntityKind.Resource, "Inside", new TileCoord(105, 100), Direction8.S);
+        PlaceAt(state, inside, new WorldVector(104.6, 100));
+        // The float distance is 4.6 < 5, so it is in interest even though it rounds to the boundary tile.
+        Assert.True(GameServer.IsEntityInInterest(viewer, inside, session, interestRadius: 5f));
+        Assert.Contains(1u, GridInInterest(state, viewer, session, interestRadius: 5f));
+    }
+
+    [Fact]
+    public void SubTilePositionJustOutsideFloatRadiusIsExcluded()
+    {
+        var state = new WorldState(gridCellSize: 8);
+        var session = new ClientSession(null!);
+        var viewer = MakeViewer(new TileCoord(100, 100));
+
+        var outside = state.AddTransient(1, EntityKind.Resource, "Outside", new TileCoord(105, 100), Direction8.S);
+        PlaceAt(state, outside, new WorldVector(105.4, 100));
+        // The float distance is 5.4 > 5 and it is unknown (not in last snapshot), so it is out of interest.
+        Assert.False(GameServer.IsEntityInInterest(viewer, outside, session, interestRadius: 5f));
+        // The gather still RETURNS it as a candidate (superset) — it must just fail the exact test.
+        Assert.DoesNotContain(1u, GridInInterest(state, viewer, session, interestRadius: 5f));
+    }
+
+    // Phase 6 superset invariant, made deterministic at the rounding edge: a KNOWN candidate sitting on the
+    // .5 boundary so its ROUNDED tile (the grid cell key) is the maximum half-tile FURTHER from the viewer
+    // than its true float position, with its float distance just inside the exit (hysteresis) radius. The
+    // gathered candidate set (keyed on rounded tiles) MUST still contain it — the property
+    // RoundedGatherMarginTiles guarantees. (NB: with AwayFromZero rounding + the inclusive boundary, a
+    // single-axis case can't quite force the bare ceil(exit) box to drop an in-interest entity — see the
+    // review note; the +1 margin is the conservative provable bound and the randomized fractional sweep
+    // above is the broad guard. This test pins the named edge as a regression scaffold.)
+    [Fact]
+    public void KnownCandidateAtRoundingEdgeStaysGathered()
+    {
+        const float interestRadius = 5f; // exit radius = 5 + 1 = 6
+        var state = new WorldState(gridCellSize: 8);
+        var session = new ClientSession(null!);
+
+        var viewer = MakeViewer(new TileCoord(100, 100)); // exact tile centre, rounds to 100
+        var candidate = state.AddTransient(1, EntityKind.Resource, "Edge", new TileCoord(106, 100), Direction8.S);
+        PlaceAt(state, candidate, new WorldVector(105.5, 100)); // float dist 5.5 < 6; rounds to tile 106
+        session.RememberSnapshotEntities([candidate]); // known ⇒ exit radius (hysteresis) applies
+
+        // Float distance 5.5 ≤ exit radius 6 ⇒ in interest; the rounded-tile gather must still contain it.
+        Assert.True(GameServer.IsEntityInInterest(viewer, candidate, session, interestRadius));
+        AssertGatherIsSupersetOfFloatInterest(state, viewer, session, interestRadius, [candidate]);
+        Assert.Contains(1u, GridInInterest(state, viewer, session, interestRadius));
+    }
+
+    // Directly asserts the Phase 6 superset invariant: for `viewer`, EVERY entity that passes the exact
+    // float IsEntityInInterest test is present in the rounded-tile candidate gather. This is the property
+    // RoundedGatherMarginTiles guarantees; a failure is a dropped in-interest entity (a replication hole).
+    private static void AssertGatherIsSupersetOfFloatInterest(
+        WorldState state,
+        WorldEntity viewer,
+        ClientSession session,
+        float interestRadius,
+        IReadOnlyList<WorldEntity> entities)
+    {
+        var radiusTiles = (int)Math.Ceiling(interestRadius + ExitHysteresisTiles + RoundedGatherMarginTiles);
+        var gathered = new List<WorldEntity>();
+        state.GatherInterestCandidates(viewer.TileCoord, radiusTiles, gathered);
+        var gatheredIds = gathered.Select(static e => e.NetworkId).ToHashSet();
+
+        foreach (var entity in entities)
+        {
+            if (GameServer.IsEntityInInterest(viewer, entity, session, interestRadius))
+            {
+                Assert.Contains(entity.NetworkId, gatheredIds);
+            }
+        }
+    }
+
+    // Places an entity at a continuous (possibly fractional) world position and re-keys its grid bucket,
+    // exactly as the live integrator does on a sub-tile advance (ApplyResolvedMove + OnEntityMoved).
+    private static void PlaceAt(WorldState state, WorldEntity entity, WorldVector position)
+    {
+        var previous = entity.TileCoord;
+        entity.ApplyResolvedMove(position);
+        state.OnEntityMoved(entity, previous);
+    }
+
     // Replicates GameServer's exact two-source selection using the grid: gather candidates from the
     // spatial index over the exit-radius cell box, then filter by the exact interest test.
     private static SortedSet<uint> GridInInterest(
@@ -154,7 +284,7 @@ public sealed class SpatialAoiParityTests
         ClientSession session,
         float interestRadius)
     {
-        var radiusTiles = (int)Math.Ceiling(interestRadius + ExitHysteresisTiles);
+        var radiusTiles = (int)Math.Ceiling(interestRadius + ExitHysteresisTiles + RoundedGatherMarginTiles);
         var candidates = new List<WorldEntity>();
         state.GatherInterestCandidates(viewer.TileCoord, radiusTiles, candidates);
 

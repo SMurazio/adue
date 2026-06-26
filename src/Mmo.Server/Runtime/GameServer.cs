@@ -1057,7 +1057,7 @@ public sealed class GameServer
         // Place markers for spawners that newly entered AOI.
         foreach (var spawner in _spawners.Values)
         {
-            var inAoi = IsTileInInterest(recipientEntity.TileCoord, spawner.Tile, _tuning.InterestRadius);
+            var inAoi = IsTileInInterest(recipientEntity.Position, spawner.Tile, _tuning.InterestRadius);
             if (inAoi && !recipient.KnowsSpawner(spawner.SpawnerId))
             {
                 TrySend(recipient.Peer, new SpawnerMarkerMessage(spawner.SpawnerId, spawner.Tile, true), DeliveryMethod.ReliableOrdered);
@@ -1070,7 +1070,7 @@ public sealed class GameServer
         foreach (var spawnerId in recipient.KnownSpawnerIds)
         {
             var stillVisible = _spawners.TryGetValue(spawnerId, out var spawner)
-                && IsTileInInterest(recipientEntity.TileCoord, spawner.Tile, _tuning.InterestRadius);
+                && IsTileInInterest(recipientEntity.Position, spawner.Tile, _tuning.InterestRadius);
             if (!stillVisible)
             {
                 _spawnerForgetScratch.Add(spawnerId);
@@ -1084,14 +1084,16 @@ public sealed class GameServer
         }
     }
 
-    // Whether `target` is within `interestRadius` (Euclidean, no hysteresis) of `viewerTile`. Plain radius test for the
-    // spawner marker — it does not need the entity hysteresis (the marker is cheap + reliable, and a 1-tile flicker at
-    // the boundary is invisible since the marker is static).
-    private static bool IsTileInInterest(TileCoord viewerTile, TileCoord target, float interestRadius)
+    // Whether `target` (a spawner's authored integer tile) is within `interestRadius` (Euclidean, no hysteresis) of
+    // the viewer's CONTINUOUS float position. Plain radius test for the spawner marker — it does not need the entity
+    // hysteresis (the marker is cheap + reliable, and a sub-tile flicker at the boundary is invisible since the
+    // marker is static). CONTINUOUS MIGRATION (Phase 6): the viewer side is now the precise float Position; the
+    // spawner stays a tile centre (FromTile) because spawners are authored on integer tiles. So the marker
+    // flips on/off at the viewer's true sub-tile distance to the spawner, matching the entity AOI test.
+    private static bool IsTileInInterest(WorldVector viewerPosition, TileCoord target, float interestRadius)
     {
-        var dx = target.X - viewerTile.X;
-        var dy = target.Y - viewerTile.Y;
-        return (dx * dx) + (dy * dy) <= interestRadius * interestRadius;
+        var delta = WorldVector.FromTile(target) - viewerPosition;
+        return delta.LengthSquared <= interestRadius * (double)interestRadius;
     }
 
     private static float SnapshotSortKey(ClientSession recipient, WorldEntity candidate, float distanceSquared)
@@ -1119,11 +1121,16 @@ public sealed class GameServer
         }
     }
 
+    // CONTINUOUS MIGRATION (Phase 6): the PRECISE interest distance is now computed on the entities' continuous
+    // float Position (WorldVector, tile units), not the rounded .TileCoord. So an entity's in/out-of-AOI is
+    // decided by its TRUE sub-tile distance to the viewer, the thing integer-tile distance could not express.
+    // Returned as a float (the radius/hysteresis comparands are float tiles); the underlying double distance is
+    // well within float range for any sane interest radius, and the value only feeds the radius² compare + the
+    // snapshot sort key. The grid candidate gather stays a coarse rounded-tile superset (see
+    // ResolveAoiQueryRadiusTiles) — this float test is the exact filter applied to the gathered candidates.
     private static float DistanceSquared(WorldEntity a, WorldEntity b)
     {
-        var dx = b.TileCoord.X - a.TileCoord.X;
-        var dy = b.TileCoord.Y - a.TileCoord.Y;
-        return (dx * dx) + (dy * dy);
+        return (float)(b.Position - a.Position).LengthSquared;
     }
 
     internal static bool IsEntityInInterest(
@@ -1149,14 +1156,24 @@ public sealed class GameServer
         return recipient.WasInLastSnapshot(candidate.NetworkId) && distanceSquared <= exitRadiusSquared;
     }
 
-    // Tile half-extent an AOI grid query must cover: the interest EXIT radius (interest radius + the
-    // hysteresis margin), rounded UP so the integer cell box fully contains the float exit circle. Any
-    // entity that could pass IsEntityInInterest lies within this Chebyshev box of the viewer, so querying
-    // it guarantees the grid returns a superset of the full-scan result.
+    // Tile half-extent an AOI grid query must cover so the rounded-tile cell gather stays a strict SUPERSET of
+    // the precise FLOAT interest test (Phase 6). The gather centers on the viewer's ROUNDED TileCoord and the
+    // grid keys candidates on their ROUNDED TileCoord, but IsEntityInInterest now measures the EXIT radius
+    // (interest + hysteresis) on the continuous float Positions. Bounding the rounding both sides, per axis:
+    //   |Tc - Tv| <= |Tc - Pc| + |Pc - Pv| + |Pv - Tv| <= 0.5 + (exit radius) + 0.5 = exitRadius + 1
+    // (each round() is at most 0.5 off its true position, and the axis gap never exceeds the Euclidean exit
+    // distance). So any entity that can pass the float test lies within Chebyshev (exitRadius + 1) tiles of the
+    // viewer's tile. Ceil that: the +1 is the load-bearing margin that the old integer-only gather lacked — a
+    // sub-tile-further float candidate could otherwise round into a cell just outside the box and be dropped.
     private static int ResolveAoiQueryRadiusTiles(float interestRadius)
     {
-        return (int)Math.Ceiling(interestRadius + InterestExitHysteresisTiles);
+        return (int)Math.Ceiling(interestRadius + InterestExitHysteresisTiles + RoundedGatherMarginTiles);
     }
+
+    // The +1-tile superset margin above: 0.5 from rounding the viewer's continuous position to its gather-center
+    // tile, plus 0.5 from rounding each candidate's continuous position to its grid-cell key. Named so the parity
+    // test can stay in lockstep with the gather-radius math.
+    internal const float RoundedGatherMarginTiles = 1f;
 
     // Spatial-index cell size (tiles): one cell ≈ the interest box, so a viewer query touches a small
     // fixed neighborhood (~3×3 cells) regardless of world size. Derived from the interest radius and
