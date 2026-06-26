@@ -123,6 +123,9 @@ public sealed class ContinuousDtBudgetRegressionTests
         // 571ms entities spike — yanks further), snapCount=0. NOTE maxDivergence (the POST-reconcile predicted-vs-
         // server gap) is tiny (~0.03u) precisely because the reconcile collapses it each tick — the CORRECTION
         // magnitude is the rubberband the user sees, not the residual gap (the metric the first cut wrongly asserted).
+        // CAVEAT (independent review): the exact 1.22u is HARNESS-RELATIVE — model-specific to this synthetic
+        // input/credit interleave. It is a DIRECTION-OF-FIX proof (buggy snap ≫ fixed, same sign + order as the live
+        // ~1.5u), NOT a calibrated prediction of the live magnitude. The live confirmation is the human feel-test.
         Assert.True(sim.MaxReconcileCorrectionUnits >= 1.0d,
             $"expected to reproduce the >=1u snap-back; got correction {sim.MaxReconcileCorrectionUnits:F4}u");
         Assert.Equal(0, sim.SnapCount);
