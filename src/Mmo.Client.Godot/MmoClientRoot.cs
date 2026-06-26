@@ -45,18 +45,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMin = 8f;
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
-	// S95: camera focus blend + temporal smoothing (S102: now live F6 levers). Defaults reproduce TODAY's camera
-	// exactly: blend 1.0 = follow the rendered character position, smoothing 0 = hard-follow (no glide). The tracker
-	// blends the confirmed tile and rendered position and frame-rate-independently smooths a persistent focus
-	// toward it, snapping on the first frame and on teleports (> _cameraTeleportSnapTiles).
-	private float _cameraFollowBlend = 1.0f;
-	// STUTTER FIX: a LOW smoothing (user-preferred 3). The 15 it had drifted to ran an exponential focus chase
-	// (focus += (target-focus)*t) that moves fast when behind / slow when close = the "accelerate to catch up" the
-	// player felt but the player-render frame-log couldn't show (it logs the avatar, not the camera). 0 = hard-follow
-	// the (already smooth) character; 3 adds a touch of glide without the catch-up. NOTE: at a FIXED rate the lag =
-	// move-speed / rate, so faster speeds trail more — auto-scaling the rate with speed would hold the lag constant.
-	// Live-tunable via the F1 Movement tab.
-	private float _cameraSmoothing = 3f;
+	// S95: camera temporal smoothing (S102: live F1 lever). The tracker frame-rate-independently smooths a persistent
+	// focus toward the rendered (continuous) character position, snapping on the first frame and on teleports
+	// (> _cameraTeleportSnapTiles). The old "follow blend toward the confirmed TILE" knob was a tile-era remnant and
+	// has been removed — in continuous movement the camera always follows the continuous render position.
+	// CONTINUOUS: smoothing 10 (the good-feeling exp/continuous-movement value). The old LOW 3 was a TILE-era value:
+	// it tamed the old tile-camera's jittery exponential focus-chase (the "accelerate to catch up" stutter), but the
+	// continuous predictor renders SMOOTHLY, so there is no per-frame jitter left to damp — a low 3 just makes the
+	// camera TRAIL the avatar and COAST after a stop. 0 = hard-follow; 10 tracks tightly with only a cosmetic glide.
+	// NOTE: at a FIXED rate the lag = move-speed / rate, so faster speeds still trail a touch more — auto-scaling the
+	// rate with speed would hold the lag constant. Live-tunable via the F1 Movement tab.
+	private float _cameraSmoothing = 10f;
 	// S95 default 4 tiles. S102: now a live F6 field (was a const) feeding CameraFocusTracker.Advance's
 	// teleport-snap threshold — beyond this jump the camera hard-snaps (respawn/zone change) instead of gliding.
 	private float _cameraTeleportSnapTiles = 4f;
@@ -68,10 +67,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
 	private bool _showSpawnerTiles;
-	// F1 Visual "Server positions" toggle — default OFF. Debug viz of every entity's AUTHORITATIVE server tile (the
-	// latest-snapshot tile), as distinct from its rendered body — so the human can SEE the gap: for a REMOTE entity
-	// the interpolation lag (a marker leading a moving slime); for the LOCAL player the prediction-vs-server gap (the
-	// confirmed tile vs the predicted body). Flipped by ApplyServerPositions; read by UpdateServerPositionMarkers.
+	// F1 Visual "Server positions" toggle — default OFF. Debug viz of every entity's AUTHORITATIVE server position
+	// (the continuous confirmed AuthoritativePosition), as distinct from its rendered body — so the human can SEE the
+	// gap: for a REMOTE entity the interpolation lag (a marker leading a moving slime); for the LOCAL player the
+	// prediction-vs-server gap (the confirmed position vs the predicted body). Flipped by ApplyServerPositions; read
+	// by UpdateServerPositionMarkers.
 	private bool _showServerPositions;
 	// LIVING-ENEMIES P3: one flat RED ground marker per known SPAWNER (the persistent leash/de-aggro anchor), keyed by
 	// the stable spawner id, parented under _worldRoot. Synced each _Process frame from MmoClient.SpawnerMarkers: a
@@ -81,11 +81,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private readonly System.Collections.Generic.List<uint> _monsterHomeStaleScratch = new();
 
 	// DEBUG-SERVER-POSITIONS: one flat CYAN ground marker per REMOTE entity (keyed by network id), parented under
-	// _worldRoot, painted at that entity's AuthoritativeTile (its latest-snapshot server tile). Synced each _Process
-	// frame from _renderStates while the F1 "Server positions" toggle is on: a marker is created when a remote entity
-	// is first seen, repositioned every frame (so it tracks the server tile and visibly LEADS the interpolated body
-	// under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The LOCAL player IS
-	// included: its body renders the PREDICTED position, so its marker shows the prediction-vs-server gap.
+	// _worldRoot, painted at that entity's continuous AuthoritativePosition (its confirmed server position). Synced
+	// each _Process frame from _renderStates while the F1 "Server positions" toggle is on: a marker is created when a
+	// remote entity is first seen, repositioned every frame (so it tracks the server position and visibly LEADS the
+	// interpolated body under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The
+	// LOCAL player IS included: its body renders the PREDICTED position, so its marker shows the prediction-vs-server gap.
 	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _serverPositionMarkers = new();
 	private readonly System.Collections.Generic.List<uint> _serverPositionStaleScratch = new();
 	private readonly System.Collections.Generic.HashSet<uint> _serverPositionSeenScratch = new();
@@ -172,9 +172,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// The movement/camera-FEEL levers. All live (no restart); seeded from the current values on first open.
 	// Per-entity SPEED is the "Move speed" dropdown (sends /speed); the GLOBAL base cooldown is a pinned constant
 	// (SPEED1) — there is no longer a global move-speed server knob.
-	// Moved from the visual surface: net latency (S93), camera follow blend + smoothing (S95).
+	// Moved from the visual surface: net latency (S93), camera smoothing (S95). (Camera follow-blend removed — tile remnant.)
 	private LineEdit? _moveNetLatencyMs;
-	private LineEdit? _moveCameraFollowBlend;
 	private LineEdit? _moveCameraSmoothing;
 	// New (S102): camera teleport-snap distance (tiles) — exposes the former CameraTeleportSnapTiles const live.
 	private LineEdit? _moveCameraTeleportSnapTiles;
@@ -1345,9 +1344,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Applied on Apply/Enter:
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
-		// S95: camera focus blend between the confirmed tile (0) and the rendered character (1, default).
-		_moveCameraFollowBlend = AddTuningField(rows, "Camera follow blend (0=tile,1=char)", OnMovementApplyPressed);
-		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow.
+		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow. CONTINUOUS
+		// default 10 (the good-feeling experiment value) — tracks tightly; lower values trail/coast after a stop. The
+		// field is seeded from _cameraSmoothing (=10) by SeedMovementFields.
 		_moveCameraSmoothing = AddTuningField(rows, "Camera smoothing (/s, 0=off)", OnMovementApplyPressed);
 		// S102 new: camera teleport-snap distance (tiles). Beyond this single-frame jump the camera hard-snaps
 		// (respawn / zone change) instead of gliding; below it the smoothing glides. Was the const = 4.
@@ -1907,13 +1906,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var localState = local.Value;
-		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally smoothed
-		// (frame-rate independent). Defaults (blend 1.0, smoothing 0) = hard-follow the rendered character.
-		double tileX = localState.AuthoritativeTile.X, tileY = localState.AuthoritativeTile.Y;
+		// CONTINUOUS: focus on the cosmetic (continuous) render position, temporally smoothed (frame-rate independent).
+		// smoothing 10 = a tight follow with a small cosmetic glide; the former confirmed-tile blend leg is removed.
 		double cosX = localState.Position.X, cosY = localState.Position.Y;
 		var (focusX, focusY) = _cameraFocus.Advance(
-			tileX, tileY, cosX, cosY,
-			_cameraFollowBlend,
+			cosX, cosY,
 			_cameraSmoothing,
 			_lastFrameDelta,
 			_cameraTeleportSnapTiles);
@@ -2468,7 +2465,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	{
 		// Seed from the live values so re-opening shows the current state.
 		SetField(_moveNetLatencyMs, _client?.SimulatedLatencyMs ?? 0);
-		SetField(_moveCameraFollowBlend, _cameraFollowBlend);
 		SetField(_moveCameraSmoothing, _cameraSmoothing);
 		// New (S102).
 		SetField(_moveCameraTeleportSnapTiles, _cameraTeleportSnapTiles);
@@ -2734,13 +2730,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_client.SetSimulatedLatencyMs((int)Mathf.Clamp((float)netLatency, 0f, 2000f));
 		}
 
-		// S95: camera focus blend [0,1] and follow smoothing [0,30 /s]. The next UpdateCamera reads the new values.
-		// Defaults (1.0 / 0) reproduce today's hard-follow camera.
-		if (TryReadField(_moveCameraFollowBlend, out var followBlend))
-		{
-			_cameraFollowBlend = Mathf.Clamp((float)followBlend, 0f, 1f);
-		}
-
+		// S95: camera follow smoothing [0,30 /s]. The next UpdateCamera reads the new value. (Continuous default 10.)
 		if (TryReadField(_moveCameraSmoothing, out var cameraSmoothing))
 		{
 			_cameraSmoothing = Mathf.Clamp((float)cameraSmoothing, 0f, 30f);
@@ -3379,14 +3369,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// DEBUG-SERVER-POSITIONS: sync the CYAN server-tile markers to every REMOTE entity's authoritative tile each
-	// frame. Mirrors UpdateMonsterHomeMarkers (per-id pooled flat markers) but keyed by network id and driven by
-	// _renderStates (refreshed in SampleRenderStates) instead of SpawnerMarkers. A marker is created when a remote
+	// DEBUG-SERVER-POSITIONS: sync the CYAN server-position markers to every entity's continuous authoritative
+	// position each frame. Mirrors UpdateMonsterHomeMarkers (per-id pooled flat markers) but keyed by network id and
+	// driven by _renderStates (refreshed in SampleRenderStates) instead of SpawnerMarkers. A marker is created when an
 	// entity is first seen and freed when its entity despawns / leaves AOI or the toggle is off. Unlike the fixed
-	// spawner anchors, the tile is RE-POSITIONED every frame: the marker tracks AuthoritativeTile (the latest
-	// snapshot tile) while the body smooths toward it, so under movement the marker visibly LEADS the body — that
-	// gap IS the interpolation lag the human wants to see. The local player is excluded (IsLocal): it already has
-	// the "Prediction tiles" markers. No-op until the world root exists.
+	// spawner anchors, the marker is RE-POSITIONED every frame: it tracks the continuous AuthoritativePosition (the
+	// confirmed server position) while the body smooths toward it, so under movement the marker visibly LEADS the body
+	// — that gap IS the interpolation lag the human wants to see. The LOCAL player IS included: its body renders the
+	// PREDICTED position, so its marker shows the prediction-vs-server gap. No-op until the world root exists.
 	private void UpdateServerPositionMarkers()
 	{
 		if (_worldRoot is null)
@@ -3411,10 +3401,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// Add/position a marker per entity at its authoritative server tile; track which ids we saw this frame so
-		// departed entities can be freed below. The LOCAL player is INCLUDED (was excluded): its body renders the
-		// PREDICTED position, so its cyan marker — painted at AuthoritativeTile (the confirmed server tile, what
-		// LocalConfirmedPosition rounds to) — is exactly the prediction-vs-server gap the user wants to SEE.
+		// Add/position a marker per entity at its continuous authoritative server position; track which ids we saw this
+		// frame so departed entities can be freed below. The LOCAL player is INCLUDED (was excluded): its body renders
+		// the PREDICTED position, so its cyan marker — painted at the continuous AuthoritativePosition (the confirmed
+		// server position) — is exactly the prediction-vs-server gap the user wants to SEE.
 		_serverPositionSeenScratch.Clear();
 		foreach (var state in _renderStates)
 		{

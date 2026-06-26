@@ -355,6 +355,12 @@ internal sealed class DebugControlChannel : IDisposable
                 writer.WriteString("kind", state.Kind.ToString());
                 writer.WriteBoolean("depleted", state.Depleted);
                 writer.WriteString("tile", state.AuthoritativeTile.ToString());
+                // CONTINUOUS: the confirmed server position as continuous X/Y (not the tile-rounded value above), so
+                // agent telemetry isn't tile-coarse — mirrors the continuous "render" block below.
+                writer.WriteStartObject("authoritative");
+                writer.WriteNumber("x", state.AuthoritativePosition.X);
+                writer.WriteNumber("y", state.AuthoritativePosition.Y);
+                writer.WriteEndObject();
                 writer.WriteStartObject("render");
                 writer.WriteNumber("x", state.Position.X);
                 writer.WriteNumber("y", state.Position.Y);

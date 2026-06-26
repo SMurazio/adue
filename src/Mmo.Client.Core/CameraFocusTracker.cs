@@ -1,9 +1,10 @@
 namespace Mmo.Client.Core;
 
 // S95: pure camera-focus math, extracted out of the Godot client so it is unit-testable (no Godot types).
-// The Godot UpdateCamera blends the confirmed tile and the cosmetic render position, then temporally smooths
-// a persistent focus point toward that blend. This struct holds the persistent focus and does the per-frame
-// math; the Godot side only translates to/from Vector3 and applies the camera offset/LookAt.
+// The Godot UpdateCamera temporally smooths a persistent focus point toward the (continuous) render position.
+// This struct holds the persistent focus and does the per-frame math; the Godot side only translates to/from
+// Vector3 and applies the camera offset/LookAt. (The former confirmed-tile blend leg — a tile-era remnant —
+// was removed; in continuous movement the camera always tracks the continuous render position.)
 //
 // Frame-rate independence: the smoothing uses focus += (target-focus) * (1 - exp(-rate*delta)), which converges
 // at the same wall-clock speed regardless of frame rate (unlike a raw per-frame lerp factor). rate == 0 disables
@@ -20,26 +21,18 @@ public struct CameraFocusTracker
     public readonly double FocusY => _focusY;
     public readonly bool Seeded => _seeded;
 
-    // Blend the confirmed tile (tileX/tileY) and the cosmetic render position (cosmeticX/cosmeticY) by
-    // followBlend in [0,1] (0 = confirmed tile only, 1 = cosmetic/character — today's behavior), then smooth
-    // the persistent focus toward that blend using this frame's delta seconds and the per-second smoothing rate.
+    // Smooth the persistent focus toward the (continuous) render target (targetX/targetY) using this frame's
+    // delta seconds and the per-second smoothing rate.
     //
     // Returns the new focus point. On the first call (or after a teleport beyond teleportSnapDistance tiles)
     // the focus is hard-snapped to the target — no glide from the origin / across the map.
     public (double X, double Y) Advance(
-        double tileX,
-        double tileY,
-        double cosmeticX,
-        double cosmeticY,
-        double followBlend,
+        double targetX,
+        double targetY,
         double smoothingPerSecond,
         double deltaSeconds,
         double teleportSnapDistance)
     {
-        var blend = Clamp01(followBlend);
-        var targetX = tileX + (cosmeticX - tileX) * blend;
-        var targetY = tileY + (cosmeticY - tileY) * blend;
-
         // First frame with a render state, or a jump beyond the teleport threshold: snap instantly.
         if (!_seeded || Distance(_focusX, _focusY, targetX, targetY) > teleportSnapDistance)
         {
@@ -69,8 +62,6 @@ public struct CameraFocusTracker
         _focusY = 0d;
         _seeded = false;
     }
-
-    private static double Clamp01(double v) => v < 0d ? 0d : (v > 1d ? 1d : v);
 
     private static double Distance(double ax, double ay, double bx, double by)
     {
