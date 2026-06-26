@@ -196,6 +196,17 @@ public sealed class GameServer
     private long _traceStartTimestamp;
     private int _snapshotsSentThisTick;
 
+    // CONTINUOUS MIGRATION (prediction-regression fix): the Stopwatch timestamp of the previous dt-budget credit
+    // pass. The anti-speedhack budget must accrue REAL elapsed wall-clock time, NOT the fixed tick interval — when
+    // a server tick runs long (a GC gen2 pause / the startup entities spike) the client keeps spending real-time dt
+    // the whole stall, so crediting only 1/TickRate per tick LEAVES THE BUDGET SHORT and clamps the honest inputs
+    // that queued during the stall (a SOFT predicted-vs-authoritative rubberband the client never modeled — the
+    // measured regression vs the budget-less exp server). Crediting the real elapsed since this timestamp refunds
+    // the full stall window while still bounding a cheater to real-elapsed + the burst allowance (anti-speedhack
+    // intact: the cap is unchanged; only the accrual source moves from assumed-fixed to actual-elapsed). 0 until the
+    // first credit pass (the per-session seed handles a fresh peer's first move).
+    private long _lastBudgetCreditTimestamp;
+
     public GameServer(ServerOptions options, ICharacterRepository characters)
     {
         _options = options;
@@ -2765,7 +2776,27 @@ public sealed class GameServer
     // cadence, so this equals real elapsed time over many ticks — and is deterministic for the flood test).
     private void CreditMoveDtBudgetsAndKeepalive()
     {
-        var tickSeconds = 1.0 / _options.TickRate;
+        // PREDICTION-REGRESSION FIX: credit the budget by the REAL elapsed wall-clock time since the previous credit
+        // pass, NOT the fixed tick interval. A long tick (GC gen2 / the startup entities spike) makes the fixed
+        // interval UNDER-credit the real time that actually elapsed — and the client, running independently, kept
+        // sending real-time dt the whole stall, so the budget is left short and clamps those honest inputs (the
+        // measured SOFT rubberband). Real elapsed refunds the full stall window. On a healthy tick this equals the
+        // tick interval, so steady-state behaviour is unchanged; on a catch-up burst the FIRST tick credits the
+        // whole real gap (capped at the burst allowance) and the back-to-back catch-up ticks credit ~0 — total
+        // credit == real elapsed either way. The first-ever pass credits exactly one tick interval (no prior
+        // timestamp), and the per-session seed still gives a fresh peer its initial burst allowance.
+        var now = Stopwatch.GetTimestamp();
+        double realElapsedSeconds;
+        if (_lastBudgetCreditTimestamp == 0)
+        {
+            realElapsedSeconds = 1.0 / _options.TickRate;
+        }
+        else
+        {
+            realElapsedSeconds = Stopwatch.GetElapsedTime(_lastBudgetCreditTimestamp, now).TotalSeconds;
+        }
+
+        _lastBudgetCreditTimestamp = now;
         var keepaliveTimeoutTicks = (uint)Math.Max(1, (int)Math.Ceiling(MoveIntentKeepaliveTimeout.TotalMilliseconds / (1000d / _options.TickRate)));
 
         foreach (var session in _sessions.Values)
@@ -2775,8 +2806,10 @@ public sealed class GameServer
                 continue;
             }
 
-            // Credit the anti-speedhack budget by the elapsed tick time (capped at the burst allowance inside).
-            session.CreditMoveDtBudget(tickSeconds, MoveDtBurstAllowanceSeconds);
+            // Credit the anti-speedhack budget by the REAL elapsed wall-clock time (capped at the burst allowance
+            // inside CreditMoveDtBudget). The cap is unchanged, so the anti-speedhack bound (integrated sim-time <=
+            // real elapsed + burst) holds — we only stopped UNDER-crediting honest play during server-tick stalls.
+            session.CreditMoveDtBudget(realElapsedSeconds, MoveDtBurstAllowanceSeconds);
 
             if (!TryGetSessionEntity(session, out var entity))
             {
