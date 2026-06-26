@@ -7,6 +7,7 @@ using Godot;
 using Mmo.Client.Core;
 using Mmo.Client.Godot.Visuals;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 
 public partial class MmoClientRoot : Node3D, IControlHost
 {
@@ -616,6 +617,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			GetViewport().SetInputAsHandled();
 			return;
 		}
+
+		// MOVEMENT-ACTIONS Phase B1 — TEMPORARY DEV TRIGGER: J fires a ballistic jump along the local player's current
+		// facing. This is a runtime, in-client trigger (no launch flag, no restart — the project's live-toggle
+		// discipline); B1 has no skill bar yet. Phase E REPLACES this with real skill-input binding. J is otherwise
+		// unbound (distinct from WASD movement, E harvest, F loot-all, Space attack, F1/F3/F11 panels, Tab/Enter/T
+		// chat). Not while typing in chat (so 'j' types a letter instead of jumping). The action is server-confirmed
+		// in B1 (no client prediction) — a brief delay before the avatar rises is expected and correct for B1.
+		if (key.Keycode == Key.J && _chatInput?.HasFocus() != true)
+		{
+			TryJump();
+			GetViewport().SetInputAsHandled();
+			return;
+		}
 		if ((key.Keycode == Key.Enter || key.Keycode == Key.KpEnter || key.Keycode == Key.T)
 			&& _chatInput?.HasFocus() != true)
 		{
@@ -669,6 +683,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			// mispredict (a stray/missing number when render positions disagree with the server tile) is acceptable.
 			PredictSwingDamageNumbers(px, pz, aimRadians);
 		}
+	}
+
+	// MOVEMENT-ACTIONS Phase B1 — TEMPORARY DEV TRIGGER (Phase E replaces it with real skill-input binding): send a
+	// ballistic-jump ActionIntent on the action stream (MmoClient.SendAction, its OWN cursor). The launch HEADING is
+	// the local player's current facing bearing, quantized via the SAME shared AimAngle the attack aim uses, so the
+	// server decodes it to the identical unit heading. No client prediction in B1 — the jump is server-confirmed (the
+	// avatar rises via the replicated VerticalOffset once the snapshot lands), which is intentional for B1.
+	private void TryJump()
+	{
+		if (_client?.IsLoggedIn != true)
+		{
+			return;
+		}
+
+		// Aim the jump along the cursor when available (so a forward-arc jump goes where the player is looking), else
+		// fall back to the discrete facing — exactly the aim source TryAttack uses, so the heading is always defined.
+		var headingRadians = TryGetAimToCursor(out var cursorAim)
+			? cursorAim
+			: LocalFacingRadians();
+
+		_client.SendAction((byte)ActionId.Jump, AimAngle.Quantize(headingRadians));
+		ShowInteractFeedback("Jump!");
 	}
 
 	// FREEAIM-PREDICT: predict + pop the attacker's own damage numbers for a swing from (attackerX, attackerZ) along

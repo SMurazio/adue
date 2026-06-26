@@ -23,10 +23,16 @@ namespace Mmo.Shared.Domain;
 // so the v35 bytes round-trip byte-for-byte unchanged. Pass B flips the codec to send fixed-point continuous
 // positions (PositionEncoding) and bumps the protocol version. Consumers that need a grid cell derive it via
 // Position.ToTileRounded() (e.g. the client's ClientEntity.Tile).
+// MOVEMENT-ACTIONS Phase B1 (v38): VerticalOffset is the entity's authoritative airborne height in WORLD UNITS (tiles)
+// above the ground plane — 0 grounded, >0 mid-jump (design §1.4.5). It is DEFAULTED (0) so every existing construction
+// (the non-airborne common case, tests) is unchanged; the codec encodes it compactly (a presence flag + an optional
+// Q12.4 ushort, so a grounded entity pays +1 byte). The renderer LIFTS the visual by it; XY/collision/AOI never read it
+// (the XY/Z split, §1.4.1).
 public readonly record struct EntityStateSnapshot(
     uint NetworkId,
     WorldVector Position,
     Direction8 Facing,
     bool Depleted = false,
     ushort Health = 0,
-    ushort MaxHealth = 0);
+    ushort MaxHealth = 0,
+    double VerticalOffset = 0d);

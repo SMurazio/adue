@@ -6,6 +6,7 @@ using LiteNetLib;
 using Mmo.Server.Configuration;
 using Mmo.Server.Data;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 using Mmo.Shared.Protocol;
 
 namespace Mmo.Server.Runtime;
@@ -21,7 +22,11 @@ public sealed class GameServer
     // Per-entity snapshot state wire size: networkId(2) + qx(2) + qy(2) + facing(1) + depleted(1) = 8, plus
     // COMBAT-S2A's public HP Health(2) + MaxHealth(2) = 12. CONTINUOUS MIGRATION (v36): qx/qy are the fixed-point
     // Q12.4 continuous position (two shorts) — same 4 bytes as the v35 tile shorts, so the per-entity size is unchanged.
-    private const int EntityStateFixedBytes = 12;
+    // MOVEMENT-ACTIONS Phase B1 (v38): + the airborne VerticalOffset — a flag byte (1, grounded) plus an optional
+    // Q12.4 ushort (2, airborne). This is a CHUNK-BUDGET estimate (packets must not overflow), so use the WORST case
+    // 1+2 = 3 to stay conservative: 12 + 3 = 15. (The real grounded entity is 13; over-estimating only chunks a hair
+    // earlier, never overflows.)
+    private const int EntityStateFixedBytes = 15;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -143,6 +148,12 @@ public sealed class GameServer
     // the pass is ~free) until the wire (Phase B) / AI (Phase C) trigger actions; it exists + is driven now so the
     // executor is exercised headlessly and is ready to wire.
     private readonly ServerActionExecutor _actionExecutor;
+
+    // MOVEMENT-ACTIONS Phase B1: the SHARED action registry — the SAME defs the client loads (MovementActionRegistry
+    // .Default is built from the shared assembly). HandleActionIntent resolves the wire ActionId to a def from here,
+    // so server execution and (B2) client prediction run identical trajectories. Static-shared today (compile-time
+    // defs); the Phase-B live-tuning path (ActionTuningMessage) would replicate per-instance values later.
+    private readonly MovementActionRegistry _actionRegistry = MovementActionRegistry.Default;
 
     // LIVING-ENEMIES P2-POLISH: the table of monster TYPES (named templates — slime now) + their live-tunable,
     // replicated per-type tuning. Replaces the former single global monster.* tuning block: a spawned monster
@@ -522,6 +533,12 @@ public sealed class GameServer
                     HandleAttack(session, attack.Sequence, attack.Kind, attack.AimAngle, attack.AuthoredTick);
                 }
                 break;
+            case ActionIntentMessage action:
+                if (session.IsAuthenticated)
+                {
+                    HandleActionIntent(session, action.ActionSeq, action.ActionId, action.Heading, action.AuthoredTick);
+                }
+                break;
             case LootActionMessage loot:
                 if (session.IsAuthenticated)
                 {
@@ -538,7 +555,10 @@ public sealed class GameServer
     // messages (chat, snapshot ack, admin tuning/stat, hello/login) are NOT suppressed so the client stays responsive.
     private static bool IsSuppressedWhileDead(MessageType type) =>
         type is MessageType.MoveIntent or MessageType.Attack
-			or MessageType.InteractRequest or MessageType.LootAction;
+			or MessageType.InteractRequest or MessageType.LootAction
+			// MOVEMENT-ACTIONS Phase B1: an action trigger is an action message — suppressed while the player is downed
+			// (like Attack/MoveIntent), so a dead player can't jump.
+			or MessageType.ActionIntent;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -940,7 +960,14 @@ public sealed class GameServer
             // → the soft ~1-tile snap-back. Remote viewers stay tile-keyed (StateRevision) so their AOI bandwidth is
             // unchanged; this adds at most ONE entity (the player's own) per tick to its own snapshot while moving, and
             // nothing at rest (Velocity == 0 → falls through to the normal acked-baseline delta).
-            var forceOwnWhileMoving = entity.NetworkId == recipientEntity.NetworkId && entity.Velocity.LengthSquared > 0d;
+            // MOVEMENT-ACTIONS Phase B1: also force-include the own entity while a movement action is ACTIVE on it —
+            // an airborne entity moves via the executor and may have Velocity == 0 (an InPlace jump, or any tick whose
+            // XY delta is zero), so the Velocity-only predicate would delta it out and FREEZE its replicated
+            // VerticalOffset between tile crossings. Including it every airborne tick re-publishes the live height (and
+            // XY) so remote viewers see the real arc and a (future B2) predictor reconciles against the live action
+            // position. Off-action this is the unchanged Velocity-only path (no extra entity at rest).
+            var forceOwnWhileMoving = entity.NetworkId == recipientEntity.NetworkId
+                && (entity.Velocity.LengthSquared > 0d || _actionExecutor.IsActive(entity));
             if (forceOwnWhileMoving || !recipient.HasAckedCurrentRevision(entity))
             {
                 _payloadEntityScratch.Add(entity);
@@ -1266,7 +1293,11 @@ public sealed class GameServer
         // MIGRATION (Phase 3 Pass A): carry the entity's full continuous Position on the snapshot DTO. The codec
         // still quantizes it to a tile on the wire (v35 unchanged); Pass B sends it continuously. The double sim
         // position is never rounded here — only the wire projection is.
-        return new EntityStateSnapshot(entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth);
+        // MOVEMENT-ACTIONS Phase B1: replicate the authoritative airborne height (design §1.4.5). 0 for every grounded
+        // entity (the codec then pays just the +1-byte presence flag); >0 while the entity is mid-jump (the executor
+        // drives WorldEntity.VerticalOffset each airborne tick). XY/Position is untouched — the Z rides alongside.
+        return new EntityStateSnapshot(
+            entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth, entity.VerticalOffset);
     }
 
     // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry
@@ -2428,6 +2459,64 @@ public sealed class GameServer
                 }
             }
         }
+    }
+
+    // MOVEMENT-ACTIONS Phase B1: handle an inbound ActionIntentMessage — the player-triggered movement action (jump).
+    // Mirrors HandleAttack's shape: dedup on the DEDICATED action cursor, resolve the entity + def, validate can-act,
+    // and start the action through the SAME ServerActionExecutor a Phase-A test / Phase-C AI drives. NO PREDICTION in
+    // B1 — the action is server-executed and the local jump is server-confirmed (slightly delayed under latency, which
+    // is intentional for B1). The action is ANCHORED AT THE SERVER RECEIPT TICK (_serverTick); `authoredTick` rides
+    // the wire for B2 to consume (it will anchor the trajectory to the client's logical tick, like the swing-commit
+    // fix) but B1 deliberately does NOT use it — no EstimateServerTick, no tick estimator (that is a B2 decision after
+    // a measurement). The suppression seam (HandleMoveIntent skips integration while IsActive) + the StepAll tick-loop
+    // call already exist from Phase A and are UNTOUCHED here.
+    private void HandleActionIntent(ClientSession session, uint actionSeq, byte actionId, ushort heading, uint authoredTick)
+    {
+        // (1) Own action cursor dedup — PARALLEL to but independent of BOTH the movement and attack cursors (NET6: a
+        // third stream gets a third cursor). A stale/duplicate action seq is dropped before any work. The cursor
+        // advances even on a later can-act reject, so a re-sent already-seen trigger can never start twice.
+        if (!session.TryConsumeActionSequence(actionSeq))
+        {
+            return;
+        }
+
+        // B1 anchors the action server-side; the authored tick only rides the wire for B2. Bind it so the unused
+        // parameter is explicit (it is NOT consumed — no tick estimator in B1).
+        _ = authoredTick;
+
+        if (!TryGetSessionEntity(session, out var entity))
+        {
+            return;
+        }
+
+        // (2) Resolve the def from the SHARED registry. An unknown id (no registered def — e.g. a reserved Charge/
+        // DodgeRoll the wire carried before they ship, or a corrupt byte) is dropped, exactly like an unhandled
+        // attack kind. The codec passes the raw byte through, so the validation is here against the live registry.
+        if (!_actionRegistry.TryGet((ActionId)actionId, out var def))
+        {
+            return;
+        }
+
+        // (3) can-act: a downed player never reaches here (dispatch suppresses ActionIntent while dead), but guard it
+        // anyway; then defer the rest of can-act (one-at-a-time + cooldown) to the executor's CanStart, the single
+        // source of that truth (design §2.8 / §1.1). A trigger arriving while an action already owns the entity, or
+        // inside this action's cooldown, is rejected — no second start, no queue.
+        if (session.IsDead)
+        {
+            return;
+        }
+
+        if (!_actionExecutor.CanStart(entity, def, _serverTick))
+        {
+            return;
+        }
+
+        // (4) Decode the launch heading (the wire bearing, reusing the AimAngle quantization) to a unit vector and
+        // start the action ANCHORED AT THE SERVER RECEIPT TICK. The executor owns the entity's movement for the
+        // action's duration (HandleMoveIntent already suppresses normal integration while IsActive — the Phase-A
+        // seam); StepAll advances it each tick.
+        var headingVector = AimAngle.ToUnitVector(heading);
+        _actionExecutor.TryStart(entity, def, headingVector, _serverTick);
     }
 
     // COMBAT-QOL: send a cosmetic DamageEventMessage for `victim` to every authenticated viewer whose AOI currently

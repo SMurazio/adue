@@ -106,6 +106,12 @@ public sealed class MmoClient : IDisposable
     // on its matching independent _lastAttackSeq cursor.
     private uint _attackSeq;
 
+    // MOVEMENT-ACTIONS Phase B1: the ACTION stream's OWN monotonic sequence counter — SEPARATE from BOTH the move seq
+    // AND the attack seq (the NET6 lesson — a third stream gets a third cursor). Every SendAction mints the next action
+    // seq off THIS counter only; it never touches the move/attack seqs, and they never touch it. The server dedups
+    // actions on its matching independent _lastActionSeq cursor.
+    private uint _nextActionSeq;
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -549,6 +555,21 @@ public sealed class MmoClient : IDisposable
         return sequence;
     }
 
+    // MOVEMENT-ACTIONS Phase B1: trigger a movement action (jump). Mints the next sequence off the DEDICATED
+    // _nextActionSeq counter (never _moveSequence / _attackSeq — a third independent stream) and sends an
+    // ActionIntentMessage RELIABLE-ORDERED so the low-rate trigger is never silently lost (mirrors SendAttack). The
+    // wire carries only (actionId, heading) — never a height/distance/duration, which live in the server-side def
+    // (anti-cheat). `heading` is the launch bearing already quantized via AimAngle.Quantize (the same quantization the
+    // attack aim uses), so the server decodes it to the identical unit heading. AuthoredTick is 0: B1 has NO
+    // prediction and anchors the action SERVER-SIDE at the receipt tick (exactly like SendAttack today); B2 will stamp
+    // a real EstimateServerTick once a tick-alignment model is chosen. Returns the action seq sent (for tests/diag).
+    public uint SendAction(byte actionId, ushort heading)
+    {
+        var sequence = ++_nextActionSeq;
+        Send(new ActionIntentMessage(sequence, actionId, heading, AuthoredTick: 0u), DeliveryMethod.ReliableOrdered);
+        return sequence;
+    }
+
     // COMBAT-TUNING: the attack-cooldown fallback used before the first replicated CombatTuningSnapshot arrives —
     // the historical 600 ms constant. Once a snapshot lands, the replicated value drives both the radial cooldown
     // sweep and (server-side) the actual gate, so this is only the pre-login default.
@@ -975,7 +996,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Position, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth);
+            var confirmation = entity.ApplySnapshot(state.Position, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth, state.VerticalOffset);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -1018,7 +1039,11 @@ public sealed class MmoClient : IDisposable
                 serverTick,
                 localEntity.Depleted,
                 localEntity.Health,
-                localEntity.MaxHealth);
+                localEntity.MaxHealth,
+                // MOVEMENT-ACTIONS Phase B1: preserve the current replicated airborne height on a delta'd-out re-apply
+                // (like Depleted/HP) so an idle re-apply never resets a non-zero Z. (While airborne the own-entity is
+                // force-included every tick so it takes the in-snapshot path; this guards the unchanged-idle case.)
+                localEntity.VerticalOffset);
 
             // CONTINUOUS MIGRATION (Phase 4): an IDLE local player is delta'd out of the payload but still reconciles
             // on the header (LastInputSeq) so any residual over-prediction converges down to the confirmed position at
@@ -1164,9 +1189,10 @@ public sealed class MmoClient : IDisposable
                 existing.SetStepCooldownMs(effectiveCooldown.Value, existingCadence, ResolveInterpolationDelay(existingCadence, existing.IsLocal));
             }
 
-            // EntitySpawn carries no Depleted/HP bits (those ride the AOI snapshot), so preserve whatever the
-            // last snapshot set rather than resetting a known-depleted node to available or zeroing known HP.
-            existing.ApplySnapshot(position, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth);
+            // EntitySpawn carries no Depleted/HP/vertical bits (those ride the AOI snapshot), so preserve whatever the
+            // last snapshot set rather than resetting a known-depleted node to available, zeroing known HP, or zeroing
+            // a replicated airborne height.
+            existing.ApplySnapshot(position, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth, existing.VerticalOffset);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -1428,6 +1454,12 @@ public sealed class MmoClient : IDisposable
 
         public ushort MaxHealth { get; private set; }
 
+        // MOVEMENT-ACTIONS Phase B1: the REPLICATED airborne height (world units) — server-authoritative, snapshot-
+        // driven like Depleted/Health (NOT interpolated). 0 grounded, >0 mid-jump. ToRenderState threads it to the
+        // render state so the visual lifts by the real arc; the local player's own server-confirmed jump uses this
+        // same path (no prediction in B1).
+        public double VerticalOffset { get; private set; }
+
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
             && DisplayName.StartsWith("#", StringComparison.Ordinal);
@@ -1449,7 +1481,7 @@ public sealed class MmoClient : IDisposable
             // gliding off the same buffer (no hand-off, no driver re-anchor). The hop arc is retired.
         }
 
-        public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0)
+        public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0, double verticalOffset = 0d)
         {
             var previousTile = Tile;
             // Position/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -1462,6 +1494,10 @@ public sealed class MmoClient : IDisposable
             // (the delta'd-out local re-apply and EntitySpawn) pass the current values so HP isn't reset to 0.
             Health = health;
             MaxHealth = maxHealth;
+            // MOVEMENT-ACTIONS Phase B1: adopt the replicated airborne height (snapshot-driven, like Depleted/HP). The
+            // local player's own jump is server-confirmed in B1 (no prediction), so it too renders from this confirmed
+            // value rather than a predicted Z.
+            VerticalOffset = verticalOffset;
             LastSeenSnapshotSequence = snapshotSequence;
             // CONTINUOUS MIGRATION (Phase 4): the LOCAL predictor lives on the OUTER MmoClient (continuous), not here.
             // ClientEntity always tracks the SERVER-CONFIRMED state — the outer class reconciles the predictor against
@@ -1534,7 +1570,12 @@ public sealed class MmoClient : IDisposable
 
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
                 AuthoritativePosition: RenderPosition.FromWorld(Position),
-                HopHeight: hopHeight);
+                HopHeight: hopHeight,
+                // MOVEMENT-ACTIONS Phase B1: thread the REPLICATED airborne height to the render state for EVERY entity
+                // (local + remote) — the real jump arc the visual lifts by. Snapshot-confirmed (no interp/predict in
+                // B1); 0 grounded, so the common case is the unchanged flat render. Distinct from the cosmetic
+                // monster HopHeight above (which Phase C retires in favour of this).
+                VerticalOffset: VerticalOffset);
         }
     }
 

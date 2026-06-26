@@ -46,7 +46,12 @@ public static class ProtocolCodec
     // authoritative player body radius, replicated so the new client predictor collides against the SAME radius the
     // server integrates with (the determinism contract at walls). Intra-branch bump (no deployed clients); server +
     // every in-repo client flip together. Otherwise identical to v36.
-    public const byte Version = 37;
+    // v38 — MOVEMENT-ACTIONS Phase B1: ActionIntent message + replicated VerticalOffset. Two changes: (1) a new
+    // client->server ActionIntentMessage (own dedup cursor, reliable-ordered — the action trigger stream). (2) the
+    // per-entity snapshot state gains an OPTIONAL quantised VerticalOffset (the real airborne height, design §1.4.5):
+    // a single airborne-FLAG byte after MaxHealth — 0 ⇒ grounded (VerticalOffset 0, no further bytes, the common
+    // case at +1 byte only); 1 ⇒ a Q12.4 ushort height follows. Server + every in-repo client flip together.
+    public const byte Version = 38;
 
     private const int MaxMonsterTypes = 256;
 
@@ -95,6 +100,14 @@ public static class ProtocolCodec
                 writer.Write(value.AimAngle);
                 // SWING-COMMIT-FIX (v30): authored tick last, so the server can root the swing at the same logical
                 // tick the predictor did. Mirrored in the Attack decode (read in the same order).
+                writer.Write(value.AuthoredTick);
+                break;
+            case ActionIntentMessage value:
+                // MOVEMENT-ACTIONS Phase B1 (v38): mirror AttackMessage's wire order exactly — seq, the action id byte,
+                // the quantized heading ushort, then the authored tick. Mirrored in the ActionIntent decode.
+                writer.Write(value.ActionSeq);
+                writer.Write(value.ActionId);
+                writer.Write(value.Heading);
                 writer.Write(value.AuthoredTick);
                 break;
             case LootActionMessage value:
@@ -278,6 +291,10 @@ public static class ProtocolCodec
             // CONTINUOUS MIGRATION (v36): per-input continuous move — InputSeq, raw DirX/DirY, DtSeconds.
             MessageType.MoveIntent => new MoveIntentMessage(reader.ReadUInt32(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()),
             MessageType.Attack => new AttackMessage(reader.ReadUInt32(), ReadAttackKind(reader), reader.ReadUInt16(), reader.ReadUInt32()),
+            // MOVEMENT-ACTIONS Phase B1 (v38): mirrors the ActionIntent encode order — seq, action id byte, heading
+            // ushort, authored tick. The action-id byte is range-validated (ReadActionId) so a hostile/corrupt packet
+            // can't smuggle an out-of-range id into the server handler (mirroring ReadAttackKind).
+            MessageType.ActionIntent => new ActionIntentMessage(reader.ReadUInt32(), ReadActionId(reader), reader.ReadUInt16(), reader.ReadUInt32()),
             MessageType.LootAction => new LootActionMessage(reader.ReadUInt32(), ReadLootActionKind(reader), ReadString(reader)),
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
@@ -377,7 +394,45 @@ public static class ProtocolCodec
             // "no HP" (resources/players-without-stats); the client hides the bar in that case.
             writer.Write(entity.Health);
             writer.Write(entity.MaxHealth);
+            // MOVEMENT-ACTIONS Phase B1 (v38): the replicated airborne height (design §1.4.5). A single AIRBORNE-FLAG
+            // byte after MaxHealth keeps the common GROUNDED case at +1 byte/entity: flag 0 ⇒ on the ground
+            // (VerticalOffset 0), nothing follows; flag 1 ⇒ a Q12.4 ushort height (sixteenths of a tile, the same
+            // fixed-point the position uses) follows. Heights are small (bounded by JumpHeight, ~a few tiles), so the
+            // ushort range (≈4095 tiles of headroom) is ample. FUTURE: if airborne bandwidth ever bites, an
+            // airborne-only side-list (only airborne entities carry height) replaces the per-entity flag byte.
+            WriteVerticalOffset(writer, entity.VerticalOffset);
         }
+    }
+
+    // MOVEMENT-ACTIONS Phase B1: write the optional airborne height. Grounded (offset <= 0 or non-finite) writes the
+    // single flag byte 0. Airborne writes flag 1 + a Q12.4 ushort (round(offset * 16), clamped to the ushort range so
+    // an absurd height can't wrap). Mirrored by ReadVerticalOffset.
+    private static void WriteVerticalOffset(BinaryWriter writer, double verticalOffset)
+    {
+        if (!(verticalOffset > 0d) || !double.IsFinite(verticalOffset))
+        {
+            writer.Write((byte)0);
+            return;
+        }
+
+        writer.Write((byte)1);
+        var sixteenths = System.Math.Round(verticalOffset * PositionEncoding.Scale, System.MidpointRounding.AwayFromZero);
+        var clamped = System.Math.Clamp(sixteenths, 0d, ushort.MaxValue);
+        writer.Write((ushort)clamped);
+    }
+
+    // MOVEMENT-ACTIONS Phase B1: read the optional airborne height (mirrors WriteVerticalOffset). Flag 0 ⇒ 0; flag 1 ⇒
+    // decode the Q12.4 ushort back to world units (/16).
+    private static double ReadVerticalOffset(BinaryReader reader)
+    {
+        var flag = reader.ReadByte();
+        if (flag == 0)
+        {
+            return 0d;
+        }
+
+        var sixteenths = reader.ReadUInt16();
+        return sixteenths / PositionEncoding.Scale;
     }
 
     private static void WriteHeader(BinaryWriter writer, MessageType type)
@@ -494,7 +549,10 @@ public static class ProtocolCodec
             // COMBAT-S2A (v27): mirrors WriteEntityStates — Health then MaxHealth, ushort each.
             var health = reader.ReadUInt16();
             var maxHealth = reader.ReadUInt16();
-            entities.Add(new EntityStateSnapshot(networkId, position, facing, depleted, health, maxHealth));
+            // MOVEMENT-ACTIONS Phase B1 (v38): the optional airborne height — flag byte then (if airborne) a Q12.4
+            // ushort. Absent (flag 0) ⇒ VerticalOffset 0, the grounded common case.
+            var verticalOffset = ReadVerticalOffset(reader);
+            entities.Add(new EntityStateSnapshot(networkId, position, facing, depleted, health, maxHealth, verticalOffset));
         }
 
         return entities;
@@ -661,6 +719,15 @@ public static class ProtocolCodec
         }
 
         return (AttackKind)value;
+    }
+
+    // MOVEMENT-ACTIONS Phase B1: the ActionIntent's action-id byte rides the wire unvalidated as a raw byte (the
+    // message field is a byte, not the enum, so the codec doesn't bind it to the registry — the server resolves the
+    // def). Return it as-is; the server's HandleActionIntent rejects an id with no registered def. Kept as a named
+    // reader so the wire shape mirrors ReadAttackKind's structure and a future per-id validation has one seam.
+    private static byte ReadActionId(BinaryReader reader)
+    {
+        return reader.ReadByte();
     }
 
     private static void WriteGuid(BinaryWriter writer, Guid value)

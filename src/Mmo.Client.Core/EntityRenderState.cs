@@ -29,7 +29,14 @@ public readonly record struct EntityRenderState(
     // sparse server hop. PURELY presentational: it never touches Position/AuthoritativeTile/AuthoritativePosition,
     // so targeting/harvest/combat are byte-identical. 0 for players, continuously-moving entities, and a resting
     // monster (the render loop adds it to the visual's Y; 0 == flat, the unchanged behaviour for every other kind).
-    double HopHeight = 0d)
+    double HopHeight = 0d,
+    // MOVEMENT-ACTIONS Phase B1: the REPLICATED, server-authoritative airborne height in WORLD UNITS (tiles) — the
+    // REAL jump arc (design §1.4.5), distinct from the cosmetic monster HopHeight above (Phase C retires the hop in
+    // favour of this). Populated from the snapshot's EntityStateSnapshot.VerticalOffset for EVERY entity (local +
+    // remote); 0 grounded. The renderer LIFTS the visual by it the same way it lifts by HopHeight. For B1 the local
+    // player's own jump rises/lands via this same path (server-confirmed — no prediction yet). Presentation-only — it
+    // never touches Position/targeting, exactly like HopHeight.
+    double VerticalOffset = 0d)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

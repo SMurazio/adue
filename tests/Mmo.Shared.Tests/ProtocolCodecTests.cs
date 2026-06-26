@@ -73,6 +73,92 @@ public sealed class ProtocolCodecTests
         Assert.True(System.Math.Abs(entity.Position.Y - (-8.77)) <= 1d / 16d);
     }
 
+    // MOVEMENT-ACTIONS Phase B1 (v38): the new client->server ActionIntentMessage round-trips byte-for-byte (its own
+    // ActionSeq, the action id byte, the quantized heading ushort, the authored tick).
+    [Fact]
+    public void ActionIntentRoundTrips()
+    {
+        var original = new ActionIntentMessage(
+            ActionSeq: 4242u,
+            ActionId: (byte)Mmo.Shared.Domain.Actions.ActionId.Jump,
+            Heading: AimAngle.Quantize(System.Math.PI / 3d),
+            AuthoredTick: 777u);
+
+        var decoded = Assert.IsType<ActionIntentMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(original, decoded);
+        Assert.Equal(4242u, decoded.ActionSeq);
+        Assert.Equal((byte)Mmo.Shared.Domain.Actions.ActionId.Jump, decoded.ActionId);
+        Assert.Equal(original.Heading, decoded.Heading);
+        Assert.Equal(777u, decoded.AuthoredTick);
+    }
+
+    // MOVEMENT-ACTIONS Phase B1 (v38): a GROUNDED entity (VerticalOffset 0) round-trips with the airborne flag byte 0
+    // and no height bytes — the common case, +1 byte/entity.
+    [Fact]
+    public void EntityStateGroundedVerticalOffsetRoundTripsAsZero()
+    {
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(7, WorldVector.FromTile(3, 4), Direction8.S, Depleted: false, Health: 50, MaxHealth: 100, VerticalOffset: 0d)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.Equal(0d, entity.VerticalOffset);
+        Assert.Equal((ushort)50, entity.Health);
+        Assert.Equal((ushort)100, entity.MaxHealth);
+    }
+
+    // MOVEMENT-ACTIONS Phase B1 (v38): an AIRBORNE entity (VerticalOffset > 0) round-trips with the flag byte 1 + a
+    // Q12.4 ushort height, within the 1/16-tile fixed-point quantum (the same precision the position uses).
+    [Fact]
+    public void EntityStateAirborneVerticalOffsetRoundTripsWithinOneSixteenth()
+    {
+        const double height = 1.53125d; // exactly representable in Q12.4 (24.5/16) — and a fractional value generally
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(9, WorldVector.FromTile(2, 2), Direction8.N, VerticalOffset: height)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.True(entity.VerticalOffset > 0d, "an airborne entity decoded as grounded");
+        Assert.True(System.Math.Abs(entity.VerticalOffset - height) <= 1d / 16d);
+    }
+
+    // MOVEMENT-ACTIONS Phase B1 (v38): a snapshot mixing a grounded AND an airborne entity is self-consistent on the
+    // wire — the per-entity presence flag means decoding the second entity is not thrown off by the first's (absent)
+    // height bytes.
+    [Fact]
+    public void EntityStateMixedGroundedAndAirborneRoundTrips()
+    {
+        var original = new WorldSnapshotMessage(
+            5,
+            5,
+            new[]
+            {
+                new EntityStateSnapshot(1, WorldVector.FromTile(0, 0), Direction8.E, VerticalOffset: 0d),
+                new EntityStateSnapshot(2, WorldVector.FromTile(1, 0), Direction8.W, VerticalOffset: 2.25d),
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(2, decoded.Entities.Count);
+        Assert.Equal(0d, decoded.Entities[0].VerticalOffset);
+        Assert.True(System.Math.Abs(decoded.Entities[1].VerticalOffset - 2.25d) <= 1d / 16d);
+        Assert.Equal(1u, decoded.Entities[0].NetworkId);
+        Assert.Equal(2u, decoded.Entities[1].NetworkId);
+    }
+
     // CONTINUOUS MIGRATION (v36): a v35 packet (the old version byte) is no longer decodable — the atomic break is
     // mutually undecodable. The codec rejects any version != ProtocolCodec.Version.
     [Fact]
@@ -317,12 +403,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtySeven()
+    public void ProtocolVersionIsThirtyEight()
     {
-        // CONTINUOUS MIGRATION (v37, Phase 4): ServerHello gains a trailing BodyRadiusUnits float (the replicated
-        // authoritative body radius for the client predictor). Intra-branch bump on top of the v36 continuous break.
-        // Pin it so a change is caught.
-        Assert.Equal(37, ProtocolCodec.Version);
+        // MOVEMENT-ACTIONS Phase B1 (v38): the wire gains the client->server ActionIntentMessage AND an optional
+        // replicated VerticalOffset on the per-entity snapshot state (presence flag + Q12.4 ushort). Bump on top of
+        // the v37 continuous body-radius add. Pin it so a change is caught.
+        Assert.Equal(38, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).

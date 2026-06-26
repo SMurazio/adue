@@ -23,6 +23,12 @@ public enum MessageType : ushort
     // key, take ALL, or CLOSE the window. (OPENING the window reuses the existing InteractRequest on a corpse.)
     // Reliable-ordered: a dropped take/close must not be lost. See LootActionMessage.
     LootAction = 14,
+    // MOVEMENT-ACTIONS Phase B1 (v38): client->server action trigger (jump now) on its OWN dedup cursor, SEPARATE from
+    // both movement AND attack (the NET6 "two streams, one cursor" lesson — a third stream gets a third cursor). Mirrors
+    // Attack: reliable-ordered, low-rate, carries an authored tick (rides the wire for B2; B1 anchors server-side). Tag
+    // 15 is the next free client->server tag (8-11 are the deleted tile-step gaps, 12-14 are AdminSetStat/Attack/Loot).
+    // See ActionIntentMessage.
+    ActionIntent = 15,
 
     ServerHello = 100,
     LoginResult = 101,

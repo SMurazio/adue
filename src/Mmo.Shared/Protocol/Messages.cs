@@ -62,6 +62,26 @@ public sealed record AttackMessage(uint Sequence, AttackKind Kind, ushort AimAng
     public MessageType Type => MessageType.Attack;
 }
 
+// MOVEMENT-ACTIONS Phase B1 (protocol v38): the client->server movement-action trigger — a SIBLING of the attack
+// stream, NOT the move stream. Modeled byte-for-byte on AttackMessage (design §2.2): its own DEDICATED ActionSeq
+// counter (client) dedup'd on a DEDICATED _lastActionSeq cursor (server) that shares NOTHING with the move or attack
+// cursors (the NET6 "two streams, one cursor" lesson — a third stream gets a third cursor). Sent RELIABLE-ORDERED
+// like Attack: actions are low-rate and a dropped trigger must not be lost.
+//
+//   ActionSeq    — the DEDICATED monotonic counter, dedup'd on _lastActionSeq.
+//   ActionId     — the registry key (Jump=1) for the MovementActionDef to start (a byte; the codec range-validates it).
+//   Heading      — the launch heading as a quantized world BEARING, reusing the SAME AimAngle ushort quantization the
+//                  attack aim uses (0..65535 -> [0,2π), bearing atan2(dz,dx), +X east / +Z south). The wire carries a
+//                  heading ONLY — never a height/distance/duration; those live in the server-side def (anti-cheat, §2.7).
+//   AuthoredTick — the client's stamped server tick at trigger. It rides the wire for B2 (which will anchor the
+//                  trajectory to the same logical tick the predictor did, like the swing-commit-fix); B1 does NOT
+//                  consume it — B1 anchors the action at the SERVER RECEIPT tick (no prediction yet), so the client
+//                  sends 0 (exactly like SendAttack today).
+public sealed record ActionIntentMessage(uint ActionSeq, byte ActionId, ushort Heading, uint AuthoredTick) : IProtocolMessage
+{
+    public MessageType Type => MessageType.ActionIntent;
+}
+
 public sealed record ChatSendMessage(string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatSend;

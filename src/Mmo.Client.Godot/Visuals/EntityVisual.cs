@@ -145,7 +145,13 @@ void fragment() {
         // a vertical lift (state.HopHeight, world units) so a slime visibly ARCS up-and-over its server hop and
         // lands flat. HopHeight is 0 for every other kind and for a resting monster, so the common case is the
         // unchanged flat glide. Presentation-only — Position.Y here never affects the authoritative tile/targeting.
-        Position = ToWorld(state.Position) + new Vector3(0f, (float)state.HopHeight, 0f);
+        //
+        // MOVEMENT-ACTIONS Phase B1: ADD the REPLICATED real airborne height (state.VerticalOffset, world units) on
+        // the SAME 1:1 unit->screen-height mapping the cosmetic hop uses — so a real ballistic jump rises/lands for
+        // EVERY kind (the local player's own server-confirmed jump included). 0 grounded, so the common case is
+        // unchanged. The two add: today the cosmetic hop is monster-only and the replicated offset is 0 for monsters
+        // (no action triggers a monster jump until Phase C), so they never overlap; Phase C retires HopHeight.
+        Position = ToWorld(state.Position) + new Vector3(0f, (float)(state.HopHeight + state.VerticalOffset), 0f);
         if (_label is not null)
         {
             SetLabelText(state.DisplayName);

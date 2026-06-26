@@ -82,6 +82,14 @@ public sealed class ClientSession
     // reliable-ordered + low-rate, so a strict `seq > cursor` monotonic gate is all the dedup needed.
     private uint _lastAttackSeq;
 
+    // MOVEMENT-ACTIONS Phase B1: the ACTION-stream dedup cursor (the highest accepted ActionIntentMessage seq). A
+    // THIRD independent stream alongside movement AND attack — it shares NOTHING with either (_lastInputSeq /
+    // _lastAttackSeq). This is the NET6 "two streams, one cursor" lesson applied to a third stream: a fresh cursor so
+    // an action can never pre-dedup a move/attack (or the reverse). The client mints action seqs off its OWN dedicated
+    // _nextActionSeq counter; HandleActionIntent gates on THIS cursor only. Reliable-ordered + low-rate, so a strict
+    // monotonic `seq > cursor` gate is all the dedup needed (identical to the attack cursor).
+    private uint _lastActionSeq;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -116,6 +124,10 @@ public sealed class ClientSession
     // COMBAT-S2B: the attack-stream dedup cursor (the highest accepted AttackMessage seq). Exposed for tests that
     // assert the attack cursor advances independently of the movement cursor.
     public uint LastAttackSeq => _lastAttackSeq;
+
+    // MOVEMENT-ACTIONS Phase B1: the action-stream dedup cursor (the highest accepted ActionIntentMessage seq).
+    // Exposed for tests that assert the action cursor advances INDEPENDENTLY of the movement and attack cursors.
+    public uint LastActionSeq => _lastActionSeq;
 
     // LOOT P4c: the ENTITY id of the corpse this session currently has its loot window OPEN on, or null if no
     // window is open. Set when the player opens a corpse (InteractRequest on it, eligibility-passed); cleared on
@@ -290,6 +302,24 @@ public sealed class ClientSession
         }
 
         _lastAttackSeq = sequence;
+        return true;
+    }
+
+    // MOVEMENT-ACTIONS Phase B1: advances the ACTION-sequence cursor (_lastActionSeq) for an inbound
+    // ActionIntentMessage. Rejects stale/duplicate sequences (seq <= the action cursor) so a re-ordered/duplicate/
+    // replayed action trigger can't start twice, returning false WITHOUT mutating anything. It does NOT consult or
+    // advance the move OR attack cursor — the action stream is fully independent (the NET6 lesson applied to a third
+    // stream). Returns true iff the seq was fresh on the action cursor (the caller may then validate + start the
+    // action). The cursor advances even if the caller later rejects the trigger (can-act/cooldown), so a re-sent
+    // already-seen trigger is deduped here and never starts.
+    public bool TryConsumeActionSequence(uint sequence)
+    {
+        if (sequence <= _lastActionSeq)
+        {
+            return false;
+        }
+
+        _lastActionSeq = sequence;
         return true;
     }
 

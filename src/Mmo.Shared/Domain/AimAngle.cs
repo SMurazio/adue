@@ -35,4 +35,15 @@ public static class AimAngle
     {
         return quantized / 65536d * TwoPi;
     }
+
+    // MOVEMENT-ACTIONS Phase B1: decode a wire bearing ushort straight to a UNIT world-plane direction vector
+    // (cos θ, sin θ) under the SAME convention as the aim/sector path: θ = atan2(dz, dx), +X east, +Z south (tile +Y),
+    // so x = cos θ, y = sin θ. The action stream sends a launch HEADING as exactly this bearing (reusing AimAngle's
+    // quantization), and the server resolves it to a unit heading the ServerActionExecutor takes — no second
+    // quantization convention. Always unit-length (a degenerate angle can't, since cos²+sin² == 1).
+    public static WorldVector ToUnitVector(ushort quantized)
+    {
+        var radians = ToRadians(quantized);
+        return new WorldVector(System.Math.Cos(radians), System.Math.Sin(radians));
+    }
 }
