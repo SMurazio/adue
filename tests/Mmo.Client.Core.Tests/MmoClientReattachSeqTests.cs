@@ -12,52 +12,20 @@ namespace Mmo.Client.Core.Tests;
 // CONTINUOUS MIGRATION (Phase 4a) — the RE-ATTACH freeze guard (Phase-4 review Finding A, BLOCK).
 //
 // THE BUG: the movement input-seq was minted by TWO disjoint counters — a fresh per-predictor _nextInputSeq (started
-// at 0 on every EnsurePredictor) and a separate _preSpawnMoveSeq for the prediction-off path. The SERVER gate is
-// `inputSeq <= _lastInputSeq -> REJECT`. So after ANY mid-session re-attach (F5 "Prediction" toggle, death/respawn,
-// AOI re-entry — all null the predictor then rebuild it) the new counter restarted at 0 and minted 1,2,3… all <= the
-// server's already-high acked cursor N → the server rejected EVERY MoveIntent until the local counter climbed back
-// past N → a multi-second rubberband/freeze proportional to session length. First spawn (N=0) was fine, which is why
-// the timing-faithful harness (a single long-lived predictor, never re-attached) never caught it.
+// at 0 on every EnsurePredictor) and a separate _preSpawnMoveSeq for the pre-spawn path. The SERVER gate is
+// `inputSeq <= _lastInputSeq -> REJECT`. So after ANY mid-session re-attach (death/respawn, AOI re-entry — both null
+// the predictor then rebuild it) the new counter restarted at 0 and minted 1,2,3… all <= the server's already-high
+// acked cursor N → the server rejected EVERY MoveIntent until the local counter climbed back past N → a multi-second
+// rubberband/freeze proportional to session length. First spawn (N=0) was fine, which is why the timing-faithful
+// harness (a single long-lived predictor, never re-attached) never caught it.
 //
-// THE FIX: a SINGLE persistent monotonic high-water on MmoClient that survives predictor re-attach AND the
-// prediction on/off toggle. EnsurePredictor SEEDS each fresh predictor from it; both the predictor path and the
-// prediction-off path mint from it. The invariant these tests pin: across re-attach and toggle, the NEXT sent seq is
-// STRICTLY GREATER than every previously-sent seq (hence > the server's acked cursor) → never rejected as a stale dup.
+// THE FIX: a SINGLE persistent monotonic high-water on MmoClient that survives predictor re-attach. EnsurePredictor
+// SEEDS each fresh predictor from it; both the predictor path and the pre-spawn path mint from it. The invariant
+// these tests pin: across re-attach, the NEXT sent seq is STRICTLY GREATER than every previously-sent seq (hence >
+// the server's acked cursor) → never rejected as a stale dup. (The continuous migration removed the dev-only
+// prediction on/off A/B toggle that was a THIRD re-attach vector — the respawn vector below covers the same guard.)
 public sealed class MmoClientReattachSeqTests
 {
-    [Fact]
-    public void SeqStaysAboveServerCursor_AcrossPredictionToggleReattach()
-    {
-        using var client = CreateAttachedLocalPlayer(out var outbound, out var localNetworkId, out _);
-
-        // Walk a while: send several inputs so the seq climbs. The server acks them, advancing its cursor to N.
-        uint lastSeqSent = 0;
-        for (var i = 0; i < 8; i++)
-        {
-            lastSeqSent = client.PredictAndSendMove(1f, 0f, 0.05f);
-        }
-
-        // The server's authoritative cursor is now lastSeqSent (it integrated and acked every input). Drive that home
-        // via a snapshot whose header LastInputSeq == lastSeqSent (exactly what the wire carries).
-        var n = lastSeqSent;
-        Assert.True(n > 0, "precondition: inputs should have minted a non-zero seq");
-        client.HandleMessageForTests(SnapshotWithInputSeq(10, localNetworkId, 6, 5, lastInputSeq: n));
-
-        // RE-ATTACH via the live F5 path: prediction OFF (nulls the predictor) then ON (EnsurePredictor rebuilds a
-        // fresh predictor). The OLD bug: the fresh predictor's counter restarts at 0.
-        client.PredictionEnabled = false;
-        client.PredictionEnabled = true;
-
-        outbound.Clear();
-        var nextSeq = client.PredictAndSendMove(1f, 0f, 0.05f);
-
-        // THE INVARIANT: the next minted seq is STRICTLY above the server's cursor N, so a server whose
-        // _lastInputSeq == N ACCEPTS it (inputSeq <= _lastInputSeq is FALSE) rather than rejecting it as a dup.
-        Assert.True(nextSeq > n, $"re-attach reset the seq below the server cursor: next={nextSeq}, serverCursor={n}");
-        var sent = Assert.Single(outbound.OfType<MoveIntentMessage>());
-        Assert.Equal(nextSeq, sent.InputSeq);
-    }
-
     [Fact]
     public void SeqStaysAboveServerCursor_AcrossRespawnReattach()
     {
@@ -88,28 +56,41 @@ public sealed class MmoClientReattachSeqTests
     }
 
     [Fact]
-    public void SeqStaysMonotonic_AcrossPrePredictionToggleThenAttach()
+    public void SeqStaysMonotonic_AcrossPreSpawnThenPredictorAttach()
     {
-        // The prediction-OFF / pre-spawn path used to mint from a SEPARATE counter. Verify a toggle ON (which attaches
-        // a predictor) continues strictly above the seqs the OFF path already sent — no overlap with the server cursor.
-        using var client = CreateAttachedLocalPlayer(out var outbound, out var localNetworkId, out _);
+        // The PRE-SPAWN path (no predictor attached yet) used to mint from a SEPARATE counter. Verify that once the
+        // local entity spawns and EnsurePredictor attaches a predictor, it continues STRICTLY above the seqs the
+        // pre-spawn path already sent — no overlap with the server cursor.
+        var outbound = new List<IProtocolMessage>();
+        var captured = outbound;
+        using var client = new MmoClient(new ClientConnectionOptions("127.0.0.1", 1, "test", "account", "display"));
+        client.OutboundSinkForTests = (message, _) => captured.Add(message);
 
-        // Disable prediction (no predictor) and send via the off-path; the seq must still climb monotonically.
-        client.PredictionEnabled = false;
-        uint offPathSeq = 0;
+        var characterId = System.Guid.NewGuid();
+        var localNetworkId = 9u;
+        var zone = Zone.CreateGenerated(64, 64, 0, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        var serverHash = TerrainGenerator.ContentHash(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+
+        // Hello + zone + login land, but the local EntitySpawn has NOT — so no predictor is attached yet and sends go
+        // through the pre-spawn fallback counter.
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 50, 30, 0.5f));
+        client.HandleMessageForTests(new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash));
+        client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+
+        uint preSpawnSeq = 0;
         for (var i = 0; i < 5; i++)
         {
-            offPathSeq = client.PredictAndSendMove(1f, 0f, 0.05f);
+            preSpawnSeq = client.PredictAndSendMove(1f, 0f, 0.05f);
         }
 
-        Assert.True(offPathSeq > 0);
+        Assert.True(preSpawnSeq > 0);
 
-        // Re-enable prediction → EnsurePredictor attaches, seeded from the high-water the off-path advanced.
-        client.PredictionEnabled = true;
+        // The local entity spawns → EnsurePredictor attaches, seeded from the high-water the pre-spawn path advanced.
+        client.HandleMessageForTests(new EntitySpawnMessage(localNetworkId, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 50));
         outbound.Clear();
         var nextSeq = client.PredictAndSendMove(1f, 0f, 0.05f);
 
-        Assert.True(nextSeq > offPathSeq, $"predictor attach reset the seq below the off-path cursor: next={nextSeq}, offPath={offPathSeq}");
+        Assert.True(nextSeq > preSpawnSeq, $"predictor attach reset the seq below the pre-spawn cursor: next={nextSeq}, preSpawn={preSpawnSeq}");
         Assert.Equal(nextSeq, Assert.Single(outbound.OfType<MoveIntentMessage>()).InputSeq);
     }
 

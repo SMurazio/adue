@@ -16,8 +16,8 @@ public sealed class MmoClient : IDisposable
     // RemotePositionInterpolator's fixed-delay playout glide (Phase 5 — one driver smooths both continuous players
     // and tile-stepped monsters; the per-kind TileInterpolator / MonsterHopInterpolator split was retired). The
     // obsolete tile LocalPlayerPredictor + its dead plumbing were DELETED earlier; targeting/harvest still read the
-    // CONFIRMED tile, never the predicted/interpolated position. PredictionEnabled is the live raw-vs-predicted A/B
-    // lever (local only).
+    // CONFIRMED tile, never the predicted/interpolated position. Prediction is always on (the dev-only A/B raw-vs-
+    // predicted toggle was removed with the migration); the local player always renders the predictor.
 
     // remote-interp-tighten Part A: the remote jitter buffer was 1.3 * cadence (~1.3 tiles of steady-state lag) —
     // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
@@ -113,18 +113,17 @@ public sealed class MmoClient : IDisposable
 
     // CONTINUOUS MIGRATION (Phase 4): the LOCAL-player continuous predictor (predict -> reconcile -> replay, smooth
     // zero-lag render). Created lazily by EnsurePredictor once we know the zone (blocked map), the local entity, and
-    // the server body radius; null until then (and on the web/headless paths that never input, and while prediction
-    // is toggled OFF for the live A/B raw-vs-predicted compare). Local player ONLY — remote entities stay raw
-    // (Phase 5). Lives on THIS outer class (not ClientEntity): the predicted RenderX/RenderY overrides only the
-    // local entity's rendered position in the render-state builders; the confirmed Tile/Position stay authoritative
-    // for targeting (S53 invariant). See Continuous.ContinuousPredictor.
+    // the server body radius; null until then (and on the web/headless paths that never input). Prediction is now
+    // THE model — always on; the dev-only A/B raw-vs-predicted toggle was removed with the migration. Local player
+    // ONLY — remote entities stay raw (Phase 5). Lives on THIS outer class (not ClientEntity): the predicted
+    // RenderX/RenderY overrides only the local entity's rendered position in the render-state builders; the confirmed
+    // Tile/Position stay authoritative for targeting (S53 invariant). See Continuous.ContinuousPredictor.
     private ContinuousPredictor? _predictor;
-    private bool _predictionEnabled = true;
 
     // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): the SINGLE persistent monotonic input-seq high-water for
-    // ALL movement — the source of truth that survives predictor re-attach (F5 prediction toggle, respawn, AOI
-    // re-entry — each nulls the predictor then rebuilds one) AND the prediction on/off toggle. Both the predictor path
-    // and the pre-spawn / prediction-off path mint from THIS, so a sent seq is ALWAYS strictly above every
+    // ALL movement — the source of truth that survives predictor re-attach (respawn, AOI re-entry — each nulls the
+    // predictor then rebuilds one). Both the predictor path and the pre-spawn path mint from THIS, so a sent seq is
+    // ALWAYS strictly above every
     // previously-sent seq, hence above the server's acked cursor (_lastInputSeq) → the server NEVER rejects a
     // post-re-attach MoveIntent as a stale dup. (The bug it fixes: a fresh per-predictor counter restarted at 0 and
     // minted 1,2,3… <= the server's already-high cursor N → every MoveIntent rejected until it climbed back past N → a
@@ -385,36 +384,6 @@ public sealed class MmoClient : IDisposable
         // extra to drive here per poll.
     }
 
-    // CONTINUOUS MIGRATION (Phase 4): live A/B raw-vs-predicted lever (F5 checkbox). When flipped OFF we null the
-    // predictor so the local player renders the RAW confirmed position; EnsurePredictor re-attaches a fresh predictor
-    // (anchored to the current confirmed position) on the next snapshot when flipped back ON. A runtime in-client
-    // toggle (project rule: diagnostics are live toggles, never launch flags).
-    public bool PredictionEnabled
-    {
-        get => _predictionEnabled;
-        set
-        {
-            if (_predictionEnabled == value)
-            {
-                return;
-            }
-
-            _predictionEnabled = value;
-            if (!value)
-            {
-                // OFF: drop the predictor so the render reverts to raw immediately. EnsurePredictor is a no-op while
-                // disabled, and re-attaches on the next snapshot once re-enabled.
-                _predictor = null;
-            }
-            else
-            {
-                // ON: attach now if we already have everything (local entity + zone + radius); else the next snapshot
-                // attaches it via EnsurePredictor.
-                EnsurePredictor();
-            }
-        }
-    }
-
     public void Disconnect()
     {
         if (_disposed)
@@ -440,12 +409,12 @@ public sealed class MmoClient : IDisposable
     // The raw world-axis direction (DirX/DirY; a zero vector is STOP) + the frame's dt. The caller drives this once PER
     // RENDER FRAME with that frame's delta (already clamped to 0.25 caller-side). PredictAndBuffer re-clamps to the
     // shared MaxInputDtSeconds and BUFFERS the clamped dt (buffered == sent == server-integrated). We Send the dt
-    // AS-IS (the server re-clamps too). When prediction is DISABLED we do NOT predict (so the render stays raw, A/B
-    // lever) but still send via the fallback counter. Sent UNRELIABLE (latest frame wins). Returns the seq sent.
+    // AS-IS (the server re-clamps too). Before the predictor attaches (pre-spawn) we don't predict but still send via
+    // the fallback counter. Sent UNRELIABLE (latest frame wins). Returns the seq sent.
     public uint PredictAndSendMove(float dirX, float dirY, float dtSeconds)
     {
         uint seq;
-        if (_predictionEnabled && _predictor is { } predictor)
+        if (_predictor is { } predictor)
         {
             // The predictor integrates the predicted present immediately (zero latency) and returns the monotonic
             // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile. The
@@ -456,8 +425,9 @@ public sealed class MmoClient : IDisposable
         }
         else
         {
-            // Pre-spawn / prediction-off: nothing to predict — mint the next seq off the SAME persistent high-water so
-            // a later predictor attach (EnsurePredictor) seeds strictly above it and the server never sees a stale dup.
+            // Pre-spawn (predictor not yet attached): nothing to predict — mint the next seq off the SAME persistent
+            // high-water so a later predictor attach (EnsurePredictor) seeds strictly above it and the server never
+            // sees a stale dup.
             seq = ++_inputSeqHighWater;
         }
 
@@ -467,7 +437,7 @@ public sealed class MmoClient : IDisposable
 
     // CONTINUOUS MIGRATION (Phase 4): advance the predictor's cosmetic render catch-up once per render frame (decays
     // the correction offset toward zero so a reconcile correction slides on smoothly). Driven by the Godot caller
-    // exactly ONCE per frame. No-op when no predictor is attached (pre-spawn / prediction off).
+    // exactly ONCE per frame. No-op when no predictor is attached (pre-spawn).
     public void AdvanceRender(double frameDtSeconds)
     {
         _predictor?.AdvanceRender(frameDtSeconds);
@@ -487,15 +457,15 @@ public sealed class MmoClient : IDisposable
 
     // CONTINUOUS MIGRATION (Phase 4): attach a fresh continuous predictor for the LOCAL player when one isn't already
     // attached, anchored to the local entity's CURRENT confirmed Position. Idempotent (no-op if already attached) and
-    // guarded so it only attaches once prediction is enabled AND we have everything the predictor needs to stay
-    // deterministic with the server: the local entity (start position + speed), the zone (blocked map for collision),
-    // and the server body radius (replicated on ServerHello). Called at the lifecycle seams — after the local entity
-    // is upserted/spawned and at the end of ApplySnapshot — so a respawn / AOI re-entry (which nulls the predictor via
-    // ClearLocalEntity) re-attaches to the fresh confirmed position (the S47b-class guard).
+    // guarded so it only attaches once we have everything the predictor needs to stay deterministic with the server:
+    // the local entity (start position + speed), the zone (blocked map for collision), and the server body radius
+    // (replicated on ServerHello). Prediction is always on now, so the predictor attaches as soon as those are known.
+    // Called at the lifecycle seams — after the local entity is upserted/spawned and at the end of ApplySnapshot — so
+    // a respawn / AOI re-entry (which nulls the predictor via ClearLocalEntity) re-attaches to the fresh confirmed
+    // position (the S47b-class guard).
     private void EnsurePredictor()
     {
         if (_predictor is not null
-            || !_predictionEnabled
             || Zone is null
             || Server is null
             || LocalNetworkId is not { } localId

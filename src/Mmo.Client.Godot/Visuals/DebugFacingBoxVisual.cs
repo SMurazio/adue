@@ -22,7 +22,9 @@ public sealed partial class DebugFacingBoxVisual : EntityVisual
     // Bright facing arrow — a flat triangular prism authored pointing along -Z (Godot's conventional forward),
     // so a yaw of Atan2(-dx,-dy) about +Y aims it at the world heading the avatar walks (see ApplyFacing).
     private static readonly ArrayMesh ArrowMesh = BuildArrowMesh();
-    private static readonly StandardMaterial3D ArrowMaterial = Material(new Color(1.0f, 0.95f, 0.20f));
+    // Bright yellow, and (facing-arrow fix) Unshaded + NoDepthTest so the flat arrow always draws ON TOP of the box
+    // body / ground instead of being occluded or z-fighting and reading as "missing". Body materials stay normal.
+    private static readonly StandardMaterial3D ArrowMaterial = ArrowMaterialOnTop(new Color(1.0f, 0.95f, 0.20f));
 
     private MeshInstance3D _body = null!;
     private MeshInstance3D _arrow = null!;
@@ -44,13 +46,16 @@ public sealed partial class DebugFacingBoxVisual : EntityVisual
         };
         AddChild(_body);
 
-        // The arrow sits at the box base (y≈0), a small flat wedge laid on the ground pointing in facing.
+        // The arrow is a small flat wedge laid on the ground pointing in facing. FIX (facing-arrow): it was parked at
+        // y=0.02 — flush with the terrain plane (y=0) and the other ground markers, so it z-fought / sank under them
+        // and read as "missing / too low". Lift it clear of the ground band (above the cyan server marker at 0.06 and
+        // the spawner anchors at 0.03); the NoDepthTest material below also draws it on top so it always shows.
         _arrow = new MeshInstance3D
         {
             Name = "FacingArrow",
             Mesh = ArrowMesh,
             MaterialOverride = ArrowMaterial,
-            Position = new Vector3(0f, 0.02f, 0f)
+            Position = new Vector3(0f, 0.1f, 0f)
         };
         AddChild(_arrow);
     }
@@ -119,6 +124,21 @@ public sealed partial class DebugFacingBoxVisual : EntityVisual
             AlbedoColor = color,
             Roughness = 0.82f,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled
+        };
+    }
+
+    // The facing arrow's material: like Material() but Unshaded + NoDepthTest so the flat ground arrow ALWAYS renders
+    // on top (a diagnostic overlay must never be hidden by the box body it sits under or z-fight the terrain). Only
+    // the arrow uses this; the box body keeps the normal shaded, depth-tested Material().
+    private static StandardMaterial3D ArrowMaterialOnTop(Color color)
+    {
+        return new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            Roughness = 0.82f,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            NoDepthTest = true
         };
     }
 }

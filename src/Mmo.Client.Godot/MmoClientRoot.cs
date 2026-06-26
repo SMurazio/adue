@@ -68,10 +68,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
 	private bool _showSpawnerTiles;
-	// F1 Visual "Server positions" toggle — default OFF. Debug viz of every REMOTE entity's AUTHORITATIVE server
-	// tile (the latest-snapshot tile it interpolates TOWARD), as distinct from its smoothed render body — so the
-	// human can SEE the interpolation gap (e.g. a marker leading a moving slime). The remote-entity analogue of
-	// the local player's "Prediction tiles". Flipped by ApplyServerPositions; read by UpdateServerPositionMarkers.
+	// F1 Visual "Server positions" toggle — default OFF. Debug viz of every entity's AUTHORITATIVE server tile (the
+	// latest-snapshot tile), as distinct from its rendered body — so the human can SEE the gap: for a REMOTE entity
+	// the interpolation lag (a marker leading a moving slime); for the LOCAL player the prediction-vs-server gap (the
+	// confirmed tile vs the predicted body). Flipped by ApplyServerPositions; read by UpdateServerPositionMarkers.
 	private bool _showServerPositions;
 	// LIVING-ENEMIES P3: one flat RED ground marker per known SPAWNER (the persistent leash/de-aggro anchor), keyed by
 	// the stable spawner id, parented under _worldRoot. Synced each _Process frame from MmoClient.SpawnerMarkers: a
@@ -84,8 +84,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// _worldRoot, painted at that entity's AuthoritativeTile (its latest-snapshot server tile). Synced each _Process
 	// frame from _renderStates while the F1 "Server positions" toggle is on: a marker is created when a remote entity
 	// is first seen, repositioned every frame (so it tracks the server tile and visibly LEADS the interpolated body
-	// under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The local player is
-	// excluded (it predicts locally; there is no remote interpolation gap to show for it).
+	// under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The LOCAL player IS
+	// included: its body renders the PREDICTED position, so its marker shows the prediction-vs-server gap.
 	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _serverPositionMarkers = new();
 	private readonly System.Collections.Generic.List<uint> _serverPositionStaleScratch = new();
 	private readonly System.Collections.Generic.HashSet<uint> _serverPositionSeenScratch = new();
@@ -1275,28 +1275,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		catoSprite.Toggled += ApplyCatoSprite;
 		rows.AddChild(catoSprite);
 
-		// CONTINUOUS MIGRATION (Phase 4): the live A/B raw-vs-predicted lever. ON (default) = the local player renders
-		// the smooth client-side prediction (predict -> reconcile -> replay); OFF = renders the RAW confirmed server
-		// position (crude/laggy under latency) so the human can feel the difference with no restart. Flips
-		// MmoClient.PredictionEnabled live, which nulls/re-attaches the predictor. A runtime in-client toggle (project
-		// rule: diagnostics are live toggles, never launch flags).
-		var prediction = new CheckBox
-		{
-			Name = "PredictLocalPlayer",
-			Text = "Prediction (predict local player)",
-			ButtonPressed = _client?.PredictionEnabled ?? true
-		};
-		prediction.AddThemeFontSizeOverride("font_size", 13);
-		prediction.Toggled += enabled =>
-		{
-			if (_client is not null)
-			{
-				_client.PredictionEnabled = enabled;
-			}
-		};
-		rows.AddChild(prediction);
+		// CONTINUOUS MIGRATION COMPLETE: the old "Prediction (predict local player)" A/B raw-vs-predicted toggle was
+		// removed here — prediction is now THE model, always on, and the raw-confirmed-render fallback it flipped to was
+		// dev-only cruft. The local player always renders the predictor's smooth position; the predictor is always
+		// attached (EnsurePredictor on every lifecycle seam). No checkbox, no MmoClient.PredictionEnabled.
 
-		// Spawner tiles: debug viz of the monster spawner anchors (red tiles), default off — like prediction tiles.
+		// Spawner tiles: debug viz of the monster spawner anchors (red tiles), default off — like server-positions.
 		var spawnerTiles = new CheckBox { Name = "SpawnerTiles", Text = "Spawner tiles", ButtonPressed = _showSpawnerTiles };
 		spawnerTiles.AddThemeFontSizeOverride("font_size", 13);
 		spawnerTiles.Toggled += ApplySpawnerTiles;
@@ -1334,7 +1318,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var rows = AddDebugTab(tabs, "Movement");
 
 		var note = CreateOverlayLabel("MovementSpeedNote", 12);
-		note.Text = "— client-local (instant) —";
+		// One speed control (not a base+multiplier split): the dropdown sets the local player's speed via /speed
+		// <multiplier>. Each item label is "<mult>x - <ms to cross one tile> - <tiles/sec>"; the server speed is
+		// BaseMoveSpeedUnitsPerSecond x multiplier (continuous). The discrete set is tick-quantized so client
+		// prediction matches the server's per-tick integration.
+		note.Text = "Move speed — one control: /speed <multiplier> (label: mult / ms-per-tile / tiles-per-sec)";
 		rows.AddChild(note);
 
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
@@ -1367,7 +1355,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// remote-interp-tighten Part A: the REMOTE jitter-buffer (ms) — how far behind its true server tile a remote
 		// entity (slime, other players) renders. Lower = tighter to the cyan server marker; raise = smoother under
 		// jitter. Blank / < 0 = computed default (max(0.5*cadence, 50ms)). Applied live to all remote interpolators.
-		_moveRemoteInterpBufferMs = AddTuningField(rows, "Remote interp buffer (ms, <0=auto)", OnMovementApplyPressed);
+		// KEEP — a legitimate remote-smoothness feel knob (NOT tile-era cruft): the remote-entity playout-buffer delay
+		// in ms (how far behind its true server position a slime / other player renders). Higher = smoother under
+		// arrival jitter but laggier; lower = tighter to the cyan server marker. Blank / < 0 = computed auto default.
+		_moveRemoteInterpBufferMs = AddTuningField(rows, "Remote interp buffer (ms playout delay; <0=auto)", OnMovementApplyPressed);
 
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -3420,16 +3411,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// Add/position a marker per REMOTE entity at its authoritative server tile; track which ids we saw this
-		// frame so departed entities can be freed below.
+		// Add/position a marker per entity at its authoritative server tile; track which ids we saw this frame so
+		// departed entities can be freed below. The LOCAL player is INCLUDED (was excluded): its body renders the
+		// PREDICTED position, so its cyan marker — painted at AuthoritativeTile (the confirmed server tile, what
+		// LocalConfirmedPosition rounds to) — is exactly the prediction-vs-server gap the user wants to SEE.
 		_serverPositionSeenScratch.Clear();
 		foreach (var state in _renderStates)
 		{
-			if (state.IsLocal)
-			{
-				continue;
-			}
-
 			_serverPositionSeenScratch.Add(state.NetworkId);
 			if (!_serverPositionMarkers.TryGetValue(state.NetworkId, out var marker))
 			{
