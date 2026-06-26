@@ -38,9 +38,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 4 | Client prediction + reconcile (port `ContinuousPredictor`) | ✅ **DONE** | `ded8622` + Finding-A fix `29b3103`; review SHIP-WITH-FOLLOWUPS → caught a BLOCK re-attach seq-freeze (fixed + guarded); 3 determinism gaps resolved, timing-faithful harness green. Followups B/C/D in `todo/N-phase4-followups.md`. **Local player predicts smoothly.** |
 | 5 | Remote interpolation; retire hop/TileInterpolator | ✅ **DONE** | `ef8286d`; review SHIP (clean cosmetic swap — no lifecycle leak, local/targeting untouched, deletions clean, can't extrapolate). Followups in `todo/N-phase5-followups.md`. **MOVEMENT MIGRATION (0–5) COMPLETE — drivable build ready for live feel-test.** |
 | 6 | AOI float retype | ✅ **DONE** | `e3ea5b8`; review SHIP (superset guarantee re-derived independently — `+1` margin provably sufficient on both axes, over-includes never drops) |
-| 7 | Combat: positional via FreeAimSector | **IN PROGRESS** | plan: `docs/migration/phase-7-plan.md`. CRUX: geometry already continuous+shared; the bug = server resolver ROUNDS attacker/candidate to tile centres (the client/server hit-disagreement). Phase 7 deletes the rounding (feed `.Position`) + fixes a latent gather under-fetch + retires the dead tile-fan melee. |
-| 8 | Monster AI: steering + avoidance; Euclidean leash/aggro | pending | depends 2,7 |
-| 9 | Interaction: adjacency → interaction radius; continuous scatter | pending | depends 0 |
+| 7 | Combat: positional via FreeAimSector | ✅ **DONE** | `78e1bf2`; review SHIP (real parity proof at fractional positions; gather provably strict superset; gates relocated verbatim). **Hit-disagreement bug closed at root.** |
+| 8 | Monster AI: steering + avoidance; Euclidean leash/aggro | **BLOCKED — design call** | conflicts with the user's "slimes hop" preference: naive continuous monsters would GLIDE. Awaiting decision: keep slimes hopping (continuous nav, discrete hops) vs full glide vs per-type styles. |
+| 9 | Interaction: adjacency → interaction radius; continuous scatter | **IN PROGRESS** | mechanical: harvest/interact Chebyshev≤1 → Euclidean interaction radius (done in parallel while Phase 8 awaits the design call) |
 | 10 | Persistence: float position columns (SQLite + Postgres) | pending | depends 0 |
 | 11 | Test rewrite across suites (port exp predictor/collision tests) | pending | depends all |
 | 12 | Stress re-baseline (120/30s) + bandwidth study (likely fixed-point) | pending | depends 3,5 |
