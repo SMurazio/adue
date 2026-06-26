@@ -1513,7 +1513,8 @@ public sealed class MmoClient : IDisposable
             var position = IsLocal && localOverride.HasValue
                 ? localOverride.Value
                 : _remoteInterp.Sample(now);
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
+                AuthoritativePosition: RenderPosition.FromWorld(Position));
         }
     }
 

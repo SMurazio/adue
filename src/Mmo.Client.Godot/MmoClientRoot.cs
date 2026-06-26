@@ -3431,9 +3431,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				_serverPositionMarkers[state.NetworkId] = marker;
 			}
 
-			// A hair above the spawner anchors (0.03) and prediction markers (0.04/0.05) so the server tile wins the
-			// overlap z-fight and stays readable on top.
-			marker.Position = TileToWorld(state.AuthoritativeTile, 0.06f);
+			// CONTINUOUS: position the marker from the true continuous AuthoritativePosition (the confirmed server
+			// WorldVector), NOT the rounded AuthoritativeTile — so under movement it tracks the server position SMOOTHLY
+			// instead of snapping/teleporting tile-to-tile (that grid-snap read as jank). A hair above the spawner
+			// anchors (0.03) so it wins the overlap z-fight and stays readable on top.
+			marker.Position = new Vector3((float)state.AuthoritativePosition.X, 0.06f, (float)state.AuthoritativePosition.Y);
 		}
 
 		// Drop markers whose entity is gone this frame (despawned / left AOI).

@@ -19,7 +19,11 @@ public readonly record struct EntityRenderState(
     bool IsLocal,
     bool Depleted = false,
     ushort Health = 0,
-    ushort MaxHealth = 0)
+    ushort MaxHealth = 0,
+    // CONTINUOUS: the confirmed server position as a continuous WorldVector (NOT the rounded AuthoritativeTile).
+    // The "Server positions" debug overlay positions its marker from this so it tracks the true server position
+    // smoothly instead of snapping tile-to-tile. Defaults to (0,0) for non-render-loop constructions (tests).
+    RenderPosition AuthoritativePosition = default)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.
