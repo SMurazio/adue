@@ -911,7 +911,17 @@ public sealed class GameServer
         _payloadEntityScratch.Clear();
         foreach (var entity in visible)
         {
-            if (!recipient.HasAckedCurrentRevision(entity))
+            // CONTINUOUS MIGRATION (sub-tile reconcile fix): the recipient's OWN entity is force-included in its own
+            // snapshot while it is MOVING (Velocity != 0), even if its tile-keyed StateRevision hasn't bumped this tick
+            // — so the local predictor reconciles against the LIVE continuous position EVERY tick (restoring the
+            // experiment's every-tick own-position) instead of the position frozen at the last TILE crossing. Without
+            // this a sub-tile-moving player is delta'd out of ~4/5 of its OWN snapshots while LastInputSeq keeps
+            // advancing, so the reconcile drops those inputs but re-bases onto the stale tile position and UNDERSHOOTS
+            // → the soft ~1-tile snap-back. Remote viewers stay tile-keyed (StateRevision) so their AOI bandwidth is
+            // unchanged; this adds at most ONE entity (the player's own) per tick to its own snapshot while moving, and
+            // nothing at rest (Velocity == 0 → falls through to the normal acked-baseline delta).
+            var forceOwnWhileMoving = entity.NetworkId == recipientEntity.NetworkId && entity.Velocity.LengthSquared > 0d;
+            if (forceOwnWhileMoving || !recipient.HasAckedCurrentRevision(entity))
             {
                 _payloadEntityScratch.Add(entity);
             }
