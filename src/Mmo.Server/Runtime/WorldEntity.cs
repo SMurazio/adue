@@ -535,11 +535,26 @@ public sealed class WorldEntity
 
     // Phase 1: instant stop — zero the velocity so the entity does not glide. Called on release / dead / keepalive
     // timeout (R6: without this the entity keeps its last Velocity and integrates forever). Position is untouched
-    // (the entity stays exactly where it is — fractional tile position is fine; the wire rounds it). No StateRevision
-    // bump: a stop changes no tile and no facing.
+    // (the entity stays exactly where it is — fractional tile position is fine; the wire rounds it).
+    //
+    // STOP-EDGE RE-PUBLISH (stop-edge fix): bump StateRevision ONCE on the moving→stopped TRANSITION (Velocity was
+    // non-zero, now Zero). Movement snapshots are Unreliable (UDP); the sub-tile force-include (1133c7e) re-includes
+    // the own entity every tick only while Velocity != 0, so the instant velocity zeroes the precise stop Position
+    // would be delta'd OUT and, since a stop crosses no tile (ApplyResolvedMove never bumps), never re-published at
+    // rest. If the final moving snapshot drops, the client's confirmed base stays frozen at the stale last-moving
+    // position and the predictor settles BACKWARD onto it on release. Bumping the revision once on the transition
+    // re-enters the precise stop position into the standard "unacked entities re-include next tick under loss"
+    // self-healing path (and is correct for remote viewers — they want the final stop position too). This fires ONLY
+    // on the transition: a second StopMovement() on an already-rest entity (Velocity already Zero) is a no-op, so a
+    // player at steady rest does NOT keep bumping (no bandwidth at rest).
     public void StopMovement()
     {
+        var wasMoving = Velocity.LengthSquared > 0d;
         Velocity = WorldVector.Zero;
+        if (wasMoving)
+        {
+            StateRevision++;
+        }
     }
 
     // The Direction8 a unit vector points toward (same table as Direction8.ToUnitVector), or null for a zero vector
