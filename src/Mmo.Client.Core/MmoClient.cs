@@ -1356,6 +1356,13 @@ public sealed class MmoClient : IDisposable
 
     private sealed class ClientEntity
     {
+        // HOP-ARC (cosmetic, monster-only): the peak height in WORLD UNITS (tiles) a slime's render LIFTS at the
+        // apex of its jump arc. ~half a tile reads as a clear bounce without looking like a launch. Phase-8
+        // "Option B": the server hop stays a flat sparse Position jump (authoritative, unchanged); the client adds
+        // a parabolic vertical lift SYNCED to the horizontal interp so the slime visibly arcs up-and-over and lands
+        // exactly where/when the server hop lands. A named const (the user feel-tunes it); pure cosmetic.
+        private const double MonsterHopPeakHeight = 0.5d;
+
         // CONTINUOUS MIGRATION (Phase 5): ONE remote render driver for EVERY kind (other players, tile-stepped
         // monsters, resources) — a fixed-delay continuous playout buffer that lerps between received positions so
         // all of them glide smoothly (the per-kind TileInterpolator + MonsterHopInterpolator split is gone). Only
@@ -1513,8 +1520,21 @@ public sealed class MmoClient : IDisposable
             var position = IsLocal && localOverride.HasValue
                 ? localOverride.Value
                 : _remoteInterp.Sample(now);
+
+            // HOP-ARC (cosmetic, Phase-8 Option B): a slime hops server-authoritatively as a SPARSE Position jump
+            // with Velocity=0; the remote interp lerps the horizontal old->new flat (reads as a slide). Add a
+            // vertical parabola SYNCED to that SAME interp (HopArcFactor is the parabola of the bracket the interp
+            // is lerping NOW) so the render arcs up-and-over and lands exactly when/where the server hop lands.
+            // GATED to non-local MONSTERS (the Velocity=0 sparse-hopper) so players, the local player, and any
+            // continuously-moving entity stay flat (HopHeight 0 == today's behaviour). Sample() must run first so
+            // HopArcFactor reflects this frame's bracket; never read for the local entity (it renders the override).
+            var hopHeight = !IsLocal && Kind == EntityKind.Monster
+                ? MonsterHopPeakHeight * _remoteInterp.HopArcFactor
+                : 0d;
+
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
-                AuthoritativePosition: RenderPosition.FromWorld(Position));
+                AuthoritativePosition: RenderPosition.FromWorld(Position),
+                HopHeight: hopHeight);
         }
     }
 

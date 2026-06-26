@@ -23,7 +23,13 @@ public readonly record struct EntityRenderState(
     // CONTINUOUS: the confirmed server position as a continuous WorldVector (NOT the rounded AuthoritativeTile).
     // The "Server positions" debug overlay positions its marker from this so it tracks the true server position
     // smoothly instead of snapping tile-to-tile. Defaults to (0,0) for non-render-loop constructions (tests).
-    RenderPosition AuthoritativePosition = default)
+    RenderPosition AuthoritativePosition = default,
+    // HOP-ARC (cosmetic, monster-only): the vertical render height in WORLD UNITS (tiles) to LIFT the visual this
+    // frame — a parabolic jump that peaks mid-hop and lands at 0, SYNCED to the horizontal interp of a slime's
+    // sparse server hop. PURELY presentational: it never touches Position/AuthoritativeTile/AuthoritativePosition,
+    // so targeting/harvest/combat are byte-identical. 0 for players, continuously-moving entities, and a resting
+    // monster (the render loop adds it to the visual's Y; 0 == flat, the unchanged behaviour for every other kind).
+    double HopHeight = 0d)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

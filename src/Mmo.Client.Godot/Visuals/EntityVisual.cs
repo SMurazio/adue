@@ -141,9 +141,11 @@ void fragment() {
     // subclasses extend (facing, animation, depleted hide) via OnUpdate.
     public void UpdateFrom(EntityRenderState state, double now)
     {
-        // Every kind glides flat (the vertical monster-hop arc was retired in the continuous migration), so the
-        // wrapper (body + label + HP bar) tracks the render position with no Y offset.
-        Position = ToWorld(state.Position);
+        // HOP-ARC (cosmetic, Phase-8 Option B): every kind tracks its horizontal render position; MONSTERS also get
+        // a vertical lift (state.HopHeight, world units) so a slime visibly ARCS up-and-over its server hop and
+        // lands flat. HopHeight is 0 for every other kind and for a resting monster, so the common case is the
+        // unchanged flat glide. Presentation-only — Position.Y here never affects the authoritative tile/targeting.
+        Position = ToWorld(state.Position) + new Vector3(0f, (float)state.HopHeight, 0f);
         if (_label is not null)
         {
             SetLabelText(state.DisplayName);

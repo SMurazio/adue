@@ -55,6 +55,15 @@ public sealed class RemotePositionInterpolator
     // across an astronomical synthetic span — the very first real bracket [from, to] is two genuine confirms.
     private RenderPosition _anchor;
 
+    // HOP-ARC (cosmetic): the [0,1] PARABOLIC factor of the bracket the playout is currently lerping across —
+    // 4*alpha*(1-alpha): 0 at the bracket's start/end, 1 at its midpoint. Updated every Sample alongside the
+    // horizontal lerp from the SAME alpha, so any caller that wants a vertical "jump" arc (the slime hop) gets a
+    // height SYNCED to the horizontal move for free: peak * HopArcFactor rises and lands exactly as the position
+    // does. 0 whenever the render is HOLDing (pre-confirm, before age-in, or starvation) or the active bracket
+    // doesn't actually move (a repeated identical confirm) — so a RESTING monster never bounces. The interpolator
+    // stays kind-agnostic: it only EXPOSES the factor; the caller gates it to EntityKind.Monster and scales by peak.
+    private double _hopArcFactor;
+
     public RemotePositionInterpolator(WorldVector initialPosition, double interpolationDelayMs)
     {
         _renderPosition = _anchor = RenderPosition.FromWorld(initialPosition);
@@ -64,6 +73,11 @@ public sealed class RemotePositionInterpolator
     public RenderPosition RenderPosition => _renderPosition;
 
     public double InterpolationDelayMs => _interpolationDelayMs;
+
+    // HOP-ARC (cosmetic): the [0,1] parabolic factor (4*alpha*(1-alpha)) of the bracket the playout is currently
+    // lerping across — 0 at the bracket ends and while HOLDing, 1 at the midpoint. A caller multiplies this by a
+    // peak height to get a vertical jump arc SYNCED to the horizontal move. See the field comment. Read after Sample.
+    public double HopArcFactor => _hopArcFactor;
 
     // Count of buffered samples — exposed for diagnostics (the trace's queue-depth read-out) and tests.
     public int BufferedSampleCount => _samples.Count;
@@ -84,6 +98,7 @@ public sealed class RemotePositionInterpolator
     {
         _samples.Clear();
         _renderPosition = _anchor = RenderPosition.FromWorld(position);
+        _hopArcFactor = 0d;
     }
 
     // A new server-confirmed continuous position arrived. Append it to the playout buffer keyed on its arrival
@@ -144,6 +159,7 @@ public sealed class RemotePositionInterpolator
         if (_samples.Count == 0)
         {
             _renderPosition = _anchor;
+            _hopArcFactor = 0d;
             return _renderPosition;
         }
 
@@ -154,6 +170,7 @@ public sealed class RemotePositionInterpolator
         if (playoutTime <= _samples[0].ReceivedAt)
         {
             _renderPosition = _samples[0].Position;
+            _hopArcFactor = 0d;
             return _renderPosition;
         }
 
@@ -162,6 +179,7 @@ public sealed class RemotePositionInterpolator
         if (playoutTime >= _samples[^1].ReceivedAt)
         {
             _renderPosition = _samples[^1].Position;
+            _hopArcFactor = 0d;
             return _renderPosition;
         }
 
@@ -181,6 +199,13 @@ public sealed class RemotePositionInterpolator
         var spanMs = (to.ReceivedAt - from.ReceivedAt).TotalMilliseconds;
         var alpha = spanMs > 0d ? (playoutTime - from.ReceivedAt).TotalMilliseconds / spanMs : 1d;
         _renderPosition = RenderPosition.Lerp(from.Position, to.Position, alpha);
+
+        // HOP-ARC (cosmetic): the parabolic factor for THIS bracket, from the SAME alpha the horizontal lerp uses,
+        // so a caller's vertical jump (peak * factor) rises at the bracket midpoint and lands exactly when/where the
+        // horizontal does — no separate timeline. 0 if the bracket doesn't actually move (a repeated identical
+        // confirm: from == to) so a RESTING monster getting re-confirmed on its tile never bounces in place.
+        var clampedAlpha = Math.Clamp(alpha, 0d, 1d);
+        _hopArcFactor = from.Position == to.Position ? 0d : 4d * clampedAlpha * (1d - clampedAlpha);
 
         // Prune samples strictly older than the active bracket's start — the playout cursor has moved past them
         // and they will never be read again. Keeps the buffer at ~the steady-state depth without unbounded growth.
