@@ -510,6 +510,47 @@ public sealed class WorldEntity
         return ApplyResolvedMove(Position + delta);
     }
 
+    // CONTINUOUS MIGRATION (Phase 8): the MONSTER HOP movement-cadence gate, mirroring TryStep's _nextEligibleTick
+    // rule exactly but WITHOUT a tile-snap or walkability — the hop primitive (HopLocomotion) owns the geometry; this
+    // owns only the pacing. Returns true and ARMS the cooldown (next eligible = serverTick + cooldownTicks) iff this
+    // entity is off its movement cooldown at serverTick; returns false WITHOUT mutating anything while still inside the
+    // window. This is the SAME _nextEligibleTick field the old monster TryStep gated+armed on an accepted step (and the
+    // same field the player attack-movement-ROOT freezes), so a hop on cooldown is dropped and an accepted hop arms the
+    // next window — replicating TryStep's cadence for the continuous hop with no behaviour change. A FULLY-BLOCKED hop
+    // (no progress) must NOT arm: the caller checks readiness here only once it has decided to commit a moving hop, so
+    // a stuck hop leaves the gate where it is and re-tests next tick (TryStep's blocked-step rule).
+    public bool TryBeginHop(uint serverTick, uint cooldownTicks)
+    {
+        if (_nextEligibleTick.HasValue && serverTick < _nextEligibleTick.Value)
+        {
+            return false;
+        }
+
+        _nextEligibleTick = serverTick + cooldownTicks;
+        return true;
+    }
+
+    // CONTINUOUS MIGRATION (Phase 8): true iff this entity's movement cooldown has elapsed at serverTick (the hop
+    // cadence gate, READ-ONLY — does not arm). HopLocomotion checks this BEFORE doing the resolve/fan work so a
+    // fully-blocked hop can leave the gate un-armed (re-try next tick) while an accepted hop arms it via TryBeginHop.
+    // Same field as TryBeginHop / the attack-root freeze, so the player swing-root still gates a (hypothetical) hop.
+    public bool IsHopReady(uint serverTick)
+    {
+        return !_nextEligibleTick.HasValue || serverTick >= _nextEligibleTick.Value;
+    }
+
+    // CONTINUOUS MIGRATION (Phase 8): face this entity from a continuous unit heading (the same 8-way table the player
+    // integrator uses via ComputeMoveDelta). Used by the monster hop so the sprite still faces its movement/target
+    // heading even though Velocity stays Zero (the hop never routes through ComputeMoveDelta). A zero vector leaves
+    // Facing untouched. Bumps StateRevision (via TrySetFacing) only on a real change so it does not spam deltas.
+    public void SetFacingFromUnit(WorldVector unitDir)
+    {
+        if (FacingFromUnit(unitDir) is { } facing)
+        {
+            TrySetFacing(facing);
+        }
+    }
+
     // CONTINUOUS MIGRATION (Phase 2): apply a COLLIDED end position the caller already computed (via the shared
     // ContinuousCollision.Resolve against the nearby walls) and run the SAME tile-crossing bookkeeping
     // IntegrateMovement does. WorldEntity stays grid-agnostic — it does NOT query walls or run the resolver itself

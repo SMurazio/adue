@@ -2,46 +2,62 @@ using Mmo.Shared.Domain;
 
 namespace Mmo.Server.Runtime;
 
-// LIVING-ENEMIES P1/P2: the server-side brain for EntityKind.Monster. One instance owns ALL monsters' per-entity
-// AI state (keyed by entity id) plus the shared PRNG, and steps them on the server tick. It is deliberately
-// decoupled from GameServer plumbing so it can be unit-tested directly against a WorldState + a walkability oracle
-// + injected step/target/attack callbacks (no network, no sessions):
+// LIVING-ENEMIES P1/P2 + CONTINUOUS MIGRATION (Phase 8): the server-side brain for EntityKind.Monster. One instance
+// owns ALL monsters' per-entity AI state (keyed by entity id) plus the shared PRNG, and steps them on the server tick.
+// It is deliberately decoupled from GameServer plumbing so it can be unit-tested directly against a WorldState + a
+// walkability oracle + an injected locomotion + target/attack callbacks (no network, no sessions):
 //
-//   * Each monster has a HOME anchor (the tile it was spawned at), a roam RADIUS (Chebyshev tiles from home it
-//     may wander within — the leash), and a small state machine:
+//   * Each monster has a HOME anchor (the continuous point it was spawned at), a roam RADIUS (Euclidean tile units
+//     from home it may wander within — the leash), and a small state machine:
 //        Idle      — standing still until a pause timer elapses, then roam.
-//        Roaming   — walking one tile per step cadence toward a chosen open destination within the leash.
-//        Chasing   — (P2) a player entered aggro range; greedily step toward the TARGET's current tile and, when
-//                    adjacent, attack on the monster's own attack cooldown. The chase MAY leave the roam radius
-//                    (intended) but is LEASHED: target lost/dead/disconnected, target beyond the de-aggro range,
-//                    or the monster farther than chaseLeash from home → drop aggro and Return.
-//        Returning — (P2) walk greedily back toward home after dropping aggro; resume Idle on arrival.
-//   * The monster moves through the SAME WorldEntity tile-step path players use (Zone.TryStep here, via the
-//     injected stepper), so facing / StepSequence / AOI migration / replication / client interpolation all work
-//     for free — there is NO parallel movement system.
+//        Roaming   — HOPPING toward a chosen open destination within the leash (one collision-valid leap per cadence).
+//        Chasing   — a player entered aggro range; hop toward the TARGET's current Position and, when within
+//                    AttackRangeUnits, attack on the monster's own attack cooldown. The chase MAY leave the roam
+//                    radius (intended) but is LEASHED: target lost/dead/disconnected, target beyond the de-aggro
+//                    range, or the monster farther than chaseLeash from home → drop aggro and Return.
+//        Returning — hop back toward home after dropping aggro; resume Idle on arrival.
+//
+// CONTINUOUS NAVIGATION (Phase 8). Navigation is CONTINUOUS (Euclidean ranges on WorldVector Position, sub-tile
+// targets, obstacle-avoidance via the swept-circle resolver) but movement still HOPS — a discrete collision-valid
+// leap per move cadence with Velocity left at Zero (the sparse-update "jump" is preserved; monsters stay OFF the
+// player velocity-glide path). The hop primitive is the injected IMonsterLocomotion (ship HopLocomotion); the AI owns
+// only WHERE (the continuous target) and WHEN (the state machine + timers + the livelock watchdog).
+//
+// RANGE CONVERSION TABLE (Chebyshev tiles → Euclidean tile units; behaviour-preserving, auditable):
+//   | Range            | old (Chebyshev) | Euclidean | note                                                         |
+//   |------------------|-----------------|-----------|--------------------------------------------------------------|
+//   | Aggro            | 6               | 6.0       | cardinal-preserving; diagonal corners trim to a TRUE circle  |
+//   | De-aggro         | ⌈1.5·aggro⌉ = 9 | 9.0       | keep the ⌈1.5·aggro⌉ hysteresis rule on the float            |
+//   | Chase leash      | 12              | 12.0      | soft bound (one-hop overshoot allowed)                       |
+//   | Roam             | 4               | 4.0       | roam destination sampled in the Euclidean disc               |
+//   | Attack/adjacency | 1 (3×3)         | 1.5       | √2-covering so the diagonal still hits (1.0 would REGRESS)   |
+// The aggro PRE-FILTER (FindTargetDelegate) still gathers by a tile/Chebyshev radius for the coarse spatial scan, but
+// the caller passes ⌈AggroRadius⌉(+1) so no in-range Euclidean target is dropped; the AI then Euclidean-tests Position.
 //
 // AGGRO THROTTLE (perf): the aggro scan (find the nearest player in range via the spatial index) is NOT run every
 // tick per monster — the P1 review flagged a per-tick scan as a perf risk. Each monster re-evaluates aggro at most
 // once every `aggroScanIntervalTicks` (~0.5 s), and the initial scan tick is staggered per entity id so a crowd of
 // monsters doesn't all scan on the same tick.
 //
-// ATTACK is the monster's OWN per-monster timer (NextAttackTick), independent of its move cooldown — exactly like
-// a player's attack cooldown is independent of its step cooldown. The damage application + the cosmetic damage
-// number are an INJECTED callback (so combat stays in GameServer / the real ApplyDamage + DamageEventMessage path
-// — the AI never forks combat).
+// ATTACK is the monster's OWN per-monster timer (NextAttackTick), independent of its move cadence — exactly like a
+// player's attack cooldown is independent of its step cooldown. The damage application + the cosmetic damage number
+// are an INJECTED callback (so combat stays in GameServer / the real ApplyDamage + DamageEventMessage path — the AI
+// never forks combat).
 //
-// CORNER-CUT LIVELOCK FIX (P1 follow-up, todo/monster-roam-cornercut-livelock.md): a greedy step can wedge against
-// a wall CORNER — the real step rejects a diagonal that cuts a corner, but the terrain oracle `_isWalkable(next)`
-// is true, so the old "blocked?" heuristic mistook it for a cooldown wait and spun forever. A NO-PROGRESS TIMEOUT
-// (`LastProgressTick`, set on entering a moving phase + on every successful step) bails when the monster has gone
-// longer than ~2 step windows + a margin without advancing — catching the corner-cut (and any other block the
-// terrain oracle misses) without re-implementing the corner-cut rule.
+// LIVELOCK WATCHDOG (Phase 8 re-base of the P1 corner-cut fix): a hop can wedge against a wall the resolver slides
+// along to a FIXPOINT (a perpendicular wall, an inside corner the fan can't escape). "Progress" is now a resolved
+// landing that advanced >= an epsilon (HopLocomotion.ProgressEpsilonUnits) toward the target — reported as
+// HopResult.Moved. CRITICAL: a hop that the locomotion ATTEMPTED (cadence elapsed) but that landed within epsilon of
+// `from` returns HopResult.Stuck and counts as NO-progress (NOT a cooldown wait), so the no-progress timeout always
+// eventually fires at a slide fixpoint: Chasing → BeginReturnHome, Roaming/Returning → GoIdle + re-pick. An
+// OnCooldown tick (the cadence simply has not elapsed) is a harmless wait and does NOT reset OR trip the watchdog.
 //
-// DETERMINISM: the AI owns a seeded System.Random so tests are reproducible. The per-monster destination pick also
-// folds in the entity id so two monsters seeded from the same instance don't roam in lockstep.
+// DETERMINISM: the AI owns a seeded System.Random so tests are reproducible. The per-monster destination pick folds
+// in the entity id so two monsters seeded from the same instance don't roam in lockstep; the hop locomotion + the
+// resolver are RNG-free and all-double, so a given seed replays an identical path.
 //
-// NO death / respawn / loot this phase — that is Phase 3+. The player TAKES damage (HP floors at 0; it does not
-// die or respawn here).
+// NO death / respawn / loot are this file's concern — those live in GameServer. The player TAKES damage via the
+// injected attack callback.
 public sealed class MonsterRoamAi
 {
     public enum State : byte
@@ -52,78 +68,77 @@ public sealed class MonsterRoamAi
         Returning = 3,
     }
 
-    // Per-monster AI record. Mutable struct held by value in the dictionary and written back on change — the state
-    // set is tiny (a handful of monsters) so a dictionary keyed by entity id is the simplest store and costs nothing
-    // measurable. Home is the leash centre; PauseUntilTick gates the next Idle→Roam transition; Destination is the
-    // current roam/return target (meaningful while Roaming/Returning). TargetId/TargetPresent identify the chased
-    // player (P2); NextAttackTick is the monster's OWN attack-cooldown gate; NextAggroScanTick throttles the aggro
-    // scan; LastProgressTick is the corner-cut no-progress watchdog.
+    // Per-monster AI record. Mutable struct held by value in the dictionary and written back on change. Home is the
+    // leash centre (continuous); PauseUntilTick gates the next Idle→Roam transition; Destination is the current
+    // roam/return target (continuous; meaningful while Roaming/Returning). TargetId/TargetPresent identify the chased
+    // player; NextAttackTick is the monster's OWN attack-cooldown gate; NextAggroScanTick throttles the aggro scan;
+    // LastProgressTick is the livelock no-progress watchdog.
     private struct MonsterState
     {
-        public TileCoord Home;
+        public WorldVector Home;
         public State Phase;
         public uint PauseUntilTick;
-        public TileCoord Destination;
+        public WorldVector Destination;
 
-        // P2 aggro/chase/attack.
+        // Aggro/chase/attack.
         public ulong TargetId;
         public bool TargetPresent;
         public uint NextAttackTick;
         public uint NextAggroScanTick;
 
-        // P1 corner-cut fix: the last tick this monster actually advanced a tile (or entered a moving phase).
+        // The last tick this monster actually advanced (HopResult.Moved) or entered a moving phase — the watchdog base.
         public uint LastProgressTick;
     }
 
     private readonly Dictionary<ulong, MonsterState> _states = [];
     private readonly Random _random;
 
-    // The walkability oracle (Zone.IsWalkable) and the single-tile stepper (Zone.TryStep). Injected so the AI is
-    // testable against a bare TileGrid/WorldState without a live Zone/GameServer. The stepper returns whether the
-    // tile actually advanced; the AI uses that to detect "blocked / made no progress" and bail.
+    // The walkability oracle (Zone.IsWalkable) — used to validate a sampled roam destination tile. Injected so the AI
+    // is testable against a bare TileGrid/WorldState without a live Zone/GameServer.
     private readonly Func<TileCoord, bool> _isWalkable;
-    private readonly TryStepDelegate _tryStep;
 
-    // P2: find the nearest VALID aggro target (alive player) within `aggroRadius` of `monster`. Returns false when
-    // none. Injected so the AI doesn't reach into WorldState/sessions directly — GameServer supplies the real
-    // spatial-index scan (GatherInterestCandidates, players only, alive), keeping the AI unit-testable with a fake.
+    // CONTINUOUS MIGRATION (Phase 8): the injected hop locomotion (HopLocomotion). Replaces the old TryStep delegate —
+    // the AI no longer tile-steps; it asks the locomotion to Advance toward a continuous target and reads the HopResult
+    // to drive its watchdog. Injected so a test can hand a fake/lambda locomotion and so a future GlideLocomotion slots
+    // in without touching this class.
+    private readonly IMonsterLocomotion _locomotion;
+
+    // Find the nearest VALID aggro target (alive player) within `gatherRadius` (a coarse Chebyshev/tile pre-filter) of
+    // `monster`. Returns false when none. Injected so the AI doesn't reach into WorldState/sessions directly —
+    // GameServer supplies the real spatial-index scan (GatherInterestCandidates, players only, alive) and outputs the
+    // target's CONTINUOUS Position; the AI does the precise Euclidean range test.
     private readonly FindTargetDelegate _findTarget;
 
-    // P2: resolve a tracked target id to its live entity. Returns false if the target is gone (despawned/logged
-    // out). Lets the AI re-read the target's CURRENT tile each chase step and detect target-lost for de-aggro.
+    // Resolve a tracked target id to its live entity. Returns false if the target is gone (despawned/logged out). Lets
+    // the AI re-read the target's CURRENT Position each chase hop and detect target-lost for de-aggro.
     private readonly TryResolveTargetDelegate _tryResolveTarget;
 
-    // P2: perform the monster's attack against `target` (face, ApplyDamage(attackDamage), emit the cosmetic damage
-    // number for the player + nearby viewers). Injected so the real combat/replication path stays in GameServer and
-    // the AI never forks combat. Returns nothing — the AI only owns the cooldown gate around it.
+    // Perform the monster's attack against `target` (face, ApplyDamage, emit the damage number). Injected so the real
+    // combat/replication path stays in GameServer and the AI never forks combat. The AI only owns the cooldown gate.
     private readonly AttackDelegate _attack;
 
-    // The stepper signature mirrors Zone.TryStep (entity, direction, serverTick, stepCooldownTicks) → accepted.
-    public delegate bool TryStepDelegate(WorldEntity entity, Direction8 direction, uint serverTick, uint stepCooldownTicks);
+    // Finds the nearest alive player within `gatherRadius` (a tile/Chebyshev coarse pre-filter — pass ⌈aggro⌉(+1)) of
+    // `monster`. On success returns true and outputs the target id + its current continuous Position; false when none.
+    public delegate bool FindTargetDelegate(WorldEntity monster, int gatherRadius, out ulong targetId, out WorldVector targetPosition);
 
-    // Finds the nearest alive player within `aggroRadius` of `monster`. On success returns true and outputs the
-    // target id + its current tile; false when no eligible target is in range.
-    public delegate bool FindTargetDelegate(WorldEntity monster, int aggroRadius, out ulong targetId, out TileCoord targetTile);
-
-    // Resolves a tracked target id to its live entity + current tile + alive flag. False if the entity no longer
-    // exists at all.
-    public delegate bool TryResolveTargetDelegate(ulong targetId, out TileCoord targetTile, out bool alive);
+    // Resolves a tracked target id to its live continuous Position + alive flag. False if the entity no longer exists.
+    public delegate bool TryResolveTargetDelegate(ulong targetId, out WorldVector targetPosition, out bool alive);
 
     // Applies the monster's melee attack to the target id (face + damage + damage-number broadcast). Owned by
-    // GameServer; the AI only decides WHEN (adjacency + cooldown).
+    // GameServer; the AI only decides WHEN (within AttackRangeUnits + cooldown).
     public delegate void AttackDelegate(WorldEntity monster, ulong targetId, int attackDamage);
 
     public MonsterRoamAi(
         int seed,
         Func<TileCoord, bool> isWalkable,
-        TryStepDelegate tryStep,
+        IMonsterLocomotion locomotion,
         FindTargetDelegate findTarget,
         TryResolveTargetDelegate tryResolveTarget,
         AttackDelegate attack)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
-        _tryStep = tryStep;
+        _locomotion = locomotion;
         _findTarget = findTarget;
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
@@ -132,20 +147,21 @@ public sealed class MonsterRoamAi
     public int TrackedCount => _states.Count;
 
     // Tunables the per-tick step reads. Grouped in a struct so the (growing) parameter list stays readable and the
-    // caller fills it from the live ServerTuning each tick. All values are already tick-quantised by ServerTuning.
+    // caller fills it from the live MonsterType each tick. CONTINUOUS MIGRATION (Phase 8): the navigation ranges are
+    // now EUCLIDEAN tile-unit FLOATS (see the conversion table in the class header); pause/cooldown/scan stay TICKS.
     public readonly record struct Tunables(
-        int RoamRadius,
+        double RoamRadius,
         uint PauseMinTicks,
         uint PauseMaxTicks,
-        int AggroRadius,
-        int DeaggroRadius,
-        int ChaseLeash,
-        int AttackRange,
+        double AggroRadius,
+        double DeaggroRadius,
+        double ChaseLeash,
+        double AttackRangeUnits,
         int AttackDamage,
         uint AttackCooldownTicks,
         uint AggroScanIntervalTicks);
 
-    // Registers a freshly spawned monster: records its spawn tile as the leash home and starts it Idle with an
+    // Registers a freshly spawned monster: records its spawn Position as the leash home and starts it Idle with an
     // initial randomized pause so it doesn't all-at-once lurch on the first eligible tick. The first aggro scan is
     // staggered by entity id (mod the scan interval) so a crowd of monsters doesn't scan on the same tick.
     public void Register(WorldEntity monster, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks, uint aggroScanIntervalTicks)
@@ -153,10 +169,10 @@ public sealed class MonsterRoamAi
         var stagger = aggroScanIntervalTicks == 0 ? 0u : (uint)(monster.Id % aggroScanIntervalTicks);
         _states[monster.Id] = new MonsterState
         {
-            Home = monster.TileCoord,
+            Home = monster.Position,
             Phase = State.Idle,
             PauseUntilTick = serverTick + NextPauseTicks(pauseMinTicks, pauseMaxTicks),
-            Destination = monster.TileCoord,
+            Destination = monster.Position,
             TargetId = 0,
             TargetPresent = false,
             NextAttackTick = serverTick,
@@ -181,8 +197,8 @@ public sealed class MonsterRoamAi
         return false;
     }
 
-    // Returns the leash home anchor for a monster (test/diagnostic visibility). False if untracked.
-    public bool TryGetHome(ulong monsterId, out TileCoord home)
+    // Returns the leash home anchor (continuous) for a monster (test/diagnostic visibility). False if untracked.
+    public bool TryGetHome(ulong monsterId, out WorldVector home)
     {
         if (_states.TryGetValue(monsterId, out var s))
         {
@@ -208,21 +224,14 @@ public sealed class MonsterRoamAi
     }
 
     // Steps ONE tracked monster for this tick. Paced by the caller exactly like StepHeldMovementIntents: the caller
-    // invokes this each tick with the monster's effective step-cooldown ticks; the underlying TryStep gate drops a
-    // too-early step on cooldown, so the monster physically advances at most one tile per cooldown. The pause /
-    // attack / aggro-scan timers are measured in ticks too, so the whole behaviour is tick-quantised.
+    // invokes this each tick with the monster's effective move-cadence ticks; the locomotion's hop gate drops a
+    // too-early hop on cooldown, so the monster physically leaps at most once per cadence. The pause / attack /
+    // aggro-scan timers are measured in ticks too, so the whole behaviour is tick-quantised.
     //
-    //   AGGRO (all non-Chasing phases): throttled to NextAggroScanTick — scan for the nearest player in aggroRadius;
-    //            on a hit, switch to Chasing that target (overriding Idle/Roaming/Returning).
-    //   Idle:    do nothing until PauseUntilTick. Then pick a random OPEN roam tile within the leash → Roaming.
-    //   Roaming: greedy step toward the destination; on arrival / a true block / the no-progress timeout → Idle.
-    //   Chasing: re-read the target's CURRENT tile; check the leash (target lost/dead, beyond de-aggro range, or
-    //            monster beyond chaseLeash from home) → Returning. If adjacent (Chebyshev <= attackRange) and the
-    //            attack cooldown elapsed → attack (face + damage + number) on the OWN attack timer; else greedy step
-    //            toward the target (with the no-progress watchdog).
-    //   Returning: greedy step toward home; on arrival / a true block / the no-progress timeout → Idle (re-pause).
-    //
-    // Returns true iff the monster's tile actually advanced this call (so the caller can mark replication / trace).
+    // Returns true iff the monster committed a HOP this call (HopResult.Moved) — diagnostic only; replication rides
+    // StateRevision, which ApplyResolvedMove (inside the locomotion) bumps only when the rounded tile actually crosses,
+    // so the snapshot cadence/bandwidth stay tile-keyed at today's rate regardless of this flag. The GameServer pass
+    // ignores the return; it is the headless tests' "did it move" signal.
     public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in Tunables t)
     {
         if (!_states.TryGetValue(monster.Id, out var state))
@@ -232,20 +241,19 @@ public sealed class MonsterRoamAi
 
         // AGGRO (throttled): scan for a player in range and switch to Chasing on a hit — ONLY from Idle/Roaming.
         // NOT while Chasing (already has a target), and NOT while Returning: a leashed/evading monster commits to
-        // reaching home before it re-evaluates aggro. Otherwise it re-aggros an in-range kiter mid-return and
-        // vibrates at the leash edge forever instead of a clean out-and-back (it would never reach home + settle).
-        // Throttled per monster (NextAggroScanTick), the SINGLE spatial-scan site, staggered at Register — the perf
-        // throttle the P1 review asked for. The throttle advances whether or not a target was found.
+        // reaching home before it re-evaluates aggro. Throttled per monster (NextAggroScanTick), staggered at Register.
         if ((state.Phase is State.Idle or State.Roaming) && serverTick >= state.NextAggroScanTick)
         {
-            if (t.AggroRadius > 0 && _findTarget(monster, t.AggroRadius, out var foundId, out _))
+            // Pass a COARSE tile-radius pre-filter = ⌈aggro⌉(+1) so the spatial gather drops no in-range Euclidean
+            // target; the precise Euclidean range test happens below on the target's continuous Position.
+            var gatherRadius = GatherRadiusFor(t.AggroRadius);
+            if (gatherRadius > 0
+                && _findTarget(monster, gatherRadius, out var foundId, out var foundPos)
+                && Distance(monster.Position, foundPos) <= t.AggroRadius)
             {
                 EnterChase(ref state, foundId, serverTick);
             }
 
-            // Advance the throttle off the SCAN tick (always), so the next scan is a full interval out regardless of
-            // the outcome. If we just entered Chasing, this still records when the next scan would be eligible — moot
-            // while Chasing, refreshed to "now" by BeginReturnHome when the chase ends.
             state.NextAggroScanTick = serverTick + Math.Max(1u, t.AggroScanIntervalTicks);
         }
 
@@ -261,8 +269,8 @@ public sealed class MonsterRoamAi
                         state.Destination = destination;
                         state.Phase = State.Roaming;
                         state.LastProgressTick = serverTick;
-                        // Fall through to take the first roam step THIS tick (the pause already elapsed).
-                        moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t, returningHome: false);
+                        // Fall through to take the first roam hop THIS tick (the pause already elapsed).
+                        moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
                     }
                     else
                     {
@@ -274,7 +282,7 @@ public sealed class MonsterRoamAi
                 break;
 
             case State.Roaming:
-                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t, returningHome: false);
+                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
                 break;
 
             case State.Chasing:
@@ -282,7 +290,8 @@ public sealed class MonsterRoamAi
                 break;
 
             case State.Returning:
-                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t, returningHome: true);
+                // Returning hops toward Destination = home (set in BeginReturnHome); same machinery as roam.
+                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
                 break;
         }
 
@@ -290,11 +299,9 @@ public sealed class MonsterRoamAi
         return moved;
     }
 
-    // P2: enters Chasing a target. The chase destination is re-read live each step from the target's CURRENT tile,
-    // so Destination here is just seeded; LastProgressTick starts the no-progress watchdog. The attack cooldown is
-    // NOT reset on entering chase (so a monster that just attacked, lost LOS, and re-aggroed can't instantly re-hit;
-    // its own timer still governs) unless it has never attacked — Register seeds NextAttackTick = spawn tick so the
-    // first adjacency hits immediately.
+    // Enters Chasing a target. The chase target is re-read live each hop from the target's CURRENT Position, so
+    // Destination here is moot; LastProgressTick starts the no-progress watchdog. The attack cooldown is NOT reset on
+    // entering chase (its own timer still governs) — Register seeds NextAttackTick = spawn tick so the first hit lands.
     private void EnterChase(ref MonsterState state, ulong targetId, uint serverTick)
     {
         state.Phase = State.Chasing;
@@ -303,66 +310,66 @@ public sealed class MonsterRoamAi
         state.LastProgressTick = serverTick;
     }
 
-    // P2: one chase tick. (1) Resolve the target and apply the leash rules → Returning on any break. (2) If adjacent
-    // within attackRange and the attack cooldown elapsed, attack on the OWN attack timer (no move this tick). (3)
-    // Otherwise greedy-step toward the target's current tile, with the corner-cut no-progress watchdog.
+    // One chase tick. (1) Resolve the target and apply the leash rules (Euclidean) → Returning on any break. (2) If
+    // within AttackRangeUnits and the attack cooldown elapsed, attack on the OWN attack timer (no hop this tick). (3)
+    // Otherwise hop toward the target's current Position, with the no-progress watchdog.
     private bool StepChase(WorldEntity monster, ref MonsterState state, uint serverTick, uint stepCooldownTicks, in Tunables t)
     {
-        // (1) De-aggro checks. Target gone/dead, OR beyond the de-aggro range, OR the monster has been pulled
-        // farther than chaseLeash from home → drop aggro and walk home.
-        if (!_tryResolveTarget(state.TargetId, out var targetTile, out var alive) || !alive)
+        // (1) De-aggro checks. Target gone/dead, OR beyond the de-aggro range, OR the monster pulled farther than
+        // chaseLeash from home → drop aggro and walk home. All Euclidean on Position.
+        if (!_tryResolveTarget(state.TargetId, out var targetPos, out var alive) || !alive)
         {
             BeginReturnHome(ref state, serverTick);
             return false;
         }
 
-        var distToTarget = Chebyshev(monster.TileCoord, targetTile);
-        var distFromHome = Chebyshev(monster.TileCoord, state.Home);
+        var distToTarget = Distance(monster.Position, targetPos);
+        var distFromHome = Distance(monster.Position, state.Home);
         if (distToTarget > t.DeaggroRadius || distFromHome > t.ChaseLeash)
         {
             BeginReturnHome(ref state, serverTick);
             return false;
         }
 
-        // (2) Adjacent + off cooldown → attack (face + damage + number happen in the injected callback). The attack
-        // is the monster's OWN per-monster timer, independent of its move cooldown. We do NOT move on an attack tick.
-        if (distToTarget <= t.AttackRange)
+        // (2) Within attack range + off cooldown → attack. The attack is the monster's OWN per-monster timer,
+        // independent of its move cadence. We do NOT hop on an attack tick. Face the target while in range.
+        if (distToTarget <= t.AttackRangeUnits)
         {
-            // Face the target while adjacent (an attack tick takes no step, so nothing else sets facing). The
-            // injected attack callback also faces the victim (same sign-of-delta, harmless redundancy) — facing
-            // here keeps it in the testable AI path, not only the GameServer callback.
-            monster.TrySetFacing(GreedyDirectionToward(monster.TileCoord, targetTile));
+            monster.SetFacingFromUnit((targetPos - monster.Position).Normalized());
             if (serverTick >= state.NextAttackTick)
             {
                 _attack(monster, state.TargetId, t.AttackDamage);
                 state.NextAttackTick = serverTick + t.AttackCooldownTicks;
-                state.LastProgressTick = serverTick; // adjacency-and-attacking counts as progress (not wedged).
+                state.LastProgressTick = serverTick; // in-range-and-attacking counts as progress (not wedged).
             }
 
             return false;
         }
 
-        // (3) Greedy step toward the target's current tile. The same stepper players use (facing set on the step).
-        var direction = GreedyDirectionToward(monster.TileCoord, targetTile);
-        var stepped = _tryStep(monster, direction, serverTick, stepCooldownTicks);
-        if (stepped)
+        // (3) Hop toward the target's current Position. The locomotion arms the cadence + faces the heading.
+        var result = _locomotion.Advance(monster, targetPos, serverTick, stepCooldownTicks);
+        switch (result)
         {
-            state.LastProgressTick = serverTick;
-            return true;
-        }
+            case HopResult.Moved:
+                state.LastProgressTick = serverTick;
+                return true;
 
-        // Not stepped: a cooldown wait leaves us here harmlessly (re-try next tick). But a true block / corner-cut
-        // wedge would spin forever — the no-progress watchdog bails to Returning so a monster can never freeze
-        // mid-chase against a wall corner (it walks home and re-roams; it can re-aggro on the next scan).
-        if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
-        {
-            BeginReturnHome(ref state, serverTick);
-        }
+            case HopResult.Stuck:
+                // Wedged mid-chase (a slide fixpoint the fan can't escape). The watchdog bails to Returning so a
+                // monster can never freeze against a wall — it walks home, re-roams, and can re-aggro on the next scan.
+                if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
+                {
+                    BeginReturnHome(ref state, serverTick);
+                }
 
-        return false;
+                return false;
+
+            default: // OnCooldown — harmless wait.
+                return false;
+        }
     }
 
-    // P2: drop aggro and head home. Destination = home; Returning greedily walks there and resumes Idle on arrival.
+    // Drop aggro and head home. Destination = home; Returning hops there and resumes Idle on arrival.
     private void BeginReturnHome(ref MonsterState state, uint serverTick)
     {
         state.Phase = State.Returning;
@@ -374,60 +381,58 @@ public sealed class MonsterRoamAi
         state.NextAggroScanTick = serverTick;
     }
 
-    // One greedy tile-step toward the destination (roam target or, when returningHome, the home anchor). Reduces
-    // whichever axis distance is larger (allowing diagonals when both axes still differ), maps that (dx,dy) to a
-    // Direction8, and routes it through the SAME stepper players use. On arrival, on a true terrain block, OR on the
-    // no-progress watchdog (corner-cut livelock), flip back to Idle with a fresh pause. The cooldown gate inside
-    // TryStep makes a too-early call a harmless no-op that simply re-tries next tick — that does NOT end the move.
+    // One hop toward the destination (the roam target while Roaming, or the home anchor while Returning — both held in
+    // state.Destination). Hops via the locomotion; on ARRIVAL (within the progress epsilon of the destination), or on
+    // a wedge (HopResult.Stuck + the no-progress watchdog), flips back to Idle with a fresh pause. An OnCooldown tick
+    // is a harmless wait.
     private bool StepTowardDestination(
         WorldEntity monster,
         ref MonsterState state,
         uint serverTick,
         uint stepCooldownTicks,
-        in Tunables t,
-        bool returningHome)
+        in Tunables t)
     {
-        if (monster.TileCoord == state.Destination)
+        // Arrival: within the progress epsilon of the destination — close enough; the hop can't meaningfully advance.
+        if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)
         {
             GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
             return false;
         }
 
-        var direction = GreedyDirectionToward(monster.TileCoord, state.Destination);
-        var before = monster.TileCoord;
-        var stepped = _tryStep(monster, direction, serverTick, stepCooldownTicks);
+        var result = _locomotion.Advance(monster, state.Destination, serverTick, stepCooldownTicks);
 
-        if (stepped)
+        switch (result)
         {
-            state.LastProgressTick = serverTick;
-            // Advanced one tile. If that landed us on the destination, go Idle; otherwise keep moving.
-            if (monster.TileCoord == state.Destination)
-            {
-                GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
-            }
+            case HopResult.Moved:
+                state.LastProgressTick = serverTick;
+                // If that hop landed us on (within epsilon of) the destination, go Idle; otherwise keep moving.
+                if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)
+                {
+                    GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
+                }
 
-            return true;
+                return true;
+
+            case HopResult.Stuck:
+                // Wedged this tick (no progress). The watchdog bails once the wedge has persisted longer than any
+                // legitimate cadence wait — flip back to Idle with a fresh pause and re-pick a destination next pass.
+                if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
+                {
+                    GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
+                }
+
+                return false;
+
+            default: // OnCooldown — harmless wait; do not touch the watchdog, do not advance progress.
+                return false;
         }
-
-        // Not stepped. Distinguish "cooldown — just wait" from "blocked — give up". A true terrain block (the next
-        // tile is unwalkable) bails immediately. The corner-cut case is the SUBTLE one (P1 follow-up): _tryStep
-        // rejects the diagonal but _isWalkable(nextTile) is TRUE, so the terrain check below would say "wait" and
-        // the AI would spin forever. The no-progress watchdog catches it: if the monster has gone longer than ~2
-        // step windows without advancing, it can't be a mere cooldown wait → bail.
-        var delta = direction.Delta();
-        var nextTile = before.Offset(delta.X, delta.Y);
-        if (!_isWalkable(nextTile) || NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
-        {
-            GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
-        }
-
-        return false;
     }
 
-    // P1 corner-cut fix: true once the monster has gone longer than ~2 step windows + a margin without advancing —
-    // longer than any legitimate cooldown wait can explain, so a wedge (corner-cut diagonal or any block the terrain
-    // oracle misses) is detected and the caller bails instead of spinning. Margin (+1) absorbs tick-rounding so a
-    // monster on a normal cadence is never falsely flagged.
+    // True once the monster has gone longer than ~2 move windows + a margin without a Moved hop — longer than any
+    // legitimate cadence wait can explain, so a wedge (a slide fixpoint the fan can't escape) is detected and the
+    // caller bails instead of spinning. Margin (+1) absorbs tick-rounding so a monster on a normal cadence is never
+    // falsely flagged. A Stuck hop does NOT advance LastProgressTick (the locomotion attempted and failed), so a
+    // persistent wedge reliably trips this; an OnCooldown wait is not Stuck, so it never falsely accumulates.
     private static bool NoProgressTimedOut(uint lastProgressTick, uint serverTick, uint stepCooldownTicks)
     {
         return serverTick > lastProgressTick && (serverTick - lastProgressTick) > stepCooldownTicks * 2 + 1;
@@ -440,15 +445,16 @@ public sealed class MonsterRoamAi
         state.PauseUntilTick = serverTick + NextPauseTicks(pauseMinTicks, pauseMaxTicks);
     }
 
-    // Picks a random OPEN tile within Chebyshev `roamRadius` of home (the leash), excluding the monster's current
-    // tile (so a roam is always a real move). Tries a bounded number of random offsets, then falls back to a
-    // deterministic scan of the leash box so a sparse-but-non-empty leash still yields a target; returns false only
-    // when the entire leash box (minus the current tile) is unwalkable. The chosen tile being within roamRadius of
-    // home is what KEEPS the monster leashed during roam: a greedy walk toward an in-radius tile never leaves it.
-    private bool TryPickRoamDestination(WorldEntity monster, TileCoord home, int roamRadius, out TileCoord destination)
+    // Picks a random OPEN continuous point within Euclidean `roamRadius` of home (the leash), at least one progress
+    // epsilon away from the monster's current Position (so a roam is always a real move). Samples uniformly in the
+    // disc (validating the rounded tile is walkable), then falls back to a deterministic scan of the leash box so a
+    // sparse-but-non-empty leash still yields a target; returns false only when the whole leash box is unwalkable. The
+    // chosen point being within roamRadius of home is what KEEPS the monster leashed during roam: a hop toward an
+    // in-radius point never leaves it (modulo the one-hop overshoot the leash tolerates).
+    private bool TryPickRoamDestination(WorldEntity monster, WorldVector home, double roamRadius, out WorldVector destination)
     {
-        destination = monster.TileCoord;
-        if (roamRadius <= 0)
+        destination = monster.Position;
+        if (roamRadius <= 0d)
         {
             return false;
         }
@@ -456,26 +462,38 @@ public sealed class MonsterRoamAi
         const int probes = 12;
         for (var i = 0; i < probes; i++)
         {
-            var candidate = home.Offset(
-                _random.Next(-roamRadius, roamRadius + 1),
-                _random.Next(-roamRadius, roamRadius + 1));
-            if (candidate != monster.TileCoord && _isWalkable(candidate))
+            // Uniform sample in the disc: radius = R·√u (area-uniform), angle uniform. Deterministic from _random.
+            var u = _random.NextDouble();
+            var angle = _random.NextDouble() * 2d * Math.PI;
+            var r = roamRadius * Math.Sqrt(u);
+            var candidate = new WorldVector(home.X + (r * Math.Cos(angle)), home.Y + (r * Math.Sin(angle)));
+            if (Distance(candidate, monster.Position) > HopLocomotion.ProgressEpsilonUnits
+                && _isWalkable(candidate.ToTileRounded()))
             {
                 destination = candidate;
                 return true;
             }
         }
 
-        var span = roamRadius * 2 + 1;
+        // Deterministic fallback: scan the integer tiles of the leash bounding box (starting at a per-monster offset),
+        // accept the first walkable tile centre that is within the Euclidean radius and not the current tile. Keeps a
+        // boxed-in monster terminating (the original bounded-probe → deterministic-scan fallback, on the disc).
+        var radiusTiles = (int)Math.Ceiling(roamRadius);
+        var span = (radiusTiles * 2) + 1;
         var cellCount = span * span;
+        var homeTile = home.ToTileRounded();
+        var currentTile = monster.TileCoord;
         var start = (int)((uint)(_random.Next() ^ (int)monster.Id) % (uint)cellCount);
         for (var k = 0; k < cellCount; k++)
         {
             var index = (start + k) % cellCount;
-            var dx = (index % span) - roamRadius;
-            var dy = (index / span) - roamRadius;
-            var candidate = home.Offset(dx, dy);
-            if (candidate != monster.TileCoord && _isWalkable(candidate))
+            var dx = (index % span) - radiusTiles;
+            var dy = (index / span) - radiusTiles;
+            var candidateTile = homeTile.Offset(dx, dy);
+            var candidate = WorldVector.FromTile(candidateTile);
+            if (candidateTile != currentTile
+                && Distance(candidate, home) <= roamRadius
+                && _isWalkable(candidateTile))
             {
                 destination = candidate;
                 return true;
@@ -485,34 +503,24 @@ public sealed class MonsterRoamAi
         return false;
     }
 
-    // Greedy one-tile direction from `from` toward `to`: sign of each axis delta, allowing a diagonal when both axes
-    // still differ. Reaches the destination in max(|dx|,|dy|) steps (the Chebyshev distance) — the natural
-    // 8-direction walk. `from == to` is never passed here (callers check arrival/adjacency first), defaults to S.
-    private static Direction8 GreedyDirectionToward(TileCoord from, TileCoord to)
+    // Euclidean distance between two continuous positions — the metric the leash / adjacency / aggro / de-aggro all use
+    // (see the class-header conversion table). Replaces the old Chebyshev tile metric.
+    private static double Distance(WorldVector a, WorldVector b) => (a - b).Length;
+
+    // The coarse tile/Chebyshev gather radius for the aggro pre-filter: ⌈Euclidean aggro⌉ + 1, so the spatial scan's
+    // box is a strict superset of the Euclidean aggro disc and never drops an in-range target before the precise test.
+    private static int GatherRadiusFor(double aggroRadius)
     {
-        var sx = Math.Sign(to.X - from.X);
-        var sy = Math.Sign(to.Y - from.Y);
-        return (sx, sy) switch
+        if (aggroRadius <= 0d)
         {
-            (0, -1) => Direction8.N,
-            (1, -1) => Direction8.NE,
-            (1, 0) => Direction8.E,
-            (1, 1) => Direction8.SE,
-            (0, 1) => Direction8.S,
-            (-1, 1) => Direction8.SW,
-            (-1, 0) => Direction8.W,
-            (-1, -1) => Direction8.NW,
-            _ => Direction8.S,
-        };
+            return 0;
+        }
+
+        return (int)Math.Ceiling(aggroRadius) + 1;
     }
 
-    // Chebyshev (8-direction) tile distance — the number of greedy diagonal-allowed steps between two tiles, the
-    // same metric the leash / adjacency / aggro range all use.
-    private static int Chebyshev(TileCoord a, TileCoord b)
-        => Math.Max(Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y));
-
     // A random pause length in [min, max] ticks (inclusive). Floored at 1 so a degenerate min/max can never produce
-    // a zero-pause loop that would step every tick.
+    // a zero-pause loop that would hop every tick.
     private uint NextPauseTicks(uint pauseMinTicks, uint pauseMaxTicks)
     {
         var lo = Math.Max(1u, pauseMinTicks);

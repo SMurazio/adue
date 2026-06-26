@@ -213,18 +213,28 @@ public sealed class GameServer
             TerrainGenerator.CurrentGenVersion,
             options.SpawnDistribution,
             ResolveEntityGridCellSize(options.InterestRadius));
-        // LIVING-ENEMIES P1: seed the monster roam AI off the map seed so a given world replays the same roaming
-        // (deterministic for repro/tests); it steps monsters through _zone's walkability + tile-step path.
+        // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
+        // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
+        // CONTINUOUS MIGRATION (Phase 8): built BEFORE the AI so the hop locomotion's live hop-distance provider can
+        // read the default type's HopDistanceUnits fresh each hop.
+        _monsterTypes = new MonsterTypeRegistry(options.TickRate);
+        // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8): seed the monster roam AI off the map seed so a given
+        // world replays the same roaming (deterministic for repro/tests). Navigation is now CONTINUOUS (Euclidean
+        // ranges, sub-tile targets) but movement HOPS — the injected HopLocomotion leaps the monster a collision-valid
+        // HopDistanceUnits per cadence through the SAME swept-circle wall derivation + body radius players collide at
+        // (Zone.QueryNearbyWalls + ContinuousCollision), with Velocity left at Zero (the sparse-update jump preserved).
+        // Hop distance + body radius are read FRESH each hop so a live retune applies next tick.
         _monsterAi = new MonsterRoamAi(
             options.MapSeed,
             _zone.IsWalkable,
-            (entity, direction, tick, cooldownTicks) => _zone.TryStep(entity, direction, tick, cooldownTicks),
+            new HopLocomotion(
+                () => _monsterTypes.Default.HopDistanceUnits,
+                () => _tuning.BodyRadiusUnits,
+                _zone.QueryNearbyWalls,
+                _zone.ApplyMonsterLanding),
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
-        // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
-        // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
-        _monsterTypes = new MonsterTypeRegistry(options.TickRate);
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
@@ -1910,7 +1920,8 @@ public sealed class GameServer
         // type for the AI step.
         monster.SetMaxHealthFull(type.MaxHealth);
         monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
-        // Seed the monster's tiles/sec speed stat from its type multiplier — still dormant for monsters (they tile-step until Phase 8).
+        // Seed the monster's tiles/sec speed stat from its type multiplier — dormant for monsters (they HOP via the
+        // cadence gate, not the velocity integrator; Velocity stays Zero). Kept for parity with the player /speed path.
         RefreshSpeedStat(monster);
         _monsterTypeOf[monster.Id] = type;
 
@@ -2773,18 +2784,18 @@ public sealed class GameServer
         return float.IsFinite(value) ? value : 0d;
     }
 
-    // LIVING-ENEMIES P1: the per-tick monster AI pass (sibling to StepHeldMovementIntents). For each Monster
-    // entity, the MonsterRoamAi advances its Idle↔Roaming state machine and, when Roaming, takes ONE greedy
-    // tile-step toward its leashed destination through Zone.TryStep — the SAME path players use, so facing /
-    // StepSequence / AOI migration / replication / client interpolation all happen for free. The TryStep cooldown
-    // gate paces the monster to one tile per step cooldown (it is fed each tick but only steps on cadence), and
-    // the AI's pause timers keep it Idle (still) most of the time. Roam radius + pause bounds are read fresh from
-    // the live _tuning each tick so a monster.* admin retune takes effect immediately. Monsters move at the base
-    // step cadence (SpeedMultiplier 1.0 → EffectiveStepCooldownTicks).
+    // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8): the per-tick monster AI pass (sibling to
+    // StepHeldMovementIntents). For each Monster entity, the MonsterRoamAi advances its Idle↔Roaming↔Chasing↔Returning
+    // state machine and, when moving, HOPS once per move cadence toward its continuous nav target via the injected
+    // HopLocomotion — a discrete collision-valid leap (Velocity stays Zero; the sparse-update jump is preserved). The
+    // hop's own cadence gate (WorldEntity.TryBeginHop / _nextEligibleTick) paces the monster to one leap per cooldown
+    // (fed each tick, leaps only on cadence), and the AI's pause timers keep it Idle (still) most of the time. The
+    // per-type Tunables (Euclidean ranges) + the cadence are read fresh each tick so a "<typeId>.*" admin retune takes
+    // effect immediately.
     //
-    // Iterates the live entity collection directly (no per-tick allocation); the count is tiny. TryStep mutates a
-    // monster's Tile and migrates its spatial-grid bucket but never adds/removes a dictionary entry, so iterating
-    // Entities while stepping is safe — same as RegenEnemies.
+    // Iterates the live entity collection directly (no per-tick allocation); the count is tiny. A hop mutates a
+    // monster's Position and (on a tile cross) migrates its spatial-grid bucket but never adds/removes a dictionary
+    // entry, so iterating Entities while stepping is safe — same as RegenEnemies.
     private void StepMonsterAi()
     {
         if (_monsterAi.TrackedCount == 0)
@@ -2828,11 +2839,16 @@ public sealed class GameServer
     // via the resolve path, but a NEW acquisition skips it). Returns the closest by Chebyshev distance, ties broken by
     // the smaller entity id for determinism. THROTTLED by the AI (it only calls this every ~0.5 s per monster), so the
     // per-tick scan the P1 review flagged is avoided.
-    private bool FindMonsterAggroTarget(WorldEntity monster, int aggroRadius, out ulong targetId, out TileCoord targetTile)
+    private bool FindMonsterAggroTarget(WorldEntity monster, int gatherRadius, out ulong targetId, out WorldVector targetPosition)
     {
-        _zone.World.GatherInterestCandidates(monster.TileCoord, aggroRadius, _monsterAggroScratch);
+        // CONTINUOUS MIGRATION (Phase 8): `gatherRadius` is the AI's COARSE tile/Chebyshev pre-filter (⌈Euclidean
+        // aggro⌉ + 1) — a strict superset of the Euclidean aggro disc, so this gather drops no in-range target. The
+        // precise Euclidean range test is done by the AI on the returned Position; here we just return the NEAREST
+        // alive player by Euclidean distance on Position (ties → smaller id for determinism), and the AI accepts it
+        // only if it is actually within the Euclidean aggro radius.
+        _zone.World.GatherInterestCandidates(monster.TileCoord, gatherRadius, _monsterAggroScratch);
 
-        var bestDist = int.MaxValue;
+        var bestDistSq = double.MaxValue;
         WorldEntity? best = null;
         foreach (var candidate in _monsterAggroScratch)
         {
@@ -2841,17 +2857,10 @@ public sealed class GameServer
                 continue;
             }
 
-            var dist = Math.Max(
-                Math.Abs(candidate.TileCoord.X - monster.TileCoord.X),
-                Math.Abs(candidate.TileCoord.Y - monster.TileCoord.Y));
-            if (dist > aggroRadius)
+            var distSq = (candidate.Position - monster.Position).LengthSquared;
+            if (distSq < bestDistSq || (distSq == bestDistSq && (best is null || candidate.Id < best.Id)))
             {
-                continue;
-            }
-
-            if (dist < bestDist || (dist == bestDist && (best is null || candidate.Id < best.Id)))
-            {
-                bestDist = dist;
+                bestDistSq = distSq;
                 best = candidate;
             }
         }
@@ -2859,12 +2868,12 @@ public sealed class GameServer
         if (best is null)
         {
             targetId = 0;
-            targetTile = default;
+            targetPosition = default;
             return false;
         }
 
         targetId = best.Id;
-        targetTile = best.TileCoord;
+        targetPosition = best.Position;
         return true;
     }
 
@@ -2872,16 +2881,18 @@ public sealed class GameServer
     // chase re-reads the player's live position each step and detects target-lost (despawn / logout) for de-aggro.
     // Returns false if the entity no longer exists at all; `alive` is its Health > 0 (a player whose HP hit 0 is still
     // resolvable but not alive → the AI de-aggros and returns home, since there is no death/respawn this phase).
-    private bool TryResolveMonsterTarget(ulong targetId, out TileCoord targetTile, out bool alive)
+    private bool TryResolveMonsterTarget(ulong targetId, out WorldVector targetPosition, out bool alive)
     {
         if (_zone.World.TryGet(targetId, out var target) && target.Kind == EntityKind.Player)
         {
-            targetTile = target.TileCoord;
+            // CONTINUOUS MIGRATION (Phase 8): return the target's CONTINUOUS Position so the chase re-reads the
+            // player's live sub-tile position each hop and the Euclidean de-aggro/leash test is exact.
+            targetPosition = target.Position;
             alive = target.Stats.Health > 0;
             return true;
         }
 
-        targetTile = default;
+        targetPosition = default;
         alive = false;
         return false;
     }

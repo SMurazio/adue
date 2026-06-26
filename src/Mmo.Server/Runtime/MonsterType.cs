@@ -56,6 +56,17 @@ public sealed class MonsterType
     public int AttackDamage { get; set; } = 10;
     public int AttackCooldownMs { get; set; } = 1000;
 
+    // CONTINUOUS MIGRATION (Phase 8): the discrete LEAP distance of one hop, in tile units. Default 1.0 = one tile
+    // per hop, reproducing the tile-step cadence's reach (so the slime still covers ground at the same rate). The AI
+    // hops this far toward its continuous nav target each move-cadence window; the resolver slides/stops it at walls.
+    public double HopDistanceUnits { get; set; } = 1.0;
+
+    // CONTINUOUS MIGRATION (Phase 8): the Euclidean adjacency radius (tile units) at which the monster ATTACKS instead
+    // of hopping. Default 1.5 — the √2-covering of the old 1-tile (3×3 Chebyshev) adjacency: a 1.0 here would REGRESS
+    // (a diagonal player at Euclidean √2 ≈ 1.41 would no longer be "adjacent"), so 1.5 keeps the diagonal hit. Distinct
+    // from AttackRange (the legacy tile/Chebyshev knob, kept for the wire/registry); the continuous AI reads THIS.
+    public double AttackRangeUnits { get; set; } = 1.5;
+
     // LIVING-ENEMIES P3: how long after a monster of this type DIES its spawner waits before spawning a fresh
     // full-HP one at the spawner tile. Default 5000 ms (~5 s). Live-tunable via the "<typeId>.respawnMs" key on the
     // F1 Monster tab; read live by the spawner at death time.

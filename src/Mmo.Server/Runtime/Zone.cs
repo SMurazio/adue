@@ -171,6 +171,33 @@ public sealed class Zone
         return crossedTile;
     }
 
+    // CONTINUOUS MIGRATION (Phase 8): the nearby-walls query seam for the MONSTER hop locomotion (HopLocomotion). A
+    // thin forwarder to the owned TileGrid's QueryNearbyWalls (the SAME shared TileWalls the player integrator uses),
+    // so a hop collides against the identical wall derivation players do — same body radius, same row-major order,
+    // same resolver. The locomotion owns its OWN scratch buffer (passed here), distinct from the player integrator's
+    // _wallScratch, since a monster hop and a player integrate never interleave within one Resolve call but DO run in
+    // the same tick pass over different entities.
+    public void QueryNearbyWalls(WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Wall> scratch)
+    {
+        _tileGrid.QueryNearbyWalls(start, delta, radius, scratch);
+    }
+
+    // CONTINUOUS MIGRATION (Phase 8): apply a monster HOP's resolved landing (WorldEntity.ApplyResolvedMove) and
+    // migrate its spatial-grid bucket on a tile cross — the SAME bookkeeping IntegrateMovement does for a player, the
+    // ONLY apply seam the hop locomotion uses. previousTile is captured before ApplyResolvedMove mutates Position.
+    // Returns whether the rounded tile crossed (the migration signal). A sub-tile hop resolves in place — no migration.
+    public bool ApplyMonsterLanding(WorldEntity entity, WorldVector landing)
+    {
+        var previousTile = entity.TileCoord;
+        var crossedTile = entity.ApplyResolvedMove(landing);
+        if (crossedTile)
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+
+        return crossedTile;
+    }
+
     public WorldEntity SpawnPlayer(
         uint networkId,
         Guid characterId,

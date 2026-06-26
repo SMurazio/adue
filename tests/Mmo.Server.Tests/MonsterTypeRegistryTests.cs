@@ -140,7 +140,7 @@ public sealed class MonsterTypeRegistryTests
         // The straight-through values.
         Assert.Equal(6, t.AggroRadius);
         Assert.Equal(12, t.ChaseLeash);
-        Assert.Equal(1, t.AttackRange);
+        Assert.Equal(1.5, t.AttackRangeUnits);
         Assert.Equal(10, t.AttackDamage);
         Assert.Equal(4, t.RoamRadius);
     }

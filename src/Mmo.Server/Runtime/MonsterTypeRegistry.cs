@@ -92,6 +92,11 @@ public sealed class MonsterTypeRegistry
     // Builds the AI tunables for a type, tick-quantised exactly like the old ServerTuning did (so the migrated
     // defaults are unchanged). De-aggro range is derived (×1.5 aggro, hysteresis); the aggro-scan cadence is derived
     // (~0.5 s) and is tick-rate-only (not per-type). Read fresh each AI pass so a live retune takes effect next tick.
+    // CONTINUOUS MIGRATION (Phase 8): the navigation ranges are now EUCLIDEAN tile-unit FLOATS (the per-type knobs are
+    // still authored as integer tiles — RoamRadius 4, AggroRadius 6, ChaseLeash 12 — and convert 1:1 to the Euclidean
+    // float per the AI's documented conversion table; De-aggro keeps the ⌈1.5·aggro⌉ rule). AttackRangeUnits comes
+    // from the type's continuous knob (1.5, the √2-covering of the old 1-tile adjacency), NOT the legacy AttackRange
+    // tile knob (which is kept for the wire/registry but no longer drives the continuous AI).
     public MonsterRoamAi.Tunables BuildTunables(MonsterType type) => new(
         RoamRadius: type.RoamRadius,
         PauseMinTicks: MsToTicks(type.PauseMinMs),
@@ -99,7 +104,7 @@ public sealed class MonsterTypeRegistry
         AggroRadius: type.AggroRadius,
         DeaggroRadius: DeaggroRadius(type),
         ChaseLeash: type.ChaseLeash,
-        AttackRange: type.AttackRange,
+        AttackRangeUnits: type.AttackRangeUnits,
         AttackDamage: type.AttackDamage,
         AttackCooldownTicks: CooldownMsToTicks(type.AttackCooldownMs),
         AggroScanIntervalTicks: AggroScanIntervalTicks);
