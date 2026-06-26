@@ -24,3 +24,10 @@ Phase 10 fixed "new char loads at (0,0)" by setting the `pos_x`/`pos_y` column D
 spawn-tile default), so a defaults-only INSERT lands at the spawn centre. This couples the pos default to the
 tile default (both 8). Cleaner: have the create/upsert INSERT set `pos_x = tile_x`, `pos_y = tile_y` explicitly
 (or from the actual spawn point) rather than relying on a matching column default. Low priority; works today.
+
+## E — strengthen 3 authored attack-root tests (very minor, Phase 11 review)
+The 3 AUTHORED anti-cheat tests (`AuthoredAttackRootAnchorsOnAuthoredTickNotReceiveTick` + the two clamp tests in
+`WorldEntityCombatTests`) now assert only the boolean `IsMovementFrozen` (they pin the window arithmetic). The
+consequence (frozen => no Position change) is proven once in the core `AttackMovementRootDelays...` test, so coverage
+is not lost. Belt-and-suspenders: route those 3 through `IntegrateIfNotFrozen` + a Position assertion at an in-window
+tick. Very low priority.

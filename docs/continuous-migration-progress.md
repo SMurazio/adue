@@ -42,8 +42,8 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 8 | Monster AI: continuous nav + avoidance; Euclidean leash/aggro; HOPS preserved | ✅ **DONE** | `6f3998e`; review SHIP (hops provably collision-valid — single resolver chokepoint, no bypass, anti-tunnel; livelock always bails — Stuck≠OnCooldown; Velocity~0 jump preserved; determinism). Followups (TryStep delete, legacy AttackRange) in `todo/N-phase8-followups.md`. **All gameplay continuous-native.** |
 | 9 | Interaction: adjacency → Euclidean interaction radius | ✅ **DONE** | `a04547f`; shared `InteractionRadiusTiles=1.5` (preserves Chebyshev≤1 reach), client/server parity off the shared const, gate green |
 | 10 | Persistence: float position columns (SQLite + Postgres) | ✅ **DONE** | `a70a9a3`; additive migration 005 (both DBs), sub-tile (10.4,8.7) round-trips, login-restore, write-behind. Gate green |
-| 11 | Test sweep + delete the dead tile-step path | **IN PROGRESS** | most per-phase test rewrites already done incrementally; Phase 11 = migrate the ~7 non-monster suites off `TryStep` (Phase 8 followup A) → delete `Zone/WorldEntity.TryStep`/`IsStepWalkable`/`MovementStepResult` (last tile-step remnant) + a coherence sweep |
-| 12 | Stress re-baseline (120/30s) + bandwidth study (likely fixed-point) | pending | depends 3,5 |
+| 11 | Test sweep + delete the dead tile-step path | ✅ **DONE** | `c019819`; review SHIP (attack-movement-root genuinely preserved + strengthened — helper mirrors the production gate, asserts no Position change while rooted; deletion clean; no coverage lost). Minor followup (3 authored tests) logged. **Last tile-step code gone.** |
+| 12 | Stress re-baseline (120/30s) + bandwidth study | **IN PROGRESS** | run the standard 120/30s stress on the continuous build + measure per-client bandwidth (fixed-point wire = ~parity with tile, no per-entity inflation) |
 
 ## Log
 
