@@ -39,9 +39,9 @@ boundary** (no half-migrated commits that don't build). Movement is high-risk ne
 | 5 | Remote interpolation; retire hop/TileInterpolator | ✅ **DONE** | `ef8286d`; review SHIP (clean cosmetic swap — no lifecycle leak, local/targeting untouched, deletions clean, can't extrapolate). Followups in `todo/N-phase5-followups.md`. **MOVEMENT MIGRATION (0–5) COMPLETE — drivable build ready for live feel-test.** |
 | 6 | AOI float retype | ✅ **DONE** | `e3ea5b8`; review SHIP (superset guarantee re-derived independently — `+1` margin provably sufficient on both axes, over-includes never drops) |
 | 7 | Combat: positional via FreeAimSector | ✅ **DONE** | `78e1bf2`; review SHIP (real parity proof at fractional positions; gather provably strict superset; gates relocated verbatim). **Hit-disagreement bug closed at root.** |
-| 8 | Monster AI: continuous nav + avoidance; Euclidean leash/aggro; HOPS preserved | **IN PROGRESS** | plan: `docs/migration/phase-8-plan.md`. Hop = collision-valid leap (HopDistance=1.0) per cadence, Velocity~0/sparse (jump preserved — Option A server-only, user verifies look). Euclidean ranges (table), resolve-slide+fan avoidance, livelock watchdog, delete the dead tile-step path. |
+| 8 | Monster AI: continuous nav + avoidance; Euclidean leash/aggro; HOPS preserved | ✅ **DONE** | `6f3998e`; review SHIP (hops provably collision-valid — single resolver chokepoint, no bypass, anti-tunnel; livelock always bails — Stuck≠OnCooldown; Velocity~0 jump preserved; determinism). Followups (TryStep delete, legacy AttackRange) in `todo/N-phase8-followups.md`. **All gameplay continuous-native.** |
 | 9 | Interaction: adjacency → Euclidean interaction radius | ✅ **DONE** | `a04547f`; shared `InteractionRadiusTiles=1.5` (preserves Chebyshev≤1 reach), client/server parity off the shared const, gate green |
-| 10 | Persistence: float position columns (SQLite + Postgres) | pending | depends 0 |
+| 10 | Persistence: float position columns (SQLite + Postgres) | **IN PROGRESS** | persist the continuous `Position` (float/fixed-point columns) so relog restores the exact spot, not the rounded tile; migrations for both DBs; repos + write-behind |
 | 11 | Test rewrite across suites (port exp predictor/collision tests) | pending | depends all |
 | 12 | Stress re-baseline (120/30s) + bandwidth study (likely fixed-point) | pending | depends 3,5 |
 
