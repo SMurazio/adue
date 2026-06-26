@@ -69,6 +69,36 @@ public sealed class WorldEntity
     // SpeedMultiplier / EffectiveStepCooldownTicks (the tile-step cadence), so this is dormant for them.
     public double SpeedUnitsPerSecond { get; private set; }
 
+    // MOVEMENT-ACTIONS (Phase A): the AUTHORITATIVE vertical position (world units ABOVE the ground plane; 0 = on the
+    // ground, >0 = airborne). Design §1.4.1: a SEPARATE scalar, NOT a third component on the WorldVector Position —
+    // so ALL existing XY collision (ContinuousCollision/TileWalls), AOI, distance/range and snapshot-XY code is
+    // unchanged (they were never Z-aware and don't need to be; the Z "rides alongside"). Default 0, non-zero only
+    // while airborne (a tiny fraction of the time), so it never touches the hot XY path. Driven by the
+    // ServerActionExecutor's ballistic jump (SetVerticalOffset each airborne tick, SnapToGround on landing).
+    // Distinct from and supersedes the cosmetic client-only HopHeight arc (which Phase C removes). NOT replicated in
+    // Phase A — the wire/codec addition is Phase B; this is the server-authoritative source the predictor will
+    // mirror. No StateRevision bump here: the entity is moving while airborne (Velocity may be 0 for a jump, but the
+    // executor advances Position each tick), so it is already force-included; Phase B owns the snapshot encoding.
+    public double VerticalOffset { get; private set; }
+
+    // MOVEMENT-ACTIONS (Phase A): set the airborne height for the current tick (the ballistic arc value the executor
+    // computed from BallisticArc). Clamps non-finite/negative to 0 (the body never goes below the ground plane).
+    // Pure state-write, no replication bump (see VerticalOffset note). Distinct from SnapToGround, which is the
+    // explicit landing seam.
+    public void SetVerticalOffset(double offset)
+    {
+        VerticalOffset = double.IsFinite(offset) && offset > 0d ? offset : 0d;
+    }
+
+    // MOVEMENT-ACTIONS (Phase A): land — snap VerticalOffset to an EXACT ground value (design §1.4.2 "no float drift
+    // at the seam"). The executor passes GroundHeight.GroundHeightAt(landingXY) (0 today); this sets it verbatim so
+    // the body sits exactly on the ground, never a float-rounded hair off it. Called on the final airborne tick and
+    // on an interrupt that lands an airborne entity.
+    public void SnapToGround(double groundHeight)
+    {
+        VerticalOffset = double.IsFinite(groundHeight) && groundHeight > 0d ? groundHeight : 0d;
+    }
+
     // The entity's tile (nearest tile centre to Position). The single read accessor for every tile-needing
     // server site (grid/AOI/wire build/traces): while Position is a tile centre (Phase 0) this is exact and
     // lossless. Replaces the former stored Tile field; the many `.Tile` read sites became `.TileCoord`.

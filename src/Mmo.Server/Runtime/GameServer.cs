@@ -136,6 +136,14 @@ public sealed class GameServer
     // monster never hops every tick.
     private readonly MonsterRoamAi _monsterAi;
 
+    // MOVEMENT-ACTIONS (Phase A): the server-side movement-action executor (ballistic jump etc.). Holds each entity's
+    // active action instance and advances it each tick (StepActions, a sibling pass to StepMonsterAi). Constructed
+    // after _zone since it closes over _zone.QueryNearbyWalls / _zone.ApplyMonsterLanding (the SAME shared collision +
+    // apply seams the player integrator and the hop use). Phase A has NO trigger source — the set stays empty (and
+    // the pass is ~free) until the wire (Phase B) / AI (Phase C) trigger actions; it exists + is driven now so the
+    // executor is exercised headlessly and is ready to wire.
+    private readonly ServerActionExecutor _actionExecutor;
+
     // LIVING-ENEMIES P2-POLISH: the table of monster TYPES (named templates — slime now) + their live-tunable,
     // replicated per-type tuning. Replaces the former single global monster.* tuning block: a spawned monster
     // remembers its type (via _monsterTypeOf), and StepMonsterAi reads that type's Tunables + SpeedMultiplier each
@@ -247,6 +255,14 @@ public sealed class GameServer
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
+        // MOVEMENT-ACTIONS (Phase A): the action executor reuses the EXACT same shared collision derivation + apply
+        // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
+        // radius (read fresh per tick). No trigger source yet — driven each tick by StepActions; empty until B/C.
+        _actionExecutor = new ServerActionExecutor(
+            options.TickRate,
+            () => _tuning.BodyRadiusUnits,
+            _zone.QueryNearbyWalls,
+            _zone.ApplyMonsterLanding);
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
@@ -706,6 +722,10 @@ public sealed class GameServer
             // (the TILE-STEP path — monsters stay tile-stepped; the continuous integrator is PLAYER-only), so
             // monsters idle near home and occasionally stroll within a leash.
             StepMonsterAi();
+            // MOVEMENT-ACTIONS (Phase A): advance every entity currently in a movement action (ballistic jump) by one
+            // tick — XY through the shared resolver, Z via the ballistic arc, ending + arming cooldown on the landing
+            // tick. Sibling pass to StepMonsterAi; ~free while no action is active (no trigger source until Phase B/C).
+            _actionExecutor.StepAll(_zone.World, _serverTick);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -2742,6 +2762,19 @@ public sealed class GameServer
         var rawDir = new WorldVector(SanitizeAxis(intent.DirX), SanitizeAxis(intent.DirY));
         var moving = rawDir.LengthSquared > 0d;
         var unitDir = moving ? rawDir.Normalized() : WorldVector.Zero;
+
+        // MOVEMENT-ACTIONS (Phase A, design §4): while a movement action OWNS this entity, normal input integration is
+        // SUPPRESSED — the action drives the position. The input still ACKed (TryBeginMoveInput advanced the move
+        // cursor above, so the buffer trims), it just produces NO motion, mirroring exactly how a rooted/dead player's
+        // input "ACKs but produces zero motion". The executor's per-tick Step advances Velocity/Position; do NOT zero
+        // its Velocity here. When the action ends, ordinary movement resumes from the action's end position. (No
+        // trigger source in Phase A, so IsActive is always false today — this is the seam Phase B's predicted action
+        // relies on.)
+        if (_actionExecutor.IsActive(entity))
+        {
+            session.SetMoving(true);
+            return;
+        }
 
         // Guards: a DEAD (downed) player or a swing-root-frozen player ACKs the input but does NOT move. A (0,0)
         // input is a stop. In every non-moving case zero the velocity so the entity never glides.
