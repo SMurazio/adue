@@ -223,15 +223,14 @@ public sealed class MmoClient : IDisposable
     // DIAG1: the live movement-debug read-out. The base snapshot (sent/confirmed tile, queue depth, cadence, latency,
     // render) comes from the trace; we overlay only the snapshot `recv/s` rate. CONTINUOUS MIGRATION (Phase 4): the
     // legacy tile-predictor overlay (pred/conf/lead + reconcile-outcome counters) is gone — the continuous predictor
-    // has no step-seq, so those MovementDebugSnapshot fields stay 0 and only recv/s is meaningful here.
+    // has no step-seq, so those fields were removed and only recv/s is meaningful here.
     public MovementDebugSnapshot MovementDebug
     {
         get
         {
             // CONTINUOUS MIGRATION (Phase 4): the continuous predictor has NO step-seq / tile-reconcile tallies, so the
-            // legacy predictor-overlay fields (PredictedStepSeq/ConfirmedStepSeq/LeadSteps/ReconcileMatched/Corrected/
-            // Snapped) on MovementDebugSnapshot stay at their defaults (0). Only the trace + recv/s rate are live. The
-            // struct's fields are left in place (other code/tests reference them); they simply read 0 now.
+            // legacy predictor-overlay fields were removed from MovementDebugSnapshot. Only the trace + recv/s rate are
+            // live now; we overlay the snapshot rate onto the trace snapshot here.
             return _movementTrace.Snapshot with { SnapshotsPerSecond = SnapshotsPerSecond };
         }
     }
@@ -1528,14 +1527,14 @@ public sealed class MmoClient : IDisposable
         // EVERY REMOTE entity (other players / monsters / resources) now renders the continuous playout buffer's
         // Sample(now) — a fixed-delay glide (Phase 5) instead of the raw confirmed position. The AuthoritativeTile
         // (Tile) ALWAYS stays the confirmed tile — targeting/harvest reads it and must NEVER see the
-        // predicted/interpolated position (S53 invariant). Only the rendered Position moves. HopHeight is always 0
-        // now (the vertical hop arc is retired — the slime glides flat between tiles).
+        // predicted/interpolated position (S53 invariant). Only the rendered Position moves. (The vertical hop arc
+        // is retired — every remote kind, including the slime, glides flat between tiles.)
         public EntityRenderState ToRenderState(TimeSpan now, RenderPosition? localOverride = null)
         {
             var position = IsLocal && localOverride.HasValue
                 ? localOverride.Value
                 : _remoteInterp.Sample(now);
-            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth, 0d);
+            return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth);
         }
     }
 

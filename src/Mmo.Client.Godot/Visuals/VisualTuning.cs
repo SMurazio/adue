@@ -63,14 +63,6 @@ public sealed class VisualTuning
     public float CatoXOffset { get; set; }
     public float CatoDepth { get; set; }
 
-    // S79 diagnostic: when true, the local player's PREDICTED tile and CONFIRMED/server tile are each painted
-    // as a flat ground marker (predicted = green, confirmed = magenta) at the tile centre, refreshed every
-    // frame. They overlap when prediction and server agree and separate visibly under lag, so the human can
-    // SEE the residual movement divergence in real time. Flipped live by the F5 "Prediction tiles" checkbox;
-    // S104 default ON (a movement-tuning aid while we dial in feel — uncheck to hide the markers). MmoClientRoot
-    // owns the two marker nodes and reads this flag each _Process frame; nothing in the visual hierarchy reads it.
-    public bool DebugPredictionTiles { get; set; } = true;
-
     // Shared label font/outline styling (constant; not panel-tunable). Kept here so every visual builds an
     // identical Label3D without duplicating the magic numbers.
     public const int LabelFontSize = 64;

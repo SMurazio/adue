@@ -141,10 +141,9 @@ void fragment() {
     // subclasses extend (facing, animation, depleted hide) via OnUpdate.
     public void UpdateFrom(EntityRenderState state, double now)
     {
-        // MONSTER-HOP: state.HopHeight is the vertical arc offset (world units) for a hopping monster — 0 for
-        // everything else, so this adds nothing to the flat-glide path. It lifts the WHOLE wrapper (body + label +
-        // HP bar travel together) along world Y as the slime hops tile-to-tile, then returns to ground at rest.
-        Position = ToWorld(state.Position) + new Vector3(0f, (float)state.HopHeight, 0f);
+        // Every kind glides flat (the vertical monster-hop arc was retired in the continuous migration), so the
+        // wrapper (body + label + HP bar) tracks the render position with no Y offset.
+        Position = ToWorld(state.Position);
         if (_label is not null)
         {
             SetLabelText(state.DisplayName);

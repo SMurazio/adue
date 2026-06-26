@@ -57,9 +57,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// move-speed / rate, so faster speeds trail more — auto-scaling the rate with speed would hold the lag constant.
 	// Live-tunable via the F1 Movement tab.
 	private float _cameraSmoothing = 3f;
-	// CAMERA-EXPERIMENT: when true the camera targets the DISCRETE predicted tile instead of the smooth character
-	// render (live F1 Movement toggle). Default off = follow the character. Pairs with smoothing > 0 to glide.
-	private bool _cameraTrackPredictedTile;
 	// S95 default 4 tiles. S102: now a live F6 field (was a const) feeding CameraFocusTracker.Advance's
 	// teleport-snap threshold — beyond this jump the camera hard-snaps (respawn/zone change) instead of gliding.
 	private float _cameraTeleportSnapTiles = 4f;
@@ -76,12 +73,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// human can SEE the interpolation gap (e.g. a marker leading a moving slime). The remote-entity analogue of
 	// the local player's "Prediction tiles". Flipped by ApplyServerPositions; read by UpdateServerPositionMarkers.
 	private bool _showServerPositions;
-	// S79: two flat ground markers for the predicted (green) vs confirmed/server (magenta) local tile, parented
-	// under _worldRoot and repositioned each _Process frame while the F5 "Prediction tiles" toggle is on; hidden
-	// (and not repositioned) when off so the default path has zero render cost. Created lazily on first toggle-on.
-	private MeshInstance3D? _predictedTileMarker;
-	private MeshInstance3D? _confirmedTileMarker;
-
 	// LIVING-ENEMIES P3: one flat RED ground marker per known SPAWNER (the persistent leash/de-aggro anchor), keyed by
 	// the stable spawner id, parented under _worldRoot. Synced each _Process frame from MmoClient.SpawnerMarkers: a
 	// marker is created when a spawner enters AOI and freed when it leaves. Because it tracks the SPAWNER (not the
@@ -94,7 +85,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// frame from _renderStates while the F1 "Server positions" toggle is on: a marker is created when a remote entity
 	// is first seen, repositioned every frame (so it tracks the server tile and visibly LEADS the interpolated body
 	// under movement), and freed when the entity despawns / leaves AOI or the toggle is off. The local player is
-	// excluded — it already has the "Prediction tiles" markers.
+	// excluded (it predicts locally; there is no remote interpolation gap to show for it).
 	private readonly System.Collections.Generic.Dictionary<uint, MeshInstance3D> _serverPositionMarkers = new();
 	private readonly System.Collections.Generic.List<uint> _serverPositionStaleScratch = new();
 	private readonly System.Collections.Generic.HashSet<uint> _serverPositionSeenScratch = new();
@@ -463,7 +454,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateFloatingDamageNumbers(delta);
 		var t2 = Time.GetTicksUsec();
 		UpdateCamera();
-		UpdatePredictionTileMarkers();
 		UpdateMonsterHomeMarkers();
 		UpdateServerPositionMarkers();
 		UpdateAimWedge();
@@ -1282,15 +1272,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		catoSprite.Toggled += ApplyCatoSprite;
 		rows.AddChild(catoSprite);
 
-		// S79 live debug toggle — flips on click, no Apply needed: paint the local player's PREDICTED tile (green)
-		// and CONFIRMED/server tile (magenta) as flat ground markers, refreshed each frame. They overlap when in
-		// sync and separate under lag, so the human can SEE the residual movement divergence while walking. Off
-		// hides the markers (and skips repositioning them) so the default path is unchanged.
-		var predictionTiles = new CheckBox { Name = "PredictionTiles", Text = "Prediction tiles", ButtonPressed = _tuning.DebugPredictionTiles };
-		predictionTiles.AddThemeFontSizeOverride("font_size", 13);
-		predictionTiles.Toggled += ApplyPredictionTiles;
-		rows.AddChild(predictionTiles);
-
 		// CONTINUOUS MIGRATION (Phase 4): the live A/B raw-vs-predicted lever. ON (default) = the local player renders
 		// the smooth client-side prediction (predict -> reconcile -> replay); OFF = renders the RAW confirmed server
 		// position (crude/laggy under latency) so the human can feel the difference with no restart. Flips
@@ -1341,9 +1322,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	}
 
 	// Movement tab (was F6): the movement/camera-FEEL levers — Move speed dropdown, net latency, camera follow
-	// blend + smoothing + teleport-snap, the camera track-predicted-tile toggle. All live (no restart) via the same
-	// Apply-all / live-toggle pattern. (CONTINUOUS MIGRATION Phase 4: the tile-predictor "Stop on reversal" toggle and
-	// "Force Resync" button were removed with LocalPlayerPredictor.)
+	// blend + smoothing + teleport-snap. All live (no restart) via the same Apply-all / live-toggle pattern.
+	// (CONTINUOUS MIGRATION Phase 4: the tile-predictor "Stop on reversal" toggle and "Force Resync" button were
+	// removed with LocalPlayerPredictor; the "track predicted tile" camera toggle went with the continuous swap —
+	// there is no predicted TILE anymore.)
 	private void BuildMovementTab(TabContainer tabs)
 	{
 		var rows = AddDebugTab(tabs, "Movement");
@@ -1383,19 +1365,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// entity (slime, other players) renders. Lower = tighter to the cyan server marker; raise = smoother under
 		// jitter. Blank / < 0 = computed default (max(0.5*cadence, 50ms)). Applied live to all remote interpolators.
 		_moveRemoteInterpBufferMs = AddTuningField(rows, "Remote interp buffer (ms, <0=auto)", OnMovementApplyPressed);
-
-		// CAMERA-EXPERIMENT live toggle — flips on click, no Apply: the camera targets the DISCRETE predicted tile
-		// instead of the smooth character render. Pair with "Camera smoothing" > 0 to glide the tile-to-tile jumps
-		// (smoothing 0 makes it hard-jump per step). OFF (default) = follow the character.
-		var trackPredictedTile = new CheckBox
-		{
-			Name = "CameraTrackPredictedTile",
-			Text = "Camera: track predicted tile",
-			ButtonPressed = _cameraTrackPredictedTile
-		};
-		trackPredictedTile.AddThemeFontSizeOverride("font_size", 13);
-		trackPredictedTile.Toggled += ApplyCameraTrackPredictedTile;
-		rows.AddChild(trackPredictedTile);
 
 		var apply = new Button { Name = "MovementApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -1564,13 +1533,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		ShowInteractFeedback($"Move speed: {option.Label}");
 	}
 
-	// CAMERA-EXPERIMENT live toggle ("Camera: track predicted tile"). Flips the camera target between the discrete
-	// predicted tile and the smooth character render (read in UpdateCamera). Client-local; no restart.
-	private void ApplyCameraTrackPredictedTile(bool enabled)
-	{
-		_cameraTrackPredictedTile = enabled;
-	}
-
 	// Live FXAA toggle (Visual tab "FXAA" checkbox). Flips GetViewport().ScreenSpaceAA between Fxaa (on) and
 	// Disabled (off) at runtime — no restart. Defaults ON (seeded in _Ready + reflected by the checkbox). FXAA is
 	// the screen-space AA the Compatibility renderer supports; it composes independently of the MSAA 3D option.
@@ -1672,27 +1634,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplyServerPositions(bool enabled)
 	{
 		_showServerPositions = enabled;
-	}
-
-	// S79 live debug toggle (F5 "Prediction tiles"). Flip the shared flag and ensure the two ground markers
-	// exist (created lazily on first enable). When off, hide them immediately so nothing is drawn and the
-	// per-frame UpdatePredictionTileMarkers reposition is skipped; when on, the next _Process frame positions
-	// and shows them. Admin-gated like the rest of F5 (the panel only shows for an Admin session).
-	private void ApplyPredictionTiles(bool enabled)
-	{
-		_tuning.DebugPredictionTiles = enabled;
-		if (enabled)
-		{
-			EnsurePredictionTileMarkers();
-		}
-		else if (_predictedTileMarker is not null)
-		{
-			_predictedTileMarker.Visible = false;
-			if (_confirmedTileMarker is not null)
-			{
-				_confirmedTileMarker.Visible = false;
-			}
-		}
 	}
 
 	// One labeled input row (label : LineEdit) inside a tuning panel. Returns the LineEdit so the caller can
@@ -1974,20 +1915,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var localState = local.Value;
 		// S95: focus on a tunable blend of the confirmed tile and the cosmetic render position, temporally smoothed
 		// (frame-rate independent). Defaults (blend 1.0, smoothing 0) = hard-follow the rendered character.
-		// CAMERA-EXPERIMENT (F1 Movement "track predicted tile"): target the DISCRETE confirmed tile instead of the
-		// character render — both inputs become the tile so the blend is moot. Needs smoothing > 0 to glide the
-		// tile-to-tile jumps. The tracker snaps on the first frame and on teleports. CONTINUOUS MIGRATION (Phase 4):
-		// the continuous predictor exposes no predicted TILE (its predicted position is for render only, never a tile —
-		// targeting reads the confirmed tile, S53 invariant), so this now tracks the confirmed LocalTile.
 		double tileX = localState.AuthoritativeTile.X, tileY = localState.AuthoritativeTile.Y;
 		double cosX = localState.Position.X, cosY = localState.Position.Y;
-		if (_cameraTrackPredictedTile && _client?.LocalTile is { } trackTile)
-		{
-			tileX = trackTile.X;
-			tileY = trackTile.Y;
-			cosX = trackTile.X;
-			cosY = trackTile.Y;
-		}
 		var (focusX, focusY) = _cameraFocus.Advance(
 			tileX, tileY, cosX, cosY,
 			_cameraFollowBlend,
@@ -3361,24 +3290,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		return new Vector3(tile.X, y, tile.Y);
 	}
 
-	// S79: shared flat quad for the two prediction-tile markers (one tile, slightly inset so adjacent markers
-	// read as distinct). Reused by both markers — one mesh, two material overrides. Built once on first enable.
-	private static readonly PlaneMesh PredictionTileMarkerMesh = new() { Size = new Vector2(0.9f, 0.9f) };
-	// Predicted = green, confirmed/server = magenta. Unshaded + transparent so they sit flat on the ground and
-	// stay legible over any terrain; magenta is deliberately off the terrain palette. The confirmed marker hovers
-	// a hair lower than the predicted one so when they coincide the predicted (green) wins the z-fight rather than
-	// flickering — the human still sees green-over-magenta as "in sync".
-	private static readonly StandardMaterial3D PredictedTileMarkerMaterial = MarkerMaterial(new Color(0.20f, 0.95f, 0.25f, 0.55f));
-	private static readonly StandardMaterial3D ConfirmedTileMarkerMaterial = MarkerMaterial(new Color(0.95f, 0.10f, 0.80f, 0.55f));
-
 	// LIVING-ENEMIES P2-POLISH: the shared flat quad + RED material for the monster-home markers. Full-tile (0.96) so
 	// a home reads as "this tile", red + semi-transparent + unshaded so it sits flat and legible over any terrain.
 	private static readonly PlaneMesh MonsterHomeMarkerMesh = new() { Size = new Vector2(0.96f, 0.96f) };
 	private static readonly StandardMaterial3D MonsterHomeMarkerMaterial = MarkerMaterial(new Color(0.90f, 0.12f, 0.12f, 0.55f));
 
 	// DEBUG-SERVER-POSITIONS: the shared flat quad + CYAN material for the remote-entity server-tile markers.
-	// A deliberately DISTINCT colour from the prediction markers (green/magenta) and the spawner anchors (red) so
-	// the server tile reads as its own thing; slightly inset (0.85) so it stays legible inside the entity's body.
+	// A deliberately DISTINCT colour from the spawner anchors (red) so the server tile reads as its own thing;
+	// slightly inset (0.85) so it stays legible inside the entity's body.
 	private static readonly PlaneMesh ServerPositionMarkerMesh = new() { Size = new Vector2(0.85f, 0.85f) };
 	private static readonly StandardMaterial3D ServerPositionMarkerMaterial = MarkerMaterial(new Color(0.10f, 0.85f, 0.95f, 0.55f));
 
@@ -3391,72 +3310,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 			CullMode = BaseMaterial3D.CullModeEnum.Disabled
 		};
-	}
-
-	// S79: create the two prediction-tile markers under the world root on first toggle-on. Idempotent — once
-	// built it just leaves them in place. They start hidden; UpdatePredictionTileMarkers shows + positions them
-	// each frame while the toggle is on. No-op until the world root exists (pre-zone).
-	private void EnsurePredictionTileMarkers()
-	{
-		if (_worldRoot is null || _predictedTileMarker is not null)
-		{
-			return;
-		}
-
-		_confirmedTileMarker = new MeshInstance3D
-		{
-			Name = "ConfirmedTileMarker",
-			Mesh = PredictionTileMarkerMesh,
-			MaterialOverride = ConfirmedTileMarkerMaterial,
-			Visible = false
-		};
-		_predictedTileMarker = new MeshInstance3D
-		{
-			Name = "PredictedTileMarker",
-			Mesh = PredictionTileMarkerMesh,
-			MaterialOverride = PredictedTileMarkerMaterial,
-			Visible = false
-		};
-		_worldRoot.AddChild(_confirmedTileMarker);
-		_worldRoot.AddChild(_predictedTileMarker);
-	}
-
-	// S79: per-frame reposition of the predicted (green) + confirmed (magenta) ground markers at the local
-	// player's predicted and confirmed tiles. Called every _Process frame; cheap no-op (early return) when the
-	// toggle is off — markers stay hidden and nothing is touched. When on, both markers track the two tiles
-	// every frame: they overlap when in sync and separate visibly under lag. Hidden whenever the local tile is
-	// unknown (pre-login / between snapshots) so a stale marker never lingers off the player.
-	private void UpdatePredictionTileMarkers()
-	{
-		if (!_tuning.DebugPredictionTiles)
-		{
-			return;
-		}
-
-		EnsurePredictionTileMarkers();
-		if (_predictedTileMarker is null || _confirmedTileMarker is null)
-		{
-			return;
-		}
-
-		var confirmed = _client?.LocalTile;
-		// CONTINUOUS MIGRATION (Phase 4): the continuous predictor exposes no predicted TILE (its predicted position is
-		// render-only; targeting reads the confirmed tile, S53 invariant), so the "predicted" marker now coincides with
-		// the confirmed tile. The green/magenta markers overlap; the overlay no longer shows a tile-level divergence.
-		var predicted = _client?.LocalTile;
-		if (confirmed is not TileCoord confirmedTile || predicted is not TileCoord predictedTile)
-		{
-			_predictedTileMarker.Visible = false;
-			_confirmedTileMarker.Visible = false;
-			return;
-		}
-
-		// Just above the ground (ground top sits at y=0; the grid plane at 0.02) so the markers read clearly
-		// over terrain. Predicted sits a touch higher than confirmed so green wins the overlap z-fight.
-		_confirmedTileMarker.Position = TileToWorld(confirmedTile, 0.04f);
-		_predictedTileMarker.Position = TileToWorld(predictedTile, 0.05f);
-		_confirmedTileMarker.Visible = true;
-		_predictedTileMarker.Visible = true;
 	}
 
 	// LIVING-ENEMIES P2-POLISH: sync the RED monster-home markers to the client's known monster homes each frame. A
@@ -3994,13 +3847,10 @@ void fragment() {
 	// second — is the server->client confirm channel alive?) is the only live field now.
 	// CONTINUOUS MIGRATION (Phase 4): the tile-predictor recovery-chain fields (pred / conf / lead and the reconcile
 	// Matched/Corrected/Snapped tallies) were retired with LocalPlayerPredictor — the continuous predictor has no
-	// step-seq or tile-reconcile outcomes, so MovementDebugSnapshot reports them as 0 and this readout shows zeros for
-	// pred/conf/lead/rec. The fields are kept on MovementDebugSnapshot for schema/test stability.
+	// step-seq or tile-reconcile outcomes, so they were removed from MovementDebugSnapshot and this readout.
 	private static string FormatRecoveryDiag(MovementDebugSnapshot d)
 	{
-		return $"DIAG pred={d.PredictedStepSeq} conf={d.ConfirmedStepSeq} lead={d.LeadSteps} " +
-			$"recv/s={d.SnapshotsPerSecond:0.0} " +
-			$"rec[M/C/S]={d.ReconcileMatched}/{d.ReconcileCorrected}/{d.ReconcileSnapped}";
+		return $"DIAG recv/s={d.SnapshotsPerSecond:0.0}";
 	}
 
 	private void AppendSectionRow()
