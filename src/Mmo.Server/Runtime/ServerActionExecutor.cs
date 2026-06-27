@@ -237,6 +237,34 @@ public sealed class ServerActionExecutor
         EndInstance(entity, inst, serverTick);
     }
 
+    // Drop ALL action state for an entity LEAVING the world (despawn / disconnect / death): its active instance AND
+    // any cooldown entries keyed on it. Call from the despawn seam so the cooldown map cannot grow unbounded over a
+    // long-lived server, and a REUSED entity id can never inherit a stale cooldown from a prior occupant. Idempotent
+    // — a no-op for an entity that had no action state.
+    public void ClearEntity(ulong entityId)
+    {
+        _active.Remove(entityId);
+
+        if (_cooldownUntil.Count == 0)
+        {
+            return;
+        }
+
+        _cooldownKeyScratch.Clear();
+        foreach (var key in _cooldownUntil.Keys)
+        {
+            if (key.EntityId == entityId)
+            {
+                _cooldownKeyScratch.Add(key);
+            }
+        }
+
+        foreach (var key in _cooldownKeyScratch)
+        {
+            _cooldownUntil.Remove(key);
+        }
+    }
+
     private void EndInstance(WorldEntity entity, ActionInstance inst, uint serverTick)
     {
         _active.Remove(entity.Id);
@@ -249,6 +277,10 @@ public sealed class ServerActionExecutor
     // Reused scratch list of active entity ids for StepAll (avoids a per-tick alloc while still iterating a stable
     // snapshot the dictionary mutation can't disturb).
     private readonly List<ulong> _idScratch = new();
+
+    // Reused scratch for ClearEntity's cooldown-key removal (collect-then-remove so we don't mutate the dictionary
+    // mid-enumeration). Only touched on a despawn, never on the hot tick path.
+    private readonly List<(ulong EntityId, ActionId Action)> _cooldownKeyScratch = new();
 
     // The mutable per-entity action instance: the immutable def + the fixed context + the cached ballistic constants
     // + the advancing tick counter. A class (mutated in place by Step via TickInAction); the Context is a fixed

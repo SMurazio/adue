@@ -194,6 +194,48 @@ public sealed class ServerActionExecutorTests
     }
 
     [Fact]
+    public void ClearEntity_DropsCooldown_SoAReusedIdInheritsNoStaleCooldown()
+    {
+        // N-action-cooldown-prune: an entity LEAVING the world (despawn/disconnect/death) must drop its action state,
+        // so the cooldown map can't grow unbounded AND a REUSED entity id can't inherit a stale cooldown.
+        var (executor, entity) = Build(spawn: new TileCoord(8, 8));
+        const uint duration = 6;
+        const uint cooldown = 50;
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: duration, jumpHeight: 1d, forwardDistanceUnits: 2d, cooldownTicks: cooldown, animationId: 1);
+
+        // Run a jump to completion so its cooldown arms.
+        Assert.True(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 100));
+        var tick = 100u;
+        for (var i = 0; i < (int)duration; i++)
+        {
+            tick++;
+            executor.Step(entity, tick);
+        }
+        Assert.False(executor.IsActive(entity));
+        Assert.False(executor.CanStart(entity, def, serverTick: tick)); // armed: inside the cooldown window
+
+        // The entity despawns → ClearEntity drops the cooldown.
+        executor.ClearEntity(entity.Id);
+
+        // A fresh occupant reusing the id can act immediately — no stale cooldown inherited.
+        Assert.True(executor.CanStart(entity, def, serverTick: tick));
+    }
+
+    [Fact]
+    public void ClearEntity_DropsAnInFlightAction()
+    {
+        var (executor, entity) = Build(spawn: new TileCoord(8, 8));
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: 10, jumpHeight: 2d, forwardDistanceUnits: 5d, cooldownTicks: 0, animationId: 1);
+        Assert.True(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 100));
+        Assert.True(executor.IsActive(entity));
+
+        executor.ClearEntity(entity.Id); // the entity vanished mid-action (despawn/disconnect)
+        Assert.False(executor.IsActive(entity));
+    }
+
+    [Fact]
     public void MovementRootedEntity_CannotStartAnAction_NoRootEscapeByJumping()
     {
         // can-act gap (design §2.1 "not rooted"): a swing-movement-rooted player must NOT be able to jump to relocate

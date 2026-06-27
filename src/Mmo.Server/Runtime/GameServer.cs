@@ -409,6 +409,7 @@ public sealed class GameServer
         {
             if (_zone.Despawn(session.EntityId!.Value, out var entity))
             {
+                _actionExecutor.ClearEntity(entity.Id); // drop any action state (cooldowns) for the leaving entity
                 _networkIds.Return(entity.NetworkId);
                 QueueTileSave(session, entity.Position);
                 FlushInventory(entity);
@@ -702,6 +703,7 @@ public sealed class GameServer
             // gains survive the relogin. FlushInventory still enqueues its dirty changes for persistence;
             // the quantities live on this same object, so nothing is lost either way.
             inventory = entity.Inventory;
+            _actionExecutor.ClearEntity(entity.Id); // drop any action state (cooldowns) for the kicked entity
             _networkIds.Return(entity.NetworkId);
             QueueTileSave(session, entity.Position);
             FlushInventory(entity);
@@ -2039,6 +2041,12 @@ public sealed class GameServer
         // (KnowsEntity == true) and the corpse NEVER RENDERS (it exists server-side, so its loot window still opens —
         // the "no corpse on an in-AOI death" bug). Free it at the END, after the corpse has rented a fresh id.
         var despawned = _zone.Despawn(monsterId, out var removed);
+        if (despawned)
+        {
+            // Drop any action state (cooldowns) for the dead monster so the cooldown map can't leak and a reused id
+            // can't inherit a stale cooldown (N-action-cooldown-prune).
+            _actionExecutor.ClearEntity(monsterId);
+        }
 
         // LOOT P4b: roll this monster's loot and spawn a CORPSE at the death tile holding it, tagged with the
         // eligible-looter set (the contribution ledger's contributors) + the loot mode + a decay deadline. Done
