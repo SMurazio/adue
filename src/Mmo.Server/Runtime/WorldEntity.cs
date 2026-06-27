@@ -94,9 +94,21 @@ public sealed class WorldEntity
     // at the seam"). The executor passes GroundHeight.GroundHeightAt(landingXY) (0 today); this sets it verbatim so
     // the body sits exactly on the ground, never a float-rounded hair off it. Called on the final airborne tick and
     // on an interrupt that lands an airborne entity.
+    //
+    // B1 FIX (the Z stop-edge — mirrors StopMovement's XY stop-edge): bump StateRevision on the airborne→ground
+    // TRANSITION. On the landing tick the action ENDS (IsActive→false) the same tick Z snaps, and a jump's Velocity
+    // is 0, so the entity is no longer force-included; without this bump the grounded VerticalOffset would never
+    // replicate and the client would keep the last airborne height — a residual float, worst when jumping from a
+    // standstill (no later move to heal it). The guard fires ONLY on a real change, so a re-land at the same ground
+    // value (or a no-op call) does not bump.
     public void SnapToGround(double groundHeight)
     {
+        var previous = VerticalOffset;
         VerticalOffset = double.IsFinite(groundHeight) && groundHeight > 0d ? groundHeight : 0d;
+        if (VerticalOffset != previous)
+        {
+            StateRevision++;
+        }
     }
 
     // The entity's tile (nearest tile centre to Position). The single read accessor for every tile-needing

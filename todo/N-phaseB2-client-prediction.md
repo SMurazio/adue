@@ -15,4 +15,4 @@ The high-risk phase. Full rigor: **measure/repro first**, headless determinism t
 ## Related B2/Phase-B todos (fold in)
 - [[N-phaseB-keepalive-suppress-active]] — gate the keepalive force-stop on `!IsActive` (a mid-action entity going stale must not get StopMovement'd, fighting the executor).
 - N-action-cooldown-prune — prune `_cooldownUntil` on despawn / when serverTick passes.
-- Action-END `StateRevision` bump: when an action ends, the entity→rest transition must re-publish the precise end position (mirror the stop-edge `StopMovement` bump) so it self-heals under loss (design §2.4).
+- ~~Action-END `StateRevision` bump: when an action ends, the entity→rest transition must re-publish the precise end position (mirror the stop-edge `StopMovement` bump) so it self-heals under loss (design §2.4).~~ **DONE** — pulled forward into B1 to fix a live residual-float bug (the avatar stayed lifted "a bit" after a jump from a standstill): `WorldEntity.SnapToGround` now bumps `StateRevision` on the airborne→ground transition. The user-reported symptom; faithful regression test `Landing_BumpsStateRevision_SoTheGroundedHeightReplicates`.

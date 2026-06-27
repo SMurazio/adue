@@ -194,6 +194,42 @@ public sealed class ServerActionExecutorTests
     }
 
     [Fact]
+    public void Landing_BumpsStateRevision_SoTheGroundedHeightReplicates()
+    {
+        // B1 LIVE SYMPTOM (the user saw the avatar left floating "a bit" after a jump, worst from a standstill): on the
+        // landing tick the action ENDS (IsActive→false) the same tick VerticalOffset snaps to 0, and a jump's Velocity
+        // is 0 — so the entity is neither force-included nor (before the fix) revision-bumped, and the grounded
+        // VerticalOffset=0 never replicated → the client kept the last airborne height. An InPlace jump moves no XY, so
+        // there is NO tile-cross StateRevision bump to mask the effect: the ONLY thing that can re-publish the landing
+        // is SnapToGround's own bump. This pins the fix.
+        var (executor, entity) = Build(spawn: new TileCoord(8, 8));
+        const uint n = 10;
+        var def = MovementActionRegistry.BuildInPlaceJump(
+            ActionId.Jump, durationTicks: n, jumpHeight: 1.5d, cooldownTicks: 0, animationId: 1);
+
+        Assert.True(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 100));
+
+        // Advance to the tick JUST BEFORE landing (still airborne). No XY move (InPlace) ⇒ StateRevision is quiescent.
+        var tick = 100u;
+        for (var i = 0; i < (int)n - 1; i++)
+        {
+            tick++;
+            Assert.True(executor.Step(entity, tick)); // still active
+        }
+        Assert.True(entity.VerticalOffset > 0d, "should still be airborne before the final tick");
+        var revisionBeforeLanding = entity.StateRevision;
+
+        // The final (landing) tick: Z snaps to exactly 0 AND StateRevision bumps so a delta-snapshot re-includes the
+        // entity and the client lands cleanly (the residual-float fix).
+        tick++;
+        Assert.False(executor.Step(entity, tick)); // ended this tick
+        Assert.Equal(0d, entity.VerticalOffset, Eps);
+        Assert.True(
+            entity.StateRevision > revisionBeforeLanding,
+            "landing must bump StateRevision so the grounded VerticalOffset replicates (else the client keeps a residual airborne height)");
+    }
+
+    [Fact]
     public void Determinism_IdenticalTrigger_YieldsByteIdenticalPath()
     {
         // The Phase-B prediction contract: two independent executors+entities, the same trigger + the same per-tick
