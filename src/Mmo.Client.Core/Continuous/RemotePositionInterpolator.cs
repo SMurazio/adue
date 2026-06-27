@@ -64,22 +64,14 @@ public sealed class RemotePositionInterpolator
     // across an astronomical synthetic span — the very first real bracket [from, to] is two genuine confirms.
     private RenderPosition _anchor;
 
-    // HOP-ARC (cosmetic): the [0,1] PARABOLIC factor of the bracket the playout is currently lerping across —
-    // 4*alpha*(1-alpha): 0 at the bracket's start/end, 1 at its midpoint. Updated every Sample alongside the
-    // horizontal lerp from the SAME alpha, so any caller that wants a vertical "jump" arc (the slime hop) gets a
-    // height SYNCED to the horizontal move for free: peak * HopArcFactor rises and lands exactly as the position
-    // does. 0 whenever the render is HOLDing (pre-confirm, before age-in, or starvation) or the active bracket
-    // doesn't actually move (a repeated identical confirm) — so a RESTING monster never bounces. The interpolator
-    // stays kind-agnostic: it only EXPOSES the factor; the caller gates it to EntityKind.Monster and scales by peak.
-    private double _hopArcFactor;
-
     // MOVEMENT-ACTIONS (finding #1 fix): the REPLICATED airborne height (WorldEntity.VerticalOffset), lerped on the
     // SAME playout timeline + brackets + alpha as the horizontal position. This is the REAL server-authoritative
-    // jump height (distinct from the cosmetic _hopArcFactor above): a remote viewer must see another entity's jump
+    // jump height (Phase C retired the cosmetic monster hop-arc factor that used to live here — a slime's hop is now a
+    // real replicated Z that rides THIS field): a remote viewer must see another entity's jump
     // height and XY on ONE timeline, or the height leads/stair-steps while the horizontal glides (the un-buffered
     // raw-snapshot Z that this replaces). HOLDs on the bracketing sample's height in every HOLD regime, lerps in a
     // bracket; 0 on the spawn/Reset anchor (a freshly-spawned / AOI-re-entered entity is treated as grounded until
-    // its first confirm ages in). Read after Sample, exactly like HopArcFactor.
+    // its first confirm ages in). Read via SampledVerticalOffset after Sample.
     private double _sampledVerticalOffset;
 
     public RemotePositionInterpolator(WorldVector initialPosition, double interpolationDelayMs)
@@ -92,15 +84,10 @@ public sealed class RemotePositionInterpolator
 
     public double InterpolationDelayMs => _interpolationDelayMs;
 
-    // HOP-ARC (cosmetic): the [0,1] parabolic factor (4*alpha*(1-alpha)) of the bracket the playout is currently
-    // lerping across — 0 at the bracket ends and while HOLDing, 1 at the midpoint. A caller multiplies this by a
-    // peak height to get a vertical jump arc SYNCED to the horizontal move. See the field comment. Read after Sample.
-    public double HopArcFactor => _hopArcFactor;
-
     // MOVEMENT-ACTIONS (finding #1 fix): the replicated airborne height for THIS frame's playout time, lerped on the
     // SAME timeline as the horizontal Sample — so a remote jump's height and XY share one clock (no lead / stair-step
     // vs the smooth glide). Read AFTER Sample. The caller uses this for remote entities instead of the raw latest
-    // snapshot height. Distinct from HopArcFactor (the cosmetic monster bounce); this is the real server vertical.
+    // snapshot height — including a slime's hop, now a real replicated Z (Phase C retired the cosmetic bounce factor).
     public double SampledVerticalOffset => _sampledVerticalOffset;
 
     // Count of buffered samples — exposed for diagnostics (the trace's queue-depth read-out) and tests.
@@ -123,7 +110,6 @@ public sealed class RemotePositionInterpolator
     {
         _samples.Clear();
         _renderPosition = _anchor = RenderPosition.FromWorld(position);
-        _hopArcFactor = 0d;
         _sampledVerticalOffset = 0d;
     }
 
@@ -192,7 +178,6 @@ public sealed class RemotePositionInterpolator
         if (_samples.Count == 0)
         {
             _renderPosition = _anchor;
-            _hopArcFactor = 0d;
             _sampledVerticalOffset = 0d;
             return _renderPosition;
         }
@@ -204,7 +189,6 @@ public sealed class RemotePositionInterpolator
         if (playoutTime <= _samples[0].ReceivedAt)
         {
             _renderPosition = _samples[0].Position;
-            _hopArcFactor = 0d;
             _sampledVerticalOffset = _samples[0].VerticalOffset;
             return _renderPosition;
         }
@@ -227,7 +211,6 @@ public sealed class RemotePositionInterpolator
             _renderPosition = new RenderPosition(
                 newest.Position.X + (newest.Velocity.X * elapsedSeconds),
                 newest.Position.Y + (newest.Velocity.Y * elapsedSeconds));
-            _hopArcFactor = 0d;
             _sampledVerticalOffset = newest.VerticalOffset;
             return _renderPosition;
         }
@@ -253,13 +236,6 @@ public sealed class RemotePositionInterpolator
         // the horizontal uses, so the remote jump's apex sits over the XY arc midpoint and the rise/fall tracks the
         // glide exactly (one timeline). No collision on Z, so a plain linear lerp of the two confirmed heights.
         _sampledVerticalOffset = from.VerticalOffset + ((to.VerticalOffset - from.VerticalOffset) * alpha);
-
-        // HOP-ARC (cosmetic): the parabolic factor for THIS bracket, from the SAME alpha the horizontal lerp uses,
-        // so a caller's vertical jump (peak * factor) rises at the bracket midpoint and lands exactly when/where the
-        // horizontal does — no separate timeline. 0 if the bracket doesn't actually move (a repeated identical
-        // confirm: from == to) so a RESTING monster getting re-confirmed on its tile never bounces in place.
-        var clampedAlpha = Math.Clamp(alpha, 0d, 1d);
-        _hopArcFactor = from.Position == to.Position ? 0d : 4d * clampedAlpha * (1d - clampedAlpha);
 
         // Prune samples strictly older than the active bracket's start — the playout cursor has moved past them
         // and they will never be read again. Keeps the buffer at ~the steady-state depth without unbounded growth.

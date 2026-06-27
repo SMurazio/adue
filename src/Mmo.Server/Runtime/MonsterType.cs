@@ -61,6 +61,13 @@ public sealed class MonsterType
     // hops this far toward its continuous nav target each move-cadence window; the resolver slides/stops it at walls.
     public double HopDistanceUnits { get; set; } = 1.0;
 
+    // MOVEMENT-ACTIONS (Phase C): the apex height (world units) of the slime's REAL ballistic hop. The hop is now a
+    // genuine Jump driven by the shared ServerActionExecutor — a real, replicated VerticalOffset arc — so this height
+    // is server-authoritative and rides the wire (remote clients render the arc from VerticalOffset), REPLACING the
+    // retired client-only cosmetic HopHeight. Default 0.5 == the old cosmetic MonsterHopPeakHeight, so the visible
+    // bounce height is unchanged; live-tunable per type alongside the other knobs.
+    public double HopHeightUnits { get; set; } = 0.5;
+
     // CONTINUOUS MIGRATION (Phase 8): the Euclidean adjacency radius (tile units) at which the monster ATTACKS instead
     // of hopping. Default 1.5 — the √2-covering of the old 1-tile (3×3 Chebyshev) adjacency: a 1.0 here would REGRESS
     // (a diagonal player at Euclidean √2 ≈ 1.41 would no longer be "adjacent"), so 1.5 keeps the diagonal hit. Distinct

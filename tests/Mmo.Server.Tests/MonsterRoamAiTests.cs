@@ -1,5 +1,6 @@
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 using Xunit;
 
 namespace Mmo.Server.Tests;
@@ -20,8 +21,92 @@ public sealed class MonsterRoamAiTests
     private const uint StepCooldownTicks = 3;        // the project's base cadence.
     private const double BodyRadius = 0.5d;          // the player body radius the monster also collides at.
     private const double HopDistance = 1.0d;         // one tile per hop (the default slime knob).
+    private const double HopHeightUnits = 0.5d;      // the slime's real ballistic apex (the default type knob).
+    private const int TickRate = 20;                 // server tick rate (fixes the ballistic constants; XY is rate-free).
 
     private static TileGrid OpenGrid() => new(GridSize, GridSize, []);
+
+    // MOVEMENT-ACTIONS (Phase C): the hop is now a REAL ballistic Jump driven by the shared ServerActionExecutor — the
+    // HopLocomotion only DECIDES + STARTS the hop; the executor advances the arc per tick. This harness bundles the AI +
+    // its executor + the world and exposes a one-call StepMonster that mirrors GameServer's tick order (StepMonsterAi
+    // THEN StepAll), so EVERY existing assertion (collision-valid landings, cadence, leash, livelock) keeps its exact
+    // meaning against the real refactored path. The passthroughs keep the test bodies unchanged (still call StepMonster /
+    // TryGetPhase / etc. on `ai`). NOTE: we drive the real executor here rather than a fake instant-landing locomotion
+    // (both are allowed by the spec) so the collision-valid / wedge / sub-tile tests exercise the real per-tick arc.
+    private sealed class AiHarness
+    {
+        private readonly MonsterRoamAi _ai;
+        private readonly ServerActionExecutor _executor;
+        private readonly WorldState _world;
+
+        public AiHarness(MonsterRoamAi ai, ServerActionExecutor executor, WorldState world)
+        {
+            _ai = ai;
+            _executor = executor;
+            _world = world;
+        }
+
+        public int TrackedCount => _ai.TrackedCount;
+
+        public void Register(WorldEntity monster, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks, uint aggroScanIntervalTicks)
+            => _ai.Register(monster, serverTick, pauseMinTicks, pauseMaxTicks, aggroScanIntervalTicks);
+
+        // One tick in GameServer order: the AI decides + STARTS a hop (StepMonster), then the executor advances every
+        // in-flight arc (StepAll). Returns the AI's moved flag — true on the tick a hop STARTS (the same Moved cadence
+        // the pre-refactor instant hop reported: one per cadence window).
+        public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in MonsterRoamAi.Tunables t)
+        {
+            var moved = _ai.StepMonster(monster, serverTick, stepCooldownTicks, t);
+            _executor.StepAll(_world, serverTick);
+            return moved;
+        }
+
+        public bool TryGetPhase(ulong monsterId, out MonsterRoamAi.State phase) => _ai.TryGetPhase(monsterId, out phase);
+
+        public bool TryGetHome(ulong monsterId, out WorldVector home) => _ai.TryGetHome(monsterId, out home);
+
+        public bool TryGetTarget(ulong monsterId, out ulong targetId) => _ai.TryGetTarget(monsterId, out targetId);
+    }
+
+    // Builds the action executor wired exactly like GameServer: the SAME shared wall query + body radius ordinary
+    // movement/the hop use, and the SAME apply seam (ApplyResolvedMove + spatial-bucket migration on a tile cross).
+    private static ServerActionExecutor CreateExecutor(TileGrid grid, WorldState world)
+        => new(
+            TickRate,
+            () => BodyRadius,
+            grid.QueryNearbyWalls,
+            (entity, landing) =>
+            {
+                var previous = entity.TileCoord;
+                var crossed = entity.ApplyResolvedMove(landing);
+                if (crossed)
+                {
+                    world.OnEntityMoved(entity, previous);
+                }
+
+                return crossed;
+            });
+
+    // Builds a HopLocomotion whose begin-hop starts a REAL ballistic Jump on `executor` (mirroring GameServer.BeginMonster
+    // Hop): a per-hop ForwardArc def spanning the whole cadence, jump height = HopHeightUnits, cooldown 0 (the AI's
+    // TryBeginHop is the gate), and the IsActive gate reads the executor so the AI can't re-hop mid-arc.
+    private static HopLocomotion CreateLocomotion(TileGrid grid, ServerActionExecutor executor)
+        => new(
+            () => HopDistance,
+            () => BodyRadius,
+            grid.QueryNearbyWalls,
+            (monster, heading, hopDistance, cooldownTicks, serverTick) =>
+            {
+                var def = MovementActionRegistry.BuildForwardArcJump(
+                    ActionId.Jump,
+                    durationTicks: cooldownTicks,
+                    jumpHeight: HopHeightUnits,
+                    forwardDistanceUnits: hopDistance,
+                    cooldownTicks: 0,
+                    animationId: 1);
+                return executor.TryStart(monster, def, heading, serverTick);
+            },
+            id => executor.IsActive(id));
 
     // Roam-only tunables (no aggro: AggroRadius 0 disables the scan). Euclidean float ranges.
     private static MonsterRoamAi.Tunables RoamTunables(double roamRadius, uint pauseMin, uint pauseMax)
@@ -40,7 +125,7 @@ public sealed class MonsterRoamAiTests
     // Builds an AI whose walkability oracle + REAL HopLocomotion are wired to a TileGrid exactly like GameServer does
     // (the locomotion queries the same shared TileWalls + collides at the same body radius players do). The
     // aggro/resolve/attack callbacks default to "no aggro" so a roam-only test is unaffected; the combat tests pass real ones.
-    private static MonsterRoamAi CreateAi(
+    private static AiHarness CreateAi(
         int seed,
         TileGrid grid,
         WorldState world,
@@ -48,23 +133,9 @@ public sealed class MonsterRoamAiTests
         MonsterRoamAi.TryResolveTargetDelegate? tryResolve = null,
         MonsterRoamAi.AttackDelegate? attack = null)
     {
-        var locomotion = new HopLocomotion(
-            () => HopDistance,
-            () => BodyRadius,
-            grid.QueryNearbyWalls,
-            (entity, landing) =>
-            {
-                // Apply the landing + migrate the spatial bucket on a tile cross, exactly like Zone.ApplyMonsterLanding.
-                var previous = entity.TileCoord;
-                var crossed = entity.ApplyResolvedMove(landing);
-                if (crossed)
-                {
-                    world.OnEntityMoved(entity, previous);
-                }
-
-                return crossed;
-            });
-        return new MonsterRoamAi(
+        var executor = CreateExecutor(grid, world);
+        var locomotion = CreateLocomotion(grid, executor);
+        var ai = new MonsterRoamAi(
             seed,
             grid.IsWalkable,
             locomotion,
@@ -81,6 +152,7 @@ public sealed class MonsterRoamAiTests
                 return false;
             }),
             attack ?? ((WorldEntity _, ulong _, int _) => { }));
+        return new AiHarness(ai, executor, world);
     }
 
     private static WorldEntity SpawnMonster(WorldState world, TileCoord tile, uint networkId = 1)
@@ -319,7 +391,7 @@ public sealed class MonsterRoamAiTests
     // Wires the AI's aggro/resolve/attack callbacks to a real player WorldEntity, mirroring GameServer's continuous
     // path: findTarget — nearest alive player by Euclidean Position within the COARSE gather radius (the AI re-tests
     // the Euclidean aggro disc); tryResolve — the target's live Position + alive; attack — face + ApplyDamage.
-    private static MonsterRoamAi CreateCombatAi(
+    private static AiHarness CreateCombatAi(
         int seed, TileGrid grid, WorldState world, WorldEntity player, int[] hitCounter)
     {
         return CreateAi(
@@ -665,5 +737,60 @@ public sealed class MonsterRoamAiTests
 
         Assert.True(sawRoaming, "monster never entered Roaming — the picker should hand it far targets to wedge on.");
         Assert.True(sawIdleAfterRoaming, "roaming monster appears frozen (never recovered to Idle after wedging).");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // MOVEMENT-ACTIONS (Phase C): the slime hop now goes THROUGH the shared executor as a real ballistic Jump.
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Hop_RunsThroughExecutor_ArcsRealVerticalOffset_AndCadenceGatesMidArc()
+    {
+        // The Phase-C headline: a hop is no longer an instant teleport — the locomotion STARTS a ballistic Jump on the
+        // shared executor (tick 0 = takeoff at origin, no XY move yet), and the executor advances the arc per tick: XY
+        // moves one HopDistance along the locked heading while VerticalOffset arcs up to the apex and lands back to 0.
+        // Mid-arc the IsActive gate makes a re-hop attempt return OnCooldown (no second action starts — no desync), and
+        // even after the arc lands the TryBeginHop cadence still gates the next hop until the move window elapses.
+        const uint cadence = 4;             // even, so a Z sample lands EXACTLY on the apex midpoint (i = N/2).
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(10, 10));
+        var executor = CreateExecutor(grid, world);
+        var locomotion = CreateLocomotion(grid, executor);
+
+        var origin = monster.Position;
+        var target = new WorldVector(origin.X + 6d, origin.Y); // due east, far enough that the hop clamps to full HopDistance.
+
+        // Tick 1: START the hop. Reports Moved, the executor is now active, and tick 0 is takeoff (origin, grounded).
+        Assert.Equal(HopResult.Moved, locomotion.Advance(monster, target, serverTick: 1, cadence));
+        Assert.True(executor.IsActive(monster.Id));
+        Assert.Equal(origin.X, monster.Position.X, 1e-9);
+        Assert.Equal(0d, monster.VerticalOffset, 1e-9);
+
+        // Drive the arc over `cadence` ticks; mid-arc a re-hop is gated to OnCooldown (the IsActive gate).
+        var apex = 0d;
+        for (uint t = 1; t <= cadence; t++)
+        {
+            executor.StepAll(world, t);
+            apex = Math.Max(apex, monster.VerticalOffset);
+            if (t < cadence)
+            {
+                Assert.Equal(HopResult.OnCooldown, locomotion.Advance(monster, target, t, cadence));
+                Assert.True(executor.IsActive(monster.Id), "the in-flight arc must stay the ONLY active action mid-hop");
+            }
+        }
+
+        // Landed: the action ended, XY advanced exactly one HopDistance east along the heading, Z snapped back to 0, and
+        // the apex hit the real type height (the slime really rose — the cosmetic arc is gone).
+        Assert.False(executor.IsActive(monster.Id));
+        Assert.Equal(origin.X + HopDistance, monster.Position.X, 1e-6);
+        Assert.Equal(origin.Y, monster.Position.Y, 1e-6);
+        Assert.Equal(0d, monster.VerticalOffset, 1e-9);
+        Assert.Equal(HopHeightUnits, apex, 1e-9);
+
+        // The cadence still gates the NEXT hop: armed at tick 1 → next eligible at tick 1 + cadence. So a re-hop attempt
+        // on the landing tick (cadence not yet elapsed) is OnCooldown; once the window elapses it Moves again.
+        Assert.Equal(HopResult.OnCooldown, locomotion.Advance(monster, target, serverTick: cadence, cadence));
+        Assert.Equal(HopResult.Moved, locomotion.Advance(monster, target, serverTick: 1 + cadence, cadence));
     }
 }

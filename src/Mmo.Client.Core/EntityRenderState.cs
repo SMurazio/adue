@@ -24,18 +24,12 @@ public readonly record struct EntityRenderState(
     // The "Server positions" debug overlay positions its marker from this so it tracks the true server position
     // smoothly instead of snapping tile-to-tile. Defaults to (0,0) for non-render-loop constructions (tests).
     RenderPosition AuthoritativePosition = default,
-    // HOP-ARC (cosmetic, monster-only): the vertical render height in WORLD UNITS (tiles) to LIFT the visual this
-    // frame — a parabolic jump that peaks mid-hop and lands at 0, SYNCED to the horizontal interp of a slime's
-    // sparse server hop. PURELY presentational: it never touches Position/AuthoritativeTile/AuthoritativePosition,
-    // so targeting/harvest/combat are byte-identical. 0 for players, continuously-moving entities, and a resting
-    // monster (the render loop adds it to the visual's Y; 0 == flat, the unchanged behaviour for every other kind).
-    double HopHeight = 0d,
     // MOVEMENT-ACTIONS Phase B1: the REPLICATED, server-authoritative airborne height in WORLD UNITS (tiles) — the
-    // REAL jump arc (design §1.4.5), distinct from the cosmetic monster HopHeight above (Phase C retires the hop in
-    // favour of this). Populated from the snapshot's EntityStateSnapshot.VerticalOffset for EVERY entity (local +
-    // remote); 0 grounded. The renderer LIFTS the visual by it the same way it lifts by HopHeight. For B1 the local
-    // player's own jump rises/lands via this same path (server-confirmed — no prediction yet). Presentation-only — it
-    // never touches Position/targeting, exactly like HopHeight.
+    // REAL jump arc (design §1.4.5). Populated from the snapshot's EntityStateSnapshot.VerticalOffset for EVERY entity
+    // (local + remote); 0 grounded, so the common case is the unchanged flat render. The renderer LIFTS the visual by
+    // it. Phase C retired the cosmetic monster HopHeight arc in favour of this — a slime's hop is now a REAL replicated
+    // Z, so its arc renders from this single field. Presentation-only — it never touches Position/AuthoritativeTile/
+    // AuthoritativePosition, so targeting/harvest/combat are byte-identical.
     double VerticalOffset = 0d)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,

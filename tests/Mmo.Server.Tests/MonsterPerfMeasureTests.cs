@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -18,10 +19,15 @@ public sealed class MonsterPerfMeasureTests
     private const uint StepCooldownTicks = 3;   // base cadence — one hop per 3 ticks.
     private const double BodyRadius = 0.5d;
     private const double HopDistance = 1.0d;
-    private const uint TickHz = 20;             // server tick rate (for the per-second math).
+    private const double HopHeightUnits = 0.5d; // the slime's real ballistic apex (Phase C).
+    private const uint TickHz = 20;             // server tick rate (for the per-second math + the ballistic constants).
 
-    // wall-query call counter, mutated by the wrapped delegate.
+    // wall-query call counter, mutated by the wrapped delegate (now counts BOTH the locomotion's decision probe AND the
+    // executor's per-tick arc resolve — Phase C splits the single old resolve into a probe + a per-tick arc).
     private int _wallQueryCalls;
+
+    // The action executor that drives the hop arc (Phase C). Stored so RunAndReport can StepAll each tick like GameServer.
+    private ServerActionExecutor _executor = null!;
 
     private MonsterRoamAi CreateAi(
         int seed,
@@ -31,14 +37,17 @@ public sealed class MonsterPerfMeasureTests
         MonsterRoamAi.TryResolveTargetDelegate? tryResolve = null,
         MonsterRoamAi.AttackDelegate? attack = null)
     {
-        var locomotion = new HopLocomotion(
-            () => HopDistance,
+        // One wrapped wall-query shared by the executor + the locomotion so the counter sees the TOTAL wall work.
+        void CountedQuery(WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Wall> scratch)
+        {
+            _wallQueryCalls++;
+            grid.QueryNearbyWalls(start, delta, radius, scratch);
+        }
+
+        _executor = new ServerActionExecutor(
+            (int)TickHz,
             () => BodyRadius,
-            (start, delta, radius, scratch) =>
-            {
-                _wallQueryCalls++;
-                grid.QueryNearbyWalls(start, delta, radius, scratch);
-            },
+            CountedQuery,
             (entity, landing) =>
             {
                 var previous = entity.TileCoord;
@@ -50,6 +59,23 @@ public sealed class MonsterPerfMeasureTests
 
                 return crossed;
             });
+
+        var locomotion = new HopLocomotion(
+            () => HopDistance,
+            () => BodyRadius,
+            CountedQuery,
+            (monster, heading, hopDistance, cooldownTicks, serverTick) =>
+            {
+                var def = MovementActionRegistry.BuildForwardArcJump(
+                    ActionId.Jump,
+                    durationTicks: cooldownTicks,
+                    jumpHeight: HopHeightUnits,
+                    forwardDistanceUnits: hopDistance,
+                    cooldownTicks: 0,
+                    animationId: 1);
+                return _executor.TryStart(monster, def, heading, serverTick);
+            },
+            id => _executor.IsActive(id));
         return new MonsterRoamAi(
             seed,
             grid.IsWalkable,
@@ -73,7 +99,7 @@ public sealed class MonsterPerfMeasureTests
         var t = RoamTunables(4d, 20, 60);
         ai.Register(monster, 0, t.PauseMinTicks, t.PauseMaxTicks, t.AggroScanIntervalTicks);
 
-        RunAndReport("ROAM open grid", ai, monster, t, ticks: 6000);
+        RunAndReport("ROAM open grid", ai, world, monster, t, ticks: 6000);
     }
 
     [Fact]
@@ -94,7 +120,7 @@ public sealed class MonsterPerfMeasureTests
         var t = RoamTunables(4d, 20, 60);
         ai.Register(monster, 0, t.PauseMinTicks, t.PauseMaxTicks, t.AggroScanIntervalTicks);
 
-        RunAndReport("ROAM boxed-in (every neighbor wall)", ai, monster, t, ticks: 6000);
+        RunAndReport("ROAM boxed-in (every neighbor wall)", ai, world, monster, t, ticks: 6000);
     }
 
     [Fact]
@@ -115,10 +141,10 @@ public sealed class MonsterPerfMeasureTests
         var t = new MonsterRoamAi.Tunables(4d, 20, 60, 6d, 9d, 20d, 1.5d, 5, 20, 10);
         ai.Register(monster, 0, t.PauseMinTicks, t.PauseMaxTicks, t.AggroScanIntervalTicks);
 
-        RunAndReport("CHASE stationary player", ai, monster, t, ticks: 6000);
+        RunAndReport("CHASE stationary player", ai, world, monster, t, ticks: 6000);
     }
 
-    private void RunAndReport(string label, MonsterRoamAi ai, WorldEntity monster, MonsterRoamAi.Tunables t, int ticks)
+    private void RunAndReport(string label, MonsterRoamAi ai, WorldState world, WorldEntity monster, MonsterRoamAi.Tunables t, int ticks)
     {
         _wallQueryCalls = 0;
         var positionChanges = 0;
@@ -131,6 +157,8 @@ public sealed class MonsterPerfMeasureTests
         for (uint tick = 0; tick < ticks; tick++)
         {
             var moved = ai.StepMonster(monster, tick, StepCooldownTicks, t);
+            // Phase C: advance the in-flight hop arc this tick, exactly like GameServer's StepMonsterAi → StepAll order.
+            _executor.StepAll(world, tick);
             if (moved) movedTrue++;
             if (monster.Position != lastPos) { positionChanges++; lastPos = monster.Position; }
             if (monster.StateRevision != lastRev) { revisionBumps++; lastRev = monster.StateRevision; }

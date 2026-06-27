@@ -251,12 +251,23 @@ public sealed class GameServer
         // CONTINUOUS MIGRATION (Phase 8): built BEFORE the AI so the hop locomotion's live hop-distance provider can
         // read the default type's HopDistanceUnits fresh each hop.
         _monsterTypes = new MonsterTypeRegistry(options.TickRate);
-        // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8): seed the monster roam AI off the map seed so a given
-        // world replays the same roaming (deterministic for repro/tests). Navigation is now CONTINUOUS (Euclidean
-        // ranges, sub-tile targets) but movement HOPS — the injected HopLocomotion leaps the monster a collision-valid
-        // HopDistanceUnits per cadence through the SAME swept-circle wall derivation + body radius players collide at
-        // (Zone.QueryNearbyWalls + ContinuousCollision), with Velocity left at Zero (the sparse-update jump preserved).
-        // Hop distance + body radius are read FRESH each hop so a live retune applies next tick.
+        // MOVEMENT-ACTIONS (Phase A/C): the action executor reuses the EXACT same shared collision derivation + apply
+        // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
+        // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE _monsterAi (Phase C) — it has no
+        // dependency on the AI, but the AI's HopLocomotion now drives its hop arc THROUGH this executor (BeginMonsterHop
+        // + IsActive below), so it must exist first.
+        _actionExecutor = new ServerActionExecutor(
+            options.TickRate,
+            () => _tuning.BodyRadiusUnits,
+            _zone.QueryNearbyWalls,
+            _zone.ApplyMonsterLanding);
+        // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
+        // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
+        // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop
+        // (collision-valid heading + clamped distance, the SAME swept-circle wall derivation + body radius players collide
+        // at) and BeginMonsterHop hands the arc to the shared executor, which advances XY through the resolver + the
+        // ballistic Z (the replicated VerticalOffset) per tick. The IsAction-active gate (lazy lambda) keeps the AI from
+        // re-hopping mid-arc. Hop distance + body radius are read FRESH each hop so a live retune applies next tick.
         _monsterAi = new MonsterRoamAi(
             options.MapSeed,
             _zone.IsWalkable,
@@ -264,18 +275,11 @@ public sealed class GameServer
                 () => _monsterTypes.Default.HopDistanceUnits,
                 () => _tuning.BodyRadiusUnits,
                 _zone.QueryNearbyWalls,
-                _zone.ApplyMonsterLanding),
+                BeginMonsterHop,
+                id => _actionExecutor.IsActive(id)),
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
-        // MOVEMENT-ACTIONS (Phase A): the action executor reuses the EXACT same shared collision derivation + apply
-        // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
-        // radius (read fresh per tick). No trigger source yet — driven each tick by StepActions; empty until B/C.
-        _actionExecutor = new ServerActionExecutor(
-            options.TickRate,
-            () => _tuning.BodyRadiusUnits,
-            _zone.QueryNearbyWalls,
-            _zone.ApplyMonsterLanding);
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
@@ -3034,6 +3038,32 @@ public sealed class GameServer
                 EffectiveStepCooldownTicksFor(type.MoveSpeedMultiplier),
                 _monsterTypes.BuildTunables(type));
         }
+    }
+
+    // MOVEMENT-ACTIONS (Phase C): the HopLocomotion's begin-hop seam — START the slime's hop as a REAL ballistic Jump on
+    // the shared executor (design §3 "one Jump drives players + monsters"). The locomotion already chose the heading +
+    // the clamped forward distance (the collision-valid decision); here we look up the monster's TYPE for its apex height
+    // (HopHeightUnits) and build a PER-HOP Jump def whose arc spans the WHOLE move cadence (DurationTicks = cooldownTicks)
+    // so the slime arcs over the move window then lands — matching today's interp-glide-over-the-cadence pacing, now with
+    // a real replicated Z. CooldownTicks = 0 (the AI's TryBeginHop cadence is the re-trigger gate, NOT the executor's own
+    // cooldown). A small record+closure alloc per hop (~once per cadence per monster) — acceptable. Reuses ActionId.Jump
+    // (a per-entity cooldown key, no collision with a player's jump). Returns the executor's TryStart result.
+    private bool BeginMonsterHop(WorldEntity monster, WorldVector heading, double hopDistance, uint cooldownTicks, uint serverTick)
+    {
+        if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
+        {
+            type = _monsterTypes.Default;
+        }
+
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump,
+            durationTicks: cooldownTicks,
+            jumpHeight: type.HopHeightUnits,
+            forwardDistanceUnits: hopDistance,
+            cooldownTicks: 0,
+            animationId: 1);
+
+        return _actionExecutor.TryStart(monster, def, heading, serverTick);
     }
 
     // LIVING-ENEMIES P2: the AI's aggro-scan callback — find the NEAREST ALIVE PLAYER within `aggroRadius` (Chebyshev)

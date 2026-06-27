@@ -72,7 +72,8 @@ public sealed class HopLocomotion : IMonsterLocomotion
     private readonly Func<double> _hopDistanceUnits;
     private readonly Func<double> _bodyRadiusUnits;
     private readonly QueryWallsDelegate _queryWalls;
-    private readonly ApplyLandingDelegate _applyLanding;
+    private readonly BeginHopDelegate _beginHop;
+    private readonly Func<ulong, bool> _isActionActive;
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
 
     // Fills `scratch` with the collision walls near a swept move (from, delta, radius) in stable row-major order — the
@@ -81,26 +82,42 @@ public sealed class HopLocomotion : IMonsterLocomotion
     public delegate void QueryWallsDelegate(
         WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Wall> scratch);
 
-    // Applies the resolved landing to `entity` (WorldEntity.ApplyResolvedMove) AND migrates its spatial-grid bucket on
-    // a tile cross — the SAME bookkeeping Zone.IntegrateMovement runs for a player. Injected (Zone owns the grid; the
-    // tests hand a WorldState.OnEntityMoved lambda) so the locomotion stays grid-agnostic and unit-testable. Returns
-    // whether the rounded tile crossed (the spatial-bucket-migration signal — not used by the caller here).
-    public delegate bool ApplyLandingDelegate(WorldEntity entity, WorldVector landing);
+    // MOVEMENT-ACTIONS (Phase C): START a real ballistic Jump on `monster` toward `heading` for `hopDistance` units over
+    // `cooldownTicks` ticks (the move cadence — the arc spans the whole window then lands), at `serverTick`. Injected
+    // (GameServer.BeginMonsterHop / a test) so the locomotion stays decoupled from the shared ServerActionExecutor that
+    // actually advances the arc per tick (XY through the shared resolver, Z via the ballistic formula → the replicated
+    // VerticalOffset). REPLACES the old instant-teleport apply: the locomotion now DECIDES the hop (direction + that it
+    // makes progress) and hands the MOVEMENT to the executor. Returns whether the action actually started (the executor
+    // accepted the trigger); false ⇒ treat as no-progress (should not happen given the IsActive gate below).
+    public delegate bool BeginHopDelegate(
+        WorldEntity monster, WorldVector heading, double hopDistance, uint cooldownTicks, uint serverTick);
 
     public HopLocomotion(
         Func<double> hopDistanceUnits,
         Func<double> bodyRadiusUnits,
         QueryWallsDelegate queryWalls,
-        ApplyLandingDelegate applyLanding)
+        BeginHopDelegate beginHop,
+        Func<ulong, bool> isActionActive)
     {
         _hopDistanceUnits = hopDistanceUnits;
         _bodyRadiusUnits = bodyRadiusUnits;
         _queryWalls = queryWalls;
-        _applyLanding = applyLanding;
+        _beginHop = beginHop;
+        _isActionActive = isActionActive;
     }
 
     public HopResult Advance(WorldEntity monster, WorldVector target, uint serverTick, uint cooldownTicks)
     {
+        // MOVEMENT-ACTIONS (Phase C): a hop arc is in flight (the executor owns the monster's movement mid-jump) — the
+        // tick loop runs StepMonsterAi BEFORE StepAll, so without this gate the monster could try to re-hop on the very
+        // tick its arc ends (executor.CanStart would reject it, but TryBeginHop would already be armed → cadence desync).
+        // Treat an in-flight action as a harmless cadence wait (OnCooldown): it must NOT trip the livelock watchdog (the
+        // monster IS making progress along the arc) and must NOT count as a roam/return arrival pre-check failure.
+        if (_isActionActive(monster.Id))
+        {
+            return HopResult.OnCooldown;
+        }
+
         // Gate the whole attempt on the move cadence (read-only) so a fully-blocked hop can leave the gate un-armed.
         if (!monster.IsHopReady(serverTick))
         {
@@ -156,12 +173,30 @@ public sealed class HopLocomotion : IMonsterLocomotion
             return HopResult.Stuck;
         }
 
-        // Commit the winning hop: arm the cadence (an accepted hop, TryStep's arm rule), face the heading, apply the
-        // collision-valid landing (which also migrates the spatial bucket on a tile cross). IsHopReady was true, so
-        // TryBeginHop accepts and arms serverTick + cooldown.
+        // MOVEMENT-ACTIONS (Phase C): commit the winning hop as a REAL ballistic Jump through the shared executor. The
+        // locomotion's job is now to DECIDE the hop — the heading (primaryDir, possibly a fan rotation) and the clamped
+        // distance that makes >= epsilon progress — and hand the actual movement to the executor, which arcs the XY
+        // (the SAME shared resolver + walls + radius this method just probed) and the ballistic Z per tick. `best`/
+        // `bestProgress` above are the DECISION probe (Moved vs Stuck, which heading); the executor re-resolves the arc
+        // per tick to physically land the monster.
+        //
+        // ORDER IS LOAD-BEARING: begin the executor hop BEFORE arming the cadence. WorldEntity.IsHopReady and
+        // IsMovementFrozen read the SAME `_nextEligibleTick` field and are exact complements (frozen == !ready); the
+        // executor's CanStart REJECTS a movement-frozen entity. We are past the IsHopReady gate, so the monster is NOT
+        // frozen RIGHT NOW — but TryBeginHop arms `_nextEligibleTick` into the FUTURE, which would make it look frozen.
+        // So if we armed first, executor.TryStart would see IsMovementFrozen → reject the very hop we just decided.
+        // Begin first (while still un-frozen), then arm. A (given the IsActive gate, theoretically impossible) rejected
+        // trigger leaves the cadence un-armed and reports Stuck (no-progress) rather than arming a phantom hop.
+        if (!_beginHop(monster, primaryDir, hopDistance, cooldownTicks, serverTick))
+        {
+            return HopResult.Stuck;
+        }
+
+        // Arm the cadence (an accepted hop, TryStep's arm rule) and face the heading. IsHopReady was true, so
+        // TryBeginHop accepts and arms serverTick + cooldown — the next hop is gated until this arc's window elapses
+        // (the executor's IsActive gate above covers the in-flight ticks; the cadence covers the seam after it lands).
         monster.TryBeginHop(serverTick, cooldownTicks);
         monster.SetFacingFromUnit(primaryDir);
-        _applyLanding(monster, best);
         return HopResult.Moved;
     }
 
