@@ -97,8 +97,9 @@ public sealed class RemotePositionInterpolatorTests
         Assert.Equal(1.0, starved.X, 6);
     }
 
-    // A dropped / late packet (the buffer starves: playout passes the newest sample with nothing future to lerp
-    // toward) must HOLD at the newest sample — NO extrapolation fling forward.
+    // A dropped / late packet for a NON-MOVING entity (Velocity 0 — a resting player, or a tile-stepped monster
+    // between hops) must HOLD at the newest sample: the velocity dead-reckoning is a no-op at vel 0, so it never
+    // flings. (A MOVING entity DOES extrapolate — see the dead-reckoning tests just below.)
     [Fact]
     public void StarvationHoldsAtNewestNoFling()
     {
@@ -115,6 +116,51 @@ public sealed class RemotePositionInterpolatorTests
         // Still held a frame later — no creep.
         var stillHeld = interp.Sample(Ms(600));
         Assert.Equal(2.0, stillHeld.X, 6);
+    }
+
+    // REMOTE-WALK Phase 2 (v39 dead-reckoning): a MOVING entity's replicated velocity fills the starvation gap with
+    // continuous motion instead of freezing at the newest sample — the fix for choppy remote walking (sparse
+    // tile-crossing samples were starving the playout buffer → hold-then-rush). The render keeps gliding along the
+    // velocity until the next confirm (or the cap).
+    [Fact]
+    public void MovingEntityExtrapolatesAlongVelocityOnStarvation_NoFreeze()
+    {
+        var interp = new RemotePositionInterpolator(new WorldVector(0, 0), Delay);
+        var vel = new WorldVector(4, 0); // 4 units/sec along +X
+
+        interp.Confirm(new WorldVector(0, 0), Ms(0), velocity: vel);
+        interp.Confirm(new WorldVector(0.2, 0), Ms(50), velocity: vel); // 4u/s × 50ms = 0.2u
+
+        // Starvation: playout = now − 75ms. At now=200 → playout=125ms, past the newest (50ms) by 75ms → extrapolate
+        // 0.075s × 4 = 0.3u beyond the newest 0.2 ⇒ 0.5u. NOT frozen at 0.2.
+        var r = interp.Sample(Ms(200));
+        Assert.Equal(0.5, r.X, 6);
+        Assert.Equal(0.0, r.Y, 6);
+
+        // A frame later it has advanced further — continuous dead-reckoning, not a freeze.
+        var r2 = interp.Sample(Ms(216));
+        Assert.True(r2.X > r.X, "render kept gliding during starvation (dead-reckoning), did not freeze");
+    }
+
+    // The extrapolation is CAPPED so a MOVING entity that goes silent (disconnect mid-stride / dropped stop) glides at
+    // most MaxExtrapolationMs × speed and then HOLDs — it never flings away forever.
+    [Fact]
+    public void ExtrapolationIsCappedSoASilentMovingEntityDoesNotFlingForever()
+    {
+        var interp = new RemotePositionInterpolator(new WorldVector(0, 0), Delay);
+        var vel = new WorldVector(4, 0);
+
+        interp.Confirm(new WorldVector(0, 0), Ms(0), velocity: vel);
+        interp.Confirm(new WorldVector(0.2, 0), Ms(50), velocity: vel);
+
+        // The entity goes silent — no more confirms. Advance far past it. The cap is 250ms of extrapolation, so the
+        // render pins at 0.2 + 4 × 0.250 = 1.2u, NOT 4 × ~10s = tens of tiles away.
+        var capped = interp.Sample(Ms(10000));
+        Assert.Equal(1.2, capped.X, 6);
+
+        // Held at the cap a second later — no further creep.
+        var stillCapped = interp.Sample(Ms(11000));
+        Assert.Equal(1.2, stillCapped.X, 6);
     }
 
     // An out-of-order arrival (a sample whose receivedAt is older than the newest buffered one) is ignored — it

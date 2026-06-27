@@ -44,6 +44,14 @@ public sealed class RemotePositionInterpolator
     // handful) so it never clips a legitimate window; the CatchUpSampleCap collapses genuine backlog first.
     private const int MaxBufferedSamples = 256;
 
+    // REMOTE-WALK Phase 2 (v39 dead-reckoning): the hard cap (ms) on how far the starvation branch extrapolates along
+    // a sample's replicated velocity before it HOLDs. Bounds the overshoot when a MOVING entity goes silent (a
+    // disconnect mid-stride, or a dropped stop confirm) so it glides at most ~MaxExtrapolationMs × speed (≈ one tile
+    // at walk speed) and then parks, instead of flinging away. Comfortably above the steady-state extrapolation a
+    // walker actually needs (the starvation tail of each ~sample-interval cycle, < the playout delay) so normal
+    // dead-reckoning is never clipped; only a genuine signal loss hits the cap.
+    private const double MaxExtrapolationMs = 250d;
+
     private double _interpolationDelayMs;
 
     // The last position we rendered (returned by Sample). Held across frames so a starvation HOLD and the
@@ -170,9 +178,9 @@ public sealed class RemotePositionInterpolator
     //   * no real confirms yet (or none after a Reset): HOLD on the spawn/Reset anchor.
     //   * one real confirm, or playoutTime before the oldest confirm (the buffer hasn't aged in yet): HOLD on the
     //     oldest confirm.
-    //   * playoutTime at/after the newest confirm (STARVATION — no future sample to interpolate toward): HOLD on
-    //     the newest. NO extrapolation (the deferred path) — the render parks on the last known position and waits
-    //     for the next Confirm, so a dropped/late packet never flings the entity forward.
+    //   * playoutTime at/after the newest confirm (STARVATION — no future sample to interpolate toward): EXTRAPOLATE
+    //     along the newest sample's replicated velocity (dead-reckoning), capped at MaxExtrapolationMs. A non-moving
+    //     entity (Velocity 0) extrapolates to a HOLD — a dropped packet for a resting/tile-stepped entity never flings.
     //   * playoutTime between two confirms: lerp them by the fractional position in that span.
     // The replicated airborne height (_sampledVerticalOffset) tracks the horizontal in EVERY regime — same HOLD
     // sample, same bracket, same alpha — so a remote jump's height and XY are always on one timeline.
@@ -202,12 +210,25 @@ public sealed class RemotePositionInterpolator
         }
 
         // STARVATION: playout has caught up to (or passed) the newest confirm — nothing future to lerp toward.
-        // HOLD at the newest (no extrapolation). This is the dropped/late-packet case: park, don't fling.
+        // REMOTE-WALK Phase 2 (v39 dead-reckoning): instead of HOLDing (which froze a remote walker between the sparse
+        // tile-crossing samples → the "hold-then-rush" choppiness), EXTRAPOLATE along the newest sample's replicated
+        // velocity — pos = newest.Position + newest.Velocity × elapsed — so the gap fills with continuous motion. A
+        // resting / tile-stepped entity (Velocity == 0) extrapolates to a HOLD, identical to before (no fling on a
+        // dropped packet for a non-moving entity). The elapsed is CAPPED at MaxExtrapolationMs so a moving entity that
+        // goes silent (disconnect mid-stride, a dropped stop confirm) glides at most that far then holds, rather than
+        // flinging away forever; a real stop normally arrives within the playout delay (its StateRevision stop-edge
+        // bump) and lands the bracket lerp on the stop point before this branch even extrapolates past it. Height does
+        // NOT extrapolate (a jump is force-included densely; a walker's height is 0) — hold the newest.
         if (playoutTime >= _samples[^1].ReceivedAt)
         {
-            _renderPosition = _samples[^1].Position;
+            var newest = _samples[^1];
+            var elapsedSeconds =
+                Math.Min((playoutTime - newest.ReceivedAt).TotalMilliseconds, MaxExtrapolationMs) / 1000d;
+            _renderPosition = new RenderPosition(
+                newest.Position.X + (newest.Velocity.X * elapsedSeconds),
+                newest.Position.Y + (newest.Velocity.Y * elapsedSeconds));
             _hopArcFactor = 0d;
-            _sampledVerticalOffset = _samples[^1].VerticalOffset;
+            _sampledVerticalOffset = newest.VerticalOffset;
             return _renderPosition;
         }
 
