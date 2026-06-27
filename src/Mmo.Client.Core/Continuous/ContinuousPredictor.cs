@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 
 namespace Mmo.Client.Core.Continuous;
 
@@ -92,6 +93,26 @@ public sealed class ContinuousPredictor
 
     private double _lastCorrectionUnits;
 
+    // MOVEMENT-ACTIONS Phase B2: the LOCAL player's predicted movement action (jump). The action layers ON TOP of the
+    // existing predict/reconcile/replay WITHOUT new reconcile machinery (design §2.6): while active, PredictAndBuffer
+    // IGNORES the held input and integrates the LOCKED heading at the action's speed, buffering each frame exactly like
+    // a movement frame — so the SAME seq-acked re-base+replay carries the temporal LEAD (the client stays ahead) and
+    // absorbs a server REJECTION (the server, not running the action, reports a diverging position the standard
+    // reconcile pulls toward — bounded, converging, no special path). The action's XY is locked-heading constant-
+    // velocity, byte-identical to the server's ForwardArc executor on open ground; a jump into a wall opens only a
+    // sub-tile residual (per-frame vs per-tick collision granularity) that is < SnapThresholdUnits and smoothed away.
+    // The VERTICAL is predicted locally from the ballistic constants over the elapsed action-time and rendered by the
+    // LOCAL player directly (PredictedVerticalOffset) — the carry-forward #1 fix: the local avatar NEVER renders its
+    // own replicated VerticalOffset (that scalar is for REMOTE viewers), so there is one Z source and no double-count.
+    private bool _actionActive;
+    private double _actionHeadingX;
+    private double _actionHeadingY;
+    private double _actionSpeed;
+    private double _actionRemaining;  // seconds of the action still to predict
+    private double _actionElapsed;    // seconds predicted so far (drives the ballistic Z arc)
+    private double _actionGravity;    // derived ballistic constant (g) for the predicted Z
+    private double _actionLaunchVelocity; // derived ballistic constant (v0) for the predicted Z
+
     // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): the input seq is a SINGLE persistent monotonic counter
     // owned by MmoClient, not per-predictor-instance — otherwise a mid-session re-attach (F5 prediction toggle,
     // respawn, AOI re-entry) would build a FRESH predictor whose counter restarts at 0, mint 1,2,3… all <= the
@@ -143,6 +164,63 @@ public sealed class ContinuousPredictor
     // The live integrate speed (units/sec).
     public double Speed => _speed;
 
+    // MOVEMENT-ACTIONS Phase B2: true while the local player is predicting a movement action (jump). The send path
+    // reads this to send the LOCKED heading (not the held WASD) on the wire, so a server-REJECTED action still moves
+    // along the heading there (a smaller, bounded reconcile) and the move cursor keeps advancing (the buffer trims).
+    public bool IsActionActive => _actionActive;
+
+    // The unit launch heading the active action is locked to (Zero when no action). The send path stamps it on the
+    // MoveIntent so client and server agree on the direction even on the rejected path.
+    public double ActionHeadingX => _actionActive ? _actionHeadingX : 0d;
+    public double ActionHeadingY => _actionActive ? _actionHeadingY : 0d;
+
+    // MOVEMENT-ACTIONS Phase B2: the LOCAL player's PREDICTED airborne height (world units), sampled from the ballistic
+    // constants over the elapsed action-time — a smooth per-frame arc. 0 when no action is active (landed / on ground).
+    // The local avatar renders THIS, never its replicated VerticalOffset (carry-forward #1: one Z source, no double-
+    // count). It returns to 0 the instant the action ends locally, so the end seam never pops up to a lagging server Z.
+    public double PredictedVerticalOffset =>
+        _actionActive ? BallisticArc.HeightOffsetAtTime(_actionGravity, _actionLaunchVelocity, _actionElapsed) : 0d;
+
+    // MOVEMENT-ACTIONS Phase B2: begin predicting a movement action. While active, the predictor drives the LOCKED
+    // heading at `actionSpeed` for `durationSeconds` (ignoring held input — the action owns movement, design §2.1/§4)
+    // and arcs the predicted Z from the ballistic (jumpHeight, airborneTicks) over the same span. ONE-AT-A-TIME
+    // (design §2.8): returns false if an action is already active OR the heading/duration is degenerate, so the caller
+    // declines the trigger locally just as the server's can-act would — the common spam case never mispredicts. The
+    // `actionSpeed` is the action's average ground speed (def.ForwardDistanceUnits × tickRate ÷ DurationTicks) so the
+    // per-frame integration covers exactly the action distance over the duration, matching the server executor on open
+    // ground. No re-base here: the action continues the SAME predicted timeline from the current predicted position.
+    public bool BeginAction(
+        double headingX,
+        double headingY,
+        double actionSpeed,
+        double durationSeconds,
+        double jumpHeight,
+        uint airborneTicks,
+        int tickRate)
+    {
+        if (_actionActive)
+        {
+            return false; // one-at-a-time — an action already owns the entity (design §2.8)
+        }
+
+        var length = Math.Sqrt((headingX * headingX) + (headingY * headingY));
+        if (length <= 1e-6 || durationSeconds <= 0d || !double.IsFinite(actionSpeed) || actionSpeed < 0d)
+        {
+            return false; // degenerate trigger — decline (no zero-length/zero-duration action)
+        }
+
+        var inv = 1d / length;
+        _actionHeadingX = headingX * inv;
+        _actionHeadingY = headingY * inv;
+        _actionSpeed = actionSpeed;
+        _actionRemaining = durationSeconds;
+        _actionElapsed = 0d;
+        _actionGravity = BallisticArc.Gravity(jumpHeight, airborneTicks, tickRate);
+        _actionLaunchVelocity = BallisticArc.LaunchVelocity(jumpHeight, airborneTicks, tickRate);
+        _actionActive = true;
+        return true;
+    }
+
     // CONTINUOUS MIGRATION (Phase 4a): the highest input seq this predictor has minted so far (== the last value
     // PredictAndBuffer returned, or the seeded startInputSeq before any mint). MmoClient reads this to keep its
     // persistent high-water counter in sync, so a later re-attach seeds the next predictor strictly above it.
@@ -173,6 +251,34 @@ public sealed class ContinuousPredictor
         // (the dt-alignment linchpin). A non-finite/negative dt collapses to 0 (no motion this frame, like the server).
         var clampedDt = double.IsFinite(dtSeconds) ? Math.Clamp(dtSeconds, 0d, MaxInputDtSeconds) : 0d;
 
+        // Resolve the EFFECTIVE input for this frame. Normal movement uses the held input at the live move speed.
+        // MOVEMENT-ACTIONS Phase B2: while an action owns movement, OVERRIDE the input with the LOCKED heading at the
+        // action speed (ignoring held WASD, design §2.1/§4), clamp this frame's dt to the action's remaining time so the
+        // predicted distance is exactly the action distance over the duration, advance the ballistic Z clock, and END
+        // the action when its duration elapses. The frame is still buffered like any other (seq + dir + dt + the speed
+        // it was integrated at) so the SAME reconcile/replay carries it — the action needs no separate buffer.
+        double dirX, dirY, speed, dt;
+        if (_actionActive)
+        {
+            dt = Math.Min(clampedDt, _actionRemaining);
+            dirX = _actionHeadingX;
+            dirY = _actionHeadingY;
+            speed = _actionSpeed;
+            _actionElapsed += dt;
+            _actionRemaining -= dt;
+            if (_actionRemaining <= 1e-9)
+            {
+                _actionActive = false;
+            }
+        }
+        else
+        {
+            dirX = inputX;
+            dirY = inputY;
+            speed = _speed;
+            dt = clampedDt;
+        }
+
         // Trim defensively from the front if the server has gone silent and the window grew past the cap — dropping the
         // OLDEST unacked input (the server will never ack it once we exceed the window). Keeps the buffer bounded.
         while (_buffer.Count >= MaxBufferedInputs)
@@ -180,11 +286,14 @@ public sealed class ContinuousPredictor
             _buffer.RemoveAt(0);
         }
 
-        _buffer.Add(new BufferedInput(seq, inputX, inputY, clampedDt));
+        // BUFFER the per-frame speed alongside dir/dt so replay reproduces this frame at the EXACT speed it was
+        // predicted at — essential across the action/normal-speed boundary (an action frame integrated at the action
+        // speed must replay at the action speed even after the action ends and the live move speed is restored).
+        _buffer.Add(new BufferedInput(seq, dirX, dirY, dt, speed));
 
         // Integrate this frame from the current predicted position, RESOLVING collision from the running predicted
         // position — exactly as the server applies it from its running authoritative position for the same input.
-        (_predictedX, _predictedY) = IntegrateWithCollision(_predictedX, _predictedY, inputX, inputY, clampedDt);
+        (_predictedX, _predictedY) = IntegrateWithCollision(_predictedX, _predictedY, dirX, dirY, dt, speed);
 
         return seq;
     }
@@ -218,7 +327,9 @@ public sealed class ContinuousPredictor
         var newY = _baseY;
         foreach (var input in _buffer)
         {
-            (newX, newY) = IntegrateWithCollision(newX, newY, input.DirX, input.DirY, input.Dt);
+            // Replay each unacked frame at the SPEED it was predicted at (B2: an action frame replays at the action
+            // speed even after the live move speed has been restored), so replay reproduces the predicted path exactly.
+            (newX, newY) = IntegrateWithCollision(newX, newY, input.DirX, input.DirY, input.Dt, input.Speed);
         }
 
         // The correction is how far the recomputed present moved from the live predicted present. ~0 with no loss.
@@ -265,12 +376,12 @@ public sealed class ContinuousPredictor
     }
 
     // The shared integrate+collide step: normalize the raw input direction (so diagonals aren't faster), scale by the
-    // live speed over dt to get the desired delta, then RESOLVE that move against the shared walls (circle of _radius
+    // given speed over dt to get the desired delta, then RESOLVE that move against the shared walls (circle of _radius
     // vs solid tile AABBs, slide + anti-tunnel) from the given position. The walls are derived per-move from the SAME
     // blocked set via the SAME TileWalls.NeighborhoodWallsForMove the server uses, into the REUSED scratch list, and
     // the same ContinuousCollision.Resolve — IDENTICAL math + collision to the server (Zone.IntegrateMovement), so the
     // authoritative and predicted/replayed paths agree exactly, including AT walls. Null blocked == open-field move.
-    private (double X, double Y) IntegrateWithCollision(double x, double y, double inputX, double inputY, double dtSeconds)
+    private (double X, double Y) IntegrateWithCollision(double x, double y, double inputX, double inputY, double dtSeconds, double speed)
     {
         if (dtSeconds <= 0d)
         {
@@ -284,8 +395,8 @@ public sealed class ContinuousPredictor
         }
 
         var inv = 1d / length;
-        var deltaX = inputX * inv * _speed * dtSeconds;
-        var deltaY = inputY * inv * _speed * dtSeconds;
+        var deltaX = inputX * inv * speed * dtSeconds;
+        var deltaY = inputY * inv * speed * dtSeconds;
 
         if (_blocked is null || _blocked.Count == 0)
         {
@@ -305,5 +416,9 @@ public sealed class ContinuousPredictor
         return Math.Sqrt((dx * dx) + (dy * dy));
     }
 
-    private readonly record struct BufferedInput(uint Seq, double DirX, double DirY, double Dt);
+    // The exact (dir, CLAMPED dt, SPEED) used to predict one frame. Speed (B2) is stored per-frame so replay
+    // reproduces a frame at the speed it was predicted at — normal frames at the live move speed, action frames at the
+    // action speed — which is essential once an action ends and the live move speed is restored while action frames are
+    // still in the unacked window.
+    private readonly record struct BufferedInput(uint Seq, double DirX, double DirY, double Dt, double Speed);
 }

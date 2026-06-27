@@ -1,6 +1,7 @@
 using LiteNetLib;
 using Mmo.Client.Core.Continuous;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Actions;
 using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
@@ -331,10 +332,20 @@ public sealed class MmoClient : IDisposable
     // else null (raw render). The predictor lives on this outer class, so the render-state builders inject its smooth
     // RenderX/RenderY here; ClientEntity.ToRenderState applies it only to the local entity and only for the rendered
     // Position (the confirmed Tile stays authoritative for targeting — S53 invariant).
-    private RenderPosition? LocalRenderOverride(ClientEntity entity) =>
+    private LocalRenderState? LocalRenderOverride(ClientEntity entity) =>
         entity.IsLocal && _predictor is { } predictor
-            ? new RenderPosition(predictor.RenderX, predictor.RenderY)
+            ? new LocalRenderState(
+                new RenderPosition(predictor.RenderX, predictor.RenderY),
+                // MOVEMENT-ACTIONS Phase B2 (carry-forward #1): the LOCAL player's PREDICTED airborne height (0 unless
+                // mid-action). The avatar renders THIS, never its own replicated VerticalOffset (which is for remote
+                // viewers) — one Z source, no double-count, and the end seam never pops to a lagging server Z.
+                predictor.PredictedVerticalOffset)
             : null;
+
+    // MOVEMENT-ACTIONS Phase B2: the LOCAL player's render override — the predictor's smooth RenderX/RenderY PLUS its
+    // predicted airborne height. Carried together so ToRenderState applies both (position + Z) from the one predicted
+    // source for the local entity, while remote entities keep gliding off their playout buffer.
+    private readonly record struct LocalRenderState(RenderPosition Position, double VerticalOffset);
 
     public bool TryGetEntity(uint networkId, out ReplicatedEntity entity)
     {
@@ -420,8 +431,20 @@ public sealed class MmoClient : IDisposable
     public uint PredictAndSendMove(float dirX, float dirY, float dtSeconds)
     {
         uint seq;
+        var sendDirX = dirX;
+        var sendDirY = dirY;
         if (_predictor is { } predictor)
         {
+            // MOVEMENT-ACTIONS Phase B2: while an action owns movement, SEND the locked heading (not the held WASD) —
+            // the predictor predicts the heading internally, and sending it means a server-REJECTED action still moves
+            // along the heading there (a smaller, bounded reconcile) while an ACCEPTED action ignores the motion but
+            // still ACKs the seq (trimming the buffer). Capture before PredictAndBuffer (which may end the action).
+            if (predictor.IsActionActive)
+            {
+                sendDirX = (float)predictor.ActionHeadingX;
+                sendDirY = (float)predictor.ActionHeadingY;
+            }
+
             // The predictor integrates the predicted present immediately (zero latency) and returns the monotonic
             // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile. The
             // predictor was seeded from _inputSeqHighWater on attach (EnsurePredictor), so its minted seq is already
@@ -437,7 +460,7 @@ public sealed class MmoClient : IDisposable
             seq = ++_inputSeqHighWater;
         }
 
-        Send(new MoveIntentMessage(seq, dirX, dirY, dtSeconds), DeliveryMethod.Unreliable);
+        Send(new MoveIntentMessage(seq, sendDirX, sendDirY, dtSeconds), DeliveryMethod.Unreliable);
         return seq;
     }
 
@@ -555,19 +578,61 @@ public sealed class MmoClient : IDisposable
         return sequence;
     }
 
-    // MOVEMENT-ACTIONS Phase B1: trigger a movement action (jump). Mints the next sequence off the DEDICATED
-    // _nextActionSeq counter (never _moveSequence / _attackSeq — a third independent stream) and sends an
-    // ActionIntentMessage RELIABLE-ORDERED so the low-rate trigger is never silently lost (mirrors SendAttack). The
-    // wire carries only (actionId, heading) — never a height/distance/duration, which live in the server-side def
-    // (anti-cheat). `heading` is the launch bearing already quantized via AimAngle.Quantize (the same quantization the
-    // attack aim uses), so the server decodes it to the identical unit heading. AuthoredTick is 0: B1 has NO
-    // prediction and anchors the action SERVER-SIDE at the receipt tick (exactly like SendAttack today); B2 will stamp
-    // a real EstimateServerTick once a tick-alignment model is chosen. Returns the action seq sent (for tests/diag).
-    public uint SendAction(byte actionId, ushort heading)
+    // MOVEMENT-ACTIONS Phase B2: trigger a movement action (jump) AND PREDICT it locally (Model A — the client runs the
+    // deterministic action on its own clock from the trigger, leading the server by ~RTT along the same arc; the
+    // existing reconcile carries the lead and absorbs a rejection). Resolves the def from the SHARED registry, decodes
+    // the launch heading to a unit vector, and calls the predictor's BeginAction — which DECLINES (returns false) if an
+    // action is already active (one-at-a-time, design §2.8) or the trigger is degenerate. On a local decline we do NOT
+    // send the intent, mirroring exactly what the server's can-act would reject — so the spam case never mispredicts.
+    // Otherwise mint the DEDICATED _nextActionSeq (never the move/attack seq — the NET6 third-cursor lesson) and send
+    // the ActionIntent RELIABLE-ORDERED. The wire still carries only (actionId, heading) — never a height/distance/
+    // duration, which live in the server-side def (anti-cheat). AuthoredTick stays 0: Model A anchors the action at the
+    // server RECEIPT tick (the measure-first probe showed an EstimateServerTick would only zero an invisible temporal
+    // lead — see todo/N-phaseB2). Returns the action seq sent, or null if the trigger was declined locally.
+    public uint? SendAction(byte actionId, ushort heading)
     {
+        var headingVector = AimAngle.ToUnitVector(heading);
+
+        // Predict locally when a predictor is attached. BeginAction enforces one-at-a-time + a non-degenerate trigger;
+        // a decline means "don't send" (the server would reject it too). Resolve the def + derive the action's average
+        // ground speed + duration from the SAME shared registry the server executes from, so predict == server on open
+        // ground. An unknown id (no def) is dropped here, like the server's registry lookup.
+        if (_predictor is { } predictor)
+        {
+            if (!MovementActionRegistry.Default.TryGet((ActionId)actionId, out var def))
+            {
+                return null;
+            }
+
+            var tickRate = Server?.TickRate ?? 20;
+            var (actionSpeed, durationSeconds) = DeriveActionMotion(def, tickRate);
+            if (!predictor.BeginAction(
+                    headingVector.X, headingVector.Y, actionSpeed, durationSeconds, def.JumpHeight, def.AirborneTicks, tickRate))
+            {
+                return null; // declined locally (already in an action / degenerate) — mirror server one-at-a-time
+            }
+        }
+
         var sequence = ++_nextActionSeq;
         Send(new ActionIntentMessage(sequence, actionId, heading, AuthoredTick: 0u), DeliveryMethod.ReliableOrdered);
         return sequence;
+    }
+
+    // MOVEMENT-ACTIONS Phase B2: derive the action's average ground SPEED (units/sec) and DURATION (seconds) from the
+    // def + tick rate, so the client's per-frame prediction covers exactly the action's distance over its duration —
+    // matching the server's per-tick ForwardArc executor on open ground (the determinism contract). The executor
+    // advances def.ForwardDistanceUnits over def.DurationTicks ticks; average speed = distance × tickRate ÷ ticks, and
+    // duration = ticks ÷ tickRate. A zero-duration/zero-tickRate def yields (0, 0) ⇒ BeginAction declines it.
+    private static (double Speed, double DurationSeconds) DeriveActionMotion(MovementActionDef def, int tickRate)
+    {
+        if (def.DurationTicks == 0 || tickRate <= 0)
+        {
+            return (0d, 0d);
+        }
+
+        var durationSeconds = def.DurationTicks / (double)tickRate;
+        var speed = def.ForwardDistanceUnits * tickRate / def.DurationTicks;
+        return (speed, durationSeconds);
     }
 
     // COMBAT-TUNING: the attack-cooldown fallback used before the first replicated CombatTuningSnapshot arrives —
@@ -1567,10 +1632,10 @@ public sealed class MmoClient : IDisposable
         // (Tile) ALWAYS stays the confirmed tile — targeting/harvest reads it and must NEVER see the
         // predicted/interpolated position (S53 invariant). Only the rendered Position moves. (The vertical hop arc
         // is retired — every remote kind, including the slime, glides flat between tiles.)
-        public EntityRenderState ToRenderState(TimeSpan now, RenderPosition? localOverride = null)
+        public EntityRenderState ToRenderState(TimeSpan now, LocalRenderState? localOverride = null)
         {
             var position = IsLocal && localOverride.HasValue
-                ? localOverride.Value
+                ? localOverride.Value.Position
                 : _remoteInterp.Sample(now);
 
             // HOP-ARC (cosmetic, Phase-8 Option B): a slime hops server-authoritatively as a SPARSE Position jump
@@ -1586,10 +1651,15 @@ public sealed class MmoClient : IDisposable
 
             // MOVEMENT-ACTIONS (finding #1 fix): a REMOTE entity's replicated jump height rides the SAME playout
             // timeline as its horizontal — _remoteInterp.SampledVerticalOffset (set by the Sample(now) above) — so the
-            // arc's apex sits over the XY midpoint instead of leading / stair-stepping vs the smooth glide. The LOCAL
-            // player always reads its own raw CONFIRMED height (B1 has no Z prediction); SampledVerticalOffset is read
-            // for remote entities only, so the local branch never depends on whether Sample ran this frame.
-            var renderVerticalOffset = IsLocal ? VerticalOffset : _remoteInterp.SampledVerticalOffset;
+            // arc's apex sits over the XY midpoint instead of leading / stair-stepping vs the smooth glide.
+            // MOVEMENT-ACTIONS Phase B2 (carry-forward #1): the LOCAL player now renders its PREDICTED airborne height
+            // (the predictor's PredictedVerticalOffset, threaded in via localOverride) — NOT its replicated
+            // VerticalOffset. The local avatar's own jump is client-predicted, so its Z is predicted too (one source,
+            // no double-count); the replicated VerticalOffset on the local entity is only for OTHER clients' screens.
+            // Falls back to the confirmed value only when no predictor/override exists (pre-spawn), where it is 0.
+            var renderVerticalOffset = IsLocal
+                ? (localOverride?.VerticalOffset ?? VerticalOffset)
+                : _remoteInterp.SampledVerticalOffset;
 
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
                 AuthoritativePosition: RenderPosition.FromWorld(Position),

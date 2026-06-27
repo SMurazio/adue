@@ -76,7 +76,22 @@ public static class BallisticArc
         }
 
         var t = tickInAction / (double)tickRate;
-        var z = (launchVelocity * t) - (0.5d * gravity * t * t);
+        return HeightOffsetAtTime(gravity, launchVelocity, t);
+    }
+
+    // The height-above-ground at a CONTINUOUS action-time `timeSeconds` from PRE-DERIVED constants (g, v0) — the same
+    // z = v0·t − ½·g·t² parabola, sampled at a fractional time rather than an integer tick. PHASE B2 uses this so the
+    // LOCAL player's PREDICTED jump renders a SMOOTH per-frame arc (the client predicts the action on its own clock
+    // and samples the height at the elapsed seconds), while the integer-tick form stays the authoritative server value.
+    // The two agree exactly at integer ticks (t = i/tickRate). PURE; floors negatives to 0 (before launch / after land).
+    public static double HeightOffsetAtTime(double gravity, double launchVelocity, double timeSeconds)
+    {
+        if (timeSeconds <= 0d)
+        {
+            return 0d;
+        }
+
+        var z = (launchVelocity * timeSeconds) - (0.5d * gravity * timeSeconds * timeSeconds);
         return z > 0d ? z : 0d;
     }
 }

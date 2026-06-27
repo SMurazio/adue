@@ -685,11 +685,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// MOVEMENT-ACTIONS Phase B1 — TEMPORARY DEV TRIGGER (Phase E replaces it with real skill-input binding): send a
-	// ballistic-jump ActionIntent on the action stream (MmoClient.SendAction, its OWN cursor). The launch HEADING is
-	// the local player's current facing bearing, quantized via the SAME shared AimAngle the attack aim uses, so the
-	// server decodes it to the identical unit heading. No client prediction in B1 — the jump is server-confirmed (the
-	// avatar rises via the replicated VerticalOffset once the snapshot lands), which is intentional for B1.
+	// MOVEMENT-ACTIONS Phase B2 — TEMPORARY DEV TRIGGER (Phase E replaces it with real skill-input binding): trigger a
+	// ballistic-jump on the action stream (MmoClient.SendAction, its OWN cursor) — now CLIENT-PREDICTED (Model A): the
+	// jump moves the local avatar INSTANTLY (predicted), leading the server by ~RTT along the same arc, and the
+	// reconcile keeps it glued unless the server rejects. The launch HEADING is the cursor aim (or the discrete facing),
+	// quantized via the SAME shared AimAngle the attack aim uses, so client predict + server execute decode the
+	// identical unit heading. SendAction returns null when the trigger is DECLINED locally (one-at-a-time: an action is
+	// already in flight) — in that case nothing was sent and we show no feedback, mirroring the server's can-act reject.
 	private void TryJump()
 	{
 		if (_client?.IsLoggedIn != true)
@@ -703,8 +705,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			? cursorAim
 			: LocalFacingRadians();
 
-		_client.SendAction((byte)ActionId.Jump, AimAngle.Quantize(headingRadians));
-		ShowInteractFeedback("Jump!");
+		if (_client.SendAction((byte)ActionId.Jump, AimAngle.Quantize(headingRadians)) is not null)
+		{
+			ShowInteractFeedback("Jump!");
+		}
 	}
 
 	// FREEAIM-PREDICT: predict + pop the attacker's own damage numbers for a swing from (attackerX, attackerZ) along
