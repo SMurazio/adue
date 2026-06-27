@@ -68,6 +68,64 @@ public sealed class ServerActionExecutorTests
         return heights;
     }
 
+    // B2 MEASURE-FIRST — the tick-alignment model decision (per the project's measure-before-guessing rule; the three
+    // historical netcode misses all trusted a model instead of measuring). With MODEL A (client predicts the action on
+    // its LOCAL clock from trigger; the server runs the SAME deterministic action from receipt ~RTT later, force-
+    // including the entity each tick — the e2e4c3d fix), the client's predicted position LEADS the server's reported
+    // position by RTT ticks ALONG THE SAME ARC — exactly like ordinary movement prediction. This probe records the
+    // canonical trajectory off the REAL executor and measures that lead (the reconcile / render-smoothing burden) at a
+    // few latencies, and confirms both sides land at the IDENTICAL spot (determinism → no spatial discrepancy at the
+    // end, only a temporal lead that converges at touchdown). Decides Model A (keep+smooth the lead, NO estimator) vs
+    // Model B (resurrect EstimateServerTick to zero the temporal lead). NOT a regression test — a measurement that
+    // PINS the numbers so the model choice is data-driven.
+    [Fact]
+    public void Measure_PredictionLeadAlongTheArc_UnderLatency()
+    {
+        var (executor, entity) = Build(spawn: new TileCoord(8, 8));
+        const int n = 10;
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: (uint)n, jumpHeight: 2d, forwardDistanceUnits: 5d, cooldownTicks: 0, animationId: 1);
+
+        var origin = entity.Position;
+        var xy = new System.Collections.Generic.List<WorldVector>();
+        var z = new System.Collections.Generic.List<double>();
+        Assert.True(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 0));
+        xy.Add(entity.Position);
+        z.Add(entity.VerticalOffset);
+        for (uint t = 1; t <= n; t++)
+        {
+            executor.Step(entity, t);
+            xy.Add(entity.Position);
+            z.Add(entity.VerticalOffset);
+        }
+
+        // ForwardArc XY is LINEAR (constant per-tick delta = forwardDist/duration = 0.5 u/tick), so the along-arc XY
+        // lead over an RTT window is EXACTLY rtt × 0.5 at every tick — bounded + predictable. One-way latency D ticks ⇒
+        // RTT 2D ⇒ XY lead = D units (≈ one tile per 50ms @ 20Hz). Measured off the REAL executor, not assumed.
+        foreach (var d in new[] { 1, 2, 3 })
+        {
+            var rtt = 2 * d;
+            double maxXyLead = 0d, maxZLead = 0d;
+            for (var i = rtt; i <= n; i++)
+            {
+                maxXyLead = System.Math.Max(maxXyLead, System.Math.Sqrt((xy[i] - xy[i - rtt]).LengthSquared));
+                maxZLead = System.Math.Max(maxZLead, System.Math.Abs(z[i] - z[i - rtt]));
+            }
+
+            // Pin the linear-XY lead against the real executor: lead == rtt × 0.5 == D units.
+            Assert.Equal(rtt * 0.5d, maxXyLead, 6);
+            // The parabolic Z lead is bounded by the apex (2.0) — record it stays under that.
+            Assert.True(maxZLead <= 2.0d + 1e-9, $"Z lead at D={d}: {maxZLead:F3}");
+        }
+
+        // DETERMINISM: the landing is a single point regardless of latency — both sides run the same arc to xy[N], so
+        // there is NO spatial discrepancy at the end (the lead is purely temporal, converging at touchdown). This is
+        // why Model A needs no estimator: the predicted lead is invisible under no-loss, exactly like movement.
+        Assert.Equal(origin.X + 5d, xy[n].X, 1e-6);
+        Assert.Equal(origin.Y, xy[n].Y, 1e-6);
+        Assert.Equal(0d, z[n], 1e-9);
+    }
+
     [Fact]
     public void ForwardArcJump_ReachesForwardTarget_AlongTheArc()
     {
