@@ -270,4 +270,113 @@ public sealed class ContinuousPredictorActionTests
         Assert.False(predictor.IsActionActive);
         Assert.Equal(0d, predictor.PredictedVerticalOffset, 9); // landed: predicted Z back to exactly 0
     }
+
+    [Fact]
+    public void Action_IgnoresHeldInput_PredictsLockedHeadingOnly()
+    {
+        // REGRESSION (todo N-local-helddir-jump-xy-mispredict): holding a movement direction WHILE jumping must not
+        // over-predict walk — the action OWNS movement, so the predictor integrates the LOCKED heading only and ignores
+        // the held WASD for the action's duration (mirroring the server suppressing move integration while IsActive).
+        // Before B2 the predictor integrated the held input every frame and fought the executor → a held-direction jump
+        // jittered/rubberbanded. Here: jump EAST while HOLDING north — the predicted path must go purely east.
+        var def = Jump();
+        var (speed, durationSeconds) = Motion(def);
+        var heading = Direction8.E.ToUnitVector();
+        var predictor = new ContinuousPredictor(MoveSpeed, 0d, 0d, blocked: null, radius: Radius);
+        Assert.True(predictor.BeginAction(heading.X, heading.Y, speed, durationSeconds, def.JumpHeight, def.AirborneTicks, TickRate));
+
+        for (var i = 0; i < (int)def.DurationTicks; i++)
+        {
+            predictor.PredictAndBuffer(0d, 1d, TickDt); // HOLD north (0,1) the whole jump
+        }
+
+        // Moved exactly the action's reach EAST (the locked heading); ZERO north drift from the held input.
+        Assert.Equal(def.ForwardDistanceUnits, predictor.PredictedX, 6);
+        Assert.Equal(0d, predictor.PredictedY, 6);
+    }
+
+    [Fact]
+    public void Action_Cooldown_DeclinesReTriggerUntilElapsed()
+    {
+        // The mirrored cooldown (independent-review Medium): after a predicted action ends, a re-trigger inside the
+        // action's cooldown window is DECLINED LOCALLY — so a double-press the server would reject on cooldown does not
+        // mispredict a false jump. The server arms the cooldown at the action's end for CooldownTicks; the client
+        // mirrors that with a wall-clock countdown. Once it elapses, a fresh trigger is accepted again.
+        var def = Jump(duration: 6, distance: 3, cooldown: 10);
+        var (speed, durationSeconds) = Motion(def);
+        var cooldownSeconds = def.CooldownTicks / (double)TickRate;
+        var heading = Direction8.E.ToUnitVector();
+        var predictor = new ContinuousPredictor(MoveSpeed, 0d, 0d, blocked: null, radius: Radius);
+
+        Assert.True(predictor.BeginAction(heading.X, heading.Y, speed, durationSeconds, def.JumpHeight, def.AirborneTicks, TickRate, cooldownSeconds));
+        for (var i = 0; i < (int)def.DurationTicks; i++)
+        {
+            predictor.PredictAndBuffer(0d, 0d, TickDt);
+        }
+
+        Assert.False(predictor.IsActionActive);
+        // Inside the cooldown window: a re-trigger is declined locally (no false predicted jump).
+        Assert.False(predictor.BeginAction(heading.X, heading.Y, speed, durationSeconds, def.JumpHeight, def.AirborneTicks, TickRate, cooldownSeconds));
+
+        // Advance past the cooldown.
+        var cooldownFrames = (int)Math.Ceiling(cooldownSeconds / TickDt) + 1;
+        for (var i = 0; i < cooldownFrames; i++)
+        {
+            predictor.PredictAndBuffer(0d, 0d, TickDt);
+        }
+
+        // Cooldown elapsed: a fresh trigger is accepted.
+        Assert.True(predictor.BeginAction(heading.X, heading.Y, speed, durationSeconds, def.JumpHeight, def.AirborneTicks, TickRate, cooldownSeconds));
+    }
+
+    [Fact]
+    public void Action_NoLoss_60fpsClientVs20HzServer_OpenGround_StaysSilent()
+    {
+        // Closes the gate's frame-rate gap (independent-review Low): the main no-loss gate runs 1 frame per tick. Here
+        // the client predicts at 60fps while the server steps the executor at 20Hz and snapshots arrive at the tick
+        // cadence (every 3 frames), reconciling D ticks behind. On OPEN ground the colinear per-frame motion sums to the
+        // per-tick motion at every tick boundary, so the reconcile stays SILENT regardless of frame rate — confirming
+        // the no-correction contract is not an artifact of 1:1 frame/tick alignment. (The per-frame-vs-per-tick residual
+        // is a WALL-only effect, measured separately in Action_IntoWall_...).
+        var def = Jump();
+        var (speed, durationSeconds) = Motion(def);
+        var heading = Direction8.E.ToUnitVector();
+
+        var grid = new TileGrid(64, 64, Array.Empty<TileCoord>());
+        var serverEnt = NewEntity(new TileCoord(8, 8));
+        var serverPos = RunServer(grid, def, heading, serverEnt, padTicks: 12);
+        var origin = serverPos[0];
+
+        var predictor = new ContinuousPredictor(MoveSpeed, origin.X, origin.Y, blocked: null, radius: Radius);
+        Assert.True(predictor.BeginAction(heading.X, heading.Y, speed, durationSeconds, def.JumpHeight, def.AirborneTicks, TickRate));
+
+        const double frameDt = 1d / 60d;
+        const int framesPerTick = 3; // 60fps / 20Hz
+        const int d = 3;             // one-way latency in ticks
+        var totalTicks = (int)def.DurationTicks + 8;
+        var maxCorrection = 0d;
+        for (var frame = 1; frame <= totalTicks * framesPerTick; frame++)
+        {
+            predictor.PredictAndBuffer(0d, 0d, frameDt);
+            if (frame % framesPerTick != 0)
+            {
+                continue; // a snapshot arrives only on tick boundaries
+            }
+
+            var tick = frame / framesPerTick;
+            var ackTick = tick - d;
+            if (ackTick < 0)
+            {
+                continue;
+            }
+
+            // The server has processed the client frames through tick ackTick ⇒ lastInputSeq = ackTick × framesPerTick.
+            var lastSeq = (uint)(ackTick * framesPerTick);
+            predictor.Reconcile(serverPos[Math.Min(ackTick, serverPos.Count - 1)], lastSeq);
+            maxCorrection = Math.Max(maxCorrection, predictor.LastCorrectionUnits);
+        }
+
+        // Silent at 60fps on open ground — the reconcile opened no meaningful correction at any tick boundary.
+        Assert.True(maxCorrection < 1e-6, $"60fps open-ground correction was not silent: {maxCorrection}");
+    }
 }

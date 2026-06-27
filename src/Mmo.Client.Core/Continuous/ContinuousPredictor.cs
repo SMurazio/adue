@@ -113,6 +113,16 @@ public sealed class ContinuousPredictor
     private double _actionGravity;    // derived ballistic constant (g) for the predicted Z
     private double _actionLaunchVelocity; // derived ballistic constant (v0) for the predicted Z
 
+    // MOVEMENT-ACTIONS Phase B2 (cooldown mirror): the client mirrors the server's per-action COOLDOWN so a re-trigger
+    // inside the lockout is DECLINED LOCALLY (no false predicted jump the server would reject). The server arms the
+    // cooldown when the action ENDS (endTick + CooldownTicks), so the client arms `_actionCooldownRemaining` (seconds)
+    // when its predicted action ends and counts it down each frame; `_pendingCooldownSeconds` carries the value from
+    // BeginAction to that end. This closes the common double-press window (the action's own duration already covers the
+    // in-flight one-at-a-time gate); a tiny residual edge of one-way latency around the boundary is absorbed by the
+    // normal reconcile. NOT a substitute for the server's authoritative gate — purely a local mispredict-avoidance.
+    private double _actionCooldownRemaining;
+    private double _pendingCooldownSeconds;
+
     // CONTINUOUS MIGRATION (Phase 4a, re-attach freeze fix): the input seq is a SINGLE persistent monotonic counter
     // owned by MmoClient, not per-predictor-instance — otherwise a mid-session re-attach (F5 prediction toggle,
     // respawn, AOI re-entry) would build a FRESH predictor whose counter restarts at 0, mint 1,2,3… all <= the
@@ -196,11 +206,12 @@ public sealed class ContinuousPredictor
         double durationSeconds,
         double jumpHeight,
         uint airborneTicks,
-        int tickRate)
+        int tickRate,
+        double cooldownSeconds = 0d)
     {
-        if (_actionActive)
+        if (_actionActive || _actionCooldownRemaining > 1e-9)
         {
-            return false; // one-at-a-time — an action already owns the entity (design §2.8)
+            return false; // one-at-a-time (design §2.8) OR still inside this action's mirrored cooldown — decline
         }
 
         var length = Math.Sqrt((headingX * headingX) + (headingY * headingY));
@@ -217,6 +228,7 @@ public sealed class ContinuousPredictor
         _actionElapsed = 0d;
         _actionGravity = BallisticArc.Gravity(jumpHeight, airborneTicks, tickRate);
         _actionLaunchVelocity = BallisticArc.LaunchVelocity(jumpHeight, airborneTicks, tickRate);
+        _pendingCooldownSeconds = double.IsFinite(cooldownSeconds) && cooldownSeconds > 0d ? cooldownSeconds : 0d;
         _actionActive = true;
         return true;
     }
@@ -269,6 +281,7 @@ public sealed class ContinuousPredictor
             if (_actionRemaining <= 1e-9)
             {
                 _actionActive = false;
+                _actionCooldownRemaining = _pendingCooldownSeconds; // arm the mirrored cooldown at the action's END
             }
         }
         else
@@ -277,6 +290,13 @@ public sealed class ContinuousPredictor
             dirY = inputY;
             speed = _speed;
             dt = clampedDt;
+
+            // Count down the mirrored cooldown while no action is active, so a re-trigger is declined until it elapses
+            // (closing the common double-press window). Armed above when the prior action ended; never below zero.
+            if (_actionCooldownRemaining > 0d)
+            {
+                _actionCooldownRemaining = Math.Max(0d, _actionCooldownRemaining - clampedDt);
+            }
         }
 
         // Trim defensively from the front if the server has gone silent and the window grew past the cap — dropping the

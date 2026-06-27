@@ -606,10 +606,13 @@ public sealed class MmoClient : IDisposable
 
             var tickRate = Server?.TickRate ?? 20;
             var (actionSpeed, durationSeconds) = DeriveActionMotion(def, tickRate);
+            // Mirror the server's per-action cooldown so a re-trigger inside the lockout is declined LOCALLY (no false
+            // predicted jump the server would reject). The server arms it at the action's END for CooldownTicks.
+            var cooldownSeconds = tickRate > 0 ? def.CooldownTicks / (double)tickRate : 0d;
             if (!predictor.BeginAction(
-                    headingVector.X, headingVector.Y, actionSpeed, durationSeconds, def.JumpHeight, def.AirborneTicks, tickRate))
+                    headingVector.X, headingVector.Y, actionSpeed, durationSeconds, def.JumpHeight, def.AirborneTicks, tickRate, cooldownSeconds))
             {
-                return null; // declined locally (already in an action / degenerate) — mirror server one-at-a-time
+                return null; // declined locally (already in an action / cooling down / degenerate) — mirror server can-act
             }
         }
 
