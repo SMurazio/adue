@@ -1571,8 +1571,8 @@ public sealed class MmoClient : IDisposable
             // MOVEMENT-ACTIONS (finding #1 fix): a REMOTE entity's replicated jump height rides the SAME playout
             // timeline as its horizontal — _remoteInterp.SampledVerticalOffset (set by the Sample(now) above) — so the
             // arc's apex sits over the XY midpoint instead of leading / stair-stepping vs the smooth glide. The LOCAL
-            // player renders its own confirmed height directly (its position comes from the predictor override, not the
-            // interp Sample, so SampledVerticalOffset isn't refreshed for it; B1 has no Z prediction anyway).
+            // player always reads its own raw CONFIRMED height (B1 has no Z prediction); SampledVerticalOffset is read
+            // for remote entities only, so the local branch never depends on whether Sample ran this frame.
             var renderVerticalOffset = IsLocal ? VerticalOffset : _remoteInterp.SampledVerticalOffset;
 
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
