@@ -962,15 +962,22 @@ public sealed class GameServer
             // → the soft ~1-tile snap-back. Remote viewers stay tile-keyed (StateRevision) so their AOI bandwidth is
             // unchanged; this adds at most ONE entity (the player's own) per tick to its own snapshot while moving, and
             // nothing at rest (Velocity == 0 → falls through to the normal acked-baseline delta).
-            // MOVEMENT-ACTIONS Phase B1: also force-include the own entity while a movement action is ACTIVE on it —
-            // an airborne entity moves via the executor and may have Velocity == 0 (an InPlace jump, or any tick whose
-            // XY delta is zero), so the Velocity-only predicate would delta it out and FREEZE its replicated
-            // VerticalOffset between tile crossings. Including it every airborne tick re-publishes the live height (and
-            // XY) so remote viewers see the real arc and a (future B2) predictor reconciles against the live action
-            // position. Off-action this is the unchanged Velocity-only path (no extra entity at rest).
+            // MOVEMENT-ACTIONS Phase B1 + remote-fluidity fix: an entity running a movement action is force-included
+            // for EVERY in-AOI recipient (not just its own), each airborne tick. WHY all recipients: a jumping entity
+            // moves via the executor with Velocity == 0 and bumps StateRevision only on tile crossings (R1), so a
+            // REMOTE viewer would otherwise receive it only ~once per tile crossed and linearly lerp the PARABOLIC
+            // VerticalOffset between those sparse points — a faceted, non-fluid arc (the live symptom). Force-including
+            // it every airborne tick hands the interpolator the real per-tick height to glide. SCOPED to IsActive (a
+            // running action) only: ordinary sub-tile movement is NOT in _active, so it still rides the unchanged
+            // own-only + tile-keyed path — the R1 optimization and remote AOI bandwidth at rest/walk are untouched. A
+            // jump is short + rare, so the transient cost is bounded (~AirborneTicks extra includes per viewer, self-
+            // limiting when the action ends and IsActive goes false). On the LANDING tick IsActive is already false
+            // (the instance is removed in Step before it returns), so the grounded height re-publishes via the normal
+            // !HasAckedCurrentRevision path (SnapToGround's StateRevision bump) — no double-send.
             var forceOwnWhileMoving = entity.NetworkId == recipientEntity.NetworkId
-                && (entity.Velocity.LengthSquared > 0d || _actionExecutor.IsActive(entity));
-            if (forceOwnWhileMoving || !recipient.HasAckedCurrentRevision(entity))
+                && entity.Velocity.LengthSquared > 0d;
+            var forceActionAirborne = _actionExecutor.IsActive(entity);
+            if (forceOwnWhileMoving || forceActionAirborne || !recipient.HasAckedCurrentRevision(entity))
             {
                 _payloadEntityScratch.Add(entity);
             }
