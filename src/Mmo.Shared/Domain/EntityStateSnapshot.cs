@@ -28,6 +28,11 @@ namespace Mmo.Shared.Domain;
 // (the non-airborne common case, tests) is unchanged; the codec encodes it compactly (a presence flag + an optional
 // Q12.4 ushort, so a grounded entity pays +1 byte). The renderer LIFTS the visual by it; XY/collision/AOI never read it
 // (the XY/Z split, §1.4.1).
+// REMOTE-WALK Phase 1 (v39): Velocity is the entity's authoritative CONTINUOUS velocity (units/sec, = unitDir ×
+// SpeedUnitsPerSecond, zeroed on stop). It is DEFAULTED (Zero) so every existing construction (tests, the resting
+// common case) is unchanged; the codec encodes it compactly under a combined flags byte (a "moving" presence bit +
+// two signed shorts of 1/256-unit/sec velocity, only when moving). It is replicated so a remote client can dead-reckon
+// the entity between sparse snapshots (Phase 2 — Phase 1 only WIRES + BUFFERS it; Sample does not extrapolate yet).
 public readonly record struct EntityStateSnapshot(
     uint NetworkId,
     WorldVector Position,
@@ -35,4 +40,5 @@ public readonly record struct EntityStateSnapshot(
     bool Depleted = false,
     ushort Health = 0,
     ushort MaxHealth = 0,
-    double VerticalOffset = 0d);
+    double VerticalOffset = 0d,
+    WorldVector Velocity = default);

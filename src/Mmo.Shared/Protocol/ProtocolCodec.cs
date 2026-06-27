@@ -51,7 +51,17 @@ public static class ProtocolCodec
     // per-entity snapshot state gains an OPTIONAL quantised VerticalOffset (the real airborne height, design §1.4.5):
     // a single airborne-FLAG byte after MaxHealth — 0 ⇒ grounded (VerticalOffset 0, no further bytes, the common
     // case at +1 byte only); 1 ⇒ a Q12.4 ushort height follows. Server + every in-repo client flip together.
-    public const byte Version = 38;
+    // v39 — replicated per-entity Velocity (+ combined airborne/moving flags byte) for remote dead-reckoning. The
+    // per-entity tail after MaxHealth is now a single FLAGS byte (bit0=airborne ⇒ VerticalOffset present, bit1=moving
+    // ⇒ Velocity present) followed by the present fields in order: the Q12.4 ushort height (if airborne), then velX,velY
+    // as signed shorts of 1/256 units/sec (if moving). A resting grounded entity stays at flags 0 (+1 byte). Server +
+    // every in-repo client flip together. WIRE-ONLY: the client buffers the velocity but does NOT extrapolate yet.
+    public const byte Version = 39;
+
+    // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
+    // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
+    // the short range on send; component = quantized / Scale on receive.
+    private const double VelocityScale = 256d;
 
     private const int MaxMonsterTypes = 256;
 
@@ -394,45 +404,95 @@ public static class ProtocolCodec
             // "no HP" (resources/players-without-stats); the client hides the bar in that case.
             writer.Write(entity.Health);
             writer.Write(entity.MaxHealth);
-            // MOVEMENT-ACTIONS Phase B1 (v38): the replicated airborne height (design §1.4.5). A single AIRBORNE-FLAG
-            // byte after MaxHealth keeps the common GROUNDED case at +1 byte/entity: flag 0 ⇒ on the ground
-            // (VerticalOffset 0), nothing follows; flag 1 ⇒ a Q12.4 ushort height (sixteenths of a tile, the same
-            // fixed-point the position uses) follows. Heights are small (bounded by JumpHeight, ~a few tiles), so the
-            // ushort range (≈4095 tiles of headroom) is ample. FUTURE: if airborne bandwidth ever bites, an
-            // airborne-only side-list (only airborne entities carry height) replaces the per-entity flag byte.
-            WriteVerticalOffset(writer, entity.VerticalOffset);
+            // REMOTE-WALK Phase 1 (v39): the per-entity tail is a single combined FLAGS byte (bit0=airborne ⇒
+            // VerticalOffset present, bit1=moving ⇒ Velocity present) followed by the present fields IN ORDER —
+            // the Q12.4 ushort height (if airborne), then velX,velY signed shorts of 1/256 units/sec (if moving).
+            // A resting grounded entity ⇒ flags 0, +1 byte (the common case stays cheap). The flags byte is written
+            // ONCE before the conditional fields; ReadEntityStateTail mirrors this byte-for-byte (the cardinal risk —
+            // a single unmirrored conditional desyncs every entity after it). Replaces v38's lone airborne-flag byte.
+            WriteEntityStateTail(writer, entity.VerticalOffset, entity.Velocity);
         }
     }
 
-    // MOVEMENT-ACTIONS Phase B1: write the optional airborne height. Grounded (offset <= 0 or non-finite) writes the
-    // single flag byte 0. Airborne writes flag 1 + a Q12.4 ushort (round(offset * 16), clamped to the ushort range so
-    // an absurd height can't wrap). Mirrored by ReadVerticalOffset.
-    private static void WriteVerticalOffset(BinaryWriter writer, double verticalOffset)
+    // REMOTE-WALK Phase 1 (v39): write the combined per-entity tail — a FLAGS byte then the present optional fields.
+    //   bit0 (airborne): VerticalOffset > 0 (and finite). Followed by a Q12.4 ushort (round(offset * 16), clamped to
+    //     the ushort range so an absurd height can't wrap) — sixteenths of a tile, the same fixed-point as position.
+    //   bit1 (moving): Velocity.LengthSquared > 0. Followed by velX,velY each a signed short = round(component * 256)
+    //     clamped to the short range, 1/256 units/sec precision (±128 units/sec). A jump has Velocity == 0 (the
+    //     executor drives it ballistically, not via Velocity) ⇒ airborne bit set, moving bit NOT set, no velocity.
+    // Mirrored EXACTLY by ReadEntityStateTail (same flag order, same conditional fields in the same order).
+    private static void WriteEntityStateTail(BinaryWriter writer, double verticalOffset, WorldVector velocity)
     {
-        if (!(verticalOffset > 0d) || !double.IsFinite(verticalOffset))
+        var airborne = verticalOffset > 0d && double.IsFinite(verticalOffset);
+        var moving = velocity.LengthSquared > 0d;
+
+        byte flags = 0;
+        if (airborne)
         {
-            writer.Write((byte)0);
-            return;
+            flags |= 0x1;
         }
 
-        writer.Write((byte)1);
-        var sixteenths = System.Math.Round(verticalOffset * PositionEncoding.Scale, System.MidpointRounding.AwayFromZero);
-        var clamped = System.Math.Clamp(sixteenths, 0d, ushort.MaxValue);
-        writer.Write((ushort)clamped);
+        if (moving)
+        {
+            flags |= 0x2;
+        }
+
+        writer.Write(flags);
+
+        if (airborne)
+        {
+            var sixteenths = System.Math.Round(verticalOffset * PositionEncoding.Scale, System.MidpointRounding.AwayFromZero);
+            var clamped = System.Math.Clamp(sixteenths, 0d, ushort.MaxValue);
+            writer.Write((ushort)clamped);
+        }
+
+        if (moving)
+        {
+            writer.Write(QuantizeVelocityComponent(velocity.X));
+            writer.Write(QuantizeVelocityComponent(velocity.Y));
+        }
     }
 
-    // MOVEMENT-ACTIONS Phase B1: read the optional airborne height (mirrors WriteVerticalOffset). Flag 0 ⇒ 0; flag 1 ⇒
-    // decode the Q12.4 ushort back to world units (/16).
-    private static double ReadVerticalOffset(BinaryReader reader)
+    // REMOTE-WALK Phase 1 (v39): read the combined per-entity tail (mirrors WriteEntityStateTail). Decode the FLAGS
+    // byte, then read the present optional fields IN ORDER — height (if bit0), then velX,velY (if bit1). Absent fields
+    // default to grounded (0) / Zero velocity. The read order MUST match the write order exactly or every subsequent
+    // entity in the snapshot desyncs.
+    private static (double VerticalOffset, WorldVector Velocity) ReadEntityStateTail(BinaryReader reader)
     {
-        var flag = reader.ReadByte();
-        if (flag == 0)
+        var flags = reader.ReadByte();
+        var airborne = (flags & 0x1) != 0;
+        var moving = (flags & 0x2) != 0;
+
+        var verticalOffset = 0d;
+        if (airborne)
         {
-            return 0d;
+            var sixteenths = reader.ReadUInt16();
+            verticalOffset = sixteenths / PositionEncoding.Scale;
         }
 
-        var sixteenths = reader.ReadUInt16();
-        return sixteenths / PositionEncoding.Scale;
+        var velocity = WorldVector.Zero;
+        if (moving)
+        {
+            var vx = reader.ReadInt16() / VelocityScale;
+            var vy = reader.ReadInt16() / VelocityScale;
+            velocity = new WorldVector(vx, vy);
+        }
+
+        return (verticalOffset, velocity);
+    }
+
+    // REMOTE-WALK Phase 1 (v39): quantize one velocity component to a signed short of 1/256 units/sec, clamped to the
+    // short range so an absurd speed can't wrap. Non-finite ⇒ 0 (defensive; velocities are server-computed and finite).
+    private static short QuantizeVelocityComponent(double component)
+    {
+        if (!double.IsFinite(component))
+        {
+            return 0;
+        }
+
+        var quantized = System.Math.Round(component * VelocityScale, System.MidpointRounding.AwayFromZero);
+        var clamped = System.Math.Clamp(quantized, short.MinValue, short.MaxValue);
+        return (short)clamped;
     }
 
     private static void WriteHeader(BinaryWriter writer, MessageType type)
@@ -549,10 +609,11 @@ public static class ProtocolCodec
             // COMBAT-S2A (v27): mirrors WriteEntityStates — Health then MaxHealth, ushort each.
             var health = reader.ReadUInt16();
             var maxHealth = reader.ReadUInt16();
-            // MOVEMENT-ACTIONS Phase B1 (v38): the optional airborne height — flag byte then (if airborne) a Q12.4
-            // ushort. Absent (flag 0) ⇒ VerticalOffset 0, the grounded common case.
-            var verticalOffset = ReadVerticalOffset(reader);
-            entities.Add(new EntityStateSnapshot(networkId, position, facing, depleted, health, maxHealth, verticalOffset));
+            // REMOTE-WALK Phase 1 (v39): the combined per-entity tail — a FLAGS byte then the present optional fields
+            // (height if airborne, then velX,velY if moving). Mirrors WriteEntityStateTail byte-for-byte. Absent ⇒
+            // grounded (VerticalOffset 0) / Zero velocity, the resting common case.
+            var (verticalOffset, velocity) = ReadEntityStateTail(reader);
+            entities.Add(new EntityStateSnapshot(networkId, position, facing, depleted, health, maxHealth, verticalOffset, velocity));
         }
 
         return entities;

@@ -125,14 +125,17 @@ public sealed class RemotePositionInterpolator
     // would let the playout lerp backward and rubberband. A repeated identical arrival time is likewise ignored.
     // `verticalOffset` defaults to 0 (grounded) so the XY-only callers/tests that predate the replicated height
     // remain correct (a grounded entity).
-    public void Confirm(WorldVector position, TimeSpan receivedAt, double verticalOffset = 0d)
+    // REMOTE-WALK Phase 1 (v39): `velocity` (units/sec, server-replicated) is BUFFERED on the sample for Phase 2's
+    // dead-reckoning. It defaults to Zero so the callers/tests that predate it remain correct. Phase 1 ONLY stores it
+    // — Sample does NOT extrapolate from it yet (a deliberate behavioral no-op; Phase 2 wires the extrapolation).
+    public void Confirm(WorldVector position, TimeSpan receivedAt, double verticalOffset = 0d, WorldVector velocity = default)
     {
         if (_samples.Count > 0 && receivedAt <= _samples[^1].ReceivedAt)
         {
             return;
         }
 
-        _samples.Add(new BufferedPosition(RenderPosition.FromWorld(position), verticalOffset, receivedAt));
+        _samples.Add(new BufferedPosition(RenderPosition.FromWorld(position), verticalOffset, velocity, receivedAt));
         FastForwardIfBackedUp();
 
         while (_samples.Count > MaxBufferedSamples)
@@ -247,5 +250,7 @@ public sealed class RemotePositionInterpolator
         return _renderPosition;
     }
 
-    private readonly record struct BufferedPosition(RenderPosition Position, double VerticalOffset, TimeSpan ReceivedAt);
+    // REMOTE-WALK Phase 1 (v39): Velocity (units/sec) is BUFFERED here per sample for Phase 2 dead-reckoning. Sample
+    // does not yet read it (no extrapolation this phase) — it rides the sample purely so Phase 2 can turn on.
+    private readonly record struct BufferedPosition(RenderPosition Position, double VerticalOffset, WorldVector Velocity, TimeSpan ReceivedAt);
 }

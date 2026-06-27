@@ -996,7 +996,7 @@ public sealed class MmoClient : IDisposable
                     state.Facing);
             }
 
-            var confirmation = entity.ApplySnapshot(state.Position, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth, state.VerticalOffset);
+            var confirmation = entity.ApplySnapshot(state.Position, state.Facing, _currentTime, sequence, _lastRecipientStepSeq, serverTick, state.Depleted, state.Health, state.MaxHealth, state.VerticalOffset, state.Velocity);
             if (confirmation.TileChanged)
             {
                 _movementTrace.TileConfirmed(
@@ -1043,7 +1043,11 @@ public sealed class MmoClient : IDisposable
                 // MOVEMENT-ACTIONS Phase B1: preserve the current replicated airborne height on a delta'd-out re-apply
                 // (like Depleted/HP) so an idle re-apply never resets a non-zero Z. (While airborne the own-entity is
                 // force-included every tick so it takes the in-snapshot path; this guards the unchanged-idle case.)
-                localEntity.VerticalOffset);
+                localEntity.VerticalOffset,
+                // REMOTE-WALK Phase 1 (v39): likewise preserve the current replicated Velocity on a delta'd-out
+                // re-apply. The local player is only delta'd out while IDLE (Velocity Zero), so this is Zero in
+                // practice; preserving it (rather than fabricating) keeps the re-apply a faithful no-op.
+                localEntity.Velocity);
 
             // CONTINUOUS MIGRATION (Phase 4): an IDLE local player is delta'd out of the payload but still reconciles
             // on the header (LastInputSeq) so any residual over-prediction converges down to the confirmed position at
@@ -1189,10 +1193,10 @@ public sealed class MmoClient : IDisposable
                 existing.SetStepCooldownMs(effectiveCooldown.Value, existingCadence, ResolveInterpolationDelay(existingCadence, existing.IsLocal));
             }
 
-            // EntitySpawn carries no Depleted/HP/vertical bits (those ride the AOI snapshot), so preserve whatever the
-            // last snapshot set rather than resetting a known-depleted node to available, zeroing known HP, or zeroing
-            // a replicated airborne height.
-            existing.ApplySnapshot(position, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth, existing.VerticalOffset);
+            // EntitySpawn carries no Depleted/HP/vertical/velocity bits (those ride the AOI snapshot), so preserve
+            // whatever the last snapshot set rather than resetting a known-depleted node to available, zeroing known HP,
+            // or zeroing a replicated airborne height / velocity (REMOTE-WALK Phase 1).
+            existing.ApplySnapshot(position, facing, _currentTime, _lastAppliedSnapshotSequence ?? 0, _lastRecipientStepSeq, serverTick: null, existing.Depleted, existing.Health, existing.MaxHealth, existing.VerticalOffset, existing.Velocity);
             if (isLocal)
             {
                 LocalNetworkId = networkId;
@@ -1460,6 +1464,11 @@ public sealed class MmoClient : IDisposable
         // same path (no prediction in B1).
         public double VerticalOffset { get; private set; }
 
+        // REMOTE-WALK Phase 1 (v39): the REPLICATED continuous velocity (units/sec) — server-authoritative, snapshot-
+        // driven like VerticalOffset. Zero at rest, non-zero while walking. Phase 1 BUFFERS it in the interpolator
+        // (via Confirm) but does NOT extrapolate from it yet (Sample is unchanged) — that is Phase 2.
+        public WorldVector Velocity { get; private set; } = WorldVector.Zero;
+
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
             && DisplayName.StartsWith("#", StringComparison.Ordinal);
@@ -1481,7 +1490,7 @@ public sealed class MmoClient : IDisposable
             // gliding off the same buffer (no hand-off, no driver re-anchor). The hop arc is retired.
         }
 
-        public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0, double verticalOffset = 0d)
+        public EntityConfirmationDebug ApplySnapshot(WorldVector position, Direction8 facing, TimeSpan receivedAt, uint snapshotSequence, uint recipientStepSeq, uint? serverTick, bool depleted = false, ushort health = 0, ushort maxHealth = 0, double verticalOffset = 0d, WorldVector velocity = default)
         {
             var previousTile = Tile;
             // Position/Facing always track the SERVER-CONFIRMED state: LocalTile (harvest/click targeting) reads
@@ -1498,6 +1507,10 @@ public sealed class MmoClient : IDisposable
             // local player's own jump is server-confirmed in B1 (no prediction), so it too renders from this confirmed
             // value rather than a predicted Z.
             VerticalOffset = verticalOffset;
+            // REMOTE-WALK Phase 1 (v39): adopt the replicated velocity (snapshot-driven, like VerticalOffset/HP). It is
+            // BUFFERED into the playout interpolator below (Confirm) so Phase 2 can dead-reckon; nothing reads it for
+            // extrapolation yet (Sample is unchanged this phase).
+            Velocity = velocity;
             LastSeenSnapshotSequence = snapshotSequence;
             // CONTINUOUS MIGRATION (Phase 4): the LOCAL predictor lives on the OUTER MmoClient (continuous), not here.
             // ClientEntity always tracks the SERVER-CONFIRMED state — the outer class reconciles the predictor against
@@ -1511,7 +1524,10 @@ public sealed class MmoClient : IDisposable
             // feeds it (harmless — its render comes from the predictor, ToRenderState ignores this for IsLocal).
             // The debug carries the buffered-sample depth + the last render position for the trace's queue-depth /
             // render read-out (the effective cadence is resolved at the outer call site from the entity's cooldown).
-            _remoteInterp.Confirm(position, receivedAt, verticalOffset);
+            // REMOTE-WALK Phase 1 (v39): thread the replicated velocity into the playout buffer alongside the position +
+            // height. The interpolator STORES it on the buffered sample but does NOT extrapolate from it yet (Sample is
+            // unchanged) — Phase 1 is wire + buffering only; Phase 2 turns on dead-reckoning.
+            _remoteInterp.Confirm(position, receivedAt, verticalOffset, velocity);
             return new EntityConfirmationDebug(
                 tile != previousTile,
                 _remoteInterp.BufferedSampleCount,

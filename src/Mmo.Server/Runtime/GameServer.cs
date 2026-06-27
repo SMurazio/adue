@@ -23,10 +23,12 @@ public sealed class GameServer
     // COMBAT-S2A's public HP Health(2) + MaxHealth(2) = 12. CONTINUOUS MIGRATION (v36): qx/qy are the fixed-point
     // Q12.4 continuous position (two shorts) — same 4 bytes as the v35 tile shorts, so the per-entity size is unchanged.
     // MOVEMENT-ACTIONS Phase B1 (v38): + the airborne VerticalOffset — a flag byte (1, grounded) plus an optional
-    // Q12.4 ushort (2, airborne). This is a CHUNK-BUDGET estimate (packets must not overflow), so use the WORST case
-    // 1+2 = 3 to stay conservative: 12 + 3 = 15. (The real grounded entity is 13; over-estimating only chunks a hair
-    // earlier, never overflows.)
-    private const int EntityStateFixedBytes = 15;
+    // Q12.4 ushort (2, airborne).
+    // REMOTE-WALK Phase 1 (v39): the airborne flag byte is now a COMBINED flags byte that can also gate an optional
+    // Velocity — velX,velY signed shorts (4, moving). This is a CHUNK-BUDGET estimate (packets must not overflow), so
+    // use the WORST case flags(1) + height(2) + velocity(4) = 7: 12 + 7 = 19. (A resting grounded entity is really 13;
+    // over-estimating only chunks a hair earlier, never overflows.)
+    private const int EntityStateFixedBytes = 19;
     private const int MaxBadPacketsBeforeDisconnect = 5;
     private const int DefaultStressClientCount = 120;
     private static readonly TimeSpan DefaultStressDuration = TimeSpan.FromSeconds(60);
@@ -1305,8 +1307,12 @@ public sealed class GameServer
         // MOVEMENT-ACTIONS Phase B1: replicate the authoritative airborne height (design §1.4.5). 0 for every grounded
         // entity (the codec then pays just the +1-byte presence flag); >0 while the entity is mid-jump (the executor
         // drives WorldEntity.VerticalOffset each airborne tick). XY/Position is untouched — the Z rides alongside.
+        // REMOTE-WALK Phase 1 (v39): also replicate the authoritative continuous Velocity (units/sec) so a remote
+        // client can dead-reckon the entity between sparse snapshots (Phase 2). Zero at rest (the codec then pays no
+        // velocity bytes — only the combined flags byte); non-zero while walking. WIRE-ONLY this phase: the client
+        // buffers it but does not extrapolate yet.
         return new EntityStateSnapshot(
-            entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth, entity.VerticalOffset);
+            entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth, entity.VerticalOffset, entity.Velocity);
     }
 
     // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry

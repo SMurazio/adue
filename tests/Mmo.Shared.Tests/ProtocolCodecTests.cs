@@ -159,6 +159,148 @@ public sealed class ProtocolCodecTests
         Assert.Equal(2u, decoded.Entities[1].NetworkId);
     }
 
+    // REMOTE-WALK Phase 1 (v39): a RESTING grounded entity (VerticalOffset 0, Velocity Zero) round-trips with the
+    // combined flags byte 0 and no trailing height/velocity bytes — the common case stays at +1 byte/entity.
+    [Fact]
+    public void EntityStateRestingGroundedRoundTripsAsFlagsZero()
+    {
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(7, WorldVector.FromTile(3, 4), Direction8.S, Depleted: false, Health: 50, MaxHealth: 100, VerticalOffset: 0d, Velocity: WorldVector.Zero)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.Equal(0d, entity.VerticalOffset);
+        Assert.Equal(WorldVector.Zero, entity.Velocity);
+        Assert.Equal((ushort)50, entity.Health);
+        Assert.Equal((ushort)100, entity.MaxHealth);
+    }
+
+    // REMOTE-WALK Phase 1 (v39): a MOVING grounded entity (Velocity != 0, VerticalOffset 0) round-trips with the flags
+    // byte 2 (moving bit only) + velX,velY signed shorts, within the 1/256-unit/sec velocity quantum.
+    [Fact]
+    public void EntityStateMovingGroundedVelocityRoundTripsWithinOne256th()
+    {
+        var velocity = new WorldVector(3.5d, -4.875d); // both exactly representable in 1/256 fixed-point
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(9, WorldVector.FromTile(2, 2), Direction8.N, VerticalOffset: 0d, Velocity: velocity)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.Equal(0d, entity.VerticalOffset);
+        Assert.True(System.Math.Abs(entity.Velocity.X - velocity.X) <= 1d / 256d, "velX outside the 1/256 quantum");
+        Assert.True(System.Math.Abs(entity.Velocity.Y - velocity.Y) <= 1d / 256d, "velY outside the 1/256 quantum");
+    }
+
+    // REMOTE-WALK Phase 1 (v39): an AIRBORNE NOT-MOVING entity (a jump — VerticalOffset > 0, Velocity Zero, because the
+    // executor drives the arc ballistically, not via Velocity) round-trips with the flags byte 1 (airborne bit only) +
+    // the Q12.4 height, and carries NO velocity (the jump uses force-include, not extrapolation).
+    [Fact]
+    public void EntityStateAirborneNotMovingRoundTripsWithHeightNoVelocity()
+    {
+        const double height = 1.53125d; // exactly representable in Q12.4
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(11, WorldVector.FromTile(2, 2), Direction8.N, VerticalOffset: height, Velocity: WorldVector.Zero)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.True(System.Math.Abs(entity.VerticalOffset - height) <= 1d / 16d);
+        Assert.Equal(WorldVector.Zero, entity.Velocity);
+    }
+
+    // REMOTE-WALK Phase 1 (v39): an AIRBORNE + MOVING entity (both bits set — flags byte 3) round-trips with the height
+    // AND the velocity, in that wire order (height then velX,velY).
+    [Fact]
+    public void EntityStateAirborneAndMovingRoundTripsWithHeightAndVelocity()
+    {
+        const double height = 0.75d;
+        var velocity = new WorldVector(-2.25d, 5.0d);
+        var original = new WorldSnapshotMessage(
+            1,
+            1,
+            new[]
+            {
+                new EntityStateSnapshot(13, WorldVector.FromTile(2, 2), Direction8.N, VerticalOffset: height, Velocity: velocity)
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        var entity = Assert.Single(decoded.Entities);
+        Assert.True(System.Math.Abs(entity.VerticalOffset - height) <= 1d / 16d);
+        Assert.True(System.Math.Abs(entity.Velocity.X - velocity.X) <= 1d / 256d, "velX outside the 1/256 quantum");
+        Assert.True(System.Math.Abs(entity.Velocity.Y - velocity.Y) <= 1d / 256d, "velY outside the 1/256 quantum");
+    }
+
+    // REMOTE-WALK Phase 1 (v39): a SINGLE snapshot mixing ALL FOUR flag combos (resting grounded, moving grounded,
+    // airborne not-moving, airborne+moving) round-trips with NO desync — the decoder stays aligned across the
+    // variable-length per-entity tails (the cardinal wire-compat risk: a single unmirrored conditional would shift
+    // every entity after it). Asserts each entity's id + tail fields independently.
+    [Fact]
+    public void EntityStateAllFourFlagCombosInOneSnapshotRoundTripAligned()
+    {
+        var movingVel = new WorldVector(1.5d, -3.25d);
+        var airborneMovingVel = new WorldVector(-0.5d, 2.0d);
+        var original = new WorldSnapshotMessage(
+            5,
+            5,
+            new[]
+            {
+                // flags 0: resting grounded
+                new EntityStateSnapshot(1, WorldVector.FromTile(0, 0), Direction8.E, VerticalOffset: 0d, Velocity: WorldVector.Zero),
+                // flags 2: moving grounded
+                new EntityStateSnapshot(2, WorldVector.FromTile(1, 0), Direction8.W, VerticalOffset: 0d, Velocity: movingVel),
+                // flags 1: airborne not-moving (a jump)
+                new EntityStateSnapshot(3, WorldVector.FromTile(2, 0), Direction8.N, VerticalOffset: 1.25d, Velocity: WorldVector.Zero),
+                // flags 3: airborne + moving
+                new EntityStateSnapshot(4, WorldVector.FromTile(3, 0), Direction8.S, VerticalOffset: 0.5d, Velocity: airborneMovingVel),
+            });
+
+        var decoded = Assert.IsType<WorldSnapshotMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(4, decoded.Entities.Count);
+
+        // No desync: ids stay in order across the variable-length tails.
+        Assert.Equal(1u, decoded.Entities[0].NetworkId);
+        Assert.Equal(2u, decoded.Entities[1].NetworkId);
+        Assert.Equal(3u, decoded.Entities[2].NetworkId);
+        Assert.Equal(4u, decoded.Entities[3].NetworkId);
+
+        // flags 0: resting grounded
+        Assert.Equal(0d, decoded.Entities[0].VerticalOffset);
+        Assert.Equal(WorldVector.Zero, decoded.Entities[0].Velocity);
+
+        // flags 2: moving grounded
+        Assert.Equal(0d, decoded.Entities[1].VerticalOffset);
+        Assert.True(System.Math.Abs(decoded.Entities[1].Velocity.X - movingVel.X) <= 1d / 256d);
+        Assert.True(System.Math.Abs(decoded.Entities[1].Velocity.Y - movingVel.Y) <= 1d / 256d);
+
+        // flags 1: airborne not-moving
+        Assert.True(System.Math.Abs(decoded.Entities[2].VerticalOffset - 1.25d) <= 1d / 16d);
+        Assert.Equal(WorldVector.Zero, decoded.Entities[2].Velocity);
+
+        // flags 3: airborne + moving
+        Assert.True(System.Math.Abs(decoded.Entities[3].VerticalOffset - 0.5d) <= 1d / 16d);
+        Assert.True(System.Math.Abs(decoded.Entities[3].Velocity.X - airborneMovingVel.X) <= 1d / 256d);
+        Assert.True(System.Math.Abs(decoded.Entities[3].Velocity.Y - airborneMovingVel.Y) <= 1d / 256d);
+    }
+
     // CONTINUOUS MIGRATION (v36): a v35 packet (the old version byte) is no longer decodable — the atomic break is
     // mutually undecodable. The codec rejects any version != ProtocolCodec.Version.
     [Fact]
@@ -403,12 +545,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyEight()
+    public void ProtocolVersionIsThirtyNine()
     {
-        // MOVEMENT-ACTIONS Phase B1 (v38): the wire gains the client->server ActionIntentMessage AND an optional
-        // replicated VerticalOffset on the per-entity snapshot state (presence flag + Q12.4 ushort). Bump on top of
-        // the v37 continuous body-radius add. Pin it so a change is caught.
-        Assert.Equal(38, ProtocolCodec.Version);
+        // REMOTE-WALK Phase 1 (v39): the per-entity tail's lone airborne-flag byte becomes a COMBINED flags byte
+        // (bit0=airborne, bit1=moving) that can gate an optional replicated Velocity (velX,velY signed shorts of
+        // 1/256 units/sec) for remote dead-reckoning. Bump on top of the v38 VerticalOffset add. Pin it so a
+        // change is caught.
+        Assert.Equal(39, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).
