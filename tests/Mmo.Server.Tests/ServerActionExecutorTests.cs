@@ -194,6 +194,30 @@ public sealed class ServerActionExecutorTests
     }
 
     [Fact]
+    public void MovementRootedEntity_CannotStartAnAction_NoRootEscapeByJumping()
+    {
+        // can-act gap (design §2.1 "not rooted"): a swing-movement-rooted player must NOT be able to jump to relocate
+        // via the executor during the root window — else jumping ESCAPES the attack-root (which only gates the ordinary
+        // move integrator, not the executor). ApplyAttackMovementRoot freezes the entity; CanStart/TryStart must reject
+        // until it elapses. No headless test triggered an action on a rooted entity before this (unbiased-review find).
+        var (executor, entity) = Build(spawn: new TileCoord(8, 8));
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: 10, jumpHeight: 2d, forwardDistanceUnits: 5d, cooldownTicks: 0, animationId: 1);
+
+        entity.ApplyAttackMovementRoot(serverTick: 100, rootTicks: 20); // frozen for ticks [100, 120)
+
+        // Inside the root window: rejected, and nothing starts.
+        Assert.False(executor.CanStart(entity, def, serverTick: 105));
+        Assert.False(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 105));
+        Assert.False(executor.IsActive(entity));
+
+        // Once the root elapses (serverTick >= rootUntil): allowed.
+        Assert.True(executor.CanStart(entity, def, serverTick: 120));
+        Assert.True(executor.TryStart(entity, def, Direction8.E.ToUnitVector(), serverTick: 120));
+        Assert.True(executor.IsActive(entity));
+    }
+
+    [Fact]
     public void Landing_BumpsStateRevision_SoTheGroundedHeightReplicates()
     {
         // B1 LIVE SYMPTOM (the user saw the avatar left floating "a bit" after a jump, worst from a standstill): on the

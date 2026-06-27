@@ -2497,10 +2497,11 @@ public sealed class GameServer
             return;
         }
 
-        // (3) can-act: a downed player never reaches here (dispatch suppresses ActionIntent while dead), but guard it
-        // anyway; then defer the rest of can-act (one-at-a-time + cooldown) to the executor's CanStart, the single
-        // source of that truth (design §2.8 / §1.1). A trigger arriving while an action already owns the entity, or
-        // inside this action's cooldown, is rejected — no second start, no queue.
+        // (3) can-act: a downed player never reaches here (dispatch suppresses ActionIntent while dead), but guard the
+        // SESSION-level alive gate anyway; the ENTITY-level gates (one-at-a-time + cooldown + movement-root) are the
+        // executor's CanStart, the single source of that truth (design §2.8 / §1.1 / §2.1 "not rooted"). A trigger
+        // arriving while an action already owns the entity, inside its cooldown, or while the entity is swing-rooted
+        // is rejected — no second start, no queue, no root-escape-by-jumping.
         if (session.IsDead)
         {
             return;

@@ -75,14 +75,23 @@ public sealed class ServerActionExecutor
     public ActionId ActiveAction(ulong entityId) =>
         _active.TryGetValue(entityId, out var inst) ? inst.Def.Id : ActionId.None;
 
-    // True iff `entity` may trigger `def` at `serverTick`: not already in an action (one-at-a-time, design §2.8) and
-    // off this action's cooldown clock (design §1.1). Pure — does NOT mutate. (Phase B adds the rest of can-act:
-    // alive, not rooted, authored-tick window — Phase A validates only what the headless executor owns.)
+    // True iff `entity` may trigger `def` at `serverTick`: not already in an action (one-at-a-time, design §2.8), off
+    // this action's cooldown clock (design §1.1), and NOT movement-rooted (design §2.1 can-act "not rooted"). Pure —
+    // does NOT mutate. These are the ENTITY-level can-act gates the executor owns; the SESSION-level gate (alive) and
+    // the authored-tick window stay with the player handler (HandleActionIntent).
     public bool CanStart(WorldEntity entity, MovementActionDef def, uint serverTick)
     {
         if (_active.ContainsKey(entity.Id))
         {
             return false; // an action is already running — strictly serial (no queue)
+        }
+
+        if (entity.IsMovementFrozen(serverTick))
+        {
+            // Movement-rooted (e.g. mid swing-root via ApplyAttackMovementRoot) — cannot start a movement action.
+            // Without this a player could trigger a jump to RELOCATE via the executor during the attack-root window,
+            // bypassing IsMovementFrozen (which only gates the ordinary HandleMoveIntent integrator) — a root-escape.
+            return false;
         }
 
         if (_cooldownUntil.TryGetValue((entity.Id, def.Id), out var until) && serverTick < until)
