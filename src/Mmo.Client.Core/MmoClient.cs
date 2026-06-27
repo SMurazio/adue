@@ -1511,7 +1511,7 @@ public sealed class MmoClient : IDisposable
             // feeds it (harmless — its render comes from the predictor, ToRenderState ignores this for IsLocal).
             // The debug carries the buffered-sample depth + the last render position for the trace's queue-depth /
             // render read-out (the effective cadence is resolved at the outer call site from the entity's cooldown).
-            _remoteInterp.Confirm(position, receivedAt);
+            _remoteInterp.Confirm(position, receivedAt, verticalOffset);
             return new EntityConfirmationDebug(
                 tile != previousTile,
                 _remoteInterp.BufferedSampleCount,
@@ -1568,14 +1568,21 @@ public sealed class MmoClient : IDisposable
                 ? MonsterHopPeakHeight * _remoteInterp.HopArcFactor
                 : 0d;
 
+            // MOVEMENT-ACTIONS (finding #1 fix): a REMOTE entity's replicated jump height rides the SAME playout
+            // timeline as its horizontal — _remoteInterp.SampledVerticalOffset (set by the Sample(now) above) — so the
+            // arc's apex sits over the XY midpoint instead of leading / stair-stepping vs the smooth glide. The LOCAL
+            // player renders its own confirmed height directly (its position comes from the predictor override, not the
+            // interp Sample, so SampledVerticalOffset isn't refreshed for it; B1 has no Z prediction anyway).
+            var renderVerticalOffset = IsLocal ? VerticalOffset : _remoteInterp.SampledVerticalOffset;
+
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
                 AuthoritativePosition: RenderPosition.FromWorld(Position),
                 HopHeight: hopHeight,
-                // MOVEMENT-ACTIONS Phase B1: thread the REPLICATED airborne height to the render state for EVERY entity
-                // (local + remote) — the real jump arc the visual lifts by. Snapshot-confirmed (no interp/predict in
-                // B1); 0 grounded, so the common case is the unchanged flat render. Distinct from the cosmetic
-                // monster HopHeight above (which Phase C retires in favour of this).
-                VerticalOffset: VerticalOffset);
+                // MOVEMENT-ACTIONS Phase B1 + finding #1: thread the REPLICATED airborne height to the render state. For
+                // REMOTE entities it is interpolated on the playout timeline (renderVerticalOffset); for the LOCAL player
+                // it is the confirmed value. 0 grounded, so the common case is the unchanged flat render. Distinct from
+                // the cosmetic monster HopHeight above (which Phase C retires in favour of this).
+                VerticalOffset: renderVerticalOffset);
         }
     }
 

@@ -67,6 +67,36 @@ public sealed class RemotePositionInterpolatorTests
         Assert.Equal(5.0, mid.Y, 6);
     }
 
+    // MOVEMENT-ACTIONS (finding #1): the replicated airborne height (VerticalOffset) must ride the SAME playout
+    // timeline as the horizontal — same bracket, same alpha — so a remote jump's height and XY share one clock (no
+    // lead / stair-step vs the smooth glide). Lerps in a bracket; HOLDs the bracketing sample's height in the HOLD
+    // regimes (it parks WITH the position, it does not pop to ground).
+    [Fact]
+    public void ReplicatedVerticalOffsetRidesTheSamePlayoutTimelineAsXY()
+    {
+        var interp = new RemotePositionInterpolator(new WorldVector(0, 0), Delay);
+
+        // Two confirms 50 ms apart: XY moves 0->1 in X while the height rises 0.0 -> 2.0 (a jump-arc segment).
+        interp.Confirm(new WorldVector(0, 0), Ms(0), verticalOffset: 0.0);
+        interp.Confirm(new WorldVector(1, 0), Ms(50), verticalOffset: 2.0);
+
+        // Playout = now - 75ms. At now=100 the playout time is 25ms — the bracket midpoint (alpha=0.5). The height
+        // is the SAME-alpha lerp the horizontal uses: X≈0.5 AND VerticalOffset≈1.0 (both 50% through the bracket).
+        var render = interp.Sample(Ms(100));
+        Assert.Equal(0.5, render.X, 6);
+        Assert.Equal(1.0, interp.SampledVerticalOffset, 6); // height tracks the SAME alpha as XY — one timeline
+
+        // Pre-age-in (playout = -5ms, before the oldest confirm): HOLD the oldest height (grounded here).
+        interp.Sample(Ms(70));
+        Assert.Equal(0.0, interp.SampledVerticalOffset, 6);
+
+        // Starvation (playout = 425ms, past the newest): HOLD the newest height (this segment's apex) WITH the
+        // position — it does NOT pop to ground.
+        var starved = interp.Sample(Ms(500));
+        Assert.Equal(2.0, interp.SampledVerticalOffset, 6);
+        Assert.Equal(1.0, starved.X, 6);
+    }
+
     // A dropped / late packet (the buffer starves: playout passes the newest sample with nothing future to lerp
     // toward) must HOLD at the newest sample — NO extrapolation fling forward.
     [Fact]

@@ -34,8 +34,9 @@ public sealed class RemotePositionInterpolator
     // and the time-domain playout (now - delay vs real arrival clocks) resumes from the live render position.
     private const int CatchUpSampleCap = 8;
 
-    // The playout buffer of received confirms, oldest-first: (continuous position, arrival clock) pairs. Sample(now)
-    // renders at now - InterpolationDelay by lerping the two buffered confirms that bracket that playout time.
+    // The playout buffer of received confirms, oldest-first: (continuous position, airborne height, arrival clock)
+    // triples. Sample(now) renders at now - InterpolationDelay by lerping the two buffered confirms that bracket
+    // that playout time — BOTH the horizontal position AND the vertical height, on the same brackets/alpha.
     private readonly List<BufferedPosition> _samples = new();
 
     // Hard cap on buffered samples so a long stall (server silent, render starved) can't grow the buffer
@@ -64,6 +65,15 @@ public sealed class RemotePositionInterpolator
     // stays kind-agnostic: it only EXPOSES the factor; the caller gates it to EntityKind.Monster and scales by peak.
     private double _hopArcFactor;
 
+    // MOVEMENT-ACTIONS (finding #1 fix): the REPLICATED airborne height (WorldEntity.VerticalOffset), lerped on the
+    // SAME playout timeline + brackets + alpha as the horizontal position. This is the REAL server-authoritative
+    // jump height (distinct from the cosmetic _hopArcFactor above): a remote viewer must see another entity's jump
+    // height and XY on ONE timeline, or the height leads/stair-steps while the horizontal glides (the un-buffered
+    // raw-snapshot Z that this replaces). HOLDs on the bracketing sample's height in every HOLD regime, lerps in a
+    // bracket; 0 on the spawn/Reset anchor (a freshly-spawned / AOI-re-entered entity is treated as grounded until
+    // its first confirm ages in). Read after Sample, exactly like HopArcFactor.
+    private double _sampledVerticalOffset;
+
     public RemotePositionInterpolator(WorldVector initialPosition, double interpolationDelayMs)
     {
         _renderPosition = _anchor = RenderPosition.FromWorld(initialPosition);
@@ -79,6 +89,12 @@ public sealed class RemotePositionInterpolator
     // peak height to get a vertical jump arc SYNCED to the horizontal move. See the field comment. Read after Sample.
     public double HopArcFactor => _hopArcFactor;
 
+    // MOVEMENT-ACTIONS (finding #1 fix): the replicated airborne height for THIS frame's playout time, lerped on the
+    // SAME timeline as the horizontal Sample — so a remote jump's height and XY share one clock (no lead / stair-step
+    // vs the smooth glide). Read AFTER Sample. The caller uses this for remote entities instead of the raw latest
+    // snapshot height. Distinct from HopArcFactor (the cosmetic monster bounce); this is the real server vertical.
+    public double SampledVerticalOffset => _sampledVerticalOffset;
+
     // Count of buffered samples — exposed for diagnostics (the trace's queue-depth read-out) and tests.
     public int BufferedSampleCount => _samples.Count;
 
@@ -93,26 +109,30 @@ public sealed class RemotePositionInterpolator
 
     // Hard-reset onto a position (respawn / AOI re-entry / teleport): clear the playout buffer and snap the render
     // + the hold-anchor there. The next Sample holds on this anchor until fresh confirms refill the buffer (no
-    // stale glide across the old path, no default pop).
+    // stale glide across the old path, no default pop). The anchor is treated as grounded (height 0) until a real
+    // confirm ages in — an entity re-entering AOI mid-jump shows its true height within the buffer delay.
     public void Reset(WorldVector position)
     {
         _samples.Clear();
         _renderPosition = _anchor = RenderPosition.FromWorld(position);
         _hopArcFactor = 0d;
+        _sampledVerticalOffset = 0d;
     }
 
-    // A new server-confirmed continuous position arrived. Append it to the playout buffer keyed on its arrival
-    // clock. OUT-OF-ORDER guard: ignore a sample whose arrival is not strictly after the newest buffered one
-    // (unreliable transport can reorder/duplicate) — re-inserting an older sample would let the playout lerp
-    // backward and rubberband. A repeated identical arrival time is likewise ignored.
-    public void Confirm(WorldVector position, TimeSpan receivedAt)
+    // A new server-confirmed continuous position (+ its replicated airborne height) arrived. Append it to the
+    // playout buffer keyed on its arrival clock. OUT-OF-ORDER guard: ignore a sample whose arrival is not strictly
+    // after the newest buffered one (unreliable transport can reorder/duplicate) — re-inserting an older sample
+    // would let the playout lerp backward and rubberband. A repeated identical arrival time is likewise ignored.
+    // `verticalOffset` defaults to 0 (grounded) so the XY-only callers/tests that predate the replicated height
+    // remain correct (a grounded entity).
+    public void Confirm(WorldVector position, TimeSpan receivedAt, double verticalOffset = 0d)
     {
         if (_samples.Count > 0 && receivedAt <= _samples[^1].ReceivedAt)
         {
             return;
         }
 
-        _samples.Add(new BufferedPosition(RenderPosition.FromWorld(position), receivedAt));
+        _samples.Add(new BufferedPosition(RenderPosition.FromWorld(position), verticalOffset, receivedAt));
         FastForwardIfBackedUp();
 
         while (_samples.Count > MaxBufferedSamples)
@@ -151,15 +171,18 @@ public sealed class RemotePositionInterpolator
     //     the newest. NO extrapolation (the deferred path) — the render parks on the last known position and waits
     //     for the next Confirm, so a dropped/late packet never flings the entity forward.
     //   * playoutTime between two confirms: lerp them by the fractional position in that span.
+    // The replicated airborne height (_sampledVerticalOffset) tracks the horizontal in EVERY regime — same HOLD
+    // sample, same bracket, same alpha — so a remote jump's height and XY are always on one timeline.
     // Pure-functional on the buffer + clock; mutates only the cached _renderPosition (so HOLD/catch-up continue
     // from the live render position). Prunes confirms strictly older than the bracket so the buffer stays bounded.
     public RenderPosition Sample(TimeSpan now)
     {
-        // No real confirm has landed (pre-first-Confirm, or just after a Reset): hold on the anchor.
+        // No real confirm has landed (pre-first-Confirm, or just after a Reset): hold on the anchor (grounded).
         if (_samples.Count == 0)
         {
             _renderPosition = _anchor;
             _hopArcFactor = 0d;
+            _sampledVerticalOffset = 0d;
             return _renderPosition;
         }
 
@@ -171,6 +194,7 @@ public sealed class RemotePositionInterpolator
         {
             _renderPosition = _samples[0].Position;
             _hopArcFactor = 0d;
+            _sampledVerticalOffset = _samples[0].VerticalOffset;
             return _renderPosition;
         }
 
@@ -180,6 +204,7 @@ public sealed class RemotePositionInterpolator
         {
             _renderPosition = _samples[^1].Position;
             _hopArcFactor = 0d;
+            _sampledVerticalOffset = _samples[^1].VerticalOffset;
             return _renderPosition;
         }
 
@@ -200,6 +225,11 @@ public sealed class RemotePositionInterpolator
         var alpha = spanMs > 0d ? (playoutTime - from.ReceivedAt).TotalMilliseconds / spanMs : 1d;
         _renderPosition = RenderPosition.Lerp(from.Position, to.Position, alpha);
 
+        // MOVEMENT-ACTIONS (finding #1 fix): lerp the replicated height across the SAME bracket with the SAME alpha
+        // the horizontal uses, so the remote jump's apex sits over the XY arc midpoint and the rise/fall tracks the
+        // glide exactly (one timeline). No collision on Z, so a plain linear lerp of the two confirmed heights.
+        _sampledVerticalOffset = from.VerticalOffset + ((to.VerticalOffset - from.VerticalOffset) * alpha);
+
         // HOP-ARC (cosmetic): the parabolic factor for THIS bracket, from the SAME alpha the horizontal lerp uses,
         // so a caller's vertical jump (peak * factor) rises at the bracket midpoint and lands exactly when/where the
         // horizontal does — no separate timeline. 0 if the bracket doesn't actually move (a repeated identical
@@ -217,5 +247,5 @@ public sealed class RemotePositionInterpolator
         return _renderPosition;
     }
 
-    private readonly record struct BufferedPosition(RenderPosition Position, TimeSpan ReceivedAt);
+    private readonly record struct BufferedPosition(RenderPosition Position, double VerticalOffset, TimeSpan ReceivedAt);
 }
