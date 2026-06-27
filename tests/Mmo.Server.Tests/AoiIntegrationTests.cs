@@ -305,6 +305,84 @@ public sealed class AoiIntegrationTests
         }
     }
 
+    // CONTINUOUS remote-walk fluidity (per-tick continuous replication): a MOVING player must be force-included in a
+    // viewer's snapshots ~EVERY tick (dense ~50ms samples the viewer interpolates smoothly), NOT only on a rounded-tile
+    // crossing (~250ms at 4u/s) — the tile-stepped-era gate that left a remote viewer extrapolating across the gap and
+    // stuttering (the live symptom). We drive a mover continuously inside an observer's AOI and assert the observer
+    // receives the mover in the large majority of its snapshots during the move. The OLD tile-gated path would include
+    // the mover in only ~1 snapshot in 5 (and suppress the rest as empty keep-alives); this test fails under that path.
+    [Fact]
+    public async Task MovingEntityIsForceIncludedForViewerEveryTick_NotJustOnTileCrossings()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = new ServerOptions(
+            port,
+            20,
+            "integration-test",
+            DatabaseProvider.Sqlite,
+            database.ConnectionString,
+            TestSqliteDatabase.MigrationsPath,
+            64,
+            64,
+            50,
+            15,
+            30, // interest radius — wide enough that the few-tile walk stays inside the observer's AOI
+            150,
+            SpawnDistribution.Clustered,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var mover = new IntegrationClient("Mover");
+            using var observer = new IntegrationClient("Observer");
+            mover.Connect(port, options.ConnectionKey);
+            observer.Connect(port, options.ConnectionKey);
+
+            await WaitUntilAsync(
+                () => mover.IsLoggedIn && mover.OwnNetworkId != 0 && observer.IsLoggedIn && observer.OwnNetworkId != 0,
+                mover,
+                observer);
+
+            // Both spawn at the clustered spawn tile, so the mover starts inside the observer's AOI.
+            await WaitUntilAsync(() => observer.ReconstructedTileOf(mover.OwnNetworkId) is not null, mover, observer);
+
+            var moverId = mover.OwnNetworkId;
+            observer.ClearMessages();
+
+            // Drive the mover continuously EAST at ~tick cadence (a MoveIntent every ~50ms) for ~1.2s. While moving the
+            // mover's Velocity != 0, so the server must force-include it for the observer every tick.
+            var stopAt = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(1200);
+            while (DateTimeOffset.UtcNow < stopAt)
+            {
+                mover.SendMove(Direction8.E);
+                await PollForAsync(TimeSpan.FromMilliseconds(50), mover, observer);
+            }
+
+            mover.StopMove();
+            await PollForAsync(TimeSpan.FromMilliseconds(100), mover, observer);
+
+            var snapshots = observer.Messages.OfType<WorldSnapshotMessage>().ToList();
+            var withMover = snapshots.Count(s => s.Entities.Any(e => e.NetworkId == moverId));
+
+            // ~1.2s at 20Hz ≈ 24 ticks ⇒ many snapshots; the mover appears in the LARGE MAJORITY (per-tick continuous
+            // replication). The old tile-gated path would yield ≈1/5 inclusion (a fresh sample only per tile crossing).
+            Assert.True(snapshots.Count >= 12, $"expected many snapshots during the move, got {snapshots.Count}");
+            Assert.True(
+                withMover >= snapshots.Count * 0.7,
+                $"mover replicated in only {withMover}/{snapshots.Count} snapshots — not per-tick (tile-gated regression?)");
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
     private static int GetFreeUdpPort()
     {
         using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));

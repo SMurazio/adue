@@ -955,31 +955,31 @@ public sealed class GameServer
         _payloadEntityScratch.Clear();
         foreach (var entity in visible)
         {
-            // CONTINUOUS MIGRATION (sub-tile reconcile fix): the recipient's OWN entity is force-included in its own
-            // snapshot while it is MOVING (Velocity != 0), even if its tile-keyed StateRevision hasn't bumped this tick
-            // — so the local predictor reconciles against the LIVE continuous position EVERY tick (restoring the
-            // experiment's every-tick own-position) instead of the position frozen at the last TILE crossing. Without
-            // this a sub-tile-moving player is delta'd out of ~4/5 of its OWN snapshots while LastInputSeq keeps
-            // advancing, so the reconcile drops those inputs but re-bases onto the stale tile position and UNDERSHOOTS
-            // → the soft ~1-tile snap-back. Remote viewers stay tile-keyed (StateRevision) so their AOI bandwidth is
-            // unchanged; this adds at most ONE entity (the player's own) per tick to its own snapshot while moving, and
-            // nothing at rest (Velocity == 0 → falls through to the normal acked-baseline delta).
-            // MOVEMENT-ACTIONS Phase B1 + remote-fluidity fix: an entity running a movement action is force-included
-            // for EVERY in-AOI recipient (not just its own), each airborne tick. WHY all recipients: a jumping entity
-            // moves via the executor with Velocity == 0 and bumps StateRevision only on tile crossings (R1), so a
-            // REMOTE viewer would otherwise receive it only ~once per tile crossed and linearly lerp the PARABOLIC
-            // VerticalOffset between those sparse points — a faceted, non-fluid arc (the live symptom). Force-including
-            // it every airborne tick hands the interpolator the real per-tick height to glide. SCOPED to IsActive (a
-            // running action) only: ordinary sub-tile movement is NOT in _active, so it still rides the unchanged
-            // own-only + tile-keyed path — the R1 optimization and remote AOI bandwidth at rest/walk are untouched. A
-            // jump is short + rare, so the transient cost is bounded (~AirborneTicks extra includes per viewer, self-
-            // limiting when the action ends and IsActive goes false). On the LANDING tick IsActive is already false
-            // (the instance is removed in Step before it returns), so the grounded height re-publishes via the normal
+            // CONTINUOUS MIGRATION (remote-walk fluidity — PER-TICK CONTINUOUS REPLICATION): a MOVING entity
+            // (Velocity != 0) is force-included for EVERY in-AOI recipient each tick, carrying its LIVE continuous
+            // position — even when its tile-keyed StateRevision has not bumped this tick. This deletes the tile-crossing
+            // dependence for remote movers, which was a tile-stepped-era artifact wrong for continuous movement:
+            // ApplyResolvedMove bumps StateRevision only on a rounded-tile crossing (R1), so a REMOTE viewer used to
+            // receive a walking player only ~once per tile (~250ms @ 4u/s) and had to glide/extrapolate across the gap;
+            // with the playout buffer (~125ms) shorter than that interval, every cycle overran into extrapolation and
+            // corrected by a jittery amount at each handoff — a ~4Hz remote-walk stutter (the live symptom). Sending a
+            // mover every tick hands the interpolator dense 50ms samples so it ALWAYS interpolates between two real
+            // points → smooth, exactly like the airborne jump path below. The local predictor's own-entity sub-tile
+            // reconcile (it must see its LIVE position every tick) is a strict subset of this (the own entity is just
+            // one moving viewer), so that fix is preserved. At REST (Velocity == 0) an entity falls through to the
+            // unchanged acked-baseline delta — idle AOI bandwidth is untouched; the stop-edge StateRevision bump
+            // (StopMovement) re-publishes the final stopped position once. COST: per-tick re-sends WHILE an entity is
+            // moving in a viewer's AOI (the bandwidth the tile-gate previously saved) — measured under the 120/30s
+            // stress gate against the parity budget; this is the deliberate trade for continuous remote fluidity.
+            // MOVEMENT-ACTIONS: an entity running a movement action (jump) is ALSO force-included for every recipient
+            // each tick. A jump moves via the executor with Velocity == 0 (so `forceMoving` would miss a standstill
+            // jump) and arcs a PARABOLIC VerticalOffset, so the interpolator needs the real per-tick height to glide;
+            // IsActive covers it for the action's duration. On the landing tick IsActive is already false (the instance
+            // is removed in Step before it returns), so the grounded height re-publishes via the normal
             // !HasAckedCurrentRevision path (SnapToGround's StateRevision bump) — no double-send.
-            var forceOwnWhileMoving = entity.NetworkId == recipientEntity.NetworkId
-                && entity.Velocity.LengthSquared > 0d;
+            var forceMoving = entity.Velocity.LengthSquared > 0d;
             var forceActionAirborne = _actionExecutor.IsActive(entity);
-            if (forceOwnWhileMoving || forceActionAirborne || !recipient.HasAckedCurrentRevision(entity))
+            if (forceMoving || forceActionAirborne || !recipient.HasAckedCurrentRevision(entity))
             {
                 _payloadEntityScratch.Add(entity);
             }
