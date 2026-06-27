@@ -325,7 +325,12 @@ public sealed class AoiIntegrationTests
             TestSqliteDatabase.MigrationsPath,
             64,
             64,
-            50,
+            // StepCooldownMs = 250 = the LIVE default ⇒ 4 u/s ⇒ a rounded-tile crossing only ~every 5 ticks. This is
+            // the SPARSE-crossing regime the bug lives in: under the old tile-gated predicate the mover's StateRevision
+            // bumps ~1/5 ticks so it was included in only ~1/5 of the observer's snapshots. (At a fast cooldown like 50
+            // the mover crosses a tile EVERY tick, which would mask the bug — the entity would be included every tick
+            // via !HasAckedCurrentRevision even under the old predicate, so the test would pass on the broken code.)
+            250,
             15,
             30, // interest radius — wide enough that the few-tile walk stays inside the observer's AOI
             150,
