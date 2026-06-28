@@ -37,6 +37,10 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(1000, slime.AttackCooldownMs);
         Assert.Equal(100, slime.MaxHealth);
 
+        // SLIME-FEEL-POLISH hop knobs: airborne 300 ms + delay 400 ms = a 700 ms cycle with a visible grounded rest.
+        Assert.Equal(300, slime.HopAirborneMs);
+        Assert.Equal(400, slime.HopDelayMs);
+
         // The slower-than-player default: < 1.0 so the player (base 1.0) outruns it. LOOT P4c lowered it 0.8 → 0.6
         // (clearly outrunnable: ~417 ms/step vs the player's 250 ms).
         Assert.True(slime.MoveSpeedMultiplier < 1.0);
@@ -84,12 +88,6 @@ public sealed class MonsterTypeRegistryTests
         Assert.True(registry.TryApply("slime.attackRange", 0d, out _));
         Assert.True(registry.Default.AttackRangeUnits >= 0.5d);
 
-        // moveSpeed clamps to [0.1, 5].
-        Assert.True(registry.TryApply("slime.moveSpeed", 0d, out var ms));
-        Assert.True(ms >= 0.1);
-        Assert.True(registry.TryApply("slime.moveSpeed", 99d, out _));
-        Assert.True(registry.Default.MoveSpeedMultiplier <= 5);
-
         // maxHealth clamps to >= 1.
         Assert.True(registry.TryApply("slime.maxHealth", 0d, out _));
         Assert.True(registry.Default.MaxHealth >= 1);
@@ -124,7 +122,8 @@ public sealed class MonsterTypeRegistryTests
     {
         var registry = Registry();
         Assert.True(registry.IsMonsterTypeKey("slime.roamRadius"));
-        Assert.True(registry.IsMonsterTypeKey("slime.moveSpeed"));
+        Assert.True(registry.IsMonsterTypeKey("slime.hopDelayMs"));
+        Assert.False(registry.IsMonsterTypeKey("slime.moveSpeed")); // the retired knob is no longer a recognized key.
         Assert.False(registry.IsMonsterTypeKey("dragon.roamRadius"));
         Assert.False(registry.IsMonsterTypeKey("slime.nonsense"));
         Assert.False(registry.IsMonsterTypeKey("combat.damage"));
@@ -154,10 +153,10 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(4, t.RoamRadius);
     }
 
-    // LIVING-ENEMIES P2-POLISH item 4 (LOOT P4c default tweak): applying the slime type's default move speed yields a
-    // LONGER effective step cooldown than the player's base (the monster is slower → outrunnable). Base 250 ms @ 20 Hz
-    // = 5 ticks; at the NEW 0.6x default the slime's effective cooldown rounds to 8 ticks (~417 ms) — clearly slower
-    // than the player.
+    // MoveSpeedMultiplier is now INTERP-CADENCE-ONLY (it seeds the entity's replicated SpeedMultiplier at spawn — the
+    // EntitySpawn / MovementSpeedChanged cadence the client interpolates at — and no longer drives the hop cadence, which
+    // is HopAirborneTicks + HopDelayTicks). This still pins that the slime's 0.6x default makes its entity-level effective
+    // step cooldown LONGER than the player's base: 250 ms @ 20 Hz = 5 ticks; round(5 / 0.6) = 8 ticks (~417 ms).
     [Fact]
     public void SlimeMoveSpeedMakesItStepSlowerThanTheBase()
     {
@@ -182,14 +181,14 @@ public sealed class MonsterTypeRegistryTests
     {
         var registry = Registry();
         registry.TryApply("slime.roamRadius", 7d, out _);
-        registry.TryApply("slime.moveSpeed", 0.5d, out _);
+        registry.TryApply("slime.hopDelayMs", 250d, out _);
 
         var snapshot = registry.BuildSnapshot();
         var slime = snapshot.Types.Single();
         Assert.Equal("slime", slime.Id);
         Assert.Equal("Slime", slime.DisplayName);
         Assert.Equal(7d, FieldValue(slime, "roamRadius"));
-        Assert.Equal(0.5, FieldValue(slime, "moveSpeed"), 3);
+        Assert.Equal(250d, FieldValue(slime, "hopDelayMs"));
         Assert.Equal(100d, FieldValue(slime, "maxHealth"));
         Assert.Equal(5000d, FieldValue(slime, "respawnMs")); // P3 default ~5 s, unchanged.
     }
@@ -207,13 +206,15 @@ public sealed class MonsterTypeRegistryTests
 
         var keys = slime.Fields.Select(f => f.Key).ToArray();
         Assert.Contains("maxHealth", keys);
-        Assert.Contains("moveSpeed", keys);
         Assert.Contains("roamRadius", keys);
         Assert.Contains("respawnMs", keys);
-        // The newly exposed hop knobs.
+        // The retired "move speed (x)" knob is no longer exposed.
+        Assert.DoesNotContain("moveSpeed", keys);
+        // The hop feel-knobs, including the new delay.
         Assert.Contains("hopDistance", keys);
         Assert.Contains("hopHeight", keys);
         Assert.Contains("hopAirborneMs", keys);
+        Assert.Contains("hopDelayMs", keys);
 
         var hopDistance = slime.Fields.Single(f => f.Key == "hopDistance");
         Assert.Equal(1.5, hopDistance.Value, 6); // the bumped default ("range too low" fix).
@@ -227,9 +228,15 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(2000, hopAirborne.Max, 6);
         Assert.True(hopAirborne.IsInteger);
 
-        // maxHealth is an integer knob; moveSpeed is a fractional one.
+        var hopDelay = slime.Fields.Single(f => f.Key == "hopDelayMs");
+        Assert.Equal(400, hopDelay.Value, 6); // the default grounded rest between hops.
+        Assert.Equal(0, hopDelay.Min, 6);
+        Assert.Equal(5000, hopDelay.Max, 6);
+        Assert.True(hopDelay.IsInteger);
+
+        // maxHealth is an integer knob; hop distance is a fractional one.
         Assert.True(slime.Fields.Single(f => f.Key == "maxHealth").IsInteger);
-        Assert.False(slime.Fields.Single(f => f.Key == "moveSpeed").IsInteger);
+        Assert.False(slime.Fields.Single(f => f.Key == "hopDistance").IsInteger);
     }
 
     // DATA-DRIVEN (v40): the 3 hop knobs apply + clamp through TryApply and are recognized keys; an unknown field is
@@ -243,6 +250,7 @@ public sealed class MonsterTypeRegistryTests
         Assert.True(registry.IsMonsterTypeKey("slime.hopDistance"));
         Assert.True(registry.IsMonsterTypeKey("slime.hopHeight"));
         Assert.True(registry.IsMonsterTypeKey("slime.hopAirborneMs"));
+        Assert.True(registry.IsMonsterTypeKey("slime.hopDelayMs"));
         Assert.False(registry.IsMonsterTypeKey("slime.hopNonsense"));
 
         Assert.True(registry.TryApply("slime.hopDistance", 3.0d, out var d));
@@ -270,27 +278,36 @@ public sealed class MonsterTypeRegistryTests
         Assert.True(registry.TryApply("slime.hopAirborneMs", 999999d, out var aHi));
         Assert.Equal(2000d, aHi);
 
+        // hopDelayMs is an integer ms knob clamped to [0, 5000] (0 = re-hop the instant it lands).
+        Assert.True(registry.TryApply("slime.hopDelayMs", 600d, out var dl));
+        Assert.Equal(600d, dl);
+        Assert.Equal(600, slime.HopDelayMs);
+        Assert.True(registry.TryApply("slime.hopDelayMs", -5d, out var dlLo));
+        Assert.Equal(0d, dlLo);
+        Assert.True(registry.TryApply("slime.hopDelayMs", 999999d, out var dlHi));
+        Assert.Equal(5000d, dlHi);
+
         Assert.False(registry.TryApply("slime.hopNonsense", 1d, out _));
     }
 
-    // DATA-DRIVEN (the "hops too often" fix): the default hop is airborne for FEWER ticks than the move cadence, so a
-    // grounded rest exists between hops. HopAirborneTicks derives from the live HopAirborneMs (round, floored at 1).
+    // SLIME-FEEL-POLISH: the hop CADENCE (time between hop starts) is HopAirborneTicks + HopDelayTicks, and the airborne
+    // span is shorter than the cadence by exactly the DELAY ticks — that delay IS the grounded rest between hops.
     [Fact]
     public void DefaultHopAirborneIsShorterThanTheCadenceLeavingGroundedRest()
     {
         var registry = Registry();
         var slime = registry.Default;
 
-        // Default 300 ms @ 20 Hz = 6 ticks airborne.
+        // Default 300 ms @ 20 Hz = 6 ticks airborne; 400 ms @ 20 Hz = 8 ticks delay.
         Assert.Equal(6u, registry.HopAirborneTicks(slime));
+        Assert.Equal(8u, registry.HopDelayTicks(slime));
 
-        // The move cadence at the slime's 0.6x default is 8 ticks (round(5 / 0.6)) — so airborne (6) < cadence (8):
-        // the slime rests on the ground for ~2 ticks before the next hop starts.
-        const uint baseTicks = 5; // 250 ms @ 20 Hz, the player base cadence.
-        var cadence = (uint)Math.Clamp(
-            (long)Math.Max(1, Math.Round(baseTicks / slime.MoveSpeedMultiplier, MidpointRounding.AwayFromZero)), 1L, 100L);
-        Assert.Equal(8u, cadence);
+        // The hop cadence is airborne + delay = 14 ticks (~700 ms) — so airborne (6) < cadence (14): the slime rests on
+        // the ground for the 8 delay ticks before the next hop starts.
+        var cadence = registry.HopAirborneTicks(slime) + registry.HopDelayTicks(slime);
+        Assert.Equal(14u, cadence);
         Assert.True(registry.HopAirborneTicks(slime) < cadence, "airborne span must be shorter than the cadence for rest.");
+        Assert.Equal(registry.HopDelayTicks(slime), cadence - registry.HopAirborneTicks(slime)); // the rest == delay.
 
         // A live retune re-derives the airborne ticks.
         Assert.True(registry.TryApply("slime.hopAirborneMs", 1000d, out _));
@@ -321,33 +338,33 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal(300000d, FieldValue(snapshot.Types.Single(), "respawnMs"));
     }
 
-    // LOOT P4c (monster-types follow-up #1): the monster's step cadence is now derived from its TYPE's LIVE
-    // MoveSpeedMultiplier each tick (GameServer.EffectiveStepCooldownTicksFor), not the entity's spawn-time
-    // SpeedMultiplier — so editing "slime.moveSpeed" re-paces an ALREADY-SPAWNED slime on the next tick. This pins the
-    // derivation: applying a new moveSpeed changes the cadence the type yields (the formula StepMonsterAi feeds the AI),
-    // proving the knob dials live. (round(base / multiplier), clamped — matching the server helper.)
+    // SLIME-FEEL-POLISH: the monster's HOP CADENCE (the value StepMonsterAi feeds the AI as stepCooldownTicks) is now
+    // HopAirborneTicks + HopDelayTicks — NOT the retired moveSpeed-derived cadence. This pins that the DELAY knob dials
+    // the cadence live: editing "slime.hopDelayMs" re-paces an already-spawned slime on the next tick (the registry is
+    // read fresh each tick), and a longer delay lengthens the cadence while airborne stays put.
     [Fact]
-    public void EditingTypeMoveSpeedChangesTheDerivedCadence()
+    public void EditingTypeHopDelayChangesTheHopCadence()
     {
         var registry = Registry();
         var slime = registry.Default;
 
-        // Mirror GameServer.EffectiveStepCooldownTicksFor: base 5 ticks (250 ms @ 20 Hz), min 1, max 100.
-        const uint baseTicks = 5;
-        static uint Cadence(double multiplier) =>
-            (uint)Math.Clamp((long)Math.Max(1, Math.Round(baseTicks / multiplier, MidpointRounding.AwayFromZero)), 1L, 100L);
+        // Mirror GameServer.StepMonsterAi: cadence == HopAirborneTicks + HopDelayTicks.
+        uint Cadence() => registry.HopAirborneTicks(slime) + registry.HopDelayTicks(slime);
 
-        // Default 0.6 -> round(5 / 0.6) = 8 ticks (the new outrunnable cadence).
-        Assert.Equal(8u, Cadence(slime.MoveSpeedMultiplier));
+        // Default: 6 airborne (300 ms) + 8 delay (400 ms) = 14 ticks (~700 ms).
+        Assert.Equal(14u, Cadence());
 
-        // An admin speeds the type up to 1.0 (player pace). Because StepMonsterAi reads the TYPE value each tick, an
-        // already-spawned slime's cadence becomes round(5 / 1.0) = 5 next tick — strictly faster than before.
-        Assert.True(registry.TryApply("slime.moveSpeed", 1.0d, out _));
-        Assert.Equal(5u, Cadence(slime.MoveSpeedMultiplier));
-        Assert.True(Cadence(slime.MoveSpeedMultiplier) < 8u, "speeding the type up must shorten the cadence live.");
+        // An admin lengthens the rest to 1000 ms (20 ticks) — the cadence becomes 6 + 20 = 26 ticks, strictly slower,
+        // and the airborne span is unchanged (delay is the grounded rest, decoupled from flight time).
+        Assert.True(registry.TryApply("slime.hopDelayMs", 1000d, out _));
+        Assert.Equal(6u, registry.HopAirborneTicks(slime));
+        Assert.Equal(20u, registry.HopDelayTicks(slime));
+        Assert.Equal(26u, Cadence());
+        Assert.True(Cadence() > 14u, "lengthening the delay must lengthen the hop cadence live.");
 
-        // And slowing it to 0.5 lengthens it to round(5 / 0.5) = 10 ticks — the same live re-pacing the other way.
-        Assert.True(registry.TryApply("slime.moveSpeed", 0.5d, out _));
-        Assert.Equal(10u, Cadence(slime.MoveSpeedMultiplier));
+        // A 0 ms delay means re-hop the instant it lands — the cadence collapses to the airborne span alone.
+        Assert.True(registry.TryApply("slime.hopDelayMs", 0d, out _));
+        Assert.Equal(0u, registry.HopDelayTicks(slime));
+        Assert.Equal(registry.HopAirborneTicks(slime), Cadence());
     }
 }

@@ -3028,14 +3028,19 @@ public sealed class GameServer
                 type = _monsterTypes.Default;
             }
 
-            // LOOT P4c (monster-types follow-up #1): pace the monster off its TYPE's LIVE MoveSpeedMultiplier read
-            // fresh each tick — NOT the entity's spawn-time-copied SpeedMultiplier — so an admin retuning
-            // "<typeId>.moveSpeed" on the F1 tab speeds up / slows down ALREADY-SPAWNED monsters next tick, like the
-            // other live Tunables. Same base ÷ multiplier + min/max clamp as the player path.
+            // SLIME-FEEL-POLISH: the monster's HOP CADENCE (time between hop STARTS) is HopAirborneTicks + HopDelayTicks,
+            // read fresh each tick so a "<typeId>.hop*" admin retune re-paces ALREADY-SPAWNED monsters next tick. The hop
+            // starts at T, the executor keeps it airborne for HopAirborneTicks (lands at T+airborne), TryBeginHop then
+            // arms _nextEligibleTick = T + (airborne+delay) so the monster sits IDLE on the ground for HopDelayTicks
+            // before the next hop — DELAY is the real, tunable grounded rest the user asked for (the opaque move-speed
+            // cadence is retired). NOTE: the entity's REPLICATED interp cadence (EntitySpawn / MovementSpeedChanged,
+            // seeded from MoveSpeedMultiplier at spawn) is intentionally LEFT AS-IS and may differ from this hop cadence
+            // — the slime is force-included densely every airborne tick (Phase C) and the interp is sample-driven, so the
+            // nominal interp cadence differing from the hop cadence is tolerable.
             _monsterAi.StepMonster(
                 entity,
                 _serverTick,
-                EffectiveStepCooldownTicksFor(type.MoveSpeedMultiplier),
+                _monsterTypes.HopAirborneTicks(type) + _monsterTypes.HopDelayTicks(type),
                 _monsterTypes.BuildTunables(type));
         }
     }

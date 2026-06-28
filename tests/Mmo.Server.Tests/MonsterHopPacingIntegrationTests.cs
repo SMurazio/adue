@@ -10,15 +10,17 @@ using Xunit;
 
 namespace Mmo.Server.Tests;
 
-// LIVESPEED-DESYNC end-to-end: editing a monster TYPE's moveSpeed live (the F1 Monster tab → an AdminSetTuning on
-// "slime.moveSpeed") must re-pace ALREADY-SPAWNED monsters of that type AND replicate the new cadence to viewers,
-// exactly like the player /speed path. Before the fix the server AI re-paced the slime off the type's live
-// MoveSpeedMultiplier while the entity's SpeedMultiplier (the EntitySpawn / MovementSpeedChanged cadence the client
-// interpolates at) stayed at the spawn value, so no MovementSpeedChanged was sent → the slime visibly desynced from
-// its 'Server positions' marker. These pin: (1) a live moveSpeed edit broadcasts a MovementSpeedChanged carrying the
-// new EffectiveStepCooldownMs for the spawned monster, and that the entity now steps on the new cadence; (2) re-applying
-// the SAME moveSpeed broadcasts nothing (TrySetSpeedMultiplier is a no-op when unchanged).
-public sealed class MonsterLiveSpeedDesyncIntegrationTests
+// SLIME-FEEL-POLISH end-to-end: the monster hop PACING was redesigned around the intuitive RANGE / HEIGHT / AIRBORNE /
+// DELAY knobs, and the opaque "move speed (x)" knob was RETIRED as a tunable. Two consequences are pinned here against a
+// live server:
+//   (1) the entity's REPLICATED interp cadence (EntitySpawn / MovementSpeedChanged, seeded from MoveSpeedMultiplier at
+//       spawn) is intentionally DECOUPLED from the hop cadence (now HopAirborneTicks + HopDelayTicks) — so editing a hop
+//       knob (slime.hopDelayMs) re-paces the AI's hops but does NOT emit a MovementSpeedChanged for the spawned slime;
+//   (2) "slime.moveSpeed" is no longer a recognized tuning key — an AdminSetTuning on it is rejected (no re-pace, no
+//       broadcast), confirming the retirement end-to-end.
+// (The earlier LIVESPEED-DESYNC scenario — a live moveSpeed edit re-pacing + replicating the cadence — no longer exists
+// because moveSpeed can no longer be edited live; this file replaces those tests.)
+public sealed class MonsterHopPacingIntegrationTests
 {
     private const int TickRate = 20;
     private const int BaseStepCooldownMs = 140;
@@ -34,7 +36,7 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
     }
 
     [Fact]
-    public async Task EditingMonsterTypeMoveSpeedRepacesSpawnedMonsterAndReplicatesNewCadence()
+    public async Task EditingSlimeHopDelayDoesNotRepaceTheReplicatedInterpCadence()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
@@ -56,21 +58,15 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
             Assert.True(admin.TryGetMonsterSpawn(out var slimeSpawn));
             var slimeId = slimeSpawn.NetworkId;
 
-            // The slime's spawn advertises its TYPE default cadence (0.6x ⇒ slower than base). This is already in
-            // lockstep at spawn — the desync only appeared on a LIVE edit.
+            // The slime's spawn advertises the TYPE's interp cadence seeded from MoveSpeedMultiplier (0.6x default).
             Assert.Equal(EffectiveMs(0.6), slimeSpawn.StepCooldownMs);
 
-            // Admin speeds the slime TYPE up to 1.0 on the F1 tab. The fix must (a) re-apply that to the spawned
-            // slime entity and (b) replicate the new cadence — a MovementSpeedChanged for the slime carrying the
-            // faster (shorter) effective cooldown.
-            admin.SendAdminSetTuning("slime.moveSpeed", 1.0d);
-            await WaitUntilAsync(
-                () => admin.SpeedChanges.Any(m => m.NetworkId == slimeId),
-                admin);
-
-            var change = admin.SpeedChanges.Last(m => m.NetworkId == slimeId);
-            Assert.Equal(EffectiveMs(1.0), change.StepCooldownMs);
-            Assert.True(change.StepCooldownMs < slimeSpawn.StepCooldownMs, "speeding the type up must shorten the slime cadence live.");
+            // Admin lengthens the grounded REST between hops on the F1 tab. This re-paces the AI's HOP cadence, but the
+            // replicated interp cadence is decoupled and left as-is — so NO MovementSpeedChanged is emitted for the slime.
+            admin.ClearSpeedChanges();
+            admin.SendAdminSetTuning("slime.hopDelayMs", 1000d);
+            await PollForAsync(TimeSpan.FromMilliseconds(500), admin);
+            Assert.DoesNotContain(admin.SpeedChanges, m => m.NetworkId == slimeId);
         }
         finally
         {
@@ -80,7 +76,7 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
     }
 
     [Fact]
-    public async Task ReapplyingTheSameMonsterTypeMoveSpeedBroadcastsNothing()
+    public async Task MoveSpeedIsNoLongerATunableKeyAndBroadcastsNothing()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
@@ -101,10 +97,10 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
             Assert.True(admin.TryGetMonsterSpawn(out var slimeSpawn));
             var slimeId = slimeSpawn.NetworkId;
 
-            // Set moveSpeed to the slime's CURRENT default (0.6) — an unchanged value. TrySetSpeedMultiplier returns
-            // false, so no MovementSpeedChanged must be emitted for the slime (it is gated on an actual change).
+            // "slime.moveSpeed" is the RETIRED knob — no longer a recognized key. The server rejects + logs it, so it
+            // re-paces nothing and broadcasts no MovementSpeedChanged for the slime.
             admin.ClearSpeedChanges();
-            admin.SendAdminSetTuning("slime.moveSpeed", 0.6d);
+            admin.SendAdminSetTuning("slime.moveSpeed", 1.0d);
             await PollForAsync(TimeSpan.FromMilliseconds(500), admin);
             Assert.DoesNotContain(admin.SpeedChanges, m => m.NetworkId == slimeId);
         }
@@ -120,7 +116,7 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
         return new ServerOptions(
             port,
             20,
-            "monster-livespeed-test",
+            "monster-hop-pacing-test",
             DatabaseProvider.Sqlite,
             connectionString,
             TestSqliteDatabase.MigrationsPath,
@@ -161,7 +157,7 @@ public sealed class MonsterLiveSpeedDesyncIntegrationTests
             await Task.Delay(10);
         }
 
-        throw new TimeoutException("Timed out waiting for monster live-speed integration condition.");
+        throw new TimeoutException("Timed out waiting for monster hop-pacing integration condition.");
     }
 
     private static async Task PollForAsync(TimeSpan duration, params MonsterTuningClient[] clients)

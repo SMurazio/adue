@@ -33,15 +33,12 @@ public sealed class MonsterType
     // Per-type max HP — the monster spawns at full of this. Default 100 (the CharacterStats default).
     public int MaxHealth { get; set; } = 100;
 
-    // Per-type movement speed as a multiplier of the player's base cadence. < 1 = slower than the player
-    // (outrunnable), 1 = same, > 1 = faster. Default 0.6 — at 0.6x the slime's effective step cooldown is
-    // round(5 / 0.6) = 8 ticks (~417 ms) vs the player's base 250 ms, so it is clearly outrunnable.
-    //
-    // LOOT P4c: this is the TYPE's LIVE knob — StepMonsterAi derives a stepping monster's cadence from this
-    // value EACH TICK (EffectiveStepCooldownTicksFor), so editing "slime.moveSpeed" on the F1 Monster tab dials
-    // ALREADY-SPAWNED slimes, consistent with the other live per-type Tunables. (The spawned entity still gets a
-    // one-time SpeedMultiplier copy at spawn for parity with the player /speed path, but the monster cadence no
-    // longer reads it — the type value is authoritative for monster stepping.)
+    // INTERNAL-ONLY (no longer user-tunable / shown on the F1 Monster tab — the confusing "move speed (x)" knob was
+    // retired in favour of the intuitive RANGE / HEIGHT / AIRBORNE / DELAY hop knobs). This is still the multiplier of
+    // the player's base cadence (< 1 = slower) that the entity's replicated SpeedMultiplier is seeded from AT SPAWN —
+    // it sets the client-side interpolation cadence (EntitySpawn / MovementSpeedChanged) only. It NO LONGER drives the
+    // monster's HOP cadence: StepMonsterAi now paces hops off HopAirborneMs + HopDelayMs (see GameServer.StepMonsterAi).
+    // Default 0.6 — kept so the replicated interp cadence is unchanged. Not replicated as a tunable, not clamp-edited.
     public double MoveSpeedMultiplier { get; set; } = 0.6;
 
     // P1 roam knob. CONTINUOUS: a world-unit RANGE (Euclidean, fractional) — the AI samples a continuous disc of this
@@ -76,6 +73,13 @@ public sealed class MonsterType
     // still controls how OFTEN hops start; this controls how long each one lasts. Default 300 ms; live-tunable per type
     // ("slime.hopAirborneMs"). Keep airborne < cadence for real rest (the IsActive gate keeps it safe either way).
     public int HopAirborneMs { get; set; } = 300;
+
+    // SLIME-FEEL-POLISH: the grounded REST between hops, in ms — the real, intuitive "delay between each jump" the user
+    // asked for (the opaque "move speed (x)" knob is retired). The monster's hop CADENCE (time between hop starts) is
+    // now HopAirborneMs + HopDelayMs: it hops (airborne for HopAirborneTicks), lands, then sits IDLE on the ground for
+    // HopDelayTicks before the next hop. Default 400 ms — so the default cycle is 300 airborne + 400 rest = 700 ms, a
+    // VISIBLE pause between hops. Live-tunable per type ("slime.hopDelayMs"); 0 = hop again the instant it lands.
+    public int HopDelayMs { get; set; } = 400;
 
     // CONTINUOUS: the world-unit RANGE (Euclidean, fractional) at which the monster ATTACKS instead of hopping. The AI
     // reads THIS and the F1 "attack range" knob edits it (the former integer-tile AttackRange knob — which the AI never

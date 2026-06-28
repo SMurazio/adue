@@ -8,7 +8,7 @@ namespace Mmo.Server.Runtime;
 // kept extensible — a new type is one Add() here + (optionally) its own non-default values.
 //
 // PER-TYPE LIVE KEYS: an admin retunes a type via AdminSetTuning on keys of the form "<typeId>.<field>", e.g.
-// "slime.roamRadius", "slime.aggroRadius", "slime.moveSpeed", "slime.maxHealth". TryApply parses the typeId prefix,
+// "slime.roamRadius", "slime.aggroRadius", "slime.hopDelayMs", "slime.maxHealth". TryApply parses the typeId prefix,
 // resolves the type, clamps the field, and applies it — returning false (caller ignores+logs) for an unknown type
 // or field. The per-type tuning REPLACES the former global monster.* block (those keys were removed).
 //
@@ -23,7 +23,7 @@ public sealed class MonsterTypeRegistry
     public const string DefaultTypeId = "slime";
 
     // Per-type clamps — wide enough to tune feel, tight enough a typo can't break the AI (mirrors the old global
-    // monster.* clamps in ServerTuningRegistry, plus the new moveSpeed + maxHealth bounds).
+    // monster.* clamps in ServerTuningRegistry, plus the maxHealth + hop-knob bounds).
     // CONTINUOUS: roam/aggro/leash/attack are world-unit RANGES (fractional doubles), not integer tiles.
     private const double MinRoamRadius = 0.5d;
     private const double MaxRoamRadius = 32d;
@@ -42,20 +42,18 @@ public sealed class MonsterTypeRegistry
     // LIVING-ENEMIES P3 respawn delay bounds: 0 (instant) up to 5 min, wide enough to tune feel.
     private const int MinRespawnMs = 0;
     private const int MaxRespawnMs = 300000;
-    // moveSpeed 0.1..5x — a near-crawl up to 5x the player base; the per-entity cadence is further clamped by the
-    // server's EffectiveStepCooldown ms bounds, so an extreme value can never break the tick loop.
-    private const double MinMoveSpeed = 0.1d;
-    private const double MaxMoveSpeed = 5d;
     private const int MinMaxHealth = 1;
     private const int MaxMaxHealth = 100000;
-    // DATA-DRIVEN hop knobs (exposed on the F1 Monster tab). Distance/height are tile-unit doubles; airborne is ms.
-    // Modest bounds: distance up to 8 tiles, height up to 4 tiles, airborne 50 ms..2 s (kept < a typical cadence).
+    // DATA-DRIVEN hop knobs (exposed on the F1 Monster tab). Distance/height are tile-unit doubles; airborne/delay are ms.
+    // Modest bounds: distance up to 8 tiles, height up to 4 tiles, airborne 50 ms..2 s, delay 0..5 s (0 = no rest).
     private const double MinHopDistance = 0.25d;
     private const double MaxHopDistance = 8d;
     private const double MinHopHeight = 0d;
     private const double MaxHopHeight = 4d;
     private const int MinHopAirborneMs = 50;
     private const int MaxHopAirborneMs = 2000;
+    private const int MinHopDelayMs = 0;
+    private const int MaxHopDelayMs = 5000;
 
     // Per-type field suffixes (the part after "<typeId>."). Public so the client F1 tab + tests name the SAME keys.
     public const string RoamRadiusField = "roamRadius";
@@ -66,12 +64,12 @@ public sealed class MonsterTypeRegistry
     public const string AttackRangeField = "attackRange";
     public const string AttackDamageField = "attackDamage";
     public const string AttackCooldownMsField = "attackCooldownMs";
-    public const string MoveSpeedField = "moveSpeed";
     public const string MaxHealthField = "maxHealth";
     public const string RespawnMsField = "respawnMs";
     public const string HopDistanceField = "hopDistance";
     public const string HopHeightField = "hopHeight";
     public const string HopAirborneMsField = "hopAirborneMs";
+    public const string HopDelayMsField = "hopDelayMs";
 
     // DATA-DRIVEN tuning (v40): the SINGLE source of the per-type tunable knobs. Each descriptor names a field's wire
     // Key (the "<typeId>." suffix), its human Label (the F1 caption), a Getter that reads the CURRENT value off a
@@ -88,8 +86,13 @@ public sealed class MonsterTypeRegistry
 
     private static readonly TunableDescriptor[] Descriptors =
     {
+        // SLIME-FEEL-POLISH: the intuitive slime hop feel-knobs lead (RANGE / HEIGHT / AIRBORNE / DELAY) — the order
+        // here IS the F1 row order. The opaque "move speed (x)" knob is retired (interp-cadence-only now, not shown).
         new(MaxHealthField, "hp (max)", t => t.MaxHealth, MinMaxHealth, MaxMaxHealth, true),
-        new(MoveSpeedField, "move speed (x)", t => t.MoveSpeedMultiplier, MinMoveSpeed, MaxMoveSpeed, false),
+        new(HopDistanceField, "hop distance", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
+        new(HopHeightField, "hop height", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
+        new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true),
+        new(HopDelayMsField, "hop delay (ms)", t => t.HopDelayMs, MinHopDelayMs, MaxHopDelayMs, true),
         new(RoamRadiusField, "roam range", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, false),
         new(AggroRadiusField, "aggro range", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, false),
         new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, false),
@@ -99,9 +102,6 @@ public sealed class MonsterTypeRegistry
         new(PauseMinMsField, "pause min (ms)", t => t.PauseMinMs, MinPauseMs, MaxPauseMs, true),
         new(PauseMaxMsField, "pause max (ms)", t => t.PauseMaxMs, MinPauseMs, MaxPauseMs, true),
         new(RespawnMsField, "respawn (ms)", t => t.RespawnMs, MinRespawnMs, MaxRespawnMs, true),
-        new(HopDistanceField, "hop distance", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
-        new(HopHeightField, "hop height", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
-        new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true),
     };
 
     // The recognized per-type field suffixes, derived ONCE from the descriptor list so IsMonsterTypeKey never drifts
@@ -242,9 +242,6 @@ public sealed class MonsterTypeRegistry
             case RespawnMsField:
                 type.RespawnMs = ClampInt(value, MinRespawnMs, MaxRespawnMs, out applied);
                 return true;
-            case MoveSpeedField:
-                type.MoveSpeedMultiplier = ClampDouble(value, MinMoveSpeed, MaxMoveSpeed, out applied);
-                return true;
             case HopDistanceField:
                 type.HopDistanceUnits = ClampDouble(value, MinHopDistance, MaxHopDistance, out applied);
                 return true;
@@ -253,6 +250,9 @@ public sealed class MonsterTypeRegistry
                 return true;
             case HopAirborneMsField:
                 type.HopAirborneMs = ClampInt(value, MinHopAirborneMs, MaxHopAirborneMs, out applied);
+                return true;
+            case HopDelayMsField:
+                type.HopDelayMs = ClampInt(value, MinHopDelayMs, MaxHopDelayMs, out applied);
                 return true;
             default:
                 return false;
@@ -288,6 +288,13 @@ public sealed class MonsterTypeRegistry
     // HopAirborneMs (Round, floored at 1 tick — same MsToTicks the pause bounds use). GameServer.BeginMonsterHop feeds
     // this as the ballistic Jump's DurationTicks so the hop is a SHORT arc and the slime rests the rest of the cadence.
     public uint HopAirborneTicks(MonsterType type) => MsToTicks(type.HopAirborneMs);
+
+    // SLIME-FEEL-POLISH: this type's grounded REST between hops in TICKS, derived from its live HopDelayMs (Round,
+    // floored at 0 — a 0 ms delay means re-hop the instant it lands; same convention as RespawnTicks, NOT the floor-at-1
+    // of MsToTicks). GameServer.StepMonsterAi feeds the monster's hop CADENCE as HopAirborneTicks + HopDelayTicks, so
+    // this is the real, tunable idle pause the user asked for ("a delay between each jump").
+    public uint HopDelayTicks(MonsterType type) =>
+        (uint)Math.Max(0, (int)Math.Round(type.HopDelayMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
 
     // The current per-type tuning as the wire snapshot the server replicates (login + on change). DATA-DRIVEN: each
     // type ships the GENERIC field list built from the descriptor table (current value via the getter, bounds from the
