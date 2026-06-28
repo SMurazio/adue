@@ -39,7 +39,33 @@ A monster = four separable layers; each should be selectable per type:
 | **Abilities ("what it can do")** | the actions it can perform | none (melee-on-contact only) | per-type set of `MovementActionDef`/attacks, triggered by the brain via the executor |
 | **Visual** | what it looks like / animates as | one `EntityKind.Monster` | a replicated per-type visual id (+ the action `AnimationId`) |
 
-## 2. Recommended structure — a STRATEGY seam (pragmatic, matches the codebase)
+## 1.5 The replication guardrail (the "fun but can't be insane" constraint — LOCKED)
+Monsters are **server-run and REPLICATED** to clients that **extrapolate** a monster's position forward along its
+replicated velocity (the new default), or interpolate. So a behavior is only as good as it REPLICATES — its *motion*
+must be replication-sane, or the remote view snaps/jitters. Hard rules every behavior/locomotion obeys:
+- **Continuous motion must be velocity-coherent.** The replicated `Velocity` should point where the monster is
+  actually going, so extrapolation is accurate (a Glide walker extrapolates perfectly; the hop carries `Velocity 0`
+  but is force-included densely per tick, so it tracks). A behavior may NOT produce per-frame erratic/unpredictable
+  wiggle — that defeats extrapolation and reads as jitter.
+- **Anything sudden goes through the shared action executor.** A blink/leap/charge/dash is a discrete, authoritative
+  `MovementActionDef` (deterministic, replicated, the client is told) — NOT a raw teleport the client can't anticipate.
+- **No client-side monster simulation.** The brain runs at the SERVER tick rate and expresses itself ONLY through the
+  locomotion (smooth motion) + abilities (discrete actions). The client never predicts a monster; it just renders the
+  replicated position/velocity + action.
+
+This is exactly WHY the behavior model below is **composition from a curated library of replication-safe primitives**,
+not arbitrary per-monster scripting: "fun" comes from mixing + tuning safe building blocks, so a content author
+*cannot* author an un-replicable ("insane") monster. The expressiveness is in the COMBINATIONS, bounded by safe rails.
+
+## 2. Recommended structure — DATA-COMPOSED code primitives (resolves decisions 1 + 2)
+**The model (locked):** a monster TYPE is **DATA** that COMPOSES a curated **code library** of replication-safe
+primitives. The behavior/locomotion/ability LOGIC is code (vetted, replication-safe, type-safe, testable); a monster
+*type* is a data manifest that names which primitives to combine + the stats/tuning that parameterise them. New fun
+monster = a data entry mixing existing primitives (+ tuning); a genuinely new capability = one new primitive added to
+the code library (then any type can compose it). This is the same data-driven discipline the F1 tuning tab already
+follows (the NUMBERS dimension), extended to the COMPOSITION dimension — and it keeps the replication guardrail (§1.5)
+because the only building blocks are safe code primitives, not free-form script.
+
 Keep `MonsterType` as the data + the SELECTORS, and make behavior/locomotion/abilities pluggable strategies keyed by
 id (the same pattern `IMonsterLocomotion` already established, and the loot/action registries follow):
 
@@ -74,6 +100,10 @@ id (the same pattern `IMonsterLocomotion` already established, and the loot/acti
   aggro + leash, `VisualId=gnoll`, pack-awareness as a later behavior refinement.
 
 ## 4. Phased build (each its own gated + independently-reviewed branch, like the action framework)
+- **P0 — Data manifest for monster types (composition + tuning).** Move `MonsterType` from the code-seeded registry to
+  a loaded data manifest that names primitives (locomotion/behavior/ability ids) + stats + tuning, with schema
+  validation + the F1 live-tuning still on top. Can lead OR trail P1–P3 (the composition record is the same either
+  way) — sequence it whenever the authoring win is wanted. Until then, types are composed in code with the SAME shape.
 - **P1 — Per-type locomotion selection.** Registry of `IMonsterLocomotion` keyed by id + `MonsterType.LocomotionId`;
   the AI picks the monster's locomotion by type. NO behavior change (slime still Hop). De-risks the per-type plumbing.
 - **P2 — `GlideLocomotion`** (continuous velocity-based walk through the shared collision) + a second type that uses
@@ -89,14 +119,27 @@ Sequencing rationale: bodies before brains before abilities before looks — eac
 existing monster tests stay the safety net. A gnoll becomes shippable around P2–P4 (walks + skirmishes) and "feels
 like a gnoll" by P5–P6.
 
-## 5. Open decisions for the user (refine before P1)
-- **Behavior model:** strategy seam (recommended) vs behavior-trees vs trait/components — how much designer
-  authorability do you want, and how complex will the smartest monster get?
-- **Shared brain scaffolding:** base-class-with-overrides vs fully-separate behaviors (how much do slime & gnoll
-  actually share)?
-- **Code-defined vs data-driven types/behaviors:** keep `MonsterType` in code (current), or author monsters in data?
-- **Visual/animation replication:** fold the deferred replicated `ActionId`/per-type visual id in at P6, or sooner?
-- **Pack / group behavior** (gnolls hunt in packs) — in scope for the first richer brain, or a later layer?
+## 5. Decisions (LOCKED with the user) + what stays open
+- **Behavior model — LOCKED:** composition from a curated CODE LIBRARY of replication-safe primitives, selected per
+  type. NOT arbitrary behavior-scripting (a script engine is over-build AND a replication risk — see §1.5) and NOT
+  pure-code-per-type (too slow for authoring many fun monsters). A behavior tree can later live UNDER one
+  `IMonsterBehavior` primitive if a single monster needs designer-authored complexity, without disturbing the others.
+- **Code vs data — LOCKED: DATA** for the COMPOSITION (a monster type is a data manifest naming primitives + stats +
+  tuning) — so making a fun new monster is a data edit, not a build. The behavior/locomotion/ability LOGIC stays CODE
+  (you cannot safely data-drive logic + keep replication sane). Migrate `MonsterType` from the code-seeded registry to
+  a loaded manifest in its own phase (P0 below); the composition model is identical either way, so the seams (P1–P3)
+  don't block on the loader.
+- **Packs / group behavior — DEFERRED** (the user wants packs eventually, not now). Out of P1–P6. The behavior seam is
+  kept PACK-READY: `IMonsterBehavior` decisions can later read nearby allies / a shared squad blackboard, and a
+  group-coordination layer feeds the individual brains — so deferring it doesn't paint us into a corner.
+- **Replication guardrail — LOCKED** (§1.5): behaviors express motion only via velocity-coherent locomotion + discrete
+  executor actions; no client-side monster sim; no un-anticipatable teleports.
+
+Still open (smaller, decide as we build):
+- **Shared brain scaffolding:** base-class-with-overrides vs injected helpers (how much slime & gnoll actually share) —
+  settle at P3 when the seam is extracted.
+- **Manifest format + when:** the data manifest format (JSON/other) + whether P0 (loader) leads or trails the seams.
+- **Visual/animation replication:** fold the deferred per-type visual id + action `AnimationId` in at P6 or sooner.
 
 > The existing per-type tuning (the data-driven F1 Monster tab) already gives the NUMBERS dimension; this design adds
 > the BEHAVIOR dimension on top of it. Builds on `movement-actions-design.md` (the shared executor/abilities) and the

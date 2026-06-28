@@ -16,8 +16,22 @@ front (BTs can slot under `IMonsterBehavior` later).
 type → P3 `IMonsterBehavior` seam (extract `BasicRoamerBehavior`, no behavior change) → P4 a 2nd behavior (Skirmisher:
 flee/keep-distance) → P5 per-type ability sets (gnoll charge) → P6 per-type visual + animation replication.
 
-**Open decisions (in the doc):** behavior model (strategy vs BT vs components); shared-scaffolding vs separate brains;
-code-defined vs data-driven types; when to fold in visual/animation replication; pack/group behavior scope.
+**Decisions LOCKED with the user (see the doc §5):**
+- Behavior model = **composition from a curated code library of replication-safe primitives** (NOT a script engine,
+  NOT pure-code-per-type). A behavior tree may later live under one behavior primitive if needed.
+- **Data-driven COMPOSITION** (a monster type is a data manifest naming primitives + stats + tuning); behavior LOGIC
+  stays code. Manifest loader = phase P0 (can lead or trail the seams; composition shape is identical in code).
+- **Replication guardrail** (§1.5): behaviors express motion ONLY via velocity-coherent locomotion + discrete shared-
+  executor actions; no client-side monster sim; no un-anticipatable teleports. This is what keeps "fun" from becoming
+  un-replicable ("can't be insane").
+- **Packs DEFERRED** (wanted eventually). Out of P0–P6; the behavior seam stays pack-ready (later group layer feeds
+  individual brains).
 
-**Status: awaiting the user's review of the design doc** before P1. Builds on [[movement-actions-framework]] +
-[[tile-continuous-cleanup]].
+Still open (decide while building): shared-scaffolding vs separate brains (settle at P3); manifest format + P0 timing;
+when to fold in the per-type visual + action AnimationId replication.
+
+**Phases:** P0 data manifest → P1 per-type locomotion → P2 GlideLocomotion + a walker → P3 IMonsterBehavior seam
+(extract BasicRoamer) → P4 a 2nd behavior (Skirmisher) → P5 per-type abilities → P6 visual/animation replication.
+
+**Status: design refined + locked; ready to start P1 (or P0) on the user's go.** Builds on
+[[movement-actions-framework]] + [[tile-continuous-cleanup]].
