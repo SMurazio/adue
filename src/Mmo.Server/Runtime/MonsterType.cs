@@ -11,8 +11,8 @@ namespace Mmo.Server.Runtime;
 // (MonsterTuningSnapshot) so the F1 Monster tab can show + edit the authoritative numbers. They are read fresh each
 // AI pass, so a live change takes effect on the next tick with no torn state (single-threaded tick loop).
 //
-// Defaults migrate the former global monster.* block verbatim (roam 4 / pause 2000-5000 / aggro 6 / leash 12 /
-// attackRange 1 / attackDamage 10 / attackCooldown 1000), EXCEPT MoveSpeedMultiplier, which is the slower-than-
+// Defaults migrate the former global monster.* block (roam 4 / pause 2000-5000 / aggro 6 / leash 12 /
+// attackRangeUnits 1.5 / attackDamage 10 / attackCooldown 1000), EXCEPT MoveSpeedMultiplier, which is the slower-than-
 // player default (0.6 → the slime steps ~417 ms vs the player's 250 ms base, so the dumb ones are clearly
 // outrunnable), and MaxHealth (100, the CharacterStats default, now an explicit per-type knob so a tankier type
 // is one number away).
@@ -44,19 +44,20 @@ public sealed class MonsterType
     // longer reads it — the type value is authoritative for monster stepping.)
     public double MoveSpeedMultiplier { get; set; } = 0.6;
 
-    // P1 roam knobs (migrated from the global monster.* defaults).
-    public int RoamRadius { get; set; } = 4;
+    // P1 roam knob. CONTINUOUS: a world-unit RANGE (Euclidean, fractional) — the AI samples a continuous disc of this
+    // radius; no tile quantization. Authored 4 == the old 4-tile leash (1 unit == 1 old tile). PauseMs stay integer ms.
+    public double RoamRadius { get; set; } = 4d;
     public int PauseMinMs { get; set; } = 2000;
     public int PauseMaxMs { get; set; } = 5000;
 
-    // P2 aggro/chase/attack knobs (migrated from the global monster.* defaults).
-    public int AggroRadius { get; set; } = 6;
-    public int ChaseLeash { get; set; } = 12;
-    public int AttackRange { get; set; } = 1;
+    // P2 aggro/chase knobs — CONTINUOUS world-unit RANGES (Euclidean, fractional), used DIRECTLY by the AI's distance
+    // tests. Authored 6 / 12 == the old tile values (1 unit == 1 old tile). AttackDamage/CooldownMs stay integer.
+    public double AggroRadius { get; set; } = 6d;
+    public double ChaseLeash { get; set; } = 12d;
     public int AttackDamage { get; set; } = 10;
     public int AttackCooldownMs { get; set; } = 1000;
 
-    // CONTINUOUS MIGRATION (Phase 8): the discrete LEAP distance of one hop, in tile units. The AI hops this far toward
+    // CONTINUOUS MIGRATION (Phase 8): the discrete LEAP distance of one hop, in world units (range). The AI hops this far toward
     // its continuous nav target each move-cadence window; the resolver slides/stops it at walls. DATA-DRIVEN tuning:
     // default bumped 1.0 → 1.5 (the user's "range too low" feel-test complaint) — modest, and now live-tunable per type
     // on the F1 Monster tab ("slime.hopDistance"), so it can be dialed further without a code change.
@@ -76,10 +77,10 @@ public sealed class MonsterType
     // ("slime.hopAirborneMs"). Keep airborne < cadence for real rest (the IsActive gate keeps it safe either way).
     public int HopAirborneMs { get; set; } = 300;
 
-    // CONTINUOUS MIGRATION (Phase 8): the Euclidean adjacency radius (tile units) at which the monster ATTACKS instead
-    // of hopping. Default 1.5 — the √2-covering of the old 1-tile (3×3 Chebyshev) adjacency: a 1.0 here would REGRESS
-    // (a diagonal player at Euclidean √2 ≈ 1.41 would no longer be "adjacent"), so 1.5 keeps the diagonal hit. Distinct
-    // from AttackRange (the legacy tile/Chebyshev knob, kept for the wire/registry); the continuous AI reads THIS.
+    // CONTINUOUS: the world-unit RANGE (Euclidean, fractional) at which the monster ATTACKS instead of hopping. The AI
+    // reads THIS and the F1 "attack range" knob edits it (the former integer-tile AttackRange knob — which the AI never
+    // read — is retired). Default 1.5 — the √2-covering of the old 1-tile (3×3 Chebyshev) adjacency, so a diagonal
+    // player at Euclidean √2 ≈ 1.41 still counts as adjacent.
     public double AttackRangeUnits { get; set; } = 1.5;
 
     // LIVING-ENEMIES P3: how long after a monster of this type DIES its spawner waits before spawning a fresh

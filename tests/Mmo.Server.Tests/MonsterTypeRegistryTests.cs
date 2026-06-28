@@ -26,13 +26,13 @@ public sealed class MonsterTypeRegistryTests
         Assert.Equal("slime", slime.Id);
         Assert.Equal("Slime", slime.DisplayName);
 
-        // The former global monster.* defaults, migrated verbatim.
-        Assert.Equal(4, slime.RoamRadius);
+        // The former global monster.* defaults, migrated. CONTINUOUS: roam/aggro/leash are now world-unit RANGE doubles.
+        Assert.Equal(4d, slime.RoamRadius);
         Assert.Equal(2000, slime.PauseMinMs);
         Assert.Equal(5000, slime.PauseMaxMs);
-        Assert.Equal(6, slime.AggroRadius);
-        Assert.Equal(12, slime.ChaseLeash);
-        Assert.Equal(1, slime.AttackRange);
+        Assert.Equal(6d, slime.AggroRadius);
+        Assert.Equal(12d, slime.ChaseLeash);
+        Assert.Equal(1.5d, slime.AttackRangeUnits); // the continuous attack range the AI reads (the int tile knob is retired)
         Assert.Equal(10, slime.AttackDamage);
         Assert.Equal(1000, slime.AttackCooldownMs);
         Assert.Equal(100, slime.MaxHealth);
@@ -61,19 +61,28 @@ public sealed class MonsterTypeRegistryTests
     {
         var registry = Registry();
 
-        Assert.True(registry.TryApply("slime.roamRadius", 6d, out var r));
-        Assert.Equal(6d, r);
-        Assert.Equal(6, registry.Default.RoamRadius);
+        // CONTINUOUS: roam range accepts FRACTIONAL world-units now.
+        Assert.True(registry.TryApply("slime.roamRadius", 6.5d, out var r));
+        Assert.Equal(6.5d, r);
+        Assert.Equal(6.5d, registry.Default.RoamRadius);
 
-        // roam radius clamps to [1, 32].
+        // roam range clamps to [0.5, 32] (continuous).
         Assert.True(registry.TryApply("slime.roamRadius", 0d, out _));
-        Assert.True(registry.Default.RoamRadius >= 1);
+        Assert.True(registry.Default.RoamRadius >= 0.5d);
         Assert.True(registry.TryApply("slime.roamRadius", 999d, out _));
-        Assert.True(registry.Default.RoamRadius <= 32);
+        Assert.True(registry.Default.RoamRadius <= 32d);
 
-        // aggro radius clamps to [1, 64].
+        // aggro range clamps to [0.5, 64].
         Assert.True(registry.TryApply("slime.aggroRadius", 9999d, out _));
-        Assert.True(registry.Default.AggroRadius <= 64);
+        Assert.True(registry.Default.AggroRadius <= 64d);
+
+        // "attack range" edits the CONTINUOUS AttackRangeUnits the AI reads (not the retired integer-tile knob),
+        // accepts fractional, and clamps to [0.5, 8].
+        Assert.True(registry.TryApply("slime.attackRange", 2.25d, out var ar));
+        Assert.Equal(2.25d, ar);
+        Assert.Equal(2.25d, registry.Default.AttackRangeUnits);
+        Assert.True(registry.TryApply("slime.attackRange", 0d, out _));
+        Assert.True(registry.Default.AttackRangeUnits >= 0.5d);
 
         // moveSpeed clamps to [0.1, 5].
         Assert.True(registry.TryApply("slime.moveSpeed", 0d, out var ms));

@@ -24,16 +24,17 @@ public sealed class MonsterTypeRegistry
 
     // Per-type clamps — wide enough to tune feel, tight enough a typo can't break the AI (mirrors the old global
     // monster.* clamps in ServerTuningRegistry, plus the new moveSpeed + maxHealth bounds).
-    private const int MinRoamRadius = 1;
-    private const int MaxRoamRadius = 32;
+    // CONTINUOUS: roam/aggro/leash/attack are world-unit RANGES (fractional doubles), not integer tiles.
+    private const double MinRoamRadius = 0.5d;
+    private const double MaxRoamRadius = 32d;
     private const int MinPauseMs = 0;
     private const int MaxPauseMs = 60000;
-    private const int MinAggroRadius = 1;
-    private const int MaxAggroRadius = 64;
-    private const int MinChaseLeash = 1;
-    private const int MaxChaseLeash = 128;
-    private const int MinAttackRange = 1;
-    private const int MaxAttackRange = 4;
+    private const double MinAggroRadius = 0.5d;
+    private const double MaxAggroRadius = 64d;
+    private const double MinChaseLeash = 0.5d;
+    private const double MaxChaseLeash = 128d;
+    private const double MinAttackRangeUnits = 0.5d;
+    private const double MaxAttackRangeUnits = 8d;
     private const int MinAttackDamage = 0;
     private const int MaxAttackDamage = 10000;
     private const int MinAttackCooldownMs = 100;
@@ -89,17 +90,17 @@ public sealed class MonsterTypeRegistry
     {
         new(MaxHealthField, "hp (max)", t => t.MaxHealth, MinMaxHealth, MaxMaxHealth, true),
         new(MoveSpeedField, "move speed (x)", t => t.MoveSpeedMultiplier, MinMoveSpeed, MaxMoveSpeed, false),
-        new(RoamRadiusField, "roam radius", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, true),
-        new(AggroRadiusField, "aggro radius", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, true),
-        new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, true),
-        new(AttackRangeField, "attack range", t => t.AttackRange, MinAttackRange, MaxAttackRange, true),
+        new(RoamRadiusField, "roam range", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, false),
+        new(AggroRadiusField, "aggro range", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, false),
+        new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, false),
+        new(AttackRangeField, "attack range", t => t.AttackRangeUnits, MinAttackRangeUnits, MaxAttackRangeUnits, false),
         new(AttackDamageField, "attack damage", t => t.AttackDamage, MinAttackDamage, MaxAttackDamage, true),
         new(AttackCooldownMsField, "attack cooldown (ms)", t => t.AttackCooldownMs, MinAttackCooldownMs, MaxAttackCooldownMs, true),
         new(PauseMinMsField, "pause min (ms)", t => t.PauseMinMs, MinPauseMs, MaxPauseMs, true),
         new(PauseMaxMsField, "pause max (ms)", t => t.PauseMaxMs, MinPauseMs, MaxPauseMs, true),
         new(RespawnMsField, "respawn (ms)", t => t.RespawnMs, MinRespawnMs, MaxRespawnMs, true),
-        new(HopDistanceField, "hop distance (tiles)", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
-        new(HopHeightField, "hop height (tiles)", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
+        new(HopDistanceField, "hop distance", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
+        new(HopHeightField, "hop height", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
         new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true),
     };
 
@@ -139,11 +140,9 @@ public sealed class MonsterTypeRegistry
     // Builds the AI tunables for a type, tick-quantised exactly like the old ServerTuning did (so the migrated
     // defaults are unchanged). De-aggro range is derived (×1.5 aggro, hysteresis); the aggro-scan cadence is derived
     // (~0.5 s) and is tick-rate-only (not per-type). Read fresh each AI pass so a live retune takes effect next tick.
-    // CONTINUOUS MIGRATION (Phase 8): the navigation ranges are now EUCLIDEAN tile-unit FLOATS (the per-type knobs are
-    // still authored as integer tiles — RoamRadius 4, AggroRadius 6, ChaseLeash 12 — and convert 1:1 to the Euclidean
-    // float per the AI's documented conversion table; De-aggro keeps the ⌈1.5·aggro⌉ rule). AttackRangeUnits comes
-    // from the type's continuous knob (1.5, the √2-covering of the old 1-tile adjacency), NOT the legacy AttackRange
-    // tile knob (which is kept for the wire/registry but no longer drives the continuous AI).
+    // CONTINUOUS: the navigation ranges are EUCLIDEAN world-unit FLOATS — the per-type knobs (RoamRadius, AggroRadius,
+    // ChaseLeash, AttackRangeUnits) are now fractional doubles read DIRECTLY (no integer-tile authoring, no 1:1
+    // conversion). De-aggro keeps the ×1.5-aggro (min +1) hysteresis as a continuous range.
     public MonsterRoamAi.Tunables BuildTunables(MonsterType type) => new(
         RoamRadius: type.RoamRadius,
         PauseMinTicks: MsToTicks(type.PauseMinMs),
@@ -171,9 +170,10 @@ public sealed class MonsterTypeRegistry
     private uint CooldownMsToTicks(int ms) =>
         (uint)Math.Max(1, (int)Math.Ceiling(ms / (1000d / _tickRate)));
 
-    // Derived de-aggro range: 1.5× the acquire radius (ceil, always strictly beyond acquire) — the hysteresis margin.
-    private static int DeaggroRadius(MonsterType type) =>
-        Math.Max(type.AggroRadius + 1, (int)Math.Ceiling(type.AggroRadius * 1.5));
+    // Derived de-aggro RANGE (continuous world-units): 1.5× the acquire radius, at least +1 beyond it — the
+    // hysteresis margin so a target must get meaningfully closer to re-aggro than it did to drop. Fractional now.
+    private static double DeaggroRadius(MonsterType type) =>
+        Math.Max(type.AggroRadius + 1d, type.AggroRadius * 1.5d);
 
     // Applies a per-type tuning key ("<typeId>.<field>") to its MonsterType, clamping first. Returns false for an
     // unknown type or field (caller ignores + logs); on success `applied` is the post-clamp value actually stored.
@@ -201,7 +201,7 @@ public sealed class MonsterTypeRegistry
         switch (field)
         {
             case RoamRadiusField:
-                type.RoamRadius = ClampInt(value, MinRoamRadius, MaxRoamRadius, out applied);
+                type.RoamRadius = ClampDouble(value, MinRoamRadius, MaxRoamRadius, out applied);
                 return true;
             case PauseMinMsField:
                 type.PauseMinMs = ClampInt(value, MinPauseMs, MaxPauseMs, out applied);
@@ -220,13 +220,15 @@ public sealed class MonsterTypeRegistry
 
                 return true;
             case AggroRadiusField:
-                type.AggroRadius = ClampInt(value, MinAggroRadius, MaxAggroRadius, out applied);
+                type.AggroRadius = ClampDouble(value, MinAggroRadius, MaxAggroRadius, out applied);
                 return true;
             case ChaseLeashField:
-                type.ChaseLeash = ClampInt(value, MinChaseLeash, MaxChaseLeash, out applied);
+                type.ChaseLeash = ClampDouble(value, MinChaseLeash, MaxChaseLeash, out applied);
                 return true;
             case AttackRangeField:
-                type.AttackRange = ClampInt(value, MinAttackRange, MaxAttackRange, out applied);
+                // CONTINUOUS: "attack range" edits the world-unit AttackRangeUnits the AI actually reads (the former
+                // integer-tile AttackRange knob, which the AI never read, is retired).
+                type.AttackRangeUnits = ClampDouble(value, MinAttackRangeUnits, MaxAttackRangeUnits, out applied);
                 return true;
             case AttackDamageField:
                 type.AttackDamage = ClampInt(value, MinAttackDamage, MaxAttackDamage, out applied);
