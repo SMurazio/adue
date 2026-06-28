@@ -56,17 +56,25 @@ public sealed class MonsterType
     public int AttackDamage { get; set; } = 10;
     public int AttackCooldownMs { get; set; } = 1000;
 
-    // CONTINUOUS MIGRATION (Phase 8): the discrete LEAP distance of one hop, in tile units. Default 1.0 = one tile
-    // per hop, reproducing the tile-step cadence's reach (so the slime still covers ground at the same rate). The AI
-    // hops this far toward its continuous nav target each move-cadence window; the resolver slides/stops it at walls.
-    public double HopDistanceUnits { get; set; } = 1.0;
+    // CONTINUOUS MIGRATION (Phase 8): the discrete LEAP distance of one hop, in tile units. The AI hops this far toward
+    // its continuous nav target each move-cadence window; the resolver slides/stops it at walls. DATA-DRIVEN tuning:
+    // default bumped 1.0 → 1.5 (the user's "range too low" feel-test complaint) — modest, and now live-tunable per type
+    // on the F1 Monster tab ("slime.hopDistance"), so it can be dialed further without a code change.
+    public double HopDistanceUnits { get; set; } = 1.5;
 
     // MOVEMENT-ACTIONS (Phase C): the apex height (world units) of the slime's REAL ballistic hop. The hop is now a
     // genuine Jump driven by the shared ServerActionExecutor — a real, replicated VerticalOffset arc — so this height
     // is server-authoritative and rides the wire (remote clients render the arc from VerticalOffset), REPLACING the
     // retired client-only cosmetic HopHeight. Default 0.5 == the old cosmetic MonsterHopPeakHeight, so the visible
-    // bounce height is unchanged; live-tunable per type alongside the other knobs.
+    // bounce height is unchanged; live-tunable per type ("slime.hopHeight") alongside the other knobs.
     public double HopHeightUnits { get; set; } = 0.5;
+
+    // DATA-DRIVEN tuning (the "hops too often" fix): how long ONE hop is in the air, in ms. BeginMonsterHop builds the
+    // ballistic Jump's DurationTicks from this (not from the move cadence), so the hop is a SHORT airborne span and the
+    // slime RESTS on the ground for (cadence − airborne) ticks before the next hop starts. The move cadence (moveSpeed)
+    // still controls how OFTEN hops start; this controls how long each one lasts. Default 300 ms; live-tunable per type
+    // ("slime.hopAirborneMs"). Keep airborne < cadence for real rest (the IsActive gate keeps it safe either way).
+    public int HopAirborneMs { get; set; } = 300;
 
     // CONTINUOUS MIGRATION (Phase 8): the Euclidean adjacency radius (tile units) at which the monster ATTACKS instead
     // of hopping. Default 1.5 — the √2-covering of the old 1-tile (3×3 Chebyshev) adjacency: a 1.0 here would REGRESS

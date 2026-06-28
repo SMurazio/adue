@@ -179,10 +179,113 @@ public sealed class MonsterTypeRegistryTests
         var slime = snapshot.Types.Single();
         Assert.Equal("slime", slime.Id);
         Assert.Equal("Slime", slime.DisplayName);
-        Assert.Equal(7, slime.RoamRadius);
-        Assert.Equal(0.5, slime.MoveSpeedMultiplier, 3);
-        Assert.Equal(100, slime.MaxHealth);
-        Assert.Equal(5000, slime.RespawnMs); // P3 default ~5 s, unchanged.
+        Assert.Equal(7d, FieldValue(slime, "roamRadius"));
+        Assert.Equal(0.5, FieldValue(slime, "moveSpeed"), 3);
+        Assert.Equal(100d, FieldValue(slime, "maxHealth"));
+        Assert.Equal(5000d, FieldValue(slime, "respawnMs")); // P3 default ~5 s, unchanged.
+    }
+
+    // Reads one replicated field's current value by its wire key (DATA-DRIVEN snapshot helper).
+    private static double FieldValue(MonsterTypeSnapshot t, string key) => t.Fields.Single(f => f.Key == key).Value;
+
+    // DATA-DRIVEN (v40): the descriptor-built snapshot exposes the expected field set — including the 3 hop knobs —
+    // each with its current value, clamp bounds, and the right int-vs-double flag.
+    [Fact]
+    public void SnapshotFieldsAreDataDrivenIncludingHopKnobs()
+    {
+        var registry = Registry();
+        var slime = registry.BuildSnapshot().Types.Single();
+
+        var keys = slime.Fields.Select(f => f.Key).ToArray();
+        Assert.Contains("maxHealth", keys);
+        Assert.Contains("moveSpeed", keys);
+        Assert.Contains("roamRadius", keys);
+        Assert.Contains("respawnMs", keys);
+        // The newly exposed hop knobs.
+        Assert.Contains("hopDistance", keys);
+        Assert.Contains("hopHeight", keys);
+        Assert.Contains("hopAirborneMs", keys);
+
+        var hopDistance = slime.Fields.Single(f => f.Key == "hopDistance");
+        Assert.Equal(1.5, hopDistance.Value, 6); // the bumped default ("range too low" fix).
+        Assert.Equal(0.25, hopDistance.Min, 6);
+        Assert.Equal(8d, hopDistance.Max, 6);
+        Assert.False(hopDistance.IsInteger);
+
+        var hopAirborne = slime.Fields.Single(f => f.Key == "hopAirborneMs");
+        Assert.Equal(300, hopAirborne.Value, 6);
+        Assert.Equal(50, hopAirborne.Min, 6);
+        Assert.Equal(2000, hopAirborne.Max, 6);
+        Assert.True(hopAirborne.IsInteger);
+
+        // maxHealth is an integer knob; moveSpeed is a fractional one.
+        Assert.True(slime.Fields.Single(f => f.Key == "maxHealth").IsInteger);
+        Assert.False(slime.Fields.Single(f => f.Key == "moveSpeed").IsInteger);
+    }
+
+    // DATA-DRIVEN (v40): the 3 hop knobs apply + clamp through TryApply and are recognized keys; an unknown field is
+    // still rejected. Pins the "one descriptor + one TryApply case" contract for the new fields.
+    [Fact]
+    public void HopFieldsApplyClampAndAreKnownKeys()
+    {
+        var registry = Registry();
+        var slime = registry.Default;
+
+        Assert.True(registry.IsMonsterTypeKey("slime.hopDistance"));
+        Assert.True(registry.IsMonsterTypeKey("slime.hopHeight"));
+        Assert.True(registry.IsMonsterTypeKey("slime.hopAirborneMs"));
+        Assert.False(registry.IsMonsterTypeKey("slime.hopNonsense"));
+
+        Assert.True(registry.TryApply("slime.hopDistance", 3.0d, out var d));
+        Assert.Equal(3.0d, d);
+        Assert.Equal(3.0d, slime.HopDistanceUnits, 6);
+
+        // hopDistance clamps to [0.25, 8].
+        Assert.True(registry.TryApply("slime.hopDistance", 0d, out var dLo));
+        Assert.Equal(0.25d, dLo, 6);
+        Assert.True(registry.TryApply("slime.hopDistance", 999d, out var dHi));
+        Assert.Equal(8d, dHi, 6);
+
+        // hopHeight clamps to [0, 4].
+        Assert.True(registry.TryApply("slime.hopHeight", -5d, out var hLo));
+        Assert.Equal(0d, hLo, 6);
+        Assert.True(registry.TryApply("slime.hopHeight", 100d, out var hHi));
+        Assert.Equal(4d, hHi, 6);
+
+        // hopAirborneMs is an integer ms knob clamped to [50, 2000].
+        Assert.True(registry.TryApply("slime.hopAirborneMs", 800d, out var a));
+        Assert.Equal(800d, a);
+        Assert.Equal(800, slime.HopAirborneMs);
+        Assert.True(registry.TryApply("slime.hopAirborneMs", 10d, out var aLo));
+        Assert.Equal(50d, aLo);
+        Assert.True(registry.TryApply("slime.hopAirborneMs", 999999d, out var aHi));
+        Assert.Equal(2000d, aHi);
+
+        Assert.False(registry.TryApply("slime.hopNonsense", 1d, out _));
+    }
+
+    // DATA-DRIVEN (the "hops too often" fix): the default hop is airborne for FEWER ticks than the move cadence, so a
+    // grounded rest exists between hops. HopAirborneTicks derives from the live HopAirborneMs (round, floored at 1).
+    [Fact]
+    public void DefaultHopAirborneIsShorterThanTheCadenceLeavingGroundedRest()
+    {
+        var registry = Registry();
+        var slime = registry.Default;
+
+        // Default 300 ms @ 20 Hz = 6 ticks airborne.
+        Assert.Equal(6u, registry.HopAirborneTicks(slime));
+
+        // The move cadence at the slime's 0.6x default is 8 ticks (round(5 / 0.6)) — so airborne (6) < cadence (8):
+        // the slime rests on the ground for ~2 ticks before the next hop starts.
+        const uint baseTicks = 5; // 250 ms @ 20 Hz, the player base cadence.
+        var cadence = (uint)Math.Clamp(
+            (long)Math.Max(1, Math.Round(baseTicks / slime.MoveSpeedMultiplier, MidpointRounding.AwayFromZero)), 1L, 100L);
+        Assert.Equal(8u, cadence);
+        Assert.True(registry.HopAirborneTicks(slime) < cadence, "airborne span must be shorter than the cadence for rest.");
+
+        // A live retune re-derives the airborne ticks.
+        Assert.True(registry.TryApply("slime.hopAirborneMs", 1000d, out _));
+        Assert.Equal(20u, registry.HopAirborneTicks(slime)); // 1000 ms @ 20 Hz = 20 ticks.
     }
 
     // LIVING-ENEMIES P3: the per-type respawn delay applies + clamps, is a known key, and derives a tick count.
@@ -206,7 +309,7 @@ public sealed class MonsterTypeRegistryTests
 
         // The snapshot reflects it.
         var snapshot = registry.BuildSnapshot();
-        Assert.Equal(300000, snapshot.Types.Single().RespawnMs);
+        Assert.Equal(300000d, FieldValue(snapshot.Types.Single(), "respawnMs"));
     }
 
     // LOOT P4c (monster-types follow-up #1): the monster's step cadence is now derived from its TYPE's LIVE

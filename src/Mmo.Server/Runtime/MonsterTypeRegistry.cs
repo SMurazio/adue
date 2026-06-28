@@ -47,6 +47,14 @@ public sealed class MonsterTypeRegistry
     private const double MaxMoveSpeed = 5d;
     private const int MinMaxHealth = 1;
     private const int MaxMaxHealth = 100000;
+    // DATA-DRIVEN hop knobs (exposed on the F1 Monster tab). Distance/height are tile-unit doubles; airborne is ms.
+    // Modest bounds: distance up to 8 tiles, height up to 4 tiles, airborne 50 ms..2 s (kept < a typical cadence).
+    private const double MinHopDistance = 0.25d;
+    private const double MaxHopDistance = 8d;
+    private const double MinHopHeight = 0d;
+    private const double MaxHopHeight = 4d;
+    private const int MinHopAirborneMs = 50;
+    private const int MaxHopAirborneMs = 2000;
 
     // Per-type field suffixes (the part after "<typeId>."). Public so the client F1 tab + tests name the SAME keys.
     public const string RoamRadiusField = "roamRadius";
@@ -60,6 +68,45 @@ public sealed class MonsterTypeRegistry
     public const string MoveSpeedField = "moveSpeed";
     public const string MaxHealthField = "maxHealth";
     public const string RespawnMsField = "respawnMs";
+    public const string HopDistanceField = "hopDistance";
+    public const string HopHeightField = "hopHeight";
+    public const string HopAirborneMsField = "hopAirborneMs";
+
+    // DATA-DRIVEN tuning (v40): the SINGLE source of the per-type tunable knobs. Each descriptor names a field's wire
+    // Key (the "<typeId>." suffix), its human Label (the F1 caption), a Getter that reads the CURRENT value off a
+    // MonsterType, its clamp Min/Max (shown as a hint; TryApply clamps authoritatively), and whether it is an integer.
+    // BuildSnapshot iterates this to ship the generic field list, and IsMonsterTypeKey recognizes exactly these keys —
+    // so adding a knob is ONE descriptor entry here + one TryApply case + the MonsterType field. Order = F1 row order.
+    private readonly record struct TunableDescriptor(
+        string Key,
+        string Label,
+        Func<MonsterType, double> Getter,
+        double Min,
+        double Max,
+        bool IsInteger);
+
+    private static readonly TunableDescriptor[] Descriptors =
+    {
+        new(MaxHealthField, "hp (max)", t => t.MaxHealth, MinMaxHealth, MaxMaxHealth, true),
+        new(MoveSpeedField, "move speed (x)", t => t.MoveSpeedMultiplier, MinMoveSpeed, MaxMoveSpeed, false),
+        new(RoamRadiusField, "roam radius", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, true),
+        new(AggroRadiusField, "aggro radius", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, true),
+        new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, true),
+        new(AttackRangeField, "attack range", t => t.AttackRange, MinAttackRange, MaxAttackRange, true),
+        new(AttackDamageField, "attack damage", t => t.AttackDamage, MinAttackDamage, MaxAttackDamage, true),
+        new(AttackCooldownMsField, "attack cooldown (ms)", t => t.AttackCooldownMs, MinAttackCooldownMs, MaxAttackCooldownMs, true),
+        new(PauseMinMsField, "pause min (ms)", t => t.PauseMinMs, MinPauseMs, MaxPauseMs, true),
+        new(PauseMaxMsField, "pause max (ms)", t => t.PauseMaxMs, MinPauseMs, MaxPauseMs, true),
+        new(RespawnMsField, "respawn (ms)", t => t.RespawnMs, MinRespawnMs, MaxRespawnMs, true),
+        new(HopDistanceField, "hop distance (tiles)", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
+        new(HopHeightField, "hop height (tiles)", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
+        new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true),
+    };
+
+    // The recognized per-type field suffixes, derived ONCE from the descriptor list so IsMonsterTypeKey never drifts
+    // from BuildSnapshot. Ordinal (case-sensitive) to match the TryApply switch + the exact wire keys.
+    private static readonly HashSet<string> FieldKeys =
+        new(Descriptors.Select(d => d.Key), StringComparer.Ordinal);
 
     private readonly int _tickRate;
     private readonly Dictionary<string, MonsterType> _types = new(StringComparer.OrdinalIgnoreCase);
@@ -194,12 +241,17 @@ public sealed class MonsterTypeRegistry
                 type.RespawnMs = ClampInt(value, MinRespawnMs, MaxRespawnMs, out applied);
                 return true;
             case MoveSpeedField:
-            {
-                var clamped = Math.Clamp(value, MinMoveSpeed, MaxMoveSpeed);
-                type.MoveSpeedMultiplier = clamped;
-                applied = clamped;
+                type.MoveSpeedMultiplier = ClampDouble(value, MinMoveSpeed, MaxMoveSpeed, out applied);
                 return true;
-            }
+            case HopDistanceField:
+                type.HopDistanceUnits = ClampDouble(value, MinHopDistance, MaxHopDistance, out applied);
+                return true;
+            case HopHeightField:
+                type.HopHeightUnits = ClampDouble(value, MinHopHeight, MaxHopHeight, out applied);
+                return true;
+            case HopAirborneMsField:
+                type.HopAirborneMs = ClampInt(value, MinHopAirborneMs, MaxHopAirborneMs, out applied);
+                return true;
             default:
                 return false;
         }
@@ -220,9 +272,9 @@ public sealed class MonsterTypeRegistry
             return false;
         }
 
-        return key[(dot + 1)..] is RoamRadiusField or PauseMinMsField or PauseMaxMsField or AggroRadiusField
-            or ChaseLeashField or AttackRangeField or AttackDamageField or AttackCooldownMsField
-            or MoveSpeedField or MaxHealthField or RespawnMsField;
+        // Recognized fields are derived from the descriptor list (the single source) so this can never drift from the
+        // replicated snapshot — a new descriptor is auto-recognized; only its TryApply case must be added by hand.
+        return FieldKeys.Contains(key[(dot + 1)..]);
     }
 
     // LIVING-ENEMIES P3: this type's respawn delay in TICKS (Round, floored at 0 — instant respawn is allowed). Read
@@ -230,28 +282,28 @@ public sealed class MonsterTypeRegistry
     public uint RespawnTicks(MonsterType type) =>
         (uint)Math.Max(0, (int)Math.Round(type.RespawnMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
 
-    // The current per-type tuning as the wire snapshot the server replicates (login + on change). Ints/doubles in
-    // the SAME ms/tile units as the registry keys, so the client F1 tab shows + edits the authoritative numbers.
+    // DATA-DRIVEN tuning (the "hops too often" fix): this type's per-hop AIRBORNE span in TICKS, derived from its live
+    // HopAirborneMs (Round, floored at 1 tick — same MsToTicks the pause bounds use). GameServer.BeginMonsterHop feeds
+    // this as the ballistic Jump's DurationTicks so the hop is a SHORT arc and the slime rests the rest of the cadence.
+    public uint HopAirborneTicks(MonsterType type) => MsToTicks(type.HopAirborneMs);
+
+    // The current per-type tuning as the wire snapshot the server replicates (login + on change). DATA-DRIVEN: each
+    // type ships the GENERIC field list built from the descriptor table (current value via the getter, bounds from the
+    // descriptor), so the F1 tab renders + edits the authoritative numbers without per-field code.
     public MonsterTuningSnapshot BuildSnapshot()
     {
         var entries = new MonsterTypeSnapshot[_ordered.Count];
         for (var i = 0; i < _ordered.Count; i++)
         {
             var t = _ordered[i];
-            entries[i] = new MonsterTypeSnapshot(
-                t.Id,
-                t.DisplayName,
-                t.MaxHealth,
-                t.MoveSpeedMultiplier,
-                t.RoamRadius,
-                t.PauseMinMs,
-                t.PauseMaxMs,
-                t.AggroRadius,
-                t.ChaseLeash,
-                t.AttackRange,
-                t.AttackDamage,
-                t.AttackCooldownMs,
-                t.RespawnMs);
+            var fields = new MonsterTuningField[Descriptors.Length];
+            for (var f = 0; f < Descriptors.Length; f++)
+            {
+                var d = Descriptors[f];
+                fields[f] = new MonsterTuningField(d.Key, d.Label, d.Getter(t), d.Min, d.Max, d.IsInteger);
+            }
+
+            entries[i] = new MonsterTypeSnapshot(t.Id, t.DisplayName, fields);
         }
 
         return new MonsterTuningSnapshot(entries);
@@ -260,6 +312,13 @@ public sealed class MonsterTypeRegistry
     private static int ClampInt(double value, int min, int max, out double applied)
     {
         var clamped = Math.Clamp((int)Math.Round(value), min, max);
+        applied = clamped;
+        return clamped;
+    }
+
+    private static double ClampDouble(double value, double min, double max, out double applied)
+    {
+        var clamped = Math.Clamp(value, min, max);
         applied = clamped;
         return clamped;
     }

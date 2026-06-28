@@ -210,23 +210,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private LineEdit? _combatRadiusTiles;
 	private LineEdit? _combatDamage;
 
-	// LIVING-ENEMIES P2-POLISH: the F1 "Monster" tab — a per-TYPE dropdown + the selected type's tuning fields. Edits
-	// THAT type's live (replicated) values via AdminSetTuning on "<typeId>.<field>" keys; the server clamps +
-	// broadcasts the MonsterTuningSnapshot back, which re-seeds these fields (mirroring the Combat tab pattern).
+	// LIVING-ENEMIES P2-POLISH (DATA-DRIVEN at v40): the F1 "Monster" tab — a per-TYPE dropdown + the selected type's
+	// tuning fields, now built DYNAMICALLY from the replicated MonsterTuningField list (one labelled row per field) so
+	// exposing a new server-side knob needs NO client edit. Edits THAT type's live values via AdminSetTuning on
+	// "<typeId>.<Key>" keys; the server clamps + broadcasts the MonsterTuningSnapshot back, which re-seeds these rows
+	// (mirroring the Combat tab pattern). `_monsterFieldRows` is the container the rows live in; `_monsterFieldEdits`
+	// pairs each replicated field Key with its LineEdit (rebuilt only when the selected type's field set changes).
 	private int _monsterPanelSeededVersion = -1;
 	private int _monsterSelectedTypeIndex;
 	private OptionButton? _monsterTypeDropdown;
-	private LineEdit? _monsterMaxHealth;
-	private LineEdit? _monsterMoveSpeed;
-	private LineEdit? _monsterRoamRadius;
-	private LineEdit? _monsterAggroRadius;
-	private LineEdit? _monsterChaseLeash;
-	private LineEdit? _monsterAttackRange;
-	private LineEdit? _monsterAttackDamage;
-	private LineEdit? _monsterAttackCooldownMs;
-	private LineEdit? _monsterPauseMinMs;
-	private LineEdit? _monsterPauseMaxMs;
-	private LineEdit? _monsterRespawnMs;
+	private VBoxContainer? _monsterFieldRows;
+	private readonly List<(string Key, LineEdit Edit)> _monsterFieldEdits = new();
 
 	private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
 	private long _renderedInventoryVersion = -1;
@@ -1453,18 +1447,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		typeRow.AddChild(_monsterTypeDropdown);
 		rows.AddChild(typeRow);
 
-		// The selected type's fields. Labels match the per-type field meaning; Apply maps each to a "<typeId>.<field>".
-		_monsterMaxHealth = AddTuningField(rows, "hp (max)", OnMonsterApplyPressed);
-		_monsterMoveSpeed = AddTuningField(rows, "move speed (x)", OnMonsterApplyPressed);
-		_monsterRoamRadius = AddTuningField(rows, "roam radius", OnMonsterApplyPressed);
-		_monsterAggroRadius = AddTuningField(rows, "aggro radius", OnMonsterApplyPressed);
-		_monsterChaseLeash = AddTuningField(rows, "chase leash", OnMonsterApplyPressed);
-		_monsterAttackRange = AddTuningField(rows, "attack range", OnMonsterApplyPressed);
-		_monsterAttackDamage = AddTuningField(rows, "attack damage", OnMonsterApplyPressed);
-		_monsterAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnMonsterApplyPressed);
-		_monsterPauseMinMs = AddTuningField(rows, "pause min (ms)", OnMonsterApplyPressed);
-		_monsterPauseMaxMs = AddTuningField(rows, "pause max (ms)", OnMonsterApplyPressed);
-		_monsterRespawnMs = AddTuningField(rows, "respawn (ms)", OnMonsterApplyPressed);
+		// DATA-DRIVEN: the selected type's fields are built here at seed-time from the replicated MonsterTuningField
+		// list (one labelled LineEdit row per field) into this container — no hardcoded per-field members.
+		_monsterFieldRows = new VBoxContainer { Name = "MonsterFieldRows" };
+		_monsterFieldRows.AddThemeConstantOverride("separation", 4);
+		rows.AddChild(_monsterFieldRows);
 
 		var apply = new Button { Name = "MonsterApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
@@ -2428,7 +2415,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// nothing to seed (fields stay blank, dropdown empty).
 	private void SeedMonsterFields()
 	{
-		if (_monsterTypeDropdown is null || _client?.MonsterTuning is not { } tuning || tuning.Types.Count == 0)
+		if (_monsterTypeDropdown is null || _monsterFieldRows is null
+			|| _client?.MonsterTuning is not { } tuning || tuning.Types.Count == 0)
 		{
 			return;
 		}
@@ -2447,19 +2435,55 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_monsterSelectedTypeIndex = Math.Clamp(_monsterSelectedTypeIndex, 0, tuning.Types.Count - 1);
 		_monsterTypeDropdown.Select(_monsterSelectedTypeIndex);
 
+		// DATA-DRIVEN: build one row per replicated field (only when the field set changed) then seed each from its
+		// Value. The server is authoritative — a broadcast after Apply re-seeds the post-clamp values here.
 		var t = tuning.Types[_monsterSelectedTypeIndex];
-		SetField(_monsterMaxHealth, t.MaxHealth);
-		SetField(_monsterMoveSpeed, t.MoveSpeedMultiplier);
-		SetField(_monsterRoamRadius, t.RoamRadius);
-		SetField(_monsterAggroRadius, t.AggroRadius);
-		SetField(_monsterChaseLeash, t.ChaseLeash);
-		SetField(_monsterAttackRange, t.AttackRange);
-		SetField(_monsterAttackDamage, t.AttackDamage);
-		SetField(_monsterAttackCooldownMs, t.AttackCooldownMs);
-		SetField(_monsterPauseMinMs, t.PauseMinMs);
-		SetField(_monsterPauseMaxMs, t.PauseMaxMs);
-		SetField(_monsterRespawnMs, t.RespawnMs);
+		RebuildMonsterFieldRowsIfNeeded(t.Fields);
+		for (var i = 0; i < t.Fields.Count && i < _monsterFieldEdits.Count; i++)
+		{
+			SetField(_monsterFieldEdits[i].Edit, t.Fields[i].Value);
+		}
+
 		_monsterPanelSeededVersion = _client.MonsterTuningVersion;
+	}
+
+	// DATA-DRIVEN: (re)build the per-field rows iff the selected type's field set (the ordered Keys) differs from what
+	// is currently built — so switching type or a server-side knob add/remove rebuilds, but a plain value re-seed (the
+	// common case) does not churn the nodes. Each row is a labelled LineEdit (label = caption + a Min..Max hint).
+	private void RebuildMonsterFieldRowsIfNeeded(IReadOnlyList<MonsterTuningField> fields)
+	{
+		if (_monsterFieldRows is null)
+		{
+			return;
+		}
+
+		var matches = _monsterFieldEdits.Count == fields.Count;
+		for (var i = 0; matches && i < fields.Count; i++)
+		{
+			matches = _monsterFieldEdits[i].Key == fields[i].Key;
+		}
+
+		if (matches)
+		{
+			return;
+		}
+
+		// Remove the old rows from the tree immediately (no visual duplicate) then free them.
+		foreach (var child in _monsterFieldRows.GetChildren())
+		{
+			_monsterFieldRows.RemoveChild(child);
+			child.QueueFree();
+		}
+
+		_monsterFieldEdits.Clear();
+		foreach (var f in fields)
+		{
+			var label = f.IsInteger
+				? $"{f.Label} [{f.Min.ToString("0", CultureInfo.InvariantCulture)}..{f.Max.ToString("0", CultureInfo.InvariantCulture)}]"
+				: $"{f.Label} [{f.Min.ToString("0.###", CultureInfo.InvariantCulture)}..{f.Max.ToString("0.###", CultureInfo.InvariantCulture)}]";
+			var edit = AddTuningField(_monsterFieldRows, label, OnMonsterApplyPressed);
+			_monsterFieldEdits.Add((f.Key, edit));
+		}
 	}
 
 	// LIVING-ENEMIES P2-POLISH: re-seed the Monster tab when the replicated snapshot changes AND the panel is open
@@ -2630,28 +2654,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		SendMonsterField(typeId, "maxHealth", _monsterMaxHealth);
-		SendMonsterField(typeId, "moveSpeed", _monsterMoveSpeed);
-		SendMonsterField(typeId, "roamRadius", _monsterRoamRadius);
-		SendMonsterField(typeId, "aggroRadius", _monsterAggroRadius);
-		SendMonsterField(typeId, "chaseLeash", _monsterChaseLeash);
-		SendMonsterField(typeId, "attackRange", _monsterAttackRange);
-		SendMonsterField(typeId, "attackDamage", _monsterAttackDamage);
-		SendMonsterField(typeId, "attackCooldownMs", _monsterAttackCooldownMs);
-		SendMonsterField(typeId, "pauseMinMs", _monsterPauseMinMs);
-		SendMonsterField(typeId, "pauseMaxMs", _monsterPauseMaxMs);
-		SendMonsterField(typeId, "respawnMs", _monsterRespawnMs);
+		// DATA-DRIVEN: loop the dynamically-built rows and send each parseable field on its "<typeId>.<Key>" key.
+		// Invalid/blank fields are skipped so a typo in one never blocks the others; the server clamps authoritatively.
+		foreach (var (key, edit) in _monsterFieldEdits)
+		{
+			if (TryReadField(edit, out var value))
+			{
+				_client.SendAdminSetTuning($"{typeId}.{key}", value);
+			}
+		}
 
 		ShowInteractFeedback($"Monster tuning sent ({typeId}).");
-	}
-
-	// Sends one per-type field via AdminSetTuning on "<typeId>.<field>" iff the field parses. Skips a blank/invalid one.
-	private void SendMonsterField(string typeId, string field, LineEdit? edit)
-	{
-		if (TryReadField(edit, out var value))
-		{
-			_client?.SendAdminSetTuning($"{typeId}.{field}", value);
-		}
 	}
 
 	// Resolves the dropdown selection to a replicated type id. False if no replicated tuning / no types yet.

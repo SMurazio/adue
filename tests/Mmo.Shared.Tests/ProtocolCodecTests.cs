@@ -312,29 +312,55 @@ public sealed class ProtocolCodecTests
         Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(bytes));
     }
 
-    // LIVING-ENEMIES P2-POLISH (v33): the per-monster-TYPE tuning snapshot round-trips (count-prefixed list of
-    // per-type entries, each id + display name + the ms/tile values).
+    // LIVING-ENEMIES P2-POLISH (v33; DATA-DRIVEN at v40): the per-monster-TYPE tuning snapshot round-trips — a
+    // count-prefixed list of per-type entries, each id + display name + a count-prefixed GENERIC list of fields
+    // (Key/Label/Value/Min/Max/IsInteger). Covers multiple types, multiple fields, int + double, and the bounds.
     [Fact]
     public void MonsterTuningRoundTrips()
     {
         var original = new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
         {
-            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000, 5000),
-            new MonsterTypeSnapshot("ogre", "Ogre", 250, 0.6, 3, 1000, 4000, 8, 20, 1, 25, 1500, 8000),
+            new MonsterTypeSnapshot("slime", "Slime", new[]
+            {
+                new MonsterTuningField("maxHealth", "hp (max)", 100, 1, 100000, true),
+                new MonsterTuningField("moveSpeed", "move speed (x)", 0.8, 0.1, 5, false),
+                new MonsterTuningField("hopDistance", "hop distance (tiles)", 1.5, 0.25, 8, false),
+            }),
+            new MonsterTypeSnapshot("ogre", "Ogre", new[]
+            {
+                new MonsterTuningField("maxHealth", "hp (max)", 250, 1, 100000, true),
+                new MonsterTuningField("hopAirborneMs", "hop airborne (ms)", 300, 50, 2000, true),
+            }),
         }));
 
         var decoded = Assert.IsType<MonsterTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
         Assert.Equal(2, decoded.Tuning.Types.Count);
-        Assert.Equal("slime", decoded.Tuning.Types[0].Id);
-        Assert.Equal("Slime", decoded.Tuning.Types[0].DisplayName);
-        Assert.Equal(0.8, decoded.Tuning.Types[0].MoveSpeedMultiplier, 6);
-        Assert.Equal(100, decoded.Tuning.Types[0].MaxHealth);
-        Assert.Equal("ogre", decoded.Tuning.Types[1].Id);
-        Assert.Equal(250, decoded.Tuning.Types[1].MaxHealth);
-        Assert.Equal(25, decoded.Tuning.Types[1].AttackDamage);
-        Assert.Equal(5000, decoded.Tuning.Types[0].RespawnMs);
-        Assert.Equal(8000, decoded.Tuning.Types[1].RespawnMs);
+
+        var slime = decoded.Tuning.Types[0];
+        Assert.Equal("slime", slime.Id);
+        Assert.Equal("Slime", slime.DisplayName);
+        Assert.Equal(3, slime.Fields.Count);
+        Assert.Equal("maxHealth", slime.Fields[0].Key);
+        Assert.Equal("hp (max)", slime.Fields[0].Label);
+        Assert.Equal(100, slime.Fields[0].Value, 6);
+        Assert.True(slime.Fields[0].IsInteger);
+        Assert.Equal("moveSpeed", slime.Fields[1].Key);
+        Assert.Equal(0.8, slime.Fields[1].Value, 6);
+        Assert.False(slime.Fields[1].IsInteger);
+        Assert.Equal("hopDistance", slime.Fields[2].Key);
+        Assert.Equal(1.5, slime.Fields[2].Value, 6);
+        Assert.Equal(0.25, slime.Fields[2].Min, 6);
+        Assert.Equal(8, slime.Fields[2].Max, 6);
+
+        var ogre = decoded.Tuning.Types[1];
+        Assert.Equal("ogre", ogre.Id);
+        Assert.Equal(2, ogre.Fields.Count);
+        Assert.Equal("hopAirborneMs", ogre.Fields[1].Key);
+        Assert.Equal(300, ogre.Fields[1].Value, 6);
+        Assert.Equal(50, ogre.Fields[1].Min, 6);
+        Assert.Equal(2000, ogre.Fields[1].Max, 6);
+        Assert.True(ogre.Fields[1].IsInteger);
     }
 
     // LIVING-ENEMIES P3 (v34): the persistent spawner red-tile marker round-trips (spawner id + tile + active flag).
@@ -545,13 +571,13 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsThirtyNine()
+    public void ProtocolVersionIsForty()
     {
-        // REMOTE-WALK Phase 1 (v39): the per-entity tail's lone airborne-flag byte becomes a COMBINED flags byte
-        // (bit0=airborne, bit1=moving) that can gate an optional replicated Velocity (velX,velY signed shorts of
-        // 1/256 units/sec) for remote dead-reckoning. Bump on top of the v38 VerticalOffset add. Pin it so a
-        // change is caught.
-        Assert.Equal(39, ProtocolCodec.Version);
+        // MONSTER-TUNING DATA-DRIVEN (v40): the MonsterTuning message reshaped from a fixed per-type record to a
+        // GENERIC per-type field list (MonsterTuningField{Key,Label,Value,Min,Max,IsInteger}), so the F1 Monster tab
+        // renders from the wire and future tunables need no protocol bump. Bump on top of v39 (combined flags byte +
+        // replicated Velocity). Pin it so a change is caught.
+        Assert.Equal(40, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).

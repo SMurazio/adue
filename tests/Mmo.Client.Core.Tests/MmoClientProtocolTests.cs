@@ -361,11 +361,16 @@ public sealed class MmoClientProtocolTests
         Assert.Null(client.MonsterTuning);
         client.HandleMessageForTests(new MonsterTuningMessage(new MonsterTuningSnapshot(new[]
         {
-            new MonsterTypeSnapshot("slime", "Slime", 100, 0.8, 4, 2000, 5000, 6, 12, 1, 10, 1000, 5000),
+            new MonsterTypeSnapshot("slime", "Slime", new[]
+            {
+                new MonsterTuningField("maxHealth", "hp (max)", 100, 1, 100000, true),
+                new MonsterTuningField("respawnMs", "respawn (ms)", 5000, 0, 300000, true),
+            }),
         })));
         Assert.NotNull(client.MonsterTuning);
         Assert.Equal("slime", client.MonsterTuning!.Value.Types[0].Id);
-        Assert.Equal(5000, client.MonsterTuning!.Value.Types[0].RespawnMs);
+        Assert.Equal("respawnMs", client.MonsterTuning!.Value.Types[0].Fields[1].Key);
+        Assert.Equal(5000, client.MonsterTuning!.Value.Types[0].Fields[1].Value, 6);
         Assert.Equal(1, client.MonsterTuningVersion);
 
         // LIVING-ENEMIES P3: a spawner marker keyed by spawner id is added on Active=true.

@@ -56,7 +56,13 @@ public static class ProtocolCodec
     // ⇒ Velocity present) followed by the present fields in order: the Q12.4 ushort height (if airborne), then velX,velY
     // as signed shorts of 1/256 units/sec (if moving). A resting grounded entity stays at flags 0 (+1 byte). Server +
     // every in-repo client flip together. WIRE-ONLY: the client buffers the velocity but does NOT extrapolate yet.
-    public const byte Version = 39;
+    // v40 — DATA-DRIVEN MonsterTuning. The MonsterTuningSnapshot's per-type entry no longer ships a FIXED struct of
+    // named fields (MaxHealth/MoveSpeed/RoamRadius/…); it now ships a GENERIC count-prefixed LIST of tunable fields,
+    // each {string Key, string Label, double Value, double Min, double Max, bool IsInteger}. So the F1 Monster tab
+    // renders one row per replicated field and exposing a NEW knob is one server-side registration — no further bump.
+    // A rare reliable admin/replication message (login + on change), NOT a hot path; the extra bytes are irrelevant.
+    // Server + every in-repo client flip together.
+    public const byte Version = 40;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -64,6 +70,10 @@ public static class ProtocolCodec
     private const double VelocityScale = 256d;
 
     private const int MaxMonsterTypes = 256;
+
+    // DATA-DRIVEN MonsterTuning (v40): bound the per-type generic field list so a malformed/hostile packet can't
+    // allocate unboundedly. Comfortably above any realistic per-type knob count (the slime has ~14).
+    private const int MaxMonsterFields = 256;
 
     private const int MaxStringBytes = 2048;
     private const int MaxSnapshotEntities = 4096;
@@ -664,9 +674,11 @@ public static class ProtocolCodec
         writer.Write(tuning.Damage);
     }
 
-    // LIVING-ENEMIES P2-POLISH (v33): the per-monster-TYPE tuning — a count-prefixed list of per-type entries, each
-    // its stable id + display name + the ms/tile feel-values in a fixed order. Mirrored in ReadMonsterTuning. Rides a
-    // rare reliable all-clients message (login + on change), so the bytes are irrelevant.
+    // LIVING-ENEMIES P2-POLISH (v33; DATA-DRIVEN at v40): the per-monster-TYPE tuning — a count-prefixed list of
+    // per-type entries, each its stable id + display name + a count-prefixed GENERIC list of tunable fields. Each
+    // field writes {Key string, Label string, Value double, Min double, Max double, IsInteger bool} in that exact
+    // order. Mirrored in ReadMonsterTuning (write order == read order). Rides a rare reliable all-clients message
+    // (login + on change), so the bytes are irrelevant; correctness of the codec mirror is what matters.
     private static void WriteMonsterTuning(BinaryWriter writer, MonsterTuningSnapshot tuning)
     {
         var types = tuning.Types;
@@ -680,17 +692,23 @@ public static class ProtocolCodec
         {
             WriteString(writer, t.Id);
             WriteString(writer, t.DisplayName);
-            writer.Write(t.MaxHealth);
-            writer.Write(t.MoveSpeedMultiplier);
-            writer.Write(t.RoamRadius);
-            writer.Write(t.PauseMinMs);
-            writer.Write(t.PauseMaxMs);
-            writer.Write(t.AggroRadius);
-            writer.Write(t.ChaseLeash);
-            writer.Write(t.AttackRange);
-            writer.Write(t.AttackDamage);
-            writer.Write(t.AttackCooldownMs);
-            writer.Write(t.RespawnMs);
+
+            var fields = t.Fields;
+            if (fields.Count > MaxMonsterFields)
+            {
+                throw new ProtocolException($"Monster type '{t.Id}' has too many tuning fields: {fields.Count}.");
+            }
+
+            writer.Write((ushort)fields.Count);
+            foreach (var f in fields)
+            {
+                WriteString(writer, f.Key);
+                WriteString(writer, f.Label);
+                writer.Write(f.Value);
+                writer.Write(f.Min);
+                writer.Write(f.Max);
+                writer.Write(f.IsInteger);
+            }
         }
     }
 
@@ -707,20 +725,26 @@ public static class ProtocolCodec
         {
             var id = ReadString(reader);
             var displayName = ReadString(reader);
-            var maxHealth = reader.ReadInt32();
-            var moveSpeed = reader.ReadDouble();
-            var roamRadius = reader.ReadInt32();
-            var pauseMinMs = reader.ReadInt32();
-            var pauseMaxMs = reader.ReadInt32();
-            var aggroRadius = reader.ReadInt32();
-            var chaseLeash = reader.ReadInt32();
-            var attackRange = reader.ReadInt32();
-            var attackDamage = reader.ReadInt32();
-            var attackCooldownMs = reader.ReadInt32();
-            var respawnMs = reader.ReadInt32();
-            types.Add(new MonsterTypeSnapshot(
-                id, displayName, maxHealth, moveSpeed, roamRadius, pauseMinMs, pauseMaxMs,
-                aggroRadius, chaseLeash, attackRange, attackDamage, attackCooldownMs, respawnMs));
+
+            var fieldCount = reader.ReadUInt16();
+            if (fieldCount > MaxMonsterFields)
+            {
+                throw new ProtocolException($"Monster type '{id}' has too many tuning fields: {fieldCount}.");
+            }
+
+            var fields = new List<MonsterTuningField>(fieldCount);
+            for (var f = 0; f < fieldCount; f++)
+            {
+                var key = ReadString(reader);
+                var label = ReadString(reader);
+                var value = reader.ReadDouble();
+                var min = reader.ReadDouble();
+                var max = reader.ReadDouble();
+                var isInteger = reader.ReadBoolean();
+                fields.Add(new MonsterTuningField(key, label, value, min, max, isInteger));
+            }
+
+            types.Add(new MonsterTypeSnapshot(id, displayName, fields));
         }
 
         return new MonsterTuningSnapshot(types);

@@ -3043,11 +3043,13 @@ public sealed class GameServer
     // MOVEMENT-ACTIONS (Phase C): the HopLocomotion's begin-hop seam — START the slime's hop as a REAL ballistic Jump on
     // the shared executor (design §3 "one Jump drives players + monsters"). The locomotion already chose the heading +
     // the clamped forward distance (the collision-valid decision); here we look up the monster's TYPE for its apex height
-    // (HopHeightUnits) and build a PER-HOP Jump def whose arc spans the WHOLE move cadence (DurationTicks = cooldownTicks)
-    // so the slime arcs over the move window then lands — matching today's interp-glide-over-the-cadence pacing, now with
-    // a real replicated Z. CooldownTicks = 0 (the AI's TryBeginHop cadence is the re-trigger gate, NOT the executor's own
-    // cooldown). A small record+closure alloc per hop (~once per cadence per monster) — acceptable. Reuses ActionId.Jump
-    // (a per-entity cooldown key, no collision with a player's jump). Returns the executor's TryStart result.
+    // (HopHeightUnits) and per-hop AIRBORNE span (HopAirborneMs) and build a PER-HOP Jump def. DATA-DRIVEN tuning: the
+    // arc spans HopAirborneTicks (a SHORT airborne span), NOT the whole move cadence — so the slime lands then RESTS on
+    // the ground for the remainder of the cadence (fixing "hops too often"). `cooldownTicks` (the move cadence) is no
+    // longer the arc length; it stays the locomotion's re-trigger gate (TryBeginHop). CooldownTicks = 0 on the def (the
+    // AI's TryBeginHop cadence is the re-trigger gate, NOT the executor's own cooldown). A small record+closure alloc per
+    // hop (~once per cadence per monster) — acceptable. Reuses ActionId.Jump (a per-entity cooldown key, no collision
+    // with a player's jump). Returns the executor's TryStart result.
     private bool BeginMonsterHop(WorldEntity monster, WorldVector heading, double hopDistance, uint cooldownTicks, uint serverTick)
     {
         if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
@@ -3055,9 +3057,14 @@ public sealed class GameServer
             type = _monsterTypes.Default;
         }
 
+        // DATA-DRIVEN tuning (the "hops too often" fix): the arc spans HopAirborneMs (a SHORT airborne span), NOT the
+        // whole move cadence (`cooldownTicks`). So the slime lands after HopAirborneTicks and RESTS on the ground for
+        // (cadence − airborne) ticks before the next hop starts — the cadence (moveSpeed) still gates how OFTEN hops
+        // begin (TryBeginHop arms it in the locomotion), this only controls how long each hop is in the air. If airborne
+        // >= cadence the IsActive gate just makes the arc itself the effective cadence (safe; defaults keep real rest).
         var def = MovementActionRegistry.BuildForwardArcJump(
             ActionId.Jump,
-            durationTicks: cooldownTicks,
+            durationTicks: _monsterTypes.HopAirborneTicks(type),
             jumpHeight: type.HopHeightUnits,
             forwardDistanceUnits: hopDistance,
             cooldownTicks: 0,
