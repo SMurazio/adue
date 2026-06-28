@@ -6,7 +6,7 @@ namespace Mmo.Shared.Domain;
 // the server until Phase 3 decides whether to replicate it; the DEFAULT here is the byte-identical baseline.
 public static class CollisionDefaults
 {
-    // The player body radius in tile units. 0.5 inscribes a 1x1 body in a 1x1 tile. STRICTLY < 0.5 in practice
+    // The player body radius in world units. 0.5 inscribes a 1x1 body in a 1x1 tile. STRICTLY < 0.5 in practice
     // (ServerTuning clamps the live knob below 0.5) so a 1-tile-wide gap stays passable; this constant is the
     // nominal default the server seeds and the client mirrors. Phase 4 MUST use the IDENTICAL radius (+ dt) for the
     // determinism contract.

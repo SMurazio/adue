@@ -107,7 +107,7 @@ public sealed class ServerTuningTests
         Assert.Equal(600, snapshot.AttackCooldownMs);
         Assert.Equal(0, snapshot.RootMs);
         Assert.Equal(45d, snapshot.HalfAngleDegrees);
-        Assert.Equal(1.6d, snapshot.RadiusTiles);
+        Assert.Equal(1.6d, snapshot.RadiusUnits);
         Assert.Equal(20, snapshot.Damage);
     }
 

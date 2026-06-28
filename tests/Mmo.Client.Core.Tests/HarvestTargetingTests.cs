@@ -173,7 +173,7 @@ public sealed class HarvestTargetingTests
         // The server's authoritative gate, computed from the SAME shared constant (resource/corpse Position is the
         // tile centre).
         var target = WorldVector.FromTile(new TileCoord(tx, ty));
-        var serverAccepts = (actor - target).LengthSquared <= InteractionTuning.InteractionRadiusTilesSquared;
+        var serverAccepts = (actor - target).LengthSquared <= InteractionTuning.InteractionRadiusUnitsSquared;
         Assert.Equal(expectedInRange, serverAccepts);
 
         // The client's verdict via HarvestTargeting on a single candidate at that tile.

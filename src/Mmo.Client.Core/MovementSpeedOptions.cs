@@ -10,7 +10,7 @@ namespace Mmo.Client.Core;
 // The speeds are UNNAMED (no Walk/Run brackets — a user requirement): each option is one tick-quantized cadence,
 // labelled by NUMBERS only. For a cadence of N server ticks the multiplier that yields exactly N ticks is
 // baseWalkTicks / N (so N == baseWalkTicks is exactly 1.0x — the default walk). cadence = N * tickIntervalMs;
-// tiles/s = 1000 / cadence.
+// units/s = 1000 / cadence.
 //
 // N is clamped to the server's effective-cooldown range (MinEffectiveStepCooldownMs / MaxEffectiveStepCooldownMs,
 // quantized to ticks) so the dropdown never offers a speed the server would refuse — picking an out-of-range N
@@ -30,7 +30,7 @@ public static class MovementSpeedOptions
     public const int MinEffectiveStepCooldownMs = 50;
     public const int MaxEffectiveStepCooldownMs = 5000;
 
-    public readonly record struct SpeedOption(int Ticks, double Multiplier, double CadenceMs, double TilesPerSecond, string Label)
+    public readonly record struct SpeedOption(int Ticks, double Multiplier, double CadenceMs, double UnitsPerSecond, string Label)
     {
         // Whether this option is the default walk (multiplier 1.0 == baseWalkTicks). The dropdown preselects it.
         public bool IsDefaultWalk => Ticks > 0 && Math.Abs(Multiplier - 1.0d) < 1e-9d;
@@ -60,8 +60,8 @@ public static class MovementSpeedOptions
 
             var multiplier = (double)baseWalkTicks / n;
             var cadenceMs = n * tickIntervalMs;
-            var tilesPerSecond = 1000d / cadenceMs;
-            options.Add(new SpeedOption(n, multiplier, cadenceMs, tilesPerSecond, FormatLabel(multiplier, cadenceMs, tilesPerSecond)));
+            var unitsPerSecond = 1000d / cadenceMs;
+            options.Add(new SpeedOption(n, multiplier, cadenceMs, unitsPerSecond, FormatLabel(multiplier, cadenceMs, unitsPerSecond)));
         }
 
         return options;
@@ -69,14 +69,14 @@ public static class MovementSpeedOptions
 
     // Numbers-only label, e.g. "1.50x - 100 ms - 10.0/s". No bracket name (the user requirement). Invariant
     // culture so the dropdown reads the same everywhere and the /speed value formats with a '.' decimal.
-    public static string FormatLabel(double multiplier, double cadenceMs, double tilesPerSecond)
+    public static string FormatLabel(double multiplier, double cadenceMs, double unitsPerSecond)
     {
         return string.Format(
             CultureInfo.InvariantCulture,
             "{0:0.00}x - {1:0} ms - {2:0.0}/s",
             multiplier,
             cadenceMs,
-            tilesPerSecond);
+            unitsPerSecond);
     }
 
     // The /speed command argument for a multiplier, formatted invariantly (a '.' decimal) so the server's

@@ -3,9 +3,9 @@ using Mmo.Shared.Domain;
 namespace Mmo.Server.Runtime;
 
 // FREEAIM: server-authoritative free-aim melee resolution. Replaces the facing-derived tile cone
-// (MeleeConeResolver) with a GEOMETRIC SECTOR: a pie slice of half-angle `halfAngleRadians` and `radiusTiles`,
+// (MeleeConeResolver) with a GEOMETRIC SECTOR: a pie slice of half-angle `halfAngleRadians` and `radiusUnits`,
 // centred on the attacker's WORLD position and pointed along the client-chosen continuous `aimRadians`. An entity
-// is hit iff (a) its world position is within `radiusTiles` of the attacker AND (b) its bearing from the attacker
+// is hit iff (a) its world position is within `radiusUnits` of the attacker AND (b) its bearing from the attacker
 // is within the half-angle of the aim. Entities are CIRCLES of EntityHitRadiusTiles (a body) — the wedge hits a
 // target it merely CLIPS, not only one whose centre is dead inside it.
 //
@@ -42,10 +42,10 @@ public static class FreeAimSectorResolver
         WorldEntity attacker,
         double aimRadians,
         double halfAngleRadians,
-        double radiusTiles,
+        double radiusUnits,
         int damage,
         List<WorldEntity> candidateScratch)
-        => ResolveAndDamage(world, attacker, aimRadians, halfAngleRadians, radiusTiles, damage, candidateScratch, null);
+        => ResolveAndDamage(world, attacker, aimRadians, halfAngleRadians, radiusUnits, damage, candidateScratch, null);
 
     // Overload that ALSO appends each victim whose HP actually changed to `damagedScratch` (cleared first when
     // non-null) so the caller can emit a cosmetic damage event per real hit. Behaviour and return value are otherwise
@@ -55,7 +55,7 @@ public static class FreeAimSectorResolver
         WorldEntity attacker,
         double aimRadians,
         double halfAngleRadians,
-        double radiusTiles,
+        double radiusUnits,
         int damage,
         List<WorldEntity> candidateScratch,
         List<DamagedVictim>? damagedScratch)
@@ -69,9 +69,9 @@ public static class FreeAimSectorResolver
         // body clips it is a real hit) AND a +1 tile slack for the attacker's own sub-tile offset from that rounded
         // tile centre (off-grid, Position is up to ~0.5 tile from TileCoord on each axis). Over-gather is free; the
         // precise IsHit filters every spurious candidate. Under-gather would silently DROP a real hit server-side,
-        // which the old Ceiling(radiusTiles) — omitting body + offset — could do once attackers move off-grid.
-        var gatherRadiusTiles = System.Math.Max(1, (int)System.Math.Ceiling(radiusTiles + EntityHitRadiusTiles) + 1);
-        world.GatherInterestCandidates(attacker.TileCoord, gatherRadiusTiles, candidateScratch);
+        // which the old Ceiling(radiusUnits) — omitting body + offset — could do once attackers move off-grid.
+        var gatherRadiusUnits = System.Math.Max(1, (int)System.Math.Ceiling(radiusUnits + EntityHitRadiusTiles) + 1);
+        world.GatherInterestCandidates(attacker.TileCoord, gatherRadiusUnits, candidateScratch);
 
         // Treat each target as a CIRCLE of EntityHitRadiusTiles (a body), not a point: the wedge hits a target it
         // merely CLIPS, not only one whose tile-centre is dead inside it. The geometry (squared range vs radius+body,
@@ -93,7 +93,7 @@ public static class FreeAimSectorResolver
                     attackerZ,
                     aimRadians,
                     halfAngleRadians,
-                    radiusTiles,
+                    radiusUnits,
                     EntityHitRadiusTiles,
                     candidate.Position.X,
                     candidate.Position.Y))

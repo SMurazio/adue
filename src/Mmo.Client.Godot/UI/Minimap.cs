@@ -420,7 +420,7 @@ public partial class Minimap : Control
                 // position (tile-centre via +0.5), then apply the shared player-centred map offset. Identical math
                 // to the wall/player mapping, so a 2-tile object reads twice the side of a 1-tile one and stays put
                 // relative to the walls.
-                var sidePx = Mathf.Max(2f, obj.FootprintTiles * _scale);
+                var sidePx = Mathf.Max(2f, obj.FootprintUnits * _scale);
                 var centreX = ((obj.X + 0.5f) * _scale) + _offset.X;
                 var centreY = ((obj.Y + 0.5f) * _scale) + _offset.Y;
                 var rect = new Rect2(centreX - (sidePx / 2f), centreY - (sidePx / 2f), sidePx, sidePx);

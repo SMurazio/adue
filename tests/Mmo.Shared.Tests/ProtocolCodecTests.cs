@@ -566,7 +566,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(ProtocolCodec.Version, decoded.ProtocolVersion);
         Assert.Equal(20, decoded.TickRate);
         Assert.Equal(140, decoded.StepCooldownMs);
-        Assert.Equal(40.5f, decoded.InterestRadiusTiles);
+        Assert.Equal(40.5f, decoded.InterestRadiusUnits);
         Assert.Equal(0.375f, decoded.BodyRadiusUnits);
     }
 
@@ -715,12 +715,12 @@ public sealed class ProtocolCodecTests
     public void CombatTuningRoundTrips()
     {
         // COMBAT-TUNING (v31): the five combat feel-knobs replicate intact, including the fractional geometry
-        // (half-angle deg, radius tiles) the panel can nudge.
+        // (half-angle deg, radius units) the panel can nudge.
         var original = new CombatTuningMessage(new CombatTuningSnapshot(
             AttackCooldownMs: 750,
             RootMs: 180,
             HalfAngleDegrees: 37.5,
-            RadiusTiles: 2.25,
+            RadiusUnits: 2.25,
             Damage: 33));
 
         var decoded = Assert.IsType<CombatTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
@@ -728,7 +728,7 @@ public sealed class ProtocolCodecTests
         Assert.Equal(750, decoded.Tuning.AttackCooldownMs);
         Assert.Equal(180, decoded.Tuning.RootMs);
         Assert.Equal(37.5, decoded.Tuning.HalfAngleDegrees);
-        Assert.Equal(2.25, decoded.Tuning.RadiusTiles);
+        Assert.Equal(2.25, decoded.Tuning.RadiusUnits);
         Assert.Equal(33, decoded.Tuning.Damage);
     }
 

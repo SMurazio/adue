@@ -277,7 +277,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// S64 mouse-heading feel constants. Dead-zone: ~0.6 tile (between the S64 0.5–0.75 guidance) — inside it the
 	// held octant is kept so the heading doesn't whip when the cursor sits on/near the player. Hysteresis: 6° of
 	// octant stickiness past the boundary before switching, killing flicker between two adjacent octants.
-	private const double MouseHeadingDeadZoneTiles = 0.6;
+	private const double MouseHeadingDeadZoneUnits = 0.6;
 	private const double MouseHeadingHysteresisDegrees = 6.0;
 	private bool _lastSentMoving;
 	private Direction8 _lastSentDirection;
@@ -312,7 +312,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// reads snapCount ≈ 0 and only genuine teleports trip it. It is also frame-time-aware: a legitimately
 	// long frame can glide further, so we also require the jump to exceed what the current speed could have
 	// covered in that frame by a multiple (the "catch-up" factor) before counting it.
-	private const double MotionSnapJumpTiles = 0.5;
+	private const double MotionSnapJumpUnits = 0.5;
 	private const double MotionSnapCatchUpFactor = 4.0;
 	private bool _hasLocalRender;
 	private float _localRenderX;
@@ -735,7 +735,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 					attackerZ,
 					aimRadians,
 					tuning.HalfAngleRadians,
-					tuning.RadiusTiles,
+					tuning.RadiusUnits,
 					FreeAimSector.EntityHitRadiusTiles,
 					state.Position.X,
 					state.Position.Y))
@@ -887,7 +887,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			dx,
 			dy,
 			_lastSentMoving ? _lastSentDirection : (Direction8?)null,
-			MouseHeadingDeadZoneTiles,
+			MouseHeadingDeadZoneUnits,
 			MouseHeadingHysteresisDegrees);
 	}
 
@@ -1413,7 +1413,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_combatAttackCooldownMs = AddTuningField(rows, "attack cooldown (ms)", OnCombatApplyPressed);
 		_combatRootMs = AddTuningField(rows, "swing root (ms)", OnCombatApplyPressed);
 		_combatHalfAngleDeg = AddTuningField(rows, "half-angle (deg)", OnCombatApplyPressed);
-		_combatRadiusTiles = AddTuningField(rows, "radius (tiles)", OnCombatApplyPressed);
+		_combatRadiusTiles = AddTuningField(rows, "radius (units)", OnCombatApplyPressed);
 		_combatDamage = AddTuningField(rows, "damage (hp)", OnCombatApplyPressed);
 
 		var apply = new Button { Name = "CombatApply", Text = "Apply" };
@@ -1837,7 +1837,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// PREVIOUS frame's delta — not this frame's own (which would be self-referential) — is what makes a
 		// reconcile teleport stand out against an otherwise smooth glide. Needs a real previous render
 		// position so the very first sample after (re)spawn can't register a false jump.
-		if (_hasLocalRender && _hasPrevRenderPos && _renderFrameDelta > MotionSnapJumpTiles
+		if (_hasLocalRender && _hasPrevRenderPos && _renderFrameDelta > MotionSnapJumpUnits
 			&& _renderFrameDelta > _prevRenderFrameDelta * MotionSnapCatchUpFactor)
 		{
 			_renderSnapCount++;
@@ -1971,7 +1971,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				var localTile = _client.LocalTile?.ToString() ?? "(unknown)";
 				var server = _client.Server is null
 					? "server: pending"
-					: $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusTiles:0.#}";
+					: $"server: v{_client.Server.ProtocolVersion}, tick={_client.Server.TickRate}Hz, step={_client.Server.StepCooldownMs}ms, aoi={_client.Server.InterestRadiusUnits:0.#}";
 				var md = _client.MovementDebug;
 				// DIAG1: the recovery-chain read-out is ALWAYS shown under the F3 debug HUD (a live in-client
 				// toggle, no restart, no env var) so the human can read pred/conf/lead/recv/s + reconcile
@@ -2392,7 +2392,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			SetField(_combatAttackCooldownMs, tuning.AttackCooldownMs);
 			SetField(_combatRootMs, tuning.RootMs);
 			SetField(_combatHalfAngleDeg, tuning.HalfAngleDegrees);
-			SetField(_combatRadiusTiles, tuning.RadiusTiles);
+			SetField(_combatRadiusTiles, tuning.RadiusUnits);
 			SetField(_combatDamage, tuning.Damage);
 			_combatPanelSeededVersion = _client.CombatTuningVersion;
 		}
@@ -2501,7 +2501,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void SeedTuningFields()
 	{
 		// SPEED1: only aoi.interestRadius remains — the base step cooldown is a pinned constant, no longer tunable.
-		var serverRadius = _client?.Server?.InterestRadiusTiles ?? 35f;
+		var serverRadius = _client?.Server?.InterestRadiusUnits ?? 35f;
 		SetField(_tuneInterestRadius, serverRadius);
 	}
 
@@ -3508,7 +3508,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// (RebuildAimWedgeMeshIfNeeded, keyed off MmoClient.CombatTuningVersion). These defaults reproduce the historical
 	// look before the first snapshot lands (45°, 1.6 tiles).
 	private float _aimWedgeHalfAngleDegrees = 45f;
-	private float _aimWedgeRadiusTiles = 1.6f;
+	private float _aimWedgeRadiusUnits = 1.6f;
 	private int _aimWedgeBuiltTuningVersion = -1;
 	private ArrayMesh? _aimWedgeMesh;
 
@@ -3524,7 +3524,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// plane pointing along +X, spanning [-half, +half] out to radius. A triangle fan from the apex (player origin);
 	// the MeshInstance3D is yawed by -aimRadians so +X maps to the world aim bearing. Cheap (32 verts) and only on a
 	// tuning change, so it never runs on the hot path.
-	private ArrayMesh BuildAimWedgeMesh(float halfAngleDegrees, float radiusTiles)
+	private ArrayMesh BuildAimWedgeMesh(float halfAngleDegrees, float radiusUnits)
 	{
 		const int segments = 16;
 		var half = Mathf.DegToRad(halfAngleDegrees);
@@ -3539,7 +3539,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			var a = -half + (2f * half * i / segments);
 			// Author in XZ pointing along +X: (cos a, 0, sin a) * radius. Yawing by -aim later rotates +X to the aim.
-			points.Add(new Vector3(Mathf.Cos(a) * radiusTiles, 0f, Mathf.Sin(a) * radiusTiles));
+			points.Add(new Vector3(Mathf.Cos(a) * radiusUnits, 0f, Mathf.Sin(a) * radiusUnits));
 		}
 
 		var vertexArray = new Vector3[segments * 3];
@@ -3572,10 +3572,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_client?.CombatTuning is { } tuning)
 		{
 			_aimWedgeHalfAngleDegrees = (float)tuning.HalfAngleDegrees;
-			_aimWedgeRadiusTiles = (float)tuning.RadiusTiles;
+			_aimWedgeRadiusUnits = (float)tuning.RadiusUnits;
 		}
 
-		_aimWedgeMesh = BuildAimWedgeMesh(_aimWedgeHalfAngleDegrees, _aimWedgeRadiusTiles);
+		_aimWedgeMesh = BuildAimWedgeMesh(_aimWedgeHalfAngleDegrees, _aimWedgeRadiusUnits);
 		_aimWedgeBuiltTuningVersion = version;
 		if (_aimWedge is not null)
 		{

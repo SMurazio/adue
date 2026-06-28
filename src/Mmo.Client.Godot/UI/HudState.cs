@@ -101,11 +101,11 @@ public sealed class HudState
     // uses. Cleared + refilled in place so we don't churn allocations every frame.
     public List<MinimapObject> MinimapObjects { get; } = new();
 
-    // One world object on the minimap. X/Y are the object's continuous world position (tile space; X=east,
-    // Y=south) — identical axes to LocalX/LocalY so objects line up with the player. FootprintTiles is the side
-    // length (in world tiles) of the square to draw — a 2-tile object reads as twice a 1-tile one. Depleted lets
+    // One world object on the minimap. X/Y are the object's continuous world coords (X=east,
+    // Y=south) — identical axes to LocalX/LocalY so objects line up with the player. FootprintUnits is the side
+    // length (in world units) of the square to draw — a 2-unit object reads as twice a 1-unit one. Depleted lets
     // the minimap tint a harvested node distinctly from an available one.
-    public readonly record struct MinimapObject(float X, float Y, float FootprintTiles, bool Depleted);
+    public readonly record struct MinimapObject(float X, float Y, float FootprintUnits, bool Depleted);
 
     // --- Minimap (static environment, S109) ---------------------------------------------------------------
     // REAL, read-only: the static map the minimap rasterises ONCE (walls + world bounds). The world is

@@ -1,8 +1,8 @@
 namespace Mmo.Shared.Domain;
 
 // FREEAIM (shared): the pure per-target hit test for the free-aim melee sector — a pie slice of half-angle
-// `halfAngleRadians` and `radiusTiles`, centred on the attacker's WORLD position and pointed along the continuous
-// `aimRadians`. A target is a CIRCLE of `bodyRadiusTiles` (a body), so the wedge hits a target it merely CLIPS,
+// `halfAngleRadians` and `radiusUnits`, centred on the attacker's WORLD position and pointed along the continuous
+// `aimRadians`. A target is a CIRCLE of `bodyRadiusUnits` (a body), so the wedge hits a target it merely CLIPS,
 // not only one whose centre is dead inside it.
 //
 // This is the SINGLE source of the geometry. The server's FreeAimSectorResolver gathers AOI candidates, applies
@@ -21,8 +21,8 @@ public static class FreeAimSector
     // here; the Godot client reads it directly.)
     public const double EntityHitRadiusTiles = 0.5;
 
-    // True iff a target at (targetX, targetZ) — a body circle of `bodyRadiusTiles` — overlaps the sector centred on
-    // the attacker at (attackerX, attackerZ), reaching `radiusTiles` along `aimRadians` within ±`halfAngleRadians`.
+    // True iff a target at (targetX, targetZ) — a body circle of `bodyRadiusUnits` — overlaps the sector centred on
+    // the attacker at (attackerX, attackerZ), reaching `radiusUnits` along `aimRadians` within ±`halfAngleRadians`.
     //
     // Geometry is byte-for-byte the resolver's: squared range gate vs (radius + body), then for a non-overlapping
     // target the angular gate widened by the body's angular half-width asin(body/dist); a target overlapping the
@@ -32,8 +32,8 @@ public static class FreeAimSector
         double attackerZ,
         double aimRadians,
         double halfAngleRadians,
-        double radiusTiles,
-        double bodyRadiusTiles,
+        double radiusUnits,
+        double bodyRadiusUnits,
         double targetX,
         double targetZ)
     {
@@ -41,7 +41,7 @@ public static class FreeAimSector
         var dz = targetZ - attackerZ;
 
         // Range gate (squared, cheap): the target's body circle must reach within the sector radius.
-        var reach = radiusTiles + bodyRadiusTiles;
+        var reach = radiusUnits + bodyRadiusUnits;
         var distSquared = (dx * dx) + (dz * dz);
         if (distSquared > reach * reach)
         {
@@ -49,7 +49,7 @@ public static class FreeAimSector
         }
 
         var dist = System.Math.Sqrt(distSquared);
-        if (dist <= bodyRadiusTiles)
+        if (dist <= bodyRadiusUnits)
         {
             // Overlapping the attacker — always in-sector (point-blank always-hit), no angular gate.
             return true;
@@ -59,7 +59,7 @@ public static class FreeAimSector
         // still counts.
         var bearing = System.Math.Atan2(dz, dx);
         var delta = NormalizePi(bearing - aimRadians);
-        var angularHalfWidth = System.Math.Asin(System.Math.Min(bodyRadiusTiles / dist, 1d));
+        var angularHalfWidth = System.Math.Asin(System.Math.Min(bodyRadiusUnits / dist, 1d));
         return System.Math.Abs(delta) <= halfAngleRadians + angularHalfWidth;
     }
 

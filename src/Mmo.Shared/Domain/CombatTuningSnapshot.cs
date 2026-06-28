@@ -8,13 +8,13 @@ namespace Mmo.Shared.Domain;
 // rebuilds anything derived (the wedge mesh, the predictor's root ticks, the cooldown duration) when it changes.
 //
 // Units: AttackCooldownMs and RootMs are milliseconds; HalfAngleDegrees is the sector HALF-angle in degrees (full
-// arc = 2x); RadiusTiles is the sector reach in tiles; Damage is HP per enemy hit. These mirror the registry keys
-// combat.attackCooldownMs / combat.rootMs / combat.halfAngleDeg / combat.radiusTiles / combat.damage.
+// arc = 2x); RadiusUnits is the sector reach in world units; Damage is HP per enemy hit. These mirror the registry
+// keys combat.attackCooldownMs / combat.rootMs / combat.halfAngleDeg / combat.radiusTiles / combat.damage.
 public readonly record struct CombatTuningSnapshot(
     int AttackCooldownMs,
     int RootMs,
     double HalfAngleDegrees,
-    double RadiusTiles,
+    double RadiusUnits,
     int Damage)
 {
     public double HalfAngleRadians => HalfAngleDegrees * System.Math.PI / 180d;

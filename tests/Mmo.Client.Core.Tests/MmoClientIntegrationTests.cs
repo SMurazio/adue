@@ -35,7 +35,7 @@ public sealed class MmoClientIntegrationTests
 
             Assert.Equal(20, client.Server!.TickRate);
             Assert.Equal(50, client.Server.StepCooldownMs);
-            Assert.Equal(30f, client.Server.InterestRadiusTiles);
+            Assert.Equal(30f, client.Server.InterestRadiusUnits);
             Assert.Equal(50d, client.Server.EffectiveStepCadenceMs);
             Assert.Equal(ClientRole.Player, client.Role);
             Assert.Equal(64, client.Zone!.Width);

@@ -138,7 +138,7 @@ public sealed record InventoryUpdateMessage(IReadOnlyList<ItemStack> ChangedStac
 // ServerTuning.BodyRadiusUnits admin knob, default CollisionDefaults.BodyRadius=0.5), replicated so the client predictor
 // collides against EXACTLY the radius the server integrates with. Without it the client would silently assume the
 // default and desync at every wall the instant the knob moves (one of the three Phase-4 determinism gaps).
-public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, float InterestRadiusTiles, float BodyRadiusUnits) : IProtocolMessage
+public sealed record ServerHelloMessage(string ServerName, byte ProtocolVersion, int TickRate, int StepCooldownMs, float InterestRadiusUnits, float BodyRadiusUnits) : IProtocolMessage
 {
     public MessageType Type => MessageType.ServerHello;
 }

@@ -7,7 +7,7 @@ namespace Mmo.Server.Runtime;
 // It is deliberately decoupled from GameServer plumbing so it can be unit-tested directly against a WorldState + a
 // walkability oracle + an injected locomotion + target/attack callbacks (no network, no sessions):
 //
-//   * Each monster has a HOME anchor (the continuous point it was spawned at), a roam RADIUS (Euclidean tile units
+//   * Each monster has a HOME anchor (the continuous point it was spawned at), a roam RADIUS (Euclidean world units
 //     from home it may wander within — the leash), and a small state machine:
 //        Idle      — standing still until a pause timer elapses, then roam.
 //        Roaming   — HOPPING toward a chosen open destination within the leash (one collision-valid leap per cadence).
@@ -23,7 +23,7 @@ namespace Mmo.Server.Runtime;
 // player velocity-glide path). The hop primitive is the injected IMonsterLocomotion (ship HopLocomotion); the AI owns
 // only WHERE (the continuous target) and WHEN (the state machine + timers + the livelock watchdog).
 //
-// RANGE CONVERSION TABLE (Chebyshev tiles → Euclidean tile units; behaviour-preserving, auditable):
+// RANGE CONVERSION TABLE (Chebyshev tiles → Euclidean world units; behaviour-preserving, auditable):
 //   | Range            | old (Chebyshev) | Euclidean | note                                                         |
 //   |------------------|-----------------|-----------|--------------------------------------------------------------|
 //   | Aggro            | 6               | 6.0       | cardinal-preserving; diagonal corners trim to a TRUE circle  |

@@ -1780,11 +1780,11 @@ public sealed class GameServer
     // former tile Chebyshev <= 1 adjacency to a Euclidean distance on the CONTINUOUS positions — same int->float
     // pattern as Phase 6 (AOI) and Phase 7 (combat). The actor moves off-grid, so its sub-tile offset now counts;
     // the target (resource node / corpse) is still authored on a tile centre, so target.Position is that centre.
-    // The radius (InteractionTuning.InteractionRadiusTiles, 1.5) is SHARED with the client's HarvestTargeting so
+    // The radius (InteractionTuning.InteractionRadiusUnits, 1.5) is SHARED with the client's HarvestTargeting so
     // the player sees harvestable exactly what this gate accepts; compared squared to skip the sqrt.
     private static bool IsInInteractionRange(WorldEntity actor, WorldEntity target)
     {
-        return (actor.Position - target.Position).LengthSquared <= InteractionTuning.InteractionRadiusTilesSquared;
+        return (actor.Position - target.Position).LengthSquared <= InteractionTuning.InteractionRadiusUnitsSquared;
     }
 
     private ZoneInfoMessage CreateZoneInfoMessage()

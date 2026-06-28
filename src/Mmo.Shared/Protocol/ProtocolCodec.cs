@@ -164,7 +164,7 @@ public static class ProtocolCodec
                 writer.Write(value.ProtocolVersion);
                 writer.Write(value.TickRate);
                 writer.Write(value.StepCooldownMs);
-                writer.Write(value.InterestRadiusTiles);
+                writer.Write(value.InterestRadiusUnits);
                 // CONTINUOUS MIGRATION (v37): replicate the authoritative body radius (mirrored in the decode below).
                 writer.Write(value.BodyRadiusUnits);
                 break;
@@ -663,14 +663,14 @@ public static class ProtocolCodec
     }
 
     // COMBAT-TUNING (v31): the five combat feel-knobs in a fixed order. Mirrored in ReadCombatTuning. Ints for the
-    // ms/damage knobs, doubles for the geometry (half-angle deg, radius tiles) so the panel can nudge fractional
+    // ms/damage knobs, doubles for the geometry (half-angle deg, radius units) so the panel can nudge fractional
     // reach/arc. Rides an owner/all-clients reliable message sent rarely — the few extra bytes are irrelevant.
     private static void WriteCombatTuning(BinaryWriter writer, CombatTuningSnapshot tuning)
     {
         writer.Write(tuning.AttackCooldownMs);
         writer.Write(tuning.RootMs);
         writer.Write(tuning.HalfAngleDegrees);
-        writer.Write(tuning.RadiusTiles);
+        writer.Write(tuning.RadiusUnits);
         writer.Write(tuning.Damage);
     }
 
@@ -755,9 +755,9 @@ public static class ProtocolCodec
         var attackCooldownMs = reader.ReadInt32();
         var rootMs = reader.ReadInt32();
         var halfAngleDeg = reader.ReadDouble();
-        var radiusTiles = reader.ReadDouble();
+        var radiusUnits = reader.ReadDouble();
         var damage = reader.ReadInt32();
-        return new CombatTuningSnapshot(attackCooldownMs, rootMs, halfAngleDeg, radiusTiles, damage);
+        return new CombatTuningSnapshot(attackCooldownMs, rootMs, halfAngleDeg, radiusUnits, damage);
     }
 
     private static CharacterStats ReadCharacterStats(BinaryReader reader)

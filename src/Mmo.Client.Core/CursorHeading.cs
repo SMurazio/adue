@@ -41,7 +41,7 @@ public static class CursorHeading
     //
     // dx/dy are CONTINUOUS world-plane deltas (+X=east, +Y=south), NOT tile counts. `lastHeading` is the
     // currently-held octant (or null if none). Returns:
-    //   * null (no heading -> caller stops) when the vector magnitude is within `deadZoneTiles` — the cursor
+    //   * null (no heading -> caller stops) when the vector magnitude is within `deadZoneUnits` — the cursor
     //     sits on/near the player, so emit no octant rather than whipping a near-zero atan2 around. Returning
     //     null (not lastHeading) lets the player STOP the avatar by parking the cursor on it, matching the prior
     //     on-own-tile stop behaviour and avoiding overshoot oscillation. (This is the deliberate "stop" arm of
@@ -55,12 +55,12 @@ public static class CursorHeading
         double dx,
         double dy,
         Direction8? lastHeading,
-        double deadZoneTiles,
+        double deadZoneUnits,
         double hysteresisDegrees)
     {
         // Dead-zone: too close to the player to define a stable heading -> no heading (caller stops/holds-still).
         var magnitude = Math.Sqrt((dx * dx) + (dy * dy));
-        if (magnitude < deadZoneTiles)
+        if (magnitude < deadZoneUnits)
         {
             return null;
         }

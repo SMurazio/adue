@@ -3,7 +3,7 @@ using Mmo.Shared.Domain;
 namespace Mmo.Client.Core;
 
 // Picks which entity a harvest/interact input should target. Reach mirrors the server's rule exactly
-// (CONTINUOUS MIGRATION Phase 9: Euclidean distance <= InteractionTuning.InteractionRadiusTiles on the
+// (CONTINUOUS MIGRATION Phase 9: Euclidean distance <= InteractionTuning.InteractionRadiusUnits on the
 // CONTINUOUS positions, the same shared constant the server's interact gate reads — was tile Chebyshev <= 1),
 // so the client only ever sends an InteractRequest the server can plausibly accept — the server still
 // re-validates authoritatively. Targetable = an available resource NODE (never a depleted one) OR a dropped
@@ -47,7 +47,7 @@ public static class HarvestTargeting
             // gates with — so an in-range verdict here matches the server's accept exactly.
             var targetPosition = WorldVector.FromTile(entity.AuthoritativeTile);
             var distanceSquared = (actorPosition - targetPosition).LengthSquared;
-            if (distanceSquared > InteractionTuning.InteractionRadiusTilesSquared)
+            if (distanceSquared > InteractionTuning.InteractionRadiusUnitsSquared)
             {
                 continue;
             }

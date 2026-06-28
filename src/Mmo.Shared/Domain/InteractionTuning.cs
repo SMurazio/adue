@@ -15,12 +15,12 @@ namespace Mmo.Shared.Domain;
 // gate (resources/corpses are still authored on tile centres, so their Position is the tile centre).
 public static class InteractionTuning
 {
-    // Maximum Euclidean distance (in tile units, 1.0 == one tile) between the actor's continuous position and the
-    // target's continuous position for an interact (harvest / loot-open) to be in reach. See the type comment for
+    // Maximum Euclidean distance (in world units, 1.0 == one tile-width) between the actor's continuous position and
+    // the target's continuous position for an interact (harvest / loot-open) to be in reach. See the type comment for
     // why 1.5 preserves the old Chebyshev <= 1 reach.
-    public const double InteractionRadiusTiles = 1.5d;
+    public const double InteractionRadiusUnits = 1.5d;
 
     // The radius squared — compare against (actor.Position - target.Position).LengthSquared to avoid a sqrt on the
     // hot path. Both the server gate and the client targeting use THIS so they cannot diverge.
-    public const double InteractionRadiusTilesSquared = InteractionRadiusTiles * InteractionRadiusTiles;
+    public const double InteractionRadiusUnitsSquared = InteractionRadiusUnits * InteractionRadiusUnits;
 }

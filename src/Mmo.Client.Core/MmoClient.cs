@@ -942,7 +942,7 @@ public sealed class MmoClient : IDisposable
 
     private void HandleServerHello(ServerHelloMessage hello)
     {
-        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles, hello.BodyRadiusUnits);
+        Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusUnits, hello.BodyRadiusUnits);
         RefreshInterpolatorCadence();
         // CONTINUOUS MIGRATION (Phase 4): ServerHello now carries the body radius the predictor needs. If the local
         // entity already exists (a re-hello after spawn), attach the predictor now that Server (radius) is known;

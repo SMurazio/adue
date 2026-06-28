@@ -91,7 +91,7 @@ public sealed class ServerTuning
     // (below); per-entity /speed (SpeedMultiplier) still scales off this constant base.
     public int StepCooldownMs { get; }
 
-    // AOI interest radius in tiles. Read each AOI pass (snapshot selection + interact validation).
+    // AOI interest radius in world units. Read each AOI pass (snapshot selection + interact validation).
     public float InterestRadius { get; set; }
 
     // LIVING-ENEMIES P3: how long after the PLAYER's HP hits 0 the server waits before teleporting it back to spawn at

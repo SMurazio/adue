@@ -22,7 +22,7 @@ public sealed class MovementSpeedOptionsTests
         Assert.Equal(3, walk.Ticks);
         Assert.Equal(1.0d, walk.Multiplier, 9);
         Assert.Equal(150d, walk.CadenceMs, 9); // 3 ticks * 50 ms.
-        Assert.Equal(1000d / 150d, walk.TilesPerSecond, 9);
+        Assert.Equal(1000d / 150d, walk.UnitsPerSecond, 9);
     }
 
     [Fact]
@@ -39,14 +39,14 @@ public sealed class MovementSpeedOptionsTests
         }
 
         // Every option's cadence is its tick count * the tick interval, multiplier is baseWalkTicks/N, and
-        // tiles/s is the inverse of the cadence in seconds.
+        // units/s is the inverse of the cadence in seconds.
         const double tickIntervalMs = 1000d / DefaultTickRate;
         const int baseWalkTicks = 3;
         foreach (var option in options)
         {
             Assert.Equal(option.Ticks * tickIntervalMs, option.CadenceMs, 9);
             Assert.Equal((double)baseWalkTicks / option.Ticks, option.Multiplier, 9);
-            Assert.Equal(1000d / option.CadenceMs, option.TilesPerSecond, 9);
+            Assert.Equal(1000d / option.CadenceMs, option.UnitsPerSecond, 9);
         }
     }
 

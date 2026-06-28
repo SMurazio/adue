@@ -185,7 +185,7 @@ static void PrintMessage(
     switch (message)
     {
         case ServerHelloMessage hello:
-            Console.WriteLine($"Server: {hello.ServerName}, protocol={hello.ProtocolVersion}, tickRate={hello.TickRate}, stepCooldownMs={hello.StepCooldownMs}, interestRadiusTiles={hello.InterestRadiusTiles:0.#}");
+            Console.WriteLine($"Server: {hello.ServerName}, protocol={hello.ProtocolVersion}, tickRate={hello.TickRate}, stepCooldownMs={hello.StepCooldownMs}, interestRadiusUnits={hello.InterestRadiusUnits:0.#}");
             break;
         case LoginResultMessage login:
             Console.WriteLine(login.Accepted

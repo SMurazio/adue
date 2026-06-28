@@ -190,7 +190,9 @@ public sealed class WebBridgeSession
         switch (message)
         {
             case ServerHelloMessage hello:
-                EnqueueBrowser(new { type = "serverHello", hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusTiles });
+                // Keep the browser JSON key "interestRadiusTiles" (the C# field renamed to InterestRadiusUnits, but the
+                // web client app.js + its asset test still read interestRadiusTiles — the JSON wire to the browser is unchanged).
+                EnqueueBrowser(new { type = "serverHello", hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, InterestRadiusTiles = hello.InterestRadiusUnits });
                 break;
             case LoginResultMessage login:
                 EnqueueBrowser(new
