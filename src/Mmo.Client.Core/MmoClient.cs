@@ -24,12 +24,11 @@ public sealed class MmoClient : IDisposable
     // conservative for tile-stepped movement, which steps at a KNOWN regular cadence, so the buffer only needs to
     // absorb network ARRIVAL JITTER, not a full step. The jitter that matters is network (snapshots land on ~50ms
     // tick boundaries), NOT cadence-scaled, so the floor is a FIXED ms (one snapshot interval) rather than a pure
-    // cadence multiple. The effective remote delay is now max(RemoteInterpolationCadenceMultiplier * cadence,
-    // RemoteInterpolationMinBufferMs): at the 150ms default cadence that is max(75, 50) = 75ms — about half a tile
-    // of lag instead of ~1.3 tiles, while still keeping >= one snapshot interval buffered so TryStartNextStep
-    // reliably has the next tile ready under normal arrival jitter (no stalls/stutter). Lower bound is the fixed
-    // floor; the multiplier carries the rest for slower (longer-cadence) entities. Live-overridable via
-    // SetRemoteInterpolationBufferMs (the F1 Movement-tab "Remote interp buffer" knob); -1 = use this computed default.
+    // cadence multiple. SUPERSEDED (extrapolate-to-now): the DEFAULT remote playout delay is now ZERO — remote
+    // entities render at `now` by dead-reckoning the server's latest position along its replicated velocity, adding no
+    // playout lag (see ResolveInterpolationDelay). These cadence-multiple constants are retained only as a REFERENCE
+    // value for the opt-in buffer (the F1 "Remote interp buffer" knob can be set to roughly this if jitter smoothing is
+    // wanted); they no longer drive the default. Kept (not deleted) so the knob's "auto"/reference math is documented.
     public const double RemoteInterpolationCadenceMultiplier = 0.5d;
 
     // remote-interp-tighten Part A: the FIXED minimum remote jitter buffer (ms) — ~one 20Hz snapshot interval.
@@ -1354,7 +1353,16 @@ public sealed class MmoClient : IDisposable
             return _remoteInterpolationBufferOverrideMs;
         }
 
-        return Math.Max(cadenceMs * RemoteInterpolationCadenceMultiplier, RemoteInterpolationMinBufferMs);
+        // EXTRAPOLATE-TO-NOW (user directive: add NO lag that isn't earned). The default remote playout buffer is now
+        // ZERO: with delay 0 the RemotePositionInterpolator renders at `now` by dead-reckoning the server's latest
+        // position forward along its replicated velocity (the delay-0 path hits the extrapolation branch), so a remote
+        // entity tracks the server with no artificial playout lag instead of being drawn ~half a cadence in the past.
+        // This is now safe because moving entities stream a fresh position EVERY tick (the per-tick replication fix for
+        // walkers + Phase C for hops), so the old cadence-multiple buffer is obsolete padding. The interp buffer is
+        // OPT-IN: raise it live via the F1 "Remote interp buffer" knob (_remoteInterpolationBufferOverrideMs > 0) to
+        // trade latency for jitter smoothing. Tradeoff of 0: a brief overshoot-then-correct when an entity sharply
+        // reverses/stops (bounded by one sample interval × speed; the stop-edge re-publish lands the correction fast).
+        return 0d;
     }
 
     // remote-interp-tighten Part A: the live remote jitter-buffer override in ms, or null when using the computed
