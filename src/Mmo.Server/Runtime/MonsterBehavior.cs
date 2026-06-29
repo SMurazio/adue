@@ -44,4 +44,10 @@ public readonly record struct MonsterAiTunables(
     double AttackRangeUnits,
     int AttackDamage,
     uint AttackCooldownTicks,
-    uint AggroScanIntervalTicks);
+    uint AggroScanIntervalTicks,
+    // MONSTER-BEHAVIOR P4 (docs/monster-behavior-design.md): the wounded-flee threshold as a FRACTION of MaxHealth in
+    // [0,1]. 0 = never flee (every BasicRoamer type; the BasicRoamer brain ignores this field entirely). A
+    // SkirmisherBehavior reads it: while Chasing, if FleeHealthPct > 0 AND Health <= FleeHealthPct*MaxHealth, it RUNS
+    // AWAY from the target instead of approaching/attacking. NOT tick-quantised (a fraction, not a duration); clamped
+    // to [0,1] by BuildTunables. NOT a live F1 knob this phase (behavior-specific — see the design) so NOT on the wire.
+    double FleeHealthPct = 0d);

@@ -51,6 +51,14 @@ public sealed class MonsterType
     // Per-type max HP — the monster spawns at full of this. Default 100 (the CharacterStats default).
     public int MaxHealth { get; set; } = 100;
 
+    // MONSTER-BEHAVIOR P4 (docs/monster-behavior-design.md): the wounded-flee threshold as a FRACTION of MaxHealth in
+    // [0,1], consumed by a SkirmisherBehavior brain. Default 0 = NEVER flee (every BasicRoamer type ignores it). A
+    // skirmisher flees when Health <= FleeHealthPct*MaxHealth (e.g. 0.3 = flee below 30% HP). Behavior-specific DATA
+    // only: it is NOT a live F1 tunable / NOT in the descriptor table / NOT replicated (the global F1 Monster tab would
+    // otherwise show a flee knob on non-fleers) and NOT on the wire — set only via the manifest (clamped to [0,1]). A
+    // later tiny follow-up can promote it to a live knob if the feel-test wants it.
+    public double FleeHealthPct { get; set; }
+
     // INTERNAL-ONLY (no longer user-tunable / shown on the F1 Monster tab — the confusing "move speed (x)" knob was
     // retired in favour of the intuitive RANGE / HEIGHT / AIRBORNE / DELAY hop knobs). This is still the multiplier of
     // the player's base cadence (< 1 = slower) that the entity's replicated SpeedMultiplier is seeded from AT SPAWN —

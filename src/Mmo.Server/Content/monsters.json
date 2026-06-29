@@ -37,9 +37,10 @@
       "respawnMs": 5000
     },
     {
-      // MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the first GLIDER — a monster that WALKS continuously
-      // (locomotionId "glide") instead of hopping, the first VISIBLE per-type behavior difference. It keeps the
-      // CURRENT brain (BasicRoamer): it roams / chases / melees exactly like the slime, just WALKING. Spawn it with
+      // MONSTER-BEHAVIOR P2/P4 (docs/monster-behavior-design.md): the GLIDER that WALKS continuously (locomotionId
+      // "glide") instead of hopping AND, as of P4, runs its OWN brain (behaviorId "skirmisher"): it roams / chases /
+      // melees like the slime but FLEES when wounded (fleeHealthPct 0.3 = glides away once below 30% HP instead of
+      // attacking). The keep-distance/kiting half of "skirmisher" waits for P5's ranged ability. Spawn it with
       // `/monster gnoll`. lootTableId "" = drops nothing (no loot table authored yet — do NOT invent one).
       //
       // The HOP knobs (hopDistanceUnits / hopHeightUnits / hopAirborneMs / hopDelayMs) are OMITTED — they default and
@@ -51,7 +52,7 @@
       "displayName": "Gnoll",
       "lootTableId": "",
       "locomotionId": "glide",
-      "behaviorId": "basicRoamer",
+      "behaviorId": "skirmisher",
       "maxHealth": 200,
       "moveSpeedMultiplier": 0.9,
       "roamRadius": 5,
@@ -59,7 +60,8 @@
       "chaseLeash": 16,
       "attackDamage": 20,
       "attackCooldownMs": 1200,
-      "attackRangeUnits": 1.5
+      "attackRangeUnits": 1.5,
+      "fleeHealthPct": 0.3
     }
   ]
 }

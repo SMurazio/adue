@@ -223,6 +223,14 @@ public sealed class MonsterTypeRegistry
                 type.MoveSpeedMultiplier = dto.MoveSpeedMultiplier.Value;
             }
 
+            // MONSTER-BEHAVIOR P4: the wounded-flee threshold (a SkirmisherBehavior knob). Set directly + clamp to
+            // [0,1] (NOT a TryApply/F1 field — it is behavior-specific, not a live global tunable). Omitted → 0 (never
+            // flee), the MonsterType default. An out-of-range author value is clamped, never honoured.
+            if (dto.FleeHealthPct.HasValue)
+            {
+                type.FleeHealthPct = Math.Clamp(dto.FleeHealthPct.Value, 0d, 1d);
+            }
+
             registry.Add(type);
 
             // Each provided tunable is clamped + applied through TryApply (the SAME bounds the F1 live tuning
@@ -269,9 +277,10 @@ public sealed class MonsterTypeRegistry
         UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
     };
 
-    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 added the `locomotionId` selector and P3
-    // (this change) adds the `behaviorId` selector; later phases GROW this with the remaining selectors (abilityIds /
-    // visualId). Each selector is a plain STORED string (resolution is GameServer's job). All tunables are nullable so
+    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 added the `locomotionId` selector, P3 the
+    // `behaviorId` selector, and P4 (this change) the `fleeHealthPct` behavior knob; later phases GROW this with the
+    // remaining selectors (abilityIds / visualId). Each selector is a plain STORED string (resolution is GameServer's
+    // job). `fleeHealthPct` is behavior-specific DATA (NOT a live F1 tunable). All tunables are nullable so
     // an omitted field falls back to the MonsterType default; id/displayName are validated as required in
     // FromManifestJson. JSON property names are camelCase (matched case-insensitively).
     private sealed record MonsterManifestDto(List<MonsterTypeDto?>? Types);
@@ -283,6 +292,7 @@ public sealed class MonsterTypeRegistry
         string? LocomotionId,
         string? BehaviorId,
         int? MaxHealth,
+        double? FleeHealthPct,
         double? MoveSpeedMultiplier,
         double? RoamRadius,
         int? PauseMinMs,
@@ -335,7 +345,10 @@ public sealed class MonsterTypeRegistry
         AttackRangeUnits: type.AttackRangeUnits,
         AttackDamage: type.AttackDamage,
         AttackCooldownTicks: CooldownMsToTicks(type.AttackCooldownMs),
-        AggroScanIntervalTicks: AggroScanIntervalTicks);
+        AggroScanIntervalTicks: AggroScanIntervalTicks,
+        // MONSTER-BEHAVIOR P4: pass the flee threshold straight through (a fraction, not a duration — NO tick-
+        // quantisation), clamped to [0,1] so a nonsense out-of-range author value can't misbehave. 0 = never flee.
+        FleeHealthPct: Math.Clamp(type.FleeHealthPct, 0d, 1d));
 
     // ~0.5 s aggro-scan cadence in ticks (floored at 1) — tick-rate-only, throttling the spatial scan.
     public uint AggroScanIntervalTicks =>

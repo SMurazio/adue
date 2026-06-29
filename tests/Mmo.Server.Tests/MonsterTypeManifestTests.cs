@@ -106,6 +106,7 @@ public sealed class MonsterTypeManifestTests
         // Compare against a fresh code-default MonsterType (the single source of the defaults).
         var def = new MonsterType("blob", "Blob");
         Assert.Equal(def.MaxHealth, b.MaxHealth);
+        Assert.Equal(def.FleeHealthPct, b.FleeHealthPct, 6); // MONSTER-BEHAVIOR P4: omitted fleeHealthPct = 0 (never flee).
         Assert.Equal(def.MoveSpeedMultiplier, b.MoveSpeedMultiplier, 6);
         Assert.Equal(def.RoamRadius, b.RoamRadius, 6);
         Assert.Equal(def.PauseMinMs, b.PauseMinMs);
@@ -316,6 +317,7 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.LootTableId, d.LootTableId);
         Assert.Equal(c.LocomotionId, d.LocomotionId); // MONSTER-BEHAVIOR P1: the locomotion selector must not drift.
         Assert.Equal(c.BehaviorId, d.BehaviorId); // MONSTER-BEHAVIOR P3: the behavior selector must not drift.
+        Assert.Equal(c.FleeHealthPct, d.FleeHealthPct, 6); // MONSTER-BEHAVIOR P4: the slime never flees (0) in both.
         Assert.Equal(c.MaxHealth, d.MaxHealth);
         Assert.Equal(c.MoveSpeedMultiplier, d.MoveSpeedMultiplier, 6);
         Assert.Equal(c.RoamRadius, d.RoamRadius, 6);
@@ -350,6 +352,8 @@ public sealed class MonsterTypeManifestTests
         Assert.True(registry.TryGet("gnoll", out var g), "shipped manifest must carry the gnoll glider.");
         Assert.Equal("Gnoll", g.DisplayName);
         Assert.Equal("glide", g.LocomotionId);
+        Assert.Equal("skirmisher", g.BehaviorId); // MONSTER-BEHAVIOR P4: the gnoll runs the flee-when-wounded brain.
+        Assert.Equal(0.3d, g.FleeHealthPct, 6);    // MONSTER-BEHAVIOR P4: flees below 30% HP.
         Assert.Equal(string.Empty, g.LootTableId); // no loot table authored yet — drops nothing.
         Assert.Equal(200, g.MaxHealth);
         Assert.Equal(0.9d, g.MoveSpeedMultiplier, 6);

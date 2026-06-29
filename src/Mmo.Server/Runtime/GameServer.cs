@@ -320,11 +320,12 @@ public sealed class GameServer
                 _zone.ApplyMonsterLanding,
                 options.TickRate),
         };
-        // MONSTER-BEHAVIOR P3: the per-type BEHAVIOR ("brain") registry. Build the ONE "basicRoamer" entry (the shared
-        // BasicRoamerBehavior, formerly the standalone _monsterAi) and resolve a monster's behavior per type each
-        // spawn/death/step (ResolveBehavior). NO behavior change this phase: only "basicRoamer" is registered, so every
-        // type resolves to this same instance → identical AI. P4 adds a second entry (a Skirmisher) + a type that
-        // selects it. Seeded off the map seed so a given world replays the same roaming (deterministic for repro/tests).
+        // MONSTER-BEHAVIOR P3/P4: the per-type BEHAVIOR ("brain") registry. Build the "basicRoamer" entry (the shared
+        // BasicRoamerBehavior, formerly the standalone _monsterAi) and, as of P4, the "skirmisher" entry (the gnoll's
+        // flee-when-wounded brain) and resolve a monster's behavior per type each spawn/death/step (ResolveBehavior).
+        // The skirmisher takes the IDENTICAL deps as the basicRoamer (same aggro/resolve/attack/walkability wiring);
+        // it overrides only the chase flee decision. Both are seeded off the map seed so a given world replays the same
+        // roaming (deterministic for repro/tests); they own disjoint per-monster state so the shared seed is harmless.
         _defaultBehavior = new BasicRoamerBehavior(
             options.MapSeed,
             _zone.IsWalkable,
@@ -334,6 +335,12 @@ public sealed class GameServer
         _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
         {
             ["basicRoamer"] = _defaultBehavior,
+            ["skirmisher"] = new SkirmisherBehavior(
+                options.MapSeed,
+                _zone.IsWalkable,
+                FindMonsterAggroTarget,
+                TryResolveMonsterTarget,
+                ApplyMonsterAttack),
         };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));

@@ -65,7 +65,12 @@ namespace Mmo.Server.Runtime;
 // brain (formerly the standalone MonsterRoamAi). GameServer selects it per type via MonsterType.BehaviorId. NO behavior
 // change at P3: only "basicRoamer" is registered, so every type resolves here → identical AI. Its per-tick INPUT
 // (formerly the nested Tunables) is now the top-level MonsterAiTunables (MonsterBehavior.cs), shared by all behaviors.
-public sealed class BasicRoamerBehavior : IMonsterBehavior
+// MONSTER-BEHAVIOR P4 (docs/monster-behavior-design.md): NO LONGER sealed — this is the shared brain SCAFFOLDING a
+// second behavior composes by overriding only the DECISIONS that differ (the design's "base-class-with-overrides"
+// resolution of the open P3 question). SkirmisherBehavior : BasicRoamerBehavior overrides exactly ONE hook
+// (TryChooseFleeTarget) to FLEE when wounded and otherwise inherits the entire Idle/Roaming/Chasing/Returning state
+// machine unchanged. The hook defaults to "never flee", so BasicRoamer (the slime) is byte-identical.
+public class BasicRoamerBehavior : IMonsterBehavior
 {
     public enum State : byte
     {
@@ -320,6 +325,18 @@ public sealed class BasicRoamerBehavior : IMonsterBehavior
             return false;
         }
 
+        // (1.5) FLEE hook (MONSTER-BEHAVIOR P4). Placed AFTER the leash/de-aggro checks (so a fleeing monster still
+        // gives up + returns home when pulled past the de-aggro/leash bounds) and BEFORE the attack/approach branch.
+        // Default returns false → the rest of the chase runs UNCHANGED (BasicRoamer is byte-identical). A subclass
+        // (SkirmisherBehavior) returns true + a flee destination to OVERRIDE this tick: move AWAY (toward fleeTarget)
+        // via the SAME locomotion-move-with-watchdog helper the approach uses, and SKIP the attack. Sharing the helper
+        // is what preserves the watchdog/progress bookkeeping so a fleeing monster never false-trips the no-progress
+        // bail (and a fleer wedged into a wall still bails to Returning via that watchdog, just like the approach).
+        if (TryChooseFleeTarget(monster, t, targetPos, out var fleeTarget))
+        {
+            return StepMoveTowardWithWatchdog(monster, locomotion, ref state, serverTick, stepCooldownTicks, fleeTarget);
+        }
+
         // (2) Within attack range + off cooldown → attack. The attack is the monster's OWN per-monster timer,
         // independent of its move cadence. We do NOT hop on an attack tick. Face the target while in range.
         if (distToTarget <= t.AttackRangeUnits)
@@ -339,8 +356,21 @@ public sealed class BasicRoamerBehavior : IMonsterBehavior
             return false;
         }
 
-        // (3) Hop toward the target's current Position. The locomotion arms the cadence + faces the heading.
-        var result = locomotion.Advance(monster, targetPos, serverTick, stepCooldownTicks);
+        // (3) Hop toward the target's current Position via the shared move-with-watchdog helper (the locomotion arms
+        // the cadence + faces the heading). The flee branch (1.5) calls the SAME helper toward its flee destination.
+        return StepMoveTowardWithWatchdog(monster, locomotion, ref state, serverTick, stepCooldownTicks, targetPos);
+    }
+
+    // One chase MOVE toward `moveTarget` (the target's Position when approaching, or a flee destination when a
+    // subclass is fleeing) with the no-progress watchdog. Extracted from StepChase so the normal approach and the
+    // MONSTER-BEHAVIOR P4 flee path share IDENTICAL move + watchdog bookkeeping: a Moved hop resets the watchdog, a
+    // Stuck hop (a slide fixpoint the fan can't escape) trips it once it has persisted past any legitimate cadence
+    // wait and bails to Returning (so a monster — approaching OR fleeing — can never freeze against a wall), and an
+    // OnCooldown tick is a harmless wait. Behaviourally byte-identical to the former inline approach branch.
+    private bool StepMoveTowardWithWatchdog(
+        WorldEntity monster, IMonsterLocomotion locomotion, ref MonsterState state, uint serverTick, uint stepCooldownTicks, WorldVector moveTarget)
+    {
+        var result = locomotion.Advance(monster, moveTarget, serverTick, stepCooldownTicks);
         switch (result)
         {
             case HopResult.Moved:
@@ -348,8 +378,8 @@ public sealed class BasicRoamerBehavior : IMonsterBehavior
                 return true;
 
             case HopResult.Stuck:
-                // Wedged mid-chase (a slide fixpoint the fan can't escape). The watchdog bails to Returning so a
-                // monster can never freeze against a wall — it walks home, re-roams, and can re-aggro on the next scan.
+                // Wedged (a slide fixpoint the fan can't escape). The watchdog bails to Returning so a monster can
+                // never freeze against a wall — it walks home, re-roams, and can re-aggro on the next scan.
                 if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
                 {
                     BeginReturnHome(locomotion, monster, ref state, serverTick);
@@ -360,6 +390,18 @@ public sealed class BasicRoamerBehavior : IMonsterBehavior
             default: // OnCooldown — harmless wait.
                 return false;
         }
+    }
+
+    // MONSTER-BEHAVIOR P4 (docs/monster-behavior-design.md): the ONE overridable chase DECISION hook. Called each
+    // Chasing tick AFTER the leash/de-aggro checks and BEFORE the attack/approach branch. DEFAULT: never flee — return
+    // false so the base brain (BasicRoamer / the slime) approaches + attacks exactly as before (byte-identical). A
+    // subclass returns true + a flee destination to OVERRIDE this tick: the monster moves toward `fleeTarget` (glides
+    // AWAY from the target) via the shared move-with-watchdog helper and does NOT attack this tick, while keeping the
+    // rest of the state machine (leash, de-aggro, watchdog). `targetPos` is the chased target's current Position.
+    protected virtual bool TryChooseFleeTarget(WorldEntity monster, in MonsterAiTunables t, WorldVector targetPos, out WorldVector fleeTarget)
+    {
+        fleeTarget = default;
+        return false;
     }
 
     // Drop aggro and head home. Destination = home; Returning hops there and resumes Idle on arrival.
