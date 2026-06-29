@@ -200,6 +200,15 @@ public sealed class MonsterTypeRegistry
                 type.LootTableId = dto.LootTableId;
             }
 
+            // MONSTER-BEHAVIOR P1: the locomotion composition selector. STORE the string as-authored (non-blank);
+            // an omitted/blank id keeps the MonsterType default "hop". The loader does NOT validate/resolve it (an
+            // unknown id like "glide" before P2 registers it is accepted here) — resolution + the loud-but-safe
+            // fallback-to-hop is GameServer's job (ResolveLocomotion), mirroring how it already owns the type map.
+            if (!string.IsNullOrWhiteSpace(dto.LocomotionId))
+            {
+                type.LocomotionId = dto.LocomotionId;
+            }
+
             if (dto.MoveSpeedMultiplier.HasValue)
             {
                 type.MoveSpeedMultiplier = dto.MoveSpeedMultiplier.Value;
@@ -251,8 +260,9 @@ public sealed class MonsterTypeRegistry
         UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
     };
 
-    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields only; later phases (P1+) GROW this with
-    // the composition selectors (locomotionId / behaviorId / abilityIds / visualId). All tunables are nullable so
+    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 (this change) adds the FIRST composition
+    // selector `locomotionId`; later phases GROW this with the remaining selectors (behaviorId / abilityIds /
+    // visualId). The selector is a plain STORED string (resolution is GameServer's job). All tunables are nullable so
     // an omitted field falls back to the MonsterType default; id/displayName are validated as required in
     // FromManifestJson. JSON property names are camelCase (matched case-insensitively).
     private sealed record MonsterManifestDto(List<MonsterTypeDto?>? Types);
@@ -261,6 +271,7 @@ public sealed class MonsterTypeRegistry
         string? Id,
         string? DisplayName,
         string? LootTableId,
+        string? LocomotionId,
         int? MaxHealth,
         double? MoveSpeedMultiplier,
         double? RoamRadius,

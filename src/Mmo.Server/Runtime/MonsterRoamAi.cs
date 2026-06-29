@@ -5,7 +5,9 @@ namespace Mmo.Server.Runtime;
 // LIVING-ENEMIES P1/P2 + CONTINUOUS MIGRATION (Phase 8): the server-side brain for EntityKind.Monster. One instance
 // owns ALL monsters' per-entity AI state (keyed by entity id) plus the shared PRNG, and steps them on the server tick.
 // It is deliberately decoupled from GameServer plumbing so it can be unit-tested directly against a WorldState + a
-// walkability oracle + an injected locomotion + target/attack callbacks (no network, no sessions):
+// walkability oracle + a per-step locomotion + target/attack callbacks (no network, no sessions). MONSTER-BEHAVIOR P1:
+// the locomotion is now passed PER TICK to StepMonster (resolved per-TYPE by GameServer), not injected once — the AI is
+// locomotion-agnostic, so a per-type body (P2 GlideLocomotion) needs no change here:
 //
 //   * Each monster has a HOME anchor (the continuous point it was spawned at), a roam RADIUS (Euclidean world units
 //     from home it may wander within — the leash), and a small state machine:
@@ -20,7 +22,7 @@ namespace Mmo.Server.Runtime;
 // CONTINUOUS NAVIGATION (Phase 8). Navigation is CONTINUOUS (Euclidean ranges on WorldVector Position, sub-tile
 // targets, obstacle-avoidance via the swept-circle resolver) but movement still HOPS — a discrete collision-valid
 // leap per move cadence with Velocity left at Zero (the sparse-update "jump" is preserved; monsters stay OFF the
-// player velocity-glide path). The hop primitive is the injected IMonsterLocomotion (ship HopLocomotion); the AI owns
+// player velocity-glide path). The hop primitive is the per-step IMonsterLocomotion (ship HopLocomotion); the AI owns
 // only WHERE (the continuous target) and WHEN (the state machine + timers + the livelock watchdog).
 //
 // RANGE CONVERSION TABLE (Chebyshev tiles → Euclidean world units; behaviour-preserving, auditable):
@@ -97,12 +99,6 @@ public sealed class MonsterRoamAi
     // is testable against a bare TileGrid/WorldState without a live Zone/GameServer.
     private readonly Func<TileCoord, bool> _isWalkable;
 
-    // CONTINUOUS MIGRATION (Phase 8): the injected hop locomotion (HopLocomotion). Replaces the old TryStep delegate —
-    // the AI no longer tile-steps; it asks the locomotion to Advance toward a continuous target and reads the HopResult
-    // to drive its watchdog. Injected so a test can hand a fake/lambda locomotion and so a future GlideLocomotion slots
-    // in without touching this class.
-    private readonly IMonsterLocomotion _locomotion;
-
     // Find the nearest VALID aggro target (alive player) within `gatherRadius` (a coarse Chebyshev/tile pre-filter) of
     // `monster`. Returns false when none. Injected so the AI doesn't reach into WorldState/sessions directly —
     // GameServer supplies the real spatial-index scan (GatherInterestCandidates, players only, alive) and outputs the
@@ -128,17 +124,18 @@ public sealed class MonsterRoamAi
     // GameServer; the AI only decides WHEN (within AttackRangeUnits + cooldown).
     public delegate void AttackDelegate(WorldEntity monster, ulong targetId, int attackDamage);
 
+    // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
+    // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
+    // locomotion-AGNOSTIC — told its "body" each tick — so a per-type body (P2 GlideLocomotion) needs no change here.
     public MonsterRoamAi(
         int seed,
         Func<TileCoord, bool> isWalkable,
-        IMonsterLocomotion locomotion,
         FindTargetDelegate findTarget,
         TryResolveTargetDelegate tryResolveTarget,
         AttackDelegate attack)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
-        _locomotion = locomotion;
         _findTarget = findTarget;
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
@@ -232,7 +229,8 @@ public sealed class MonsterRoamAi
     // StateRevision, which ApplyResolvedMove (inside the locomotion) bumps only when the rounded tile actually crosses,
     // so the snapshot cadence/bandwidth stay tile-keyed at today's rate regardless of this flag. The GameServer pass
     // ignores the return; it is the headless tests' "did it move" signal.
-    public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in Tunables t)
+    public bool StepMonster(
+        WorldEntity monster, IMonsterLocomotion locomotion, uint serverTick, uint stepCooldownTicks, in Tunables t)
     {
         if (!_states.TryGetValue(monster.Id, out var state))
         {
@@ -270,7 +268,7 @@ public sealed class MonsterRoamAi
                         state.Phase = State.Roaming;
                         state.LastProgressTick = serverTick;
                         // Fall through to take the first roam hop THIS tick (the pause already elapsed).
-                        moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
+                        moved = StepTowardDestination(monster, locomotion, ref state, serverTick, stepCooldownTicks, t);
                     }
                     else
                     {
@@ -282,16 +280,16 @@ public sealed class MonsterRoamAi
                 break;
 
             case State.Roaming:
-                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
+                moved = StepTowardDestination(monster, locomotion, ref state, serverTick, stepCooldownTicks, t);
                 break;
 
             case State.Chasing:
-                moved = StepChase(monster, ref state, serverTick, stepCooldownTicks, t);
+                moved = StepChase(monster, locomotion, ref state, serverTick, stepCooldownTicks, t);
                 break;
 
             case State.Returning:
                 // Returning hops toward Destination = home (set in BeginReturnHome); same machinery as roam.
-                moved = StepTowardDestination(monster, ref state, serverTick, stepCooldownTicks, t);
+                moved = StepTowardDestination(monster, locomotion, ref state, serverTick, stepCooldownTicks, t);
                 break;
         }
 
@@ -313,7 +311,8 @@ public sealed class MonsterRoamAi
     // One chase tick. (1) Resolve the target and apply the leash rules (Euclidean) → Returning on any break. (2) If
     // within AttackRangeUnits and the attack cooldown elapsed, attack on the OWN attack timer (no hop this tick). (3)
     // Otherwise hop toward the target's current Position, with the no-progress watchdog.
-    private bool StepChase(WorldEntity monster, ref MonsterState state, uint serverTick, uint stepCooldownTicks, in Tunables t)
+    private bool StepChase(
+        WorldEntity monster, IMonsterLocomotion locomotion, ref MonsterState state, uint serverTick, uint stepCooldownTicks, in Tunables t)
     {
         // (1) De-aggro checks. Target gone/dead, OR beyond the de-aggro range, OR the monster pulled farther than
         // chaseLeash from home → drop aggro and walk home. All Euclidean on Position.
@@ -347,7 +346,7 @@ public sealed class MonsterRoamAi
         }
 
         // (3) Hop toward the target's current Position. The locomotion arms the cadence + faces the heading.
-        var result = _locomotion.Advance(monster, targetPos, serverTick, stepCooldownTicks);
+        var result = locomotion.Advance(monster, targetPos, serverTick, stepCooldownTicks);
         switch (result)
         {
             case HopResult.Moved:
@@ -387,6 +386,7 @@ public sealed class MonsterRoamAi
     // is a harmless wait.
     private bool StepTowardDestination(
         WorldEntity monster,
+        IMonsterLocomotion locomotion,
         ref MonsterState state,
         uint serverTick,
         uint stepCooldownTicks,
@@ -399,7 +399,7 @@ public sealed class MonsterRoamAi
             return false;
         }
 
-        var result = _locomotion.Advance(monster, state.Destination, serverTick, stepCooldownTicks);
+        var result = locomotion.Advance(monster, state.Destination, serverTick, stepCooldownTicks);
 
         switch (result)
         {

@@ -36,12 +36,16 @@ public sealed class MonsterRoamAiTests
     private sealed class AiHarness
     {
         private readonly MonsterRoamAi _ai;
+        private readonly IMonsterLocomotion _locomotion;
         private readonly ServerActionExecutor _executor;
         private readonly WorldState _world;
 
-        public AiHarness(MonsterRoamAi ai, ServerActionExecutor executor, WorldState world)
+        // MONSTER-BEHAVIOR P1: the locomotion is now passed PER STEP (GameServer resolves it per-type each tick), so
+        // the harness holds the one HopLocomotion and threads it into StepMonster — the test bodies stay unchanged.
+        public AiHarness(MonsterRoamAi ai, IMonsterLocomotion locomotion, ServerActionExecutor executor, WorldState world)
         {
             _ai = ai;
+            _locomotion = locomotion;
             _executor = executor;
             _world = world;
         }
@@ -51,12 +55,12 @@ public sealed class MonsterRoamAiTests
         public void Register(WorldEntity monster, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks, uint aggroScanIntervalTicks)
             => _ai.Register(monster, serverTick, pauseMinTicks, pauseMaxTicks, aggroScanIntervalTicks);
 
-        // One tick in GameServer order: the AI decides + STARTS a hop (StepMonster), then the executor advances every
-        // in-flight arc (StepAll). Returns the AI's moved flag — true on the tick a hop STARTS (the same Moved cadence
-        // the pre-refactor instant hop reported: one per cadence window).
+        // One tick in GameServer order: the AI decides + STARTS a hop (StepMonster, told its per-step locomotion), then
+        // the executor advances every in-flight arc (StepAll). Returns the AI's moved flag — true on the tick a hop
+        // STARTS (the same Moved cadence the pre-refactor instant hop reported: one per cadence window).
         public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in MonsterRoamAi.Tunables t)
         {
-            var moved = _ai.StepMonster(monster, serverTick, stepCooldownTicks, t);
+            var moved = _ai.StepMonster(monster, _locomotion, serverTick, stepCooldownTicks, t);
             _executor.StepAll(_world, serverTick);
             return moved;
         }
@@ -138,7 +142,6 @@ public sealed class MonsterRoamAiTests
         var ai = new MonsterRoamAi(
             seed,
             grid.IsWalkable,
-            locomotion,
             findTarget ?? ((WorldEntity _, int _, out ulong id, out WorldVector pos) =>
             {
                 id = 0;
@@ -152,7 +155,7 @@ public sealed class MonsterRoamAiTests
                 return false;
             }),
             attack ?? ((WorldEntity _, ulong _, int _) => { }));
-        return new AiHarness(ai, executor, world);
+        return new AiHarness(ai, locomotion, executor, world);
     }
 
     private static WorldEntity SpawnMonster(WorldState world, TileCoord tile, uint networkId = 1)

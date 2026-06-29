@@ -143,6 +143,21 @@ public sealed class GameServer
     // monster never hops every tick.
     private readonly MonsterRoamAi _monsterAi;
 
+    // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the per-type LOCOMOTION registry — id -> the
+    // IMonsterLocomotion ("body") a monster of that LocomotionId moves through. Only "hop" exists today (the single
+    // shared HopLocomotion, moved here from the AI's ctor); P2 adds GlideLocomotion as a second entry. ResolveLocomotion
+    // maps a MonsterType to its locomotion each tick (loud-but-safe fallback to "hop" on an unknown id). GameServer owns
+    // this (like it owns _monsterTypeOf) so the AI stays locomotion-agnostic — told its body per step.
+    private readonly Dictionary<string, IMonsterLocomotion> _locomotions;
+
+    // The default locomotion ("hop") every type falls back to when its LocomotionId isn't registered. Cached so the
+    // resolver never re-looks-it-up. Always present (seeded alongside the registry below).
+    private readonly IMonsterLocomotion _defaultLocomotion;
+
+    // One-time loud warning de-dup: an unknown LocomotionId logs ONCE (per distinct id) instead of every tick, then
+    // silently falls back to hop. Mirrors the manifest philosophy (don't crash on a typo'd id; warn + carry on).
+    private readonly HashSet<string> _warnedUnknownLocomotionIds = new(StringComparer.OrdinalIgnoreCase);
+
     // MOVEMENT-ACTIONS (Phase A): the server-side movement-action executor (ballistic jump etc.). Holds each entity's
     // active action instance and advances it each tick (StepActions, a sibling pass to StepMonsterAi). Constructed
     // after _zone since it closes over _zone.QueryNearbyWalls / _zone.ApplyMonsterLanding (the SAME shared collision +
@@ -268,15 +283,23 @@ public sealed class GameServer
         // at) and BeginMonsterHop hands the arc to the shared executor, which advances XY through the resolver + the
         // ballistic Z (the replicated VerticalOffset) per tick. The IsAction-active gate (lazy lambda) keeps the AI from
         // re-hopping mid-arc. Hop distance + body radius are read FRESH each hop so a live retune applies next tick.
+        // MONSTER-BEHAVIOR P1: the per-type LOCOMOTION registry. Build the ONE "hop" entry (the shared HopLocomotion,
+        // moved here from the AI's ctor) and resolve a monster's locomotion per-type each tick (StepMonsterAi →
+        // ResolveLocomotion). NO behavior change this phase: only "hop" is registered, so every type resolves to this
+        // same instance → byte-identical hopping. P2 adds a second entry (GlideLocomotion) + a type that selects it.
+        _defaultLocomotion = new HopLocomotion(
+            () => _monsterTypes.Default.HopDistanceUnits,
+            () => _tuning.BodyRadiusUnits,
+            _zone.QueryNearbyWalls,
+            BeginMonsterHop,
+            id => _actionExecutor.IsActive(id));
+        _locomotions = new Dictionary<string, IMonsterLocomotion>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hop"] = _defaultLocomotion,
+        };
         _monsterAi = new MonsterRoamAi(
             options.MapSeed,
             _zone.IsWalkable,
-            new HopLocomotion(
-                () => _monsterTypes.Default.HopDistanceUnits,
-                () => _tuning.BodyRadiusUnits,
-                _zone.QueryNearbyWalls,
-                BeginMonsterHop,
-                id => _actionExecutor.IsActive(id)),
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
@@ -3069,10 +3092,31 @@ public sealed class GameServer
             // nominal interp cadence differing from the hop cadence is tolerable.
             _monsterAi.StepMonster(
                 entity,
+                ResolveLocomotion(type),
                 _serverTick,
                 _monsterTypes.HopAirborneTicks(type) + _monsterTypes.HopDelayTicks(type),
                 _monsterTypes.BuildTunables(type));
         }
+    }
+
+    // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): map a monster TYPE to its LOCOMOTION ("body") via the
+    // registry, keyed by the type's LocomotionId. An unknown/unregistered id falls back LOUD-BUT-SAFE to the "hop"
+    // default (warn ONCE per distinct id, then carry on) — matching the manifest philosophy: a typo'd id never crashes
+    // the tick loop, it degrades to the safe default. Today only "hop" is registered, so every type resolves to the one
+    // shared HopLocomotion → byte-identical behavior; P2 registers GlideLocomotion and a type that selects it.
+    private IMonsterLocomotion ResolveLocomotion(MonsterType type)
+    {
+        if (_locomotions.TryGetValue(type.LocomotionId, out var locomotion))
+        {
+            return locomotion;
+        }
+
+        if (_warnedUnknownLocomotionIds.Add(type.LocomotionId))
+        {
+            Log.Warn($"unknown locomotionId '{type.LocomotionId}' for type '{type.Id}', falling back to hop");
+        }
+
+        return _defaultLocomotion;
     }
 
     // MOVEMENT-ACTIONS (Phase C): the HopLocomotion's begin-hop seam — START the slime's hop as a REAL ballistic Jump on

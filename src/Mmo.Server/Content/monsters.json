@@ -6,15 +6,18 @@
   // defaults in MonsterTypeRegistry (the safety net) — and the shipped slime below is byte-for-byte
   // identical to that code seed (a parity test pins this so the two can never silently drift).
   //
-  // P0 SCHEMA = the CURRENT MonsterType fields only (stats + AI tuning + hop feel + loot). The
-  // composition SELECTORS (locomotionId / behaviorId / abilityIds / visualId) arrive in later phases
-  // (P1+) and will extend this schema; do not add them yet. Optional fields may be omitted and fall back
-  // to the field default; every tunable is clamped to the same bounds the live F1 tuning uses.
+  // SCHEMA = the MonsterType fields (stats + AI tuning + hop feel + loot) plus, from P1, the composition
+  // selector `locomotionId` (the id of this type's locomotion "body"; only "hop" is registered today —
+  // an unknown id falls back loud-but-safe to hop). The remaining selectors (behaviorId / abilityIds /
+  // visualId) arrive in later phases and will extend this schema; do not add them yet. Optional fields may
+  // be omitted and fall back to the field default; every tunable is clamped to the same bounds the F1 live
+  // tuning uses.
   "types": [
     {
       "id": "slime",
       "displayName": "Slime",
       "lootTableId": "slime_loot",
+      "locomotionId": "hop",
       "maxHealth": 100,
       "moveSpeedMultiplier": 0.6,
       "roamRadius": 4,

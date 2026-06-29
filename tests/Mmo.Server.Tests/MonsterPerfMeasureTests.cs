@@ -29,6 +29,10 @@ public sealed class MonsterPerfMeasureTests
     // The action executor that drives the hop arc (Phase C). Stored so RunAndReport can StepAll each tick like GameServer.
     private ServerActionExecutor _executor = null!;
 
+    // MONSTER-BEHAVIOR P1: the locomotion is passed PER STEP now (GameServer resolves it per-type each tick), so the
+    // one HopLocomotion is stored here and threaded into StepMonster from RunAndReport.
+    private IMonsterLocomotion _locomotion = null!;
+
     private MonsterRoamAi CreateAi(
         int seed,
         TileGrid grid,
@@ -60,7 +64,7 @@ public sealed class MonsterPerfMeasureTests
                 return crossed;
             });
 
-        var locomotion = new HopLocomotion(
+        _locomotion = new HopLocomotion(
             () => HopDistance,
             () => BodyRadius,
             CountedQuery,
@@ -79,7 +83,6 @@ public sealed class MonsterPerfMeasureTests
         return new MonsterRoamAi(
             seed,
             grid.IsWalkable,
-            locomotion,
             findTarget ?? ((WorldEntity _, int _, out ulong id, out WorldVector pos) => { id = 0; pos = default; return false; }),
             tryResolve ?? ((ulong _, out WorldVector pos, out bool alive) => { pos = default; alive = false; return false; }),
             attack ?? ((WorldEntity _, ulong _, int _) => { }));
@@ -156,7 +159,7 @@ public sealed class MonsterPerfMeasureTests
         var sw = Stopwatch.StartNew();
         for (uint tick = 0; tick < ticks; tick++)
         {
-            var moved = ai.StepMonster(monster, tick, StepCooldownTicks, t);
+            var moved = ai.StepMonster(monster, _locomotion, tick, StepCooldownTicks, t);
             // Phase C: advance the in-flight hop arc this tick, exactly like GameServer's StepMonsterAi → StepAll order.
             _executor.StepAll(world, tick);
             if (moved) movedTrue++;

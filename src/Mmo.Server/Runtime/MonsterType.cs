@@ -30,6 +30,15 @@ public sealed class MonsterType
     // The human-facing name shown in the F1 Monster-tab dropdown ("Slime").
     public string DisplayName { get; }
 
+    // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the COMPOSITION selector for this type's LOCOMOTION
+    // ("body") — the id of the IMonsterLocomotion the AI drives this type's movement through. GameServer owns a
+    // registry of locomotions keyed by this id (only "hop" exists today) and resolves a type to its locomotion each
+    // tick; an unknown id falls back loud-but-safe to "hop" (resolution + fallback are GameServer's job, NOT this
+    // loader's — the registry just STORES the string). Server-side type DATA only: it is NOT a numeric tunable (not in
+    // the F1 descriptor list / not replicated) and NOT on the wire — it is set only via the manifest. Default "hop"
+    // so every existing/omitted type keeps hopping. This is the seam P2 (GlideLocomotion + a walker type) builds on.
+    public string LocomotionId { get; set; } = "hop";
+
     // Per-type max HP — the monster spawns at full of this. Default 100 (the CharacterStats default).
     public int MaxHealth { get; set; } = 100;
 
