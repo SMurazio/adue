@@ -330,12 +330,25 @@ public sealed class GlideLocomotion : IMonsterLocomotion
         var landing = ContinuousCollision.Resolve(from, delta, radius, _wallScratch);
         _applyLanding(monster, landing);
 
-        // VELOCITY COHERENCE (the replication guardrail): re-set Velocity to the ACTUAL resolved motion (landing-from)/dt,
-        // NOT the pre-collision desired dir×speed. So a glider sliding along a wall replicates its tangential slide
-        // velocity (and a wedged one ~0), and the client — which extrapolates along velocity — tracks the real path
-        // instead of drifting into the wall. Facing keeps the intended dir (set by ComputeMoveDelta) so the sprite still
-        // faces the target.
-        monster.SetVelocity((landing - from) * (1d / _dtSeconds));
+        // VELOCITY COHERENCE (the replication guardrail): replicate the ACTUAL resolved motion, NOT the pre-collision
+        // desired dir×speed. Facing keeps the intended dir (set by ComputeMoveDelta) so the sprite still faces the target.
+        var resolvedDelta = landing - from;
+        if (resolvedDelta.LengthSquared > 0d)
+        {
+            // Moving / sliding: Velocity = the resolved per-tick velocity, so a glider following a wall replicates its
+            // TANGENTIAL slide velocity (non-zero ⇒ force-included every tick) and the client extrapolation tracks the
+            // real path instead of drifting into the wall.
+            monster.SetVelocity(resolvedDelta * (1d / _dtSeconds));
+        }
+        else
+        {
+            // WEDGED (resolved motion exactly 0 — boxed head-on / inside corner): use StopMovement, NOT a bare
+            // SetVelocity(0). A bare zero leaves Velocity == 0 (so forceMoving is false) WITHOUT a StateRevision bump,
+            // so the entity is delta'd out and the client keeps extrapolating the PRE-wedge velocity INTO the wall until
+            // the no-progress watchdog finally bails (the P2-review HIGH). StopMovement fires the stop-edge revision
+            // bump → Velocity=0 re-publishes THIS tick → the client holds at the contact point, no drift.
+            monster.StopMovement();
+        }
 
         // Progress = the resolved displacement projected onto the target heading (like Hop's ProgressToward). A real
         // walk projects ~|delta|; a slide along a perpendicular wall projects ~0. >= epsilon ⇒ Moved; else Stuck (a

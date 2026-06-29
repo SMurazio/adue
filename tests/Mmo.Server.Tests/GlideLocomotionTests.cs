@@ -182,6 +182,7 @@ public sealed class GlideLocomotionTests
         var glide = CreateGlide(grid, world);
         var target = new WorldVector(20d, 10d); // well outside the box.
 
+        var revBefore = monster.StateRevision;
         for (uint tick = 1; tick <= 10; tick++)
         {
             Assert.Equal(HopResult.Stuck, glide.Advance(monster, target, tick, cooldownTicks: 7));
@@ -194,6 +195,14 @@ public sealed class GlideLocomotionTests
         Assert.True(
             monster.Velocity.Length < 1e-6,
             $"wedged glider replicated a non-zero velocity ({monster.Velocity.X:F3},{monster.Velocity.Y:F3}) — should be ~0 (it's not actually moving).");
+
+        // REPLICATION PATH (P2-review HIGH): the head-on wedge must zero Velocity via StopMovement, NOT a bare
+        // SetVelocity(0). StopMovement bumps StateRevision → the Velocity=0 RE-PUBLISHES this tick, so the client holds
+        // at the contact point. A bare SetVelocity(0) leaves Velocity==0 with no revision bump → the entity is delta'd
+        // out and the client keeps extrapolating the pre-wedge velocity INTO the wall. Assert the revision advanced.
+        Assert.True(
+            monster.StateRevision > revBefore,
+            "wedged glider did not bump StateRevision — Velocity=0 won't re-publish, so the client drifts into the wall.");
     }
 
     [Fact]
