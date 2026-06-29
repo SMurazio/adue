@@ -39,6 +39,15 @@ public sealed class MonsterType
     // so every existing/omitted type keeps hopping. This is the seam P2 (GlideLocomotion + a walker type) builds on.
     public string LocomotionId { get; set; } = "hop";
 
+    // MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): the COMPOSITION selector for this type's BEHAVIOR
+    // ("brain") — the id of the IMonsterBehavior that runs this type's roam/chase/attack decisions. GameServer owns a
+    // registry of behaviors keyed by this id (only "basicRoamer" exists today) and resolves a type to its behavior each
+    // tick; an unknown id falls back loud-but-safe to "basicRoamer" (resolution + fallback are GameServer's job, NOT
+    // this loader's — the registry just STORES the string). Server-side type DATA only: it is NOT a numeric tunable (not
+    // in the F1 descriptor list / not replicated) and NOT on the wire — set only via the manifest. Default "basicRoamer"
+    // so every existing/omitted type keeps the current brain. This is the seam P4 (a second behavior) builds on.
+    public string BehaviorId { get; set; } = "basicRoamer";
+
     // Per-type max HP — the monster spawns at full of this. Default 100 (the CharacterStats default).
     public int MaxHealth { get; set; } = 100;
 

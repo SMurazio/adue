@@ -14,7 +14,7 @@ public enum EntityKind : byte
     Dummy = 4,
 
     // LIVING-ENEMIES P1: a server-driven roaming monster. Like the Dummy it carries CharacterStats (HP) and is
-    // a hittable target, but it is NOT stationary — server AI (MonsterRoamAi) idles it near a home anchor and
+    // a hittable target, but it is NOT stationary — server AI (IMonsterBehavior) idles it near a home anchor and
     // occasionally moves it a short distance within a leash radius via the SAME continuous-movement path players use, so the
     // client renders + interpolates it for free as a remote entity (no client-side AI). Distinct kind so the
     // roam AI / future aggro target this kind specifically, and so it is NOT swept up by the Dummy HP-regen.

@@ -8,7 +8,7 @@ namespace Mmo.Server.Runtime;
 //
 // Keyed by the monster's ENTITY id (ulong, stable for the monster's life; the network id can be reused on respawn).
 // The owner (GameServer) records each damaging hit and, in KillMonster, snapshots + forgets the dead monster's
-// ledger entry alongside the existing _monsterAi.Forget / _monsterTypeOf.Remove cleanup — so the ledger is cleaned
+// ledger entry alongside the existing behavior Forget / _monsterTypeOf.Remove cleanup — so the ledger is cleaned
 // up with the monster and never leaks. A monster that is forgotten without dying (despawn for another reason) is
 // also cleaned via Forget.
 //

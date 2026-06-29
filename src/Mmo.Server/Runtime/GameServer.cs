@@ -141,7 +141,20 @@ public sealed class GameServer
     // players integrate against). Constructed after _zone since it closes over _zone.IsWalkable / _zone.QueryNearbyWalls.
     // Stepped each tick by StepMonsterAi (a sibling pass to StepHeldMovementIntents), paced off the hop cadence — so a
     // monster never hops every tick.
-    private readonly MonsterRoamAi _monsterAi;
+    // MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): the per-type BEHAVIOR ("brain") registry — id -> the
+    // IMonsterBehavior a monster of that BehaviorId runs its roam/chase/attack decisions through. Only "basicRoamer"
+    // exists today (the single shared BasicRoamerBehavior, formerly the standalone _monsterAi); P4 adds a second brain
+    // (the gnoll's Skirmisher) as a new entry. ResolveBehavior maps a MonsterType to its behavior on spawn/death/step
+    // (loud-but-safe fallback to "basicRoamer" on an unknown id). Mirrors the locomotion registry exactly.
+    private readonly Dictionary<string, IMonsterBehavior> _behaviors;
+
+    // The default behavior ("basicRoamer") every type falls back to when its BehaviorId isn't registered. Cached so the
+    // resolver never re-looks-it-up. Always present (seeded alongside the registry below).
+    private readonly IMonsterBehavior _defaultBehavior;
+
+    // One-time loud warning de-dup: an unknown BehaviorId logs ONCE (per distinct id) then silently falls back to
+    // basicRoamer. Mirrors _warnedUnknownLocomotionIds (the manifest philosophy: don't crash on a typo'd id; warn).
+    private readonly HashSet<string> _warnedUnknownBehaviorIds = new(StringComparer.OrdinalIgnoreCase);
 
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the per-type LOCOMOTION registry — id -> the
     // IMonsterLocomotion ("body") a monster of that LocomotionId moves through. Only "hop" exists today (the single
@@ -199,7 +212,7 @@ public sealed class GameServer
     private readonly Dictionary<ulong, Corpse> _corpses = [];
 
     // Per-monster type membership (entity id -> its type). Set on spawn; REMOVED on death (LIVING-ENEMIES P3 —
-    // KillMonster calls _monsterTypeOf.Remove + _monsterAi.Forget, fixing the former add-only leak flagged in
+    // KillMonster calls _monsterTypeOf.Remove + the behavior's Forget, fixing the former add-only leak flagged in
     // todo/monster-types-followups.md). The AI step reads it to build that monster's Tunables from the live per-type
     // values. Tiny (a handful of monsters).
     private readonly Dictionary<ulong, MonsterType> _monsterTypeOf = [];
@@ -268,7 +281,7 @@ public sealed class GameServer
         _monsterTypes = LoadMonsterTypes(options.TickRate);
         // MOVEMENT-ACTIONS (Phase A/C): the action executor reuses the EXACT same shared collision derivation + apply
         // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
-        // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE _monsterAi (Phase C) — it has no
+        // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE the behavior (Phase C) — it has no
         // dependency on the AI, but the AI's HopLocomotion now drives its hop arc THROUGH this executor (BeginMonsterHop
         // + IsActive below), so it must exist first.
         _actionExecutor = new ServerActionExecutor(
@@ -307,12 +320,21 @@ public sealed class GameServer
                 _zone.ApplyMonsterLanding,
                 options.TickRate),
         };
-        _monsterAi = new MonsterRoamAi(
+        // MONSTER-BEHAVIOR P3: the per-type BEHAVIOR ("brain") registry. Build the ONE "basicRoamer" entry (the shared
+        // BasicRoamerBehavior, formerly the standalone _monsterAi) and resolve a monster's behavior per type each
+        // spawn/death/step (ResolveBehavior). NO behavior change this phase: only "basicRoamer" is registered, so every
+        // type resolves to this same instance → identical AI. P4 adds a second entry (a Skirmisher) + a type that
+        // selects it. Seeded off the map seed so a given world replays the same roaming (deterministic for repro/tests).
+        _defaultBehavior = new BasicRoamerBehavior(
             options.MapSeed,
             _zone.IsWalkable,
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
             ApplyMonsterAttack);
+        _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["basicRoamer"] = _defaultBehavior,
+        };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
@@ -2101,7 +2123,7 @@ public sealed class GameServer
         // Register with the roam AI: the spawner tile is the leash home; start Idle with an initial randomized pause,
         // tick-quantised off THIS type's pause bounds.
         var tunables = _monsterTypes.BuildTunables(type);
-        _monsterAi.Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
+        ResolveBehavior(type).Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
 
         // Link the monster to its spawner (both directions) so a death finds the spawner in O(1).
         spawner.AttachMonster(monster.Id);
@@ -2144,7 +2166,20 @@ public sealed class GameServer
         _contributionLedger.Forget(monsterId);
 
         // Clean up AI + type membership (fixes the former add-only leak — see todo/monster-types-followups.md P2/P3).
-        _monsterAi.Forget(monsterId);
+        // MONSTER-BEHAVIOR P3: resolve the dead monster's behavior from its type BEFORE removing the type below — at
+        // Forget time the type is still in _monsterTypeOf, so the right brain (matching the same id that Register'd it)
+        // forgets its per-monster state. (Order is load-bearing: remove the type first and the resolve would fall back
+        // to the default brain, which for the single registered basicRoamer is the same instance, but stays correct as
+        // P4 adds more brains.)
+        if (_monsterTypeOf.TryGetValue(monsterId, out var typeToForget))
+        {
+            ResolveBehavior(typeToForget).Forget(monsterId);
+        }
+        else
+        {
+            _defaultBehavior.Forget(monsterId);
+        }
+
         _monsterTypeOf.Remove(monsterId);
 
         // Notify the owning spawner so it schedules a respawn after the type's delay (read live).
@@ -3058,7 +3093,7 @@ public sealed class GameServer
     }
 
     // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8): the per-tick monster AI pass (sibling to
-    // StepHeldMovementIntents). For each Monster entity, the MonsterRoamAi advances its Idle↔Roaming↔Chasing↔Returning
+    // StepHeldMovementIntents). For each Monster entity, the resolved IMonsterBehavior advances its Idle↔Roaming↔Chasing↔Returning
     // state machine and, when moving, HOPS once per move cadence toward its continuous nav target via the injected
     // HopLocomotion — a discrete collision-valid leap (Velocity stays Zero; the sparse-update jump is preserved). The
     // hop's own cadence gate (WorldEntity.TryBeginHop / _nextEligibleTick) paces the monster to one leap per cooldown
@@ -3071,7 +3106,11 @@ public sealed class GameServer
     // entry, so iterating Entities while stepping is safe — same as RegenEnemies.
     private void StepMonsterAi()
     {
-        if (_monsterAi.TrackedCount == 0)
+        // MONSTER-BEHAVIOR P3: skip the pass when there are no live monsters. Keyed off GameServer's OWN monster count
+        // (_monsterTypeOf, set on spawn / removed on death) rather than any single behavior's tracked count, so the
+        // guard is decoupled from which/how-many behavior instances exist (P4 adds a second brain — the count would
+        // otherwise be split across them).
+        if (_monsterTypeOf.Count == 0)
         {
             return;
         }
@@ -3102,13 +3141,33 @@ public sealed class GameServer
             // seeded from MoveSpeedMultiplier at spawn) is intentionally LEFT AS-IS and may differ from this hop cadence
             // — the slime is force-included densely every airborne tick (Phase C) and the interp is sample-driven, so the
             // nominal interp cadence differing from the hop cadence is tolerable.
-            _monsterAi.StepMonster(
+            ResolveBehavior(type).StepMonster(
                 entity,
-                ResolveLocomotion(type),
                 _serverTick,
                 _monsterTypes.HopAirborneTicks(type) + _monsterTypes.HopDelayTicks(type),
-                _monsterTypes.BuildTunables(type));
+                _monsterTypes.BuildTunables(type),
+                ResolveLocomotion(type));
         }
+    }
+
+    // MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): map a monster TYPE to its BEHAVIOR ("brain") via the
+    // registry, keyed by the type's BehaviorId. An unknown/unregistered id falls back LOUD-BUT-SAFE to the "basicRoamer"
+    // default (warn ONCE per distinct id, then carry on) — matching ResolveLocomotion + the manifest philosophy: a
+    // typo'd id never crashes the tick loop, it degrades to the safe default. Today only "basicRoamer" is registered, so
+    // every type resolves to the one shared BasicRoamerBehavior → byte-identical behavior; P4 registers a second brain.
+    private IMonsterBehavior ResolveBehavior(MonsterType type)
+    {
+        if (_behaviors.TryGetValue(type.BehaviorId, out var behavior))
+        {
+            return behavior;
+        }
+
+        if (_warnedUnknownBehaviorIds.Add(type.BehaviorId))
+        {
+            Log.Warn($"unknown behaviorId '{type.BehaviorId}' for type '{type.Id}', falling back to basicRoamer");
+        }
+
+        return _defaultBehavior;
     }
 
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): map a monster TYPE to its LOCOMOTION ("body") via the
@@ -3311,7 +3370,7 @@ public sealed class GameServer
     }
 
     // LIVING-ENEMIES P2: the 8-direction facing from `from` toward `to` by the SIGN of each axis delta (the same
-    // greedy mapping MonsterRoamAi uses to step). Null only when the two tiles coincide (no facing). Server-local so
+    // greedy mapping the monster behavior uses to step). Null only when the two tiles coincide (no facing). Server-local so
     // the server doesn't depend on the client's CursorHeading.
     private static Direction8? TileDeltaToFacing(TileCoord from, TileCoord to)
     {

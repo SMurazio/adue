@@ -13,7 +13,7 @@ namespace Mmo.Server.Runtime;
 // resolves the type, clamps the field, and applies it — returning false (caller ignores+logs) for an unknown type
 // or field. The per-type tuning REPLACES the former global monster.* block (those keys were removed).
 //
-// TICK QUANTISATION: the AI consumes a MonsterRoamAi.Tunables in TICKS; this registry owns the tick rate and derives
+// TICK QUANTISATION: the AI consumes a MonsterAiTunables in TICKS; this registry owns the tick rate and derives
 // the tick-quantised values (pause bounds, attack cooldown, aggro-scan cadence) + the derived de-aggro hysteresis,
 // exactly as the old ServerTuning did, so the migrated defaults are byte-for-byte unchanged.
 //
@@ -209,6 +209,15 @@ public sealed class MonsterTypeRegistry
                 type.LocomotionId = dto.LocomotionId;
             }
 
+            // MONSTER-BEHAVIOR P3: the behavior composition selector. STORE the string as-authored (non-blank); an
+            // omitted/blank id keeps the MonsterType default "basicRoamer". Like LocomotionId, the loader does NOT
+            // validate/resolve it (an unknown id is accepted verbatim) — resolution + the loud-but-safe fallback to
+            // basicRoamer is GameServer's job (ResolveBehavior), mirroring how it already owns the type map.
+            if (!string.IsNullOrWhiteSpace(dto.BehaviorId))
+            {
+                type.BehaviorId = dto.BehaviorId;
+            }
+
             if (dto.MoveSpeedMultiplier.HasValue)
             {
                 type.MoveSpeedMultiplier = dto.MoveSpeedMultiplier.Value;
@@ -260,9 +269,9 @@ public sealed class MonsterTypeRegistry
         UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
     };
 
-    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 (this change) adds the FIRST composition
-    // selector `locomotionId`; later phases GROW this with the remaining selectors (behaviorId / abilityIds /
-    // visualId). The selector is a plain STORED string (resolution is GameServer's job). All tunables are nullable so
+    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 added the `locomotionId` selector and P3
+    // (this change) adds the `behaviorId` selector; later phases GROW this with the remaining selectors (abilityIds /
+    // visualId). Each selector is a plain STORED string (resolution is GameServer's job). All tunables are nullable so
     // an omitted field falls back to the MonsterType default; id/displayName are validated as required in
     // FromManifestJson. JSON property names are camelCase (matched case-insensitively).
     private sealed record MonsterManifestDto(List<MonsterTypeDto?>? Types);
@@ -272,6 +281,7 @@ public sealed class MonsterTypeRegistry
         string? DisplayName,
         string? LootTableId,
         string? LocomotionId,
+        string? BehaviorId,
         int? MaxHealth,
         double? MoveSpeedMultiplier,
         double? RoamRadius,
@@ -315,7 +325,7 @@ public sealed class MonsterTypeRegistry
     // CONTINUOUS: the navigation ranges are EUCLIDEAN world-unit FLOATS — the per-type knobs (RoamRadius, AggroRadius,
     // ChaseLeash, AttackRangeUnits) are now fractional doubles read DIRECTLY (no integer-tile authoring, no 1:1
     // conversion). De-aggro keeps the ×1.5-aggro (min +1) hysteresis as a continuous range.
-    public MonsterRoamAi.Tunables BuildTunables(MonsterType type) => new(
+    public MonsterAiTunables BuildTunables(MonsterType type) => new(
         RoamRadius: type.RoamRadius,
         PauseMinTicks: MsToTicks(type.PauseMinMs),
         PauseMaxTicks: PauseMaxTicks(type),

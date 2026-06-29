@@ -60,7 +60,12 @@ namespace Mmo.Server.Runtime;
 //
 // NO death / respawn / loot are this file's concern — those live in GameServer. The player TAKES damage via the
 // injected attack callback.
-public sealed class MonsterRoamAi
+//
+// MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): this IS the seam's first IMonsterBehavior — the slime/gnoll
+// brain (formerly the standalone MonsterRoamAi). GameServer selects it per type via MonsterType.BehaviorId. NO behavior
+// change at P3: only "basicRoamer" is registered, so every type resolves here → identical AI. Its per-tick INPUT
+// (formerly the nested Tunables) is now the top-level MonsterAiTunables (MonsterBehavior.cs), shared by all behaviors.
+public sealed class BasicRoamerBehavior : IMonsterBehavior
 {
     public enum State : byte
     {
@@ -127,7 +132,7 @@ public sealed class MonsterRoamAi
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
     // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
     // locomotion-AGNOSTIC — told its "body" each tick — so a per-type body (P2 GlideLocomotion) needs no change here.
-    public MonsterRoamAi(
+    public BasicRoamerBehavior(
         int seed,
         Func<TileCoord, bool> isWalkable,
         FindTargetDelegate findTarget,
@@ -142,21 +147,6 @@ public sealed class MonsterRoamAi
     }
 
     public int TrackedCount => _states.Count;
-
-    // Tunables the per-tick step reads. Grouped in a struct so the (growing) parameter list stays readable and the
-    // caller fills it from the live MonsterType each tick. CONTINUOUS MIGRATION (Phase 8): the navigation ranges are
-    // now EUCLIDEAN tile-unit FLOATS (see the conversion table in the class header); pause/cooldown/scan stay TICKS.
-    public readonly record struct Tunables(
-        double RoamRadius,
-        uint PauseMinTicks,
-        uint PauseMaxTicks,
-        double AggroRadius,
-        double DeaggroRadius,
-        double ChaseLeash,
-        double AttackRangeUnits,
-        int AttackDamage,
-        uint AttackCooldownTicks,
-        uint AggroScanIntervalTicks);
 
     // Registers a freshly spawned monster: records its spawn Position as the leash home and starts it Idle with an
     // initial randomized pause so it doesn't all-at-once lurch on the first eligible tick. The first aggro scan is
@@ -230,7 +220,7 @@ public sealed class MonsterRoamAi
     // so the snapshot cadence/bandwidth stay tile-keyed at today's rate regardless of this flag. The GameServer pass
     // ignores the return; it is the headless tests' "did it move" signal.
     public bool StepMonster(
-        WorldEntity monster, IMonsterLocomotion locomotion, uint serverTick, uint stepCooldownTicks, in Tunables t)
+        WorldEntity monster, uint serverTick, uint stepCooldownTicks, in MonsterAiTunables t, IMonsterLocomotion locomotion)
     {
         if (!_states.TryGetValue(monster.Id, out var state))
         {
@@ -312,7 +302,7 @@ public sealed class MonsterRoamAi
     // within AttackRangeUnits and the attack cooldown elapsed, attack on the OWN attack timer (no hop this tick). (3)
     // Otherwise hop toward the target's current Position, with the no-progress watchdog.
     private bool StepChase(
-        WorldEntity monster, IMonsterLocomotion locomotion, ref MonsterState state, uint serverTick, uint stepCooldownTicks, in Tunables t)
+        WorldEntity monster, IMonsterLocomotion locomotion, ref MonsterState state, uint serverTick, uint stepCooldownTicks, in MonsterAiTunables t)
     {
         // (1) De-aggro checks. Target gone/dead, OR beyond the de-aggro range, OR the monster pulled farther than
         // chaseLeash from home → drop aggro and walk home. All Euclidean on Position.
@@ -398,7 +388,7 @@ public sealed class MonsterRoamAi
         ref MonsterState state,
         uint serverTick,
         uint stepCooldownTicks,
-        in Tunables t)
+        in MonsterAiTunables t)
     {
         // Arrival: within the progress epsilon of the destination — close enough; the hop can't meaningfully advance.
         if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)

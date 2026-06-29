@@ -122,6 +122,36 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(def.RespawnMs, b.RespawnMs);
         Assert.Equal(string.Empty, b.LootTableId); // omitted lootTableId = drops nothing.
         Assert.Equal(def.LocomotionId, b.LocomotionId); // omitted locomotionId = the "hop" default.
+        Assert.Equal(def.BehaviorId, b.BehaviorId); // MONSTER-BEHAVIOR P3: omitted behaviorId = the "basicRoamer" default.
+    }
+
+    // MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): the behavior composition SELECTOR is STORED as-authored by
+    // the loader — even an id that isn't registered (resolution + the fallback-to-basicRoamer is GameServer's job, not
+    // the loader's). So a manifest naming an unregistered behavior must keep it on the type verbatim (not coerce it).
+    [Fact]
+    public void BehaviorIdRoundTripsEvenWhenNotRegistered()
+    {
+        const string json = """
+        { "types": [ { "id": "raider", "displayName": "Raider", "behaviorId": "skirmisher" } ] }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        Assert.True(registry.TryGet("raider", out var r));
+        Assert.Equal("skirmisher", r.BehaviorId);
+    }
+
+    // MONSTER-BEHAVIOR P3: a type with NO behaviorId falls back to the "basicRoamer" default (the loader leaves the
+    // MonsterType field default in place). Pinned separately so the behavior selector's default is explicit.
+    [Fact]
+    public void OmittedBehaviorIdDefaultsToBasicRoamer()
+    {
+        const string json = """
+        { "types": [ { "id": "slime", "displayName": "Slime" } ] }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        Assert.True(registry.TryGet("slime", out var s));
+        Assert.Equal("basicRoamer", s.BehaviorId);
     }
 
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion composition SELECTOR is STORED as-authored
@@ -285,6 +315,7 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.DisplayName, d.DisplayName);
         Assert.Equal(c.LootTableId, d.LootTableId);
         Assert.Equal(c.LocomotionId, d.LocomotionId); // MONSTER-BEHAVIOR P1: the locomotion selector must not drift.
+        Assert.Equal(c.BehaviorId, d.BehaviorId); // MONSTER-BEHAVIOR P3: the behavior selector must not drift.
         Assert.Equal(c.MaxHealth, d.MaxHealth);
         Assert.Equal(c.MoveSpeedMultiplier, d.MoveSpeedMultiplier, 6);
         Assert.Equal(c.RoamRadius, d.RoamRadius, 6);

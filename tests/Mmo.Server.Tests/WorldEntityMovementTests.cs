@@ -7,7 +7,7 @@ namespace Mmo.Server.Tests;
 // Phase 1 (continuous migration): PLAYER movement is now CONTINUOUS — Position += Velocity x dt via
 // WorldEntity.IntegrateMovement, NOT a tile-step off the step cooldown. (The whole codebase is continuous-native as of
 // Phase 11; the old tile-step path TryStep/IsStepWalkable was deleted — monsters now hop via the continuous
-// HopLocomotion, covered by MonsterRoamAiTests.) These tests
+// HopLocomotion, covered by BasicRoamerBehaviorTests.) These tests
 // assert the player movement SEMANTICS the flip introduces: continuous advance, instant stop, facing from direction,
 // no walkability clamp (players walk through "walls" — Phase 2 adds real collision), and the attack-root freeze (R2)
 // still rooting a player via IsMovementFrozen. The focused port of the proven exp:ContinuousMover lives in

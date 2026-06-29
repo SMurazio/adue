@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace Mmo.Shared.Domain;
 
 // LIVING-ENEMIES P2-POLISH (protocol v33; reshaped DATA-DRIVEN at v40): server->client replication of the per-monster-
-// TYPE tuning. Monster AI tuning is server-authoritative (read each AI pass by MonsterRoamAi) and live-tunable via
+// TYPE tuning. Monster AI tuning is server-authoritative (read each AI pass by the monster behavior) and live-tunable via
 // AdminSetTuning on the per-type "<typeId>.<field>" keys; this snapshot ships the CURRENT per-type values so the
 // client's F1 "Monster" tab can list the types (dropdown) and show + edit the authoritative numbers — exactly as
 // CombatTuningSnapshot does for the combat.* knobs. Sent on login (initial truth) and broadcast to all clients

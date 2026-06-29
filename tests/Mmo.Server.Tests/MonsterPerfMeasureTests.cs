@@ -33,13 +33,13 @@ public sealed class MonsterPerfMeasureTests
     // one HopLocomotion is stored here and threaded into StepMonster from RunAndReport.
     private IMonsterLocomotion _locomotion = null!;
 
-    private MonsterRoamAi CreateAi(
+    private BasicRoamerBehavior CreateAi(
         int seed,
         TileGrid grid,
         WorldState world,
-        MonsterRoamAi.FindTargetDelegate? findTarget = null,
-        MonsterRoamAi.TryResolveTargetDelegate? tryResolve = null,
-        MonsterRoamAi.AttackDelegate? attack = null)
+        BasicRoamerBehavior.FindTargetDelegate? findTarget = null,
+        BasicRoamerBehavior.TryResolveTargetDelegate? tryResolve = null,
+        BasicRoamerBehavior.AttackDelegate? attack = null)
     {
         // One wrapped wall-query shared by the executor + the locomotion so the counter sees the TOTAL wall work.
         void CountedQuery(WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Wall> scratch)
@@ -80,7 +80,7 @@ public sealed class MonsterPerfMeasureTests
                 return _executor.TryStart(monster, def, heading, serverTick);
             },
             id => _executor.IsActive(id));
-        return new MonsterRoamAi(
+        return new BasicRoamerBehavior(
             seed,
             grid.IsWalkable,
             findTarget ?? ((WorldEntity _, int _, out ulong id, out WorldVector pos) => { id = 0; pos = default; return false; }),
@@ -88,7 +88,7 @@ public sealed class MonsterPerfMeasureTests
             attack ?? ((WorldEntity _, ulong _, int _) => { }));
     }
 
-    private static MonsterRoamAi.Tunables RoamTunables(double roamRadius, uint pauseMin, uint pauseMax)
+    private static MonsterAiTunables RoamTunables(double roamRadius, uint pauseMin, uint pauseMax)
         => new(roamRadius, pauseMin, pauseMax, 0d, 0d, 0d, 1.5d, 0, 1, 10);
 
     [Fact]
@@ -141,13 +141,13 @@ public sealed class MonsterPerfMeasureTests
             tryResolve: (ulong _, out WorldVector pos, out bool alive) => { pos = player.Position; alive = player.Stats.Health > 0; return true; });
         var monster = world.AddTransient(1, EntityKind.Monster, "Monster", new TileCoord(32, 32), Direction8.S);
         // Aggro on, big leash so it keeps chasing the whole run.
-        var t = new MonsterRoamAi.Tunables(4d, 20, 60, 6d, 9d, 20d, 1.5d, 5, 20, 10);
+        var t = new MonsterAiTunables(4d, 20, 60, 6d, 9d, 20d, 1.5d, 5, 20, 10);
         ai.Register(monster, 0, t.PauseMinTicks, t.PauseMaxTicks, t.AggroScanIntervalTicks);
 
         RunAndReport("CHASE stationary player", ai, world, monster, t, ticks: 6000);
     }
 
-    private void RunAndReport(string label, MonsterRoamAi ai, WorldState world, WorldEntity monster, MonsterRoamAi.Tunables t, int ticks)
+    private void RunAndReport(string label, BasicRoamerBehavior ai, WorldState world, WorldEntity monster, MonsterAiTunables t, int ticks)
     {
         _wallQueryCalls = 0;
         var positionChanges = 0;
@@ -159,7 +159,7 @@ public sealed class MonsterPerfMeasureTests
         var sw = Stopwatch.StartNew();
         for (uint tick = 0; tick < ticks; tick++)
         {
-            var moved = ai.StepMonster(monster, _locomotion, tick, StepCooldownTicks, t);
+            var moved = ai.StepMonster(monster, tick, StepCooldownTicks, t, _locomotion);
             // Phase C: advance the in-flight hop arc this tick, exactly like GameServer's StepMonsterAi → StepAll order.
             _executor.StepAll(world, tick);
             if (moved) movedTrue++;

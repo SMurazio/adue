@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Mmo.Server.Tests;
 
-// LIVING-ENEMIES P1/P2 + CONTINUOUS MIGRATION (Phase 8): headless tests for the monster brain (MonsterRoamAi), driven
+// LIVING-ENEMIES P1/P2 + CONTINUOUS MIGRATION (Phase 8): headless tests for the monster brain (BasicRoamerBehavior), driven
 // directly against a WorldState + TileGrid + the real HopLocomotion + injected target/attack callbacks (no
 // network/GameServer). Randomness is seeded so every assertion is deterministic. These pin the CONTINUOUS-NAVIGATION /
 // HOP contract the human live-verifies: a monster is still most of the time, occasionally HOPS within its Euclidean
@@ -13,7 +13,7 @@ namespace Mmo.Server.Tests;
 // within AttackRangeUnits on its own cooldown, de-aggros at the Euclidean de-aggro/leash ranges, NEVER lands a hop
 // inside a wall (the collision-valid headline), SOME hops land sub-tile (proving continuous nav), and never freezes
 // against a wall the resolver slides to a fixpoint (the re-based livelock watchdog).
-public sealed class MonsterRoamAiTests
+public sealed class BasicRoamerBehaviorTests
 {
     // A generous open grid so the leash is the only thing bounding the wander for the leash/cadence tests. Walls are
     // introduced explicitly in the collision-valid / wedge tests.
@@ -35,14 +35,14 @@ public sealed class MonsterRoamAiTests
     // (both are allowed by the spec) so the collision-valid / wedge / sub-tile tests exercise the real per-tick arc.
     private sealed class AiHarness
     {
-        private readonly MonsterRoamAi _ai;
+        private readonly BasicRoamerBehavior _ai;
         private readonly IMonsterLocomotion _locomotion;
         private readonly ServerActionExecutor _executor;
         private readonly WorldState _world;
 
         // MONSTER-BEHAVIOR P1: the locomotion is now passed PER STEP (GameServer resolves it per-type each tick), so
         // the harness holds the one HopLocomotion and threads it into StepMonster — the test bodies stay unchanged.
-        public AiHarness(MonsterRoamAi ai, IMonsterLocomotion locomotion, ServerActionExecutor executor, WorldState world)
+        public AiHarness(BasicRoamerBehavior ai, IMonsterLocomotion locomotion, ServerActionExecutor executor, WorldState world)
         {
             _ai = ai;
             _locomotion = locomotion;
@@ -58,14 +58,14 @@ public sealed class MonsterRoamAiTests
         // One tick in GameServer order: the AI decides + STARTS a hop (StepMonster, told its per-step locomotion), then
         // the executor advances every in-flight arc (StepAll). Returns the AI's moved flag — true on the tick a hop
         // STARTS (the same Moved cadence the pre-refactor instant hop reported: one per cadence window).
-        public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in MonsterRoamAi.Tunables t)
+        public bool StepMonster(WorldEntity monster, uint serverTick, uint stepCooldownTicks, in MonsterAiTunables t)
         {
-            var moved = _ai.StepMonster(monster, _locomotion, serverTick, stepCooldownTicks, t);
+            var moved = _ai.StepMonster(monster, serverTick, stepCooldownTicks, t, _locomotion);
             _executor.StepAll(_world, serverTick);
             return moved;
         }
 
-        public bool TryGetPhase(ulong monsterId, out MonsterRoamAi.State phase) => _ai.TryGetPhase(monsterId, out phase);
+        public bool TryGetPhase(ulong monsterId, out BasicRoamerBehavior.State phase) => _ai.TryGetPhase(monsterId, out phase);
 
         public bool TryGetHome(ulong monsterId, out WorldVector home) => _ai.TryGetHome(monsterId, out home);
 
@@ -113,7 +113,7 @@ public sealed class MonsterRoamAiTests
             id => executor.IsActive(id));
 
     // Roam-only tunables (no aggro: AggroRadius 0 disables the scan). Euclidean float ranges.
-    private static MonsterRoamAi.Tunables RoamTunables(double roamRadius, uint pauseMin, uint pauseMax)
+    private static MonsterAiTunables RoamTunables(double roamRadius, uint pauseMin, uint pauseMax)
         => new(
             RoamRadius: roamRadius,
             PauseMinTicks: pauseMin,
@@ -154,14 +154,14 @@ public sealed class MonsterRoamAiTests
         int seed,
         TileGrid grid,
         WorldState world,
-        MonsterRoamAi.FindTargetDelegate? findTarget = null,
-        MonsterRoamAi.TryResolveTargetDelegate? tryResolve = null,
-        MonsterRoamAi.AttackDelegate? attack = null,
+        BasicRoamerBehavior.FindTargetDelegate? findTarget = null,
+        BasicRoamerBehavior.TryResolveTargetDelegate? tryResolve = null,
+        BasicRoamerBehavior.AttackDelegate? attack = null,
         Func<TileGrid, ServerActionExecutor, IMonsterLocomotion>? locomotionFactory = null)
     {
         var executor = CreateExecutor(grid, world);
         var locomotion = (locomotionFactory ?? ((g, e) => CreateLocomotion(g, e)))(grid, executor);
-        var ai = new MonsterRoamAi(
+        var ai = new BasicRoamerBehavior(
             seed,
             grid.IsWalkable,
             findTarget ?? ((WorldEntity _, int _, out ulong id, out WorldVector pos) =>
@@ -354,7 +354,7 @@ public sealed class MonsterRoamAiTests
         Assert.Equal(1, ai.TrackedCount);
         Assert.True(ai.TryGetHome(monster.Id, out var stored));
         Assert.Equal(WorldVector.FromTile(home), stored);
-        Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == MonsterRoamAi.State.Idle);
+        Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.Idle);
     }
 
     [Fact]
@@ -371,19 +371,19 @@ public sealed class MonsterRoamAiTests
         for (uint tick = 1; tick < pause; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, pause, pause));
-            Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == MonsterRoamAi.State.Idle,
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.Idle,
                 $"expected Idle before pause elapses (tick {tick}).");
         }
 
         ai.StepMonster(monster, pause, StepCooldownTicks, RoamTunables(roamRadius, pause, pause));
         Assert.True(ai.TryGetPhase(monster.Id, out var roamingPhase));
-        Assert.Equal(MonsterRoamAi.State.Roaming, roamingPhase);
+        Assert.Equal(BasicRoamerBehavior.State.Roaming, roamingPhase);
 
         var sawIdleAgain = false;
         for (uint tick = pause + 1; tick <= pause + 400; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, pause, pause));
-            if (ai.TryGetPhase(monster.Id, out var p) && p == MonsterRoamAi.State.Idle)
+            if (ai.TryGetPhase(monster.Id, out var p) && p == BasicRoamerBehavior.State.Idle)
             {
                 sawIdleAgain = true;
                 break;
@@ -397,7 +397,7 @@ public sealed class MonsterRoamAiTests
     // Aggro / chase / attack / de-aggro (Euclidean) / livelock.
     // ---------------------------------------------------------------------------------------------------------
 
-    private static MonsterRoamAi.Tunables CombatTunables(
+    private static MonsterAiTunables CombatTunables(
         double roamRadius = 4d,
         uint pauseMin = 100,
         uint pauseMax = 100,
@@ -479,7 +479,7 @@ public sealed class MonsterRoamAiTests
         ai.StepMonster(monster, serverTick: 1, StepCooldownTicks, CombatTunables());
 
         Assert.True(ai.TryGetPhase(monster.Id, out var phase));
-        Assert.Equal(MonsterRoamAi.State.Chasing, phase);
+        Assert.Equal(BasicRoamerBehavior.State.Chasing, phase);
         Assert.True(ai.TryGetTarget(monster.Id, out var targetId));
         Assert.Equal(player.Id, targetId);
     }
@@ -501,7 +501,7 @@ public sealed class MonsterRoamAiTests
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables());
             Assert.True(ai.TryGetPhase(monster.Id, out var phase));
-            Assert.NotEqual(MonsterRoamAi.State.Chasing, phase);
+            Assert.NotEqual(BasicRoamerBehavior.State.Chasing, phase);
         }
     }
 
@@ -574,7 +574,7 @@ public sealed class MonsterRoamAiTests
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
         }
 
-        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == MonsterRoamAi.State.Chasing);
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
         Assert.True(Distance(monster.Position, home) > 0.5d, "monster should have left home while chasing.");
 
         world.Remove(player.Id, out _);
@@ -583,8 +583,8 @@ public sealed class MonsterRoamAiTests
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
             Assert.True(ai.TryGetPhase(monster.Id, out var phase));
-            Assert.NotEqual(MonsterRoamAi.State.Chasing, phase);
-            if (Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits && phase == MonsterRoamAi.State.Idle)
+            Assert.NotEqual(BasicRoamerBehavior.State.Chasing, phase);
+            if (Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits && phase == BasicRoamerBehavior.State.Idle)
             {
                 resumed = true;
                 break;
@@ -607,7 +607,7 @@ public sealed class MonsterRoamAiTests
         ai.Register(monster, serverTick: 0, pauseMinTicks: 5, pauseMaxTicks: 5, aggroScanIntervalTicks: 1);
 
         ai.StepMonster(monster, serverTick: 1, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
-        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == MonsterRoamAi.State.Chasing);
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
 
         // Teleport the player far east, well past the de-aggro range (9) and the chase leash (12).
         var before = player.TileCoord;
@@ -621,7 +621,7 @@ public sealed class MonsterRoamAiTests
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
             if (ai.TryGetPhase(monster.Id, out var phase)
                 && Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits
-                && phase == MonsterRoamAi.State.Idle)
+                && phase == BasicRoamerBehavior.State.Idle)
             {
                 returned = true;
                 break;
@@ -644,7 +644,7 @@ public sealed class MonsterRoamAiTests
         ai.Register(monster, serverTick: 0, pauseMinTicks: 5, pauseMaxTicks: 5, aggroScanIntervalTicks: 1);
 
         // Big aggro/de-aggro so it WOULD chase forever if not for the home leash; small chaseLeash (5).
-        MonsterRoamAi.Tunables T() => CombatTunables(
+        MonsterAiTunables T() => CombatTunables(
             pauseMin: 5, pauseMax: 5, aggroRadius: 64d, deaggroRadius: 96d, chaseLeash: 5d);
 
         var returnedHome = false;
@@ -656,7 +656,7 @@ public sealed class MonsterRoamAiTests
                 $"monster exceeded the Euclidean chase leash at tick {tick}: pos {monster.Position}, home {home}.");
             if (ai.TryGetPhase(monster.Id, out var phase)
                 && Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits
-                && phase == MonsterRoamAi.State.Idle)
+                && phase == BasicRoamerBehavior.State.Idle)
             {
                 returnedHome = true;
                 break;
@@ -707,14 +707,14 @@ public sealed class MonsterRoamAiTests
 
         // Force a chase by aggroing (the box neighbours leave the centre open; aggro at Euclidean 5 with radius 6).
         ai.StepMonster(monster, serverTick: 1, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
-        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == MonsterRoamAi.State.Chasing);
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
 
         var bailed = false;
         for (uint tick = 2; tick <= 80; tick++)
         {
             ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
             AssertCollisionValid(monster.Position, grid.BlockedTiles, $"tick {tick}");
-            if (ai.TryGetPhase(monster.Id, out var phase) && phase != MonsterRoamAi.State.Chasing)
+            if (ai.TryGetPhase(monster.Id, out var phase) && phase != BasicRoamerBehavior.State.Chasing)
             {
                 bailed = true;
                 break;
@@ -749,11 +749,11 @@ public sealed class MonsterRoamAiTests
             AssertCollisionValid(monster.Position, grid.BlockedTiles, $"tick {tick}");
             if (ai.TryGetPhase(monster.Id, out var phase))
             {
-                if (phase == MonsterRoamAi.State.Roaming)
+                if (phase == BasicRoamerBehavior.State.Roaming)
                 {
                     sawRoaming = true;
                 }
-                else if (phase == MonsterRoamAi.State.Idle && sawRoaming && tick > 50)
+                else if (phase == BasicRoamerBehavior.State.Idle && sawRoaming && tick > 50)
                 {
                     sawIdleAfterRoaming = true;
                 }
@@ -853,11 +853,11 @@ public sealed class MonsterRoamAiTests
             maxDistFromHome = Math.Max(maxDistFromHome, Distance(monster.Position, home));
             if (ai.TryGetPhase(monster.Id, out var phase))
             {
-                if (phase == MonsterRoamAi.State.Roaming)
+                if (phase == BasicRoamerBehavior.State.Roaming)
                 {
                     sawRoaming = true;
                 }
-                else if (phase == MonsterRoamAi.State.Idle && sawRoaming && tick > pause + 5)
+                else if (phase == BasicRoamerBehavior.State.Idle && sawRoaming && tick > pause + 5)
                 {
                     // Returned to Idle after a real roam — it reached a destination. On every stop edge the AI Stops
                     // the locomotion, so a parked glider's replicated velocity is zero (the client stops extrapolating).
@@ -894,11 +894,11 @@ public sealed class MonsterRoamAiTests
             AssertCollisionValid(monster.Position, grid.BlockedTiles, $"tick {tick}");
             if (ai.TryGetPhase(monster.Id, out var phase))
             {
-                if (phase == MonsterRoamAi.State.Roaming)
+                if (phase == BasicRoamerBehavior.State.Roaming)
                 {
                     sawRoaming = true;
                 }
-                else if (phase == MonsterRoamAi.State.Idle && sawRoaming && tick > 50)
+                else if (phase == BasicRoamerBehavior.State.Idle && sawRoaming && tick > 50)
                 {
                     sawIdleAfterRoaming = true;
                 }

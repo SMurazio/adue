@@ -2,7 +2,7 @@ using Mmo.Shared.Domain;
 
 namespace Mmo.Server.Runtime;
 
-// CONTINUOUS MIGRATION (Phase 8): the monster MOVEMENT-STYLE seam. The roam/chase AI (MonsterRoamAi) decides WHERE a
+// CONTINUOUS MIGRATION (Phase 8): the monster MOVEMENT-STYLE seam. The roam/chase AI (IMonsterBehavior) decides WHERE a
 // monster wants to go (a continuous WorldVector target) and WHEN it may move (its own state machine + timers); the
 // locomotion decides HOW it gets there for one move-cadence window. Ship ONLY HopLocomotion this phase: a discrete,
 // collision-valid LEAP (the slime keeps hopping). A future GlideLocomotion (sets Velocity, integrates per-tick) would

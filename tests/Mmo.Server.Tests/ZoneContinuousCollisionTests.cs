@@ -9,7 +9,7 @@ namespace Mmo.Server.Tests;
 // Phase 2 collides the PLAYER continuous integrator against walls derived from the tile map. These pin the INVERSE of
 // the Phase-1 walk-through (stop at the surface), the slide on a glancing hit, the open-field regression (unchanged),
 // and the server-layer determinism (same start + dir + map => byte-identical Position). Monsters take a SEPARATE
-// continuous path (the HopLocomotion, Phase 8) — their collision-valid hops are covered by MonsterRoamAiTests.
+// continuous path (the HopLocomotion, Phase 8) — their collision-valid hops are covered by BasicRoamerBehaviorTests.
 //
 // Geometry: a blocked tile (tx,ty) is the 1x1 box [tx-0.5..tx+0.5]; the default body radius is 0.5, so a player
 // driving into the -X face of a blocked tile stops with its CENTRE at (tx-0.5) - 0.5 = tx-1.0 (one tile-pitch shy of
@@ -120,6 +120,6 @@ public sealed class ZoneContinuousCollisionTests
     // NOTE (Phase 11 coherence sweep): the former MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression
     // test was DELETED here. It asserted monsters block via the tile-step path (Zone.TryStep / IsStepWalkable), but
     // after Phase 8 monsters move via the continuous HopLocomotion (no TryStep), and the hop's collision-valid landing
-    // (a hop never lands inside a wall) is covered by MonsterRoamAiTests.HopsLandCollisionValid_AndSomeLandSubTile.
+    // (a hop never lands inside a wall) is covered by BasicRoamerBehaviorTests.HopsLandCollisionValid_AndSomeLandSubTile.
     // The tile-step path it exercised has since been removed, so the test was testing deleted behaviour.
 }
