@@ -129,16 +129,38 @@ public sealed class MonsterRoamAiTests
     // Builds an AI whose walkability oracle + REAL HopLocomotion are wired to a TileGrid exactly like GameServer does
     // (the locomotion queries the same shared TileWalls + collides at the same body radius players do). The
     // aggro/resolve/attack callbacks default to "no aggro" so a roam-only test is unaffected; the combat tests pass real ones.
+    // MONSTER-BEHAVIOR P2: a continuous-walk GlideLocomotion wired like GameServer — same shared wall query + body
+    // radius + apply seam ordinary movement uses, dt fixed by the tick rate. The glider reads SpeedUnitsPerSecond off
+    // the entity (the test seeds it), SETS Velocity = heading×speed, and moves every tick (no executor — it applies
+    // directly), so the AI's roam/chase/leash/watchdog logic must drive a walker with no change.
+    private static GlideLocomotion CreateGlide(TileGrid grid, WorldState world)
+        => new(
+            () => BodyRadius,
+            grid.QueryNearbyWalls,
+            (entity, landing) =>
+            {
+                var previous = entity.TileCoord;
+                var crossed = entity.ApplyResolvedMove(landing);
+                if (crossed)
+                {
+                    world.OnEntityMoved(entity, previous);
+                }
+
+                return crossed;
+            },
+            TickRate);
+
     private static AiHarness CreateAi(
         int seed,
         TileGrid grid,
         WorldState world,
         MonsterRoamAi.FindTargetDelegate? findTarget = null,
         MonsterRoamAi.TryResolveTargetDelegate? tryResolve = null,
-        MonsterRoamAi.AttackDelegate? attack = null)
+        MonsterRoamAi.AttackDelegate? attack = null,
+        Func<TileGrid, ServerActionExecutor, IMonsterLocomotion>? locomotionFactory = null)
     {
         var executor = CreateExecutor(grid, world);
-        var locomotion = CreateLocomotion(grid, executor);
+        var locomotion = (locomotionFactory ?? ((g, e) => CreateLocomotion(g, e)))(grid, executor);
         var ai = new MonsterRoamAi(
             seed,
             grid.IsWalkable,
@@ -795,5 +817,95 @@ public sealed class MonsterRoamAiTests
         // on the landing tick (cadence not yet elapsed) is OnCooldown; once the window elapses it Moves again.
         Assert.Equal(HopResult.OnCooldown, locomotion.Advance(monster, target, serverTick: cadence, cadence));
         Assert.Equal(HopResult.Moved, locomotion.Advance(monster, target, serverTick: 1 + cadence, cadence));
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the SAME roam brain driving a GlideLocomotion — a walker.
+    // ---------------------------------------------------------------------------------------------------------
+
+    // Builds a roam AI whose body is a GlideLocomotion (the continuous walk) instead of the hop, and seeds the
+    // monster's walk speed (GameServer seeds SpeedUnitsPerSecond at spawn; here we set it on the bare entity).
+    private static AiHarness CreateGlideAi(int seed, TileGrid grid, WorldState world)
+        => CreateAi(seed, grid, world, locomotionFactory: (g, _) => CreateGlide(g, world));
+
+    [Fact]
+    public void Glider_RoamsToADestinationByGliding_ReachesItThenStops()
+    {
+        // A gnoll-like type (BasicRoamer brain + GlideLocomotion) roams to a destination by WALKING: it leaves Idle,
+        // enters Roaming, physically moves away from home (continuous, sub-tile), reaches the destination and returns
+        // to Idle — and on arrival its replicated Velocity is zeroed (the AI's Stop wiring), so the client parks it.
+        const double roamRadius = 6d;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded());
+        monster.SetSpeedUnitsPerSecond(4.0d); // a non-zero walk speed (otherwise a glider can't move).
+        var ai = CreateGlideAi(seed: 2024, grid, world);
+        const uint pause = 3;
+        ai.Register(monster, serverTick: 0, pauseMinTicks: pause, pauseMaxTicks: pause, aggroScanIntervalTicks: 10);
+
+        var sawRoaming = false;
+        var maxDistFromHome = 0d;
+        var reachedIdleAfterRoaming = false;
+        for (uint tick = 1; tick <= 600; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, pause, pause));
+            maxDistFromHome = Math.Max(maxDistFromHome, Distance(monster.Position, home));
+            if (ai.TryGetPhase(monster.Id, out var phase))
+            {
+                if (phase == MonsterRoamAi.State.Roaming)
+                {
+                    sawRoaming = true;
+                }
+                else if (phase == MonsterRoamAi.State.Idle && sawRoaming && tick > pause + 5)
+                {
+                    // Returned to Idle after a real roam — it reached a destination. On every stop edge the AI Stops
+                    // the locomotion, so a parked glider's replicated velocity is zero (the client stops extrapolating).
+                    Assert.Equal(WorldVector.Zero, monster.Velocity);
+                    reachedIdleAfterRoaming = true;
+                }
+            }
+        }
+
+        Assert.True(sawRoaming, "glider never entered Roaming.");
+        Assert.True(maxDistFromHome > 0.5d, $"glider barely moved (max dist from home {maxDistFromHome:F3}) — it should WALK to a destination.");
+        Assert.True(reachedIdleAfterRoaming, "glider never reached its destination + returned to Idle.");
+    }
+
+    [Fact]
+    public void Glider_WedgedRoamer_TripsWatchdogToIdle_NeverPenetratesAWall()
+    {
+        // A walking monster boxed on all eight neighbours: whenever it picks a roam target outside the box its walk
+        // slides to a fixpoint (Stuck every tick), the no-progress watchdog bails it back to Idle, and it re-picks.
+        // It must never penetrate a wall and must keep cycling Roaming→(wedge)→Idle (not freeze permanently Roaming).
+        var walls = EnclosingWalls(new TileCoord(10, 10));
+        var grid = new TileGrid(GridSize, GridSize, walls);
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(10, 10), networkId: 1);
+        monster.SetSpeedUnitsPerSecond(4.0d);
+        var ai = CreateGlideAi(seed: 31, grid, world);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 2, pauseMaxTicks: 2, aggroScanIntervalTicks: 10);
+
+        var sawRoaming = false;
+        var sawIdleAfterRoaming = false;
+        for (uint tick = 1; tick <= 2000; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(4d, 2, 2));
+            AssertCollisionValid(monster.Position, grid.BlockedTiles, $"tick {tick}");
+            if (ai.TryGetPhase(monster.Id, out var phase))
+            {
+                if (phase == MonsterRoamAi.State.Roaming)
+                {
+                    sawRoaming = true;
+                }
+                else if (phase == MonsterRoamAi.State.Idle && sawRoaming && tick > 50)
+                {
+                    sawIdleAfterRoaming = true;
+                }
+            }
+        }
+
+        Assert.True(sawRoaming, "glider never entered Roaming — the picker should hand it far targets to wedge on.");
+        Assert.True(sawIdleAfterRoaming, "wedged glider appears frozen (never recovered to Idle) — the watchdog failed.");
     }
 }

@@ -293,9 +293,19 @@ public sealed class GameServer
             _zone.QueryNearbyWalls,
             BeginMonsterHop,
             id => _actionExecutor.IsActive(id));
+        // MONSTER-BEHAVIOR P2: the second body — GlideLocomotion (a continuous velocity-based WALK). Same shared
+        // collision seams the hop uses (QueryNearbyWalls + the resolver, ApplyMonsterLanding, the live player body
+        // radius); it SETS the monster's Velocity = heading × SpeedUnitsPerSecond, which already rides the wire (v39)
+        // and is extrapolated by the default remote render — so a glider walks smoothly on the client with NO protocol
+        // change. tickRate fixes the per-tick integration dt. The "gnoll" type (Content/monsters.json) selects it.
         _locomotions = new Dictionary<string, IMonsterLocomotion>(StringComparer.OrdinalIgnoreCase)
         {
             ["hop"] = _defaultLocomotion,
+            ["glide"] = new GlideLocomotion(
+                () => _tuning.BodyRadiusUnits,
+                _zone.QueryNearbyWalls,
+                _zone.ApplyMonsterLanding,
+                options.TickRate),
         };
         _monsterAi = new MonsterRoamAi(
             options.MapSeed,
@@ -2081,8 +2091,10 @@ public sealed class GameServer
         // type for the AI step.
         monster.SetMaxHealthFull(type.MaxHealth);
         monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
-        // Seed the monster's tiles/sec speed stat from its type multiplier — dormant for monsters (they HOP via the
-        // cadence gate, not the velocity integrator; Velocity stays Zero). Kept for parity with the player /speed path.
+        // Seed the monster's tiles/sec speed stat from its type multiplier (BaseMoveSpeedUnitsPerSecond ×
+        // MoveSpeedMultiplier). MONSTER-BEHAVIOR P2: this is DORMANT for a HOPPER (it leaps via the cadence gate, not
+        // the velocity integrator; Velocity stays Zero) but IS the walk speed for a GLIDER (GlideLocomotion reads
+        // SpeedUnitsPerSecond per tick) — so it must be set at spawn for a gnoll to have a non-zero walk speed.
         RefreshSpeedStat(monster);
         _monsterTypeOf[monster.Id] = type;
 

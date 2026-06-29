@@ -599,6 +599,16 @@ public sealed class WorldEntity
         }
     }
 
+    // MONSTER-BEHAVIOR P2: set the replicated Velocity to the ACTUAL resolved per-tick velocity (not the pre-collision
+    // desired one). A continuous mover (GlideLocomotion) sets the desired Velocity = dir x speed via ComputeMoveDelta,
+    // resolves it against walls (slide/stop), then calls this with (resolvedDelta / dt) so the wire carries the velocity
+    // that MATCHES the real motion — the replication guardrail. Without it a glider sliding along / wedged at a wall
+    // would replicate a velocity pointing INTO the wall, and the client (which extrapolates along velocity) would drift
+    // into the wall and correct each tick. Does NOT bump StateRevision (the apply-landing already governs the tile-cross
+    // re-publish); a Zero here is the velocity-coherent "wedged, not moving" state (prefer StopMovement at a real stop
+    // so the stop-edge bump fires).
+    public void SetVelocity(WorldVector velocity) => Velocity = velocity;
+
     // The Direction8 a unit vector points toward (same table as Direction8.ToUnitVector), or null for a zero vector
     // (no heading -> leave Facing as-is). Used by the integrator to keep the discrete Facing tracking the continuous
     // heading without re-deriving the 8-way table at the call site.

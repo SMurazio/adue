@@ -33,6 +33,30 @@
       "hopAirborneMs": 300,
       "hopDelayMs": 400,
       "respawnMs": 5000
+    },
+    {
+      // MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the first GLIDER — a monster that WALKS continuously
+      // (locomotionId "glide") instead of hopping, the first VISIBLE per-type behavior difference. It keeps the
+      // CURRENT brain (BasicRoamer): it roams / chases / melees exactly like the slime, just WALKING. Spawn it with
+      // `/monster gnoll`. lootTableId "" = drops nothing (no loot table authored yet — do NOT invent one).
+      //
+      // The HOP knobs (hopDistanceUnits / hopHeightUnits / hopAirborneMs / hopDelayMs) are OMITTED — they default and
+      // are irrelevant to a glider EXCEPT that StepMonsterAi still derives this type's no-progress-watchdog timeout
+      // window from (hopAirborneMs + hopDelayMs) even for a glider (a minor P2 wart noted in the design; a cleaner
+      // per-locomotion cadence is a later refinement). The defaults (300 + 400 ms) give a sane watchdog window.
+      // moveSpeedMultiplier 0.9 IS the glider's walk speed (it seeds SpeedUnitsPerSecond, which GlideLocomotion reads).
+      "id": "gnoll",
+      "displayName": "Gnoll",
+      "lootTableId": "",
+      "locomotionId": "glide",
+      "maxHealth": 200,
+      "moveSpeedMultiplier": 0.9,
+      "roamRadius": 5,
+      "aggroRadius": 8,
+      "chaseLeash": 16,
+      "attackDamage": 20,
+      "attackCooldownMs": 1200,
+      "attackRangeUnits": 1.5
     }
   ]
 }

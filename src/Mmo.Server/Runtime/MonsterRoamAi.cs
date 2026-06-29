@@ -318,7 +318,7 @@ public sealed class MonsterRoamAi
         // chaseLeash from home → drop aggro and walk home. All Euclidean on Position.
         if (!_tryResolveTarget(state.TargetId, out var targetPos, out var alive) || !alive)
         {
-            BeginReturnHome(ref state, serverTick);
+            BeginReturnHome(locomotion, monster, ref state, serverTick);
             return false;
         }
 
@@ -326,7 +326,7 @@ public sealed class MonsterRoamAi
         var distFromHome = Distance(monster.Position, state.Home);
         if (distToTarget > t.DeaggroRadius || distFromHome > t.ChaseLeash)
         {
-            BeginReturnHome(ref state, serverTick);
+            BeginReturnHome(locomotion, monster, ref state, serverTick);
             return false;
         }
 
@@ -334,6 +334,10 @@ public sealed class MonsterRoamAi
         // independent of its move cadence. We do NOT hop on an attack tick. Face the target while in range.
         if (distToTarget <= t.AttackRangeUnits)
         {
+            // MONSTER-BEHAVIOR P2: in range — STOP moving to attack. Zero a velocity-based body's Velocity at this stop
+            // edge so a glider doesn't keep extrapolating into/through its target while it stands and swings (a no-op
+            // for the hop; idempotent — a second Stop on an already-stopped body does nothing).
+            locomotion.Stop(monster);
             monster.SetFacingFromUnit((targetPos - monster.Position).Normalized());
             if (serverTick >= state.NextAttackTick)
             {
@@ -358,7 +362,7 @@ public sealed class MonsterRoamAi
                 // monster can never freeze against a wall — it walks home, re-roams, and can re-aggro on the next scan.
                 if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
                 {
-                    BeginReturnHome(ref state, serverTick);
+                    BeginReturnHome(locomotion, monster, ref state, serverTick);
                 }
 
                 return false;
@@ -369,8 +373,12 @@ public sealed class MonsterRoamAi
     }
 
     // Drop aggro and head home. Destination = home; Returning hops there and resumes Idle on arrival.
-    private void BeginReturnHome(ref MonsterState state, uint serverTick)
+    private void BeginReturnHome(IMonsterLocomotion locomotion, WorldEntity monster, ref MonsterState state, uint serverTick)
     {
+        // MONSTER-BEHAVIOR P2: zero a velocity-based body's Velocity at the chase→return TURN edge so a glider's
+        // replicated velocity (pointing at the abandoned target, or into the wall it wedged on) doesn't extrapolate
+        // the wrong way for the seam tick before Returning re-aims it at home next tick. A no-op for the hop.
+        locomotion.Stop(monster);
         state.Phase = State.Returning;
         state.TargetPresent = false;
         state.Destination = state.Home;
@@ -395,7 +403,7 @@ public sealed class MonsterRoamAi
         // Arrival: within the progress epsilon of the destination — close enough; the hop can't meaningfully advance.
         if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)
         {
-            GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
+            GoIdle(locomotion, monster, ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
             return false;
         }
 
@@ -408,7 +416,7 @@ public sealed class MonsterRoamAi
                 // If that hop landed us on (within epsilon of) the destination, go Idle; otherwise keep moving.
                 if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)
                 {
-                    GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
+                    GoIdle(locomotion, monster, ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
                 }
 
                 return true;
@@ -418,7 +426,7 @@ public sealed class MonsterRoamAi
                 // legitimate cadence wait — flip back to Idle with a fresh pause and re-pick a destination next pass.
                 if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
                 {
-                    GoIdle(ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
+                    GoIdle(locomotion, monster, ref state, serverTick, t.PauseMinTicks, t.PauseMaxTicks);
                 }
 
                 return false;
@@ -438,8 +446,11 @@ public sealed class MonsterRoamAi
         return serverTick > lastProgressTick && (serverTick - lastProgressTick) > stepCooldownTicks * 2 + 1;
     }
 
-    private void GoIdle(ref MonsterState state, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks)
+    private void GoIdle(IMonsterLocomotion locomotion, WorldEntity monster, ref MonsterState state, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks)
     {
+        // MONSTER-BEHAVIOR P2: zero a velocity-based body's Velocity at the stop edge into Idle (arrival or a wedge
+        // bail) so a glider parks cleanly at its final position and the client stops extrapolating. A no-op for the hop.
+        locomotion.Stop(monster);
         state.Phase = State.Idle;
         state.TargetPresent = false;
         state.PauseUntilTick = serverTick + NextPauseTicks(pauseMinTicks, pauseMaxTicks);

@@ -19,6 +19,15 @@ public interface IMonsterLocomotion
     //                UN-ARMED (re-try next tick, mirroring TryStep's blocked-step rule) and the AI treats it as
     //                NO-progress so its watchdog eventually fires. Position may have moved a hair (< epsilon) or not.
     HopResult Advance(WorldEntity monster, WorldVector target, uint serverTick, uint cooldownTicks);
+
+    // MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the AI calls Stop the instant a monster transitions to
+    // NOT moving (arrival → Idle, a wedge bail, an in-range stop-to-attack, entering Idle), so a VELOCITY-based body
+    // (GlideLocomotion) zeroes its replicated Velocity exactly at the stop edge — the client then stops extrapolating
+    // cleanly at the final position instead of coasting past it. It is a NO-OP for a cadence-gated body whose Velocity
+    // is already Zero (HopLocomotion), so the slime is unchanged by the Stop wiring. The AI places this call ONLY at
+    // genuine stop edges — never while a monster is still gliding toward a live target — so a moving glider keeps its
+    // velocity until it actually arrives/bails.
+    void Stop(WorldEntity monster);
 }
 
 // The outcome of one IMonsterLocomotion.Advance call — see the per-value notes on Advance. Distinguishing OnCooldown
@@ -200,6 +209,14 @@ public sealed class HopLocomotion : IMonsterLocomotion
         return HopResult.Moved;
     }
 
+    // MONSTER-BEHAVIOR P2: a NO-OP for the hop. A hopper carries Velocity Zero throughout (it stays OFF the velocity-
+    // glide path — the leap is a discrete collision-resolved apply, not a velocity integration), so there is nothing
+    // to stop when the AI transitions it out of a moving phase. The slime's behavior is therefore unchanged by the
+    // AI's new Stop calls (this is the contract that keeps every existing slime/monster test green).
+    public void Stop(WorldEntity monster)
+    {
+    }
+
     // Resolve ONE candidate hop of `hopDistance` in `unitDir` from `from` against the nearby walls (slide/stop,
     // anti-tunnel). Pure w.r.t. the entity — does NOT mutate it; the caller applies the winning landing.
     private WorldVector ResolveHop(WorldVector from, WorldVector unitDir, double hopDistance, double radius)
@@ -225,4 +242,110 @@ public sealed class HopLocomotion : IMonsterLocomotion
     }
 
     private static double Deg(double degrees) => degrees * System.Math.PI / 180d;
+}
+
+// MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the CONTINUOUS-WALK locomotion — the FIRST visible behavior
+// difference (a monster that WALKS instead of hops). Unlike HopLocomotion (a discrete, cadence-gated leap with Velocity
+// left at Zero), a glider moves EVERY tick: it integrates a small step along the heading at its walk speed
+// (WorldEntity.SpeedUnitsPerSecond, seeded from the type's MoveSpeedMultiplier at spawn), through the SAME shared swept-
+// circle collision the player + the hop use (the resolver SLIDES along walls, so a glider follows a wall with NO fan —
+// the resolver does the local steering), and SETS its replicated Velocity = heading × speed.
+//
+// REPLICATION (no protocol change): Velocity is already on the wire (v39) and a moving entity (Velocity != 0) is force-
+// included every tick + the DEFAULT remote render EXTRAPOLATES along that velocity. So a glider that SETS Velocity
+// replicates + extrapolates smoothly with NO protocol/wire change — it just USES the velocity the hop leaves at Zero.
+//
+// One Advance (every tick — NOT cadence-gated, so it ignores cooldownTicks for gating and NEVER returns OnCooldown):
+//   1. toTarget = target − from; if on target (<= epsilon) → Stuck (a guard; the AI checks arrival/adjacency first).
+//   2. dir = toTarget.Normalized(); ComputeMoveDelta(dir, dt) SETS Velocity = dir×speed + Facing and returns the raw
+//      per-tick delta (dir×speed×dt). CLAMP the delta length to toTarget.Length so the final approach never overshoots
+//      a near target (mirrors the hop's clamp; without it a fixed step would oscillate across a closer-than-one-step
+//      destination forever and never land within the arrival epsilon).
+//   3. resolve the (clamped) delta through QueryWalls + ContinuousCollision.Resolve at the body radius — collision-VALID
+//      (the SAME wall derivation + radius players collide at), sliding/stopping at walls.
+//   4. apply the resolved landing via the injected apply-landing delegate (Zone.ApplyMonsterLanding — the SAME tile-
+//      crossing bookkeeping + spatial-bucket migration the hop lands through).
+//   5. progress = resolved displacement projected onto dir (HopLocomotion.ProgressToward's notion). >= ProgressEpsilon
+//      ⇒ Moved (the AI marks progress / resets its watchdog); else ⇒ Stuck (a wall the resolver can't slide past — a
+//      genuine wedge, which the AI's no-progress watchdog bails). A moving glider advances every tick, so it never
+//      FALSELY trips the watchdog; only a truly wedged one (Stuck every tick) does.
+//
+// COOLDOWN WART (minor, noted in the design): cooldownTicks is passed in (derived from the type's hop knobs even for a
+// glider) and is used ONLY as the AI's no-progress-watchdog TIMEOUT window — glide has no real cadence. Fine for P2; a
+// cleaner per-locomotion cadence is a later refinement.
+//
+// DETERMINISM: all-double, RNG-free, fixed dt (1/tickRate) + the stable shared wall query — a given (from, target,
+// speed, walls) yields a byte-identical landing every call (the same contract the hop + the player integrator hold).
+public sealed class GlideLocomotion : IMonsterLocomotion
+{
+    // Apply a glider's resolved per-tick landing — WorldEntity.ApplyResolvedMove + spatial-bucket migration on a tile
+    // cross — the SAME Zone.ApplyMonsterLanding seam the hop lands through. Injected so the locomotion is unit-testable
+    // against a bare TileGrid + WorldState without a live Zone.
+    public delegate bool ApplyLandingDelegate(WorldEntity monster, WorldVector landing);
+
+    // Body radius is read FRESH per Advance (a live "continuous.bodyRadius" retune applies on the next tick — same as
+    // the hop + the player integrator), pinned to the player radius so a glider fits exactly where a player does.
+    private readonly Func<double> _bodyRadiusUnits;
+    private readonly HopLocomotion.QueryWallsDelegate _queryWalls;
+    private readonly ApplyLandingDelegate _applyLanding;
+    private readonly double _dtSeconds;
+    private readonly List<ContinuousCollision.Wall> _wallScratch = new();
+
+    // tickRate fixes the per-tick integration step dt = 1/tickRate (the SAME fixed server tick the player integrator
+    // and the ballistic Z use; the server owns speed AND dt, so anti-speedhack is intrinsic just like a player move).
+    public GlideLocomotion(
+        Func<double> bodyRadiusUnits,
+        HopLocomotion.QueryWallsDelegate queryWalls,
+        ApplyLandingDelegate applyLanding,
+        int tickRate)
+    {
+        _bodyRadiusUnits = bodyRadiusUnits;
+        _queryWalls = queryWalls;
+        _applyLanding = applyLanding;
+        _dtSeconds = tickRate > 0 ? 1d / tickRate : 0d;
+    }
+
+    public HopResult Advance(WorldEntity monster, WorldVector target, uint serverTick, uint cooldownTicks)
+    {
+        var from = monster.Position;
+        var toTarget = target - from;
+        if (toTarget.LengthSquared <= 0d)
+        {
+            // Already on the target (the AI checks arrival/adjacency first, so this is a guard). No move.
+            return HopResult.Stuck;
+        }
+
+        var radius = _bodyRadiusUnits();
+        var dir = toTarget.Normalized();
+
+        // ComputeMoveDelta sets the DESIRED Velocity = dir × SpeedUnitsPerSecond + Facing and returns the raw per-tick
+        // delta (dir × speed × dt). Reused for the shared velocity/facing rule. CLAMP to the remaining distance so the
+        // final approach never overshoots the target.
+        var rawDelta = monster.ComputeMoveDelta(dir, _dtSeconds);
+        var delta = rawDelta.Length > toTarget.Length ? dir * toTarget.Length : rawDelta;
+
+        // Resolve the step through the SAME shared collision the player + the hop use — the resolver SLIDES along walls
+        // (a glider follows a wall, no fan needed), so a blocked step yields a sideways landing or a fixpoint.
+        _queryWalls(from, delta, radius, _wallScratch);
+        var landing = ContinuousCollision.Resolve(from, delta, radius, _wallScratch);
+        _applyLanding(monster, landing);
+
+        // VELOCITY COHERENCE (the replication guardrail): re-set Velocity to the ACTUAL resolved motion (landing-from)/dt,
+        // NOT the pre-collision desired dir×speed. So a glider sliding along a wall replicates its tangential slide
+        // velocity (and a wedged one ~0), and the client — which extrapolates along velocity — tracks the real path
+        // instead of drifting into the wall. Facing keeps the intended dir (set by ComputeMoveDelta) so the sprite still
+        // faces the target.
+        monster.SetVelocity((landing - from) * (1d / _dtSeconds));
+
+        // Progress = the resolved displacement projected onto the target heading (like Hop's ProgressToward). A real
+        // walk projects ~|delta|; a slide along a perpendicular wall projects ~0. >= epsilon ⇒ Moved; else Stuck (a
+        // wall the resolver can't slide past — the AI's no-progress watchdog bails it). NEVER OnCooldown (no cadence).
+        var progress = (landing - from).Dot(dir);
+        return progress >= HopLocomotion.ProgressEpsilonUnits ? HopResult.Moved : HopResult.Stuck;
+    }
+
+    // MONSTER-BEHAVIOR P2: zero the glider's replicated Velocity (StopMovement also bumps StateRevision ONCE on the
+    // moving→stopped transition, the stop-edge re-publish), so the client stops extrapolating cleanly at the final
+    // position. Called by the AI exactly at the stop edges (arrival, wedge bail, in-range stop-to-attack, Idle).
+    public void Stop(WorldEntity monster) => monster.StopMovement();
 }

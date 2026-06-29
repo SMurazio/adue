@@ -301,8 +301,32 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.HopDelayMs, d.HopDelayMs);
         Assert.Equal(c.RespawnMs, d.RespawnMs);
 
-        // And the data registry shipped exactly the one slime type.
-        Assert.Single(fromData.Types);
+        // The shipped manifest now carries additional types (MONSTER-BEHAVIOR P2 added the gnoll glider), so parity is
+        // pinned on the SLIME only — and the slime must stay the canonical default so /monster (no name) spawns it.
+        Assert.Equal("slime", fromData.Default.Id);
+    }
+
+    // MONSTER-BEHAVIOR P2 (docs/monster-behavior-design.md): the shipped manifest carries the "gnoll" GLIDER — the
+    // first type that selects a non-hop locomotion. Pins that it loads with locomotionId "glide" + its authored stats
+    // (so /monster gnoll spawns a walking gnoll), and that the slime is still present alongside it.
+    [Fact]
+    public void ShippedManifestLoadsTheGnollGlider()
+    {
+        var json = ReadShippedManifest();
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+
+        Assert.True(registry.TryGet("slime", out _), "shipped manifest must still carry the slime.");
+        Assert.True(registry.TryGet("gnoll", out var g), "shipped manifest must carry the gnoll glider.");
+        Assert.Equal("Gnoll", g.DisplayName);
+        Assert.Equal("glide", g.LocomotionId);
+        Assert.Equal(string.Empty, g.LootTableId); // no loot table authored yet — drops nothing.
+        Assert.Equal(200, g.MaxHealth);
+        Assert.Equal(0.9d, g.MoveSpeedMultiplier, 6);
+        Assert.Equal(8d, g.AggroRadius, 6);
+        Assert.Equal(16d, g.ChaseLeash, 6);
+        Assert.Equal(20, g.AttackDamage);
+        Assert.Equal(1200, g.AttackCooldownMs);
+        Assert.Equal(1.5d, g.AttackRangeUnits, 6);
     }
 
     private static string ReadShippedManifest()
