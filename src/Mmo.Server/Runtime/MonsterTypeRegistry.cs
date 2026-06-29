@@ -237,12 +237,18 @@ public sealed class MonsterTypeRegistry
         return registry;
     }
 
-    // Tolerant of camelCase casing, `//` comments (the manifest is annotated), and trailing commas.
+    // Tolerant of camelCase casing, `//` comments (the manifest is annotated), and trailing commas — but STRICT on
+    // unknown members (P0 review): a typo'd field ("maxHelth") or an unsupported field would otherwise be silently
+    // dropped and the monster keep the default — an invisible data-authoring trap for the first content loader.
+    // Disallow makes it throw (→ caught in FromManifestJson → ArgumentException → GameServer's loud code-seed
+    // fallback), so a typo fails LOUDLY + the server still starts on the default. (Discipline: a field added to the
+    // JSON in a later phase must be added to the DTO in the same change.)
     private static readonly JsonSerializerOptions ManifestJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
     };
 
     // The on-disk manifest shape. P0 = the CURRENT MonsterType fields only; later phases (P1+) GROW this with
@@ -284,7 +290,13 @@ public sealed class MonsterTypeRegistry
     public bool TryGet(string id, out MonsterType type) => _types.TryGetValue(id, out type!);
 
     // The default type (slime) — used when /monster is given no name.
-    public MonsterType Default => _types[DefaultTypeId];
+    // The default type (used by /monster with no name). Prefer the canonical DefaultTypeId ("slime") when present,
+    // else fall back to the FIRST registered type. P0 review (footgun): a DATA manifest may rename/omit "slime" — a
+    // structurally-valid case the loader accepts — and the old `_types[DefaultTypeId]` threw KeyNotFoundException at
+    // startup, defeating the "never crash, fall back" intent exactly when P1+ starts editing ids. The registry always
+    // has >= 1 type (FromManifestJson rejects an empty manifest; the code seed always has slime), so _ordered[0] is
+    // always valid. Keeps Default.Id == "slime" for the shipped/seed case (the manifest lists slime first).
+    public MonsterType Default => _types.TryGetValue(DefaultTypeId, out var d) ? d : _ordered[0];
 
     // Builds the AI tunables for a type, tick-quantised exactly like the old ServerTuning did (so the migrated
     // defaults are unchanged). De-aggro range is derived (×1.5 aggro, hysteresis); the aggro-scan cadence is derived

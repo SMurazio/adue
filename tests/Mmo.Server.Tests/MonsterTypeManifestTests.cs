@@ -157,6 +157,37 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(300000, s.RespawnMs);       // clamped down to MaxRespawnMs (5 min).
     }
 
+    // P0 review (footgun fix): a manifest that renames/omits the canonical "slime" id is STRUCTURALLY valid and must
+    // NOT crash — Default falls back to the FIRST registered type so /monster (no name) + the GameServer constructor's
+    // _monsterTypes.Default access keep working on a fully-data-authored monster set.
+    [Fact]
+    public void DefaultFallsBackToTheFirstTypeWhenNoCanonicalSlime()
+    {
+        const string json = """
+        { "types": [
+            { "id": "gnoll", "displayName": "Gnoll" },
+            { "id": "wolf", "displayName": "Wolf" }
+        ] }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+
+        Assert.Equal("gnoll", registry.Default.Id); // first listed, since there is no "slime"
+        Assert.Equal(2, registry.Types.Count);
+    }
+
+    // P0 review (typo guard): an unknown / misspelled field must FAIL LOUDLY (throw → GameServer's code-seed fallback)
+    // rather than be silently dropped leaving the monster on a default the author didn't intend.
+    [Fact]
+    public void UnknownFieldIsRejected()
+    {
+        const string json = """
+        { "types": [ { "id": "slime", "displayName": "Slime", "maxHelth": 5000 } ] }
+        """;
+
+        Assert.Throws<System.ArgumentException>(() => MonsterTypeRegistry.FromManifestJson(TickRate, json));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
