@@ -1,0 +1,35 @@
+{
+  // Monster TYPE data manifest (P0 of the monster-behavior architecture, docs/monster-behavior-design.md).
+  // This is the AUTHORITATIVE runtime source: the server loads this loose file from
+  // <output>/Content/monsters.json at startup; edit it + restart the server to change monsters with no
+  // code build. If this file is missing or fails to parse the server falls back to the code-seeded
+  // defaults in MonsterTypeRegistry (the safety net) — and the shipped slime below is byte-for-byte
+  // identical to that code seed (a parity test pins this so the two can never silently drift).
+  //
+  // P0 SCHEMA = the CURRENT MonsterType fields only (stats + AI tuning + hop feel + loot). The
+  // composition SELECTORS (locomotionId / behaviorId / abilityIds / visualId) arrive in later phases
+  // (P1+) and will extend this schema; do not add them yet. Optional fields may be omitted and fall back
+  // to the field default; every tunable is clamped to the same bounds the live F1 tuning uses.
+  "types": [
+    {
+      "id": "slime",
+      "displayName": "Slime",
+      "lootTableId": "slime_loot",
+      "maxHealth": 100,
+      "moveSpeedMultiplier": 0.6,
+      "roamRadius": 4,
+      "pauseMinMs": 2000,
+      "pauseMaxMs": 5000,
+      "aggroRadius": 6,
+      "chaseLeash": 12,
+      "attackDamage": 10,
+      "attackCooldownMs": 1000,
+      "attackRangeUnits": 1.5,
+      "hopDistanceUnits": 1.5,
+      "hopHeightUnits": 0.5,
+      "hopAirborneMs": 300,
+      "hopDelayMs": 400,
+      "respawnMs": 5000
+    }
+  ]
+}

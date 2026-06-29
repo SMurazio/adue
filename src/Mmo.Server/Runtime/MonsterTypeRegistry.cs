@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Mmo.Shared.Domain;
 
 namespace Mmo.Server.Runtime;
@@ -113,14 +114,162 @@ public sealed class MonsterTypeRegistry
     private readonly Dictionary<string, MonsterType> _types = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<MonsterType> _ordered = [];
 
+    // The code-seeded ctor — the FALLBACK + test-seed. Seeds the one slime type in code so the server still
+    // runs (and every existing test passes unchanged) when no data manifest is present. The shipped
+    // Content/monsters.json is the AUTHORITATIVE runtime source (see FromManifestJson + GameServer); a parity
+    // test pins that the data file and this code seed never drift.
     public MonsterTypeRegistry(int tickRate)
+        : this(tickRate, seed: true)
+    {
+    }
+
+    // Shared private ctor: `seed` gates the code default so FromManifestJson can build an EMPTY registry and
+    // populate it purely from data (no code-seeded slime to dedupe against).
+    private MonsterTypeRegistry(int tickRate, bool seed)
     {
         _tickRate = tickRate;
-        // Seed the one type today. A new type is one Add() + its non-default values.
-        // LOOT P4a: the slime rolls the "slime_loot" table on death (gel floor + the shared rare tail +
-        // its signature core). Static content; the LootTableRegistry owns the table definition.
-        Add(new MonsterType(DefaultTypeId, "Slime") { LootTableId = "slime_loot" });
+        if (seed)
+        {
+            // Seed the one type today. A new type is one Add() + its non-default values.
+            // LOOT P4a: the slime rolls the "slime_loot" table on death (gel floor + the shared rare tail +
+            // its signature core). Static content; the LootTableRegistry owns the table definition.
+            Add(new MonsterType(DefaultTypeId, "Slime") { LootTableId = "slime_loot" });
+        }
     }
+
+    // P0 (monster-behavior architecture, docs/monster-behavior-design.md): build the registry from a JSON DATA
+    // MANIFEST instead of the code seed, so monster TYPES are authored/edited in data with no code build. Loads
+    // the SAME shape the shipped Content/monsters.json carries. Validation: a non-empty `id` + `displayName` are
+    // required; duplicate ids are rejected; an empty/malformed manifest (or one with no types) throws a clear
+    // ArgumentException; every OPTIONAL tunable that is omitted falls back to the MonsterType field default, and
+    // every provided tunable is CLAMPED through the exact same TryApply bounds the live F1 tuning uses (single
+    // source of truth — the data file cannot author an out-of-range monster). P0 SCHEMA = the current
+    // MonsterType fields only; the composition selectors (locomotion/behavior/ability/visual ids) come in P1+.
+    public static MonsterTypeRegistry FromManifestJson(int tickRate, string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            throw new ArgumentException("Monster manifest is empty.", nameof(json));
+        }
+
+        MonsterManifestDto? manifest;
+        try
+        {
+            manifest = JsonSerializer.Deserialize<MonsterManifestDto>(json, ManifestJsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException($"Monster manifest is not valid JSON: {ex.Message}", nameof(json), ex);
+        }
+
+        if (manifest?.Types is null || manifest.Types.Count == 0)
+        {
+            throw new ArgumentException("Monster manifest has no types.", nameof(json));
+        }
+
+        var registry = new MonsterTypeRegistry(tickRate, seed: false);
+        foreach (var dto in manifest.Types)
+        {
+            if (dto is null)
+            {
+                throw new ArgumentException("Monster manifest contains a null type entry.", nameof(json));
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.Id))
+            {
+                throw new ArgumentException("Monster manifest type is missing a non-empty 'id'.", nameof(json));
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.DisplayName))
+            {
+                throw new ArgumentException(
+                    $"Monster type '{dto.Id}' is missing a non-empty 'displayName'.", nameof(json));
+            }
+
+            if (registry._types.ContainsKey(dto.Id))
+            {
+                throw new ArgumentException(
+                    $"Monster manifest has a duplicate type id '{dto.Id}'.", nameof(json));
+            }
+
+            var type = new MonsterType(dto.Id, dto.DisplayName);
+            // Non-tunable static content + the interp-cadence multiplier: set directly (no TryApply key). Omitted
+            // → the MonsterType field default (LootTableId "" = drops nothing; MoveSpeedMultiplier 0.6).
+            if (dto.LootTableId is not null)
+            {
+                type.LootTableId = dto.LootTableId;
+            }
+
+            if (dto.MoveSpeedMultiplier.HasValue)
+            {
+                type.MoveSpeedMultiplier = dto.MoveSpeedMultiplier.Value;
+            }
+
+            registry.Add(type);
+
+            // Each provided tunable is clamped + applied through TryApply (the SAME bounds the F1 live tuning
+            // uses); an omitted one keeps the field default. Note attackRange's wire key vs the AttackRangeUnits
+            // JSON/field name. Pause min is applied before max so the non-inversion guard resolves like the F1 path.
+            void Apply(string field, double? value)
+            {
+                if (value.HasValue)
+                {
+                    registry.TryApply($"{type.Id}.{field}", value.Value, out _);
+                }
+            }
+
+            Apply(MaxHealthField, dto.MaxHealth);
+            Apply(RoamRadiusField, dto.RoamRadius);
+            Apply(PauseMinMsField, dto.PauseMinMs);
+            Apply(PauseMaxMsField, dto.PauseMaxMs);
+            Apply(AggroRadiusField, dto.AggroRadius);
+            Apply(ChaseLeashField, dto.ChaseLeash);
+            Apply(AttackRangeField, dto.AttackRangeUnits);
+            Apply(AttackDamageField, dto.AttackDamage);
+            Apply(AttackCooldownMsField, dto.AttackCooldownMs);
+            Apply(RespawnMsField, dto.RespawnMs);
+            Apply(HopDistanceField, dto.HopDistanceUnits);
+            Apply(HopHeightField, dto.HopHeightUnits);
+            Apply(HopAirborneMsField, dto.HopAirborneMs);
+            Apply(HopDelayMsField, dto.HopDelayMs);
+        }
+
+        return registry;
+    }
+
+    // Tolerant of camelCase casing, `//` comments (the manifest is annotated), and trailing commas.
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+    };
+
+    // The on-disk manifest shape. P0 = the CURRENT MonsterType fields only; later phases (P1+) GROW this with
+    // the composition selectors (locomotionId / behaviorId / abilityIds / visualId). All tunables are nullable so
+    // an omitted field falls back to the MonsterType default; id/displayName are validated as required in
+    // FromManifestJson. JSON property names are camelCase (matched case-insensitively).
+    private sealed record MonsterManifestDto(List<MonsterTypeDto?>? Types);
+
+    private sealed record MonsterTypeDto(
+        string? Id,
+        string? DisplayName,
+        string? LootTableId,
+        int? MaxHealth,
+        double? MoveSpeedMultiplier,
+        double? RoamRadius,
+        int? PauseMinMs,
+        int? PauseMaxMs,
+        double? AggroRadius,
+        double? ChaseLeash,
+        int? AttackDamage,
+        int? AttackCooldownMs,
+        double? AttackRangeUnits,
+        double? HopDistanceUnits,
+        double? HopHeightUnits,
+        int? HopAirborneMs,
+        int? HopDelayMs,
+        int? RespawnMs);
 
     private void Add(MonsterType type)
     {

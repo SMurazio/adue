@@ -250,7 +250,7 @@ public sealed class GameServer
         // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
         // CONTINUOUS MIGRATION (Phase 8): built BEFORE the AI so the hop locomotion's live hop-distance provider can
         // read the default type's HopDistanceUnits fresh each hop.
-        _monsterTypes = new MonsterTypeRegistry(options.TickRate);
+        _monsterTypes = LoadMonsterTypes(options.TickRate);
         // MOVEMENT-ACTIONS (Phase A/C): the action executor reuses the EXACT same shared collision derivation + apply
         // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
         // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE _monsterAi (Phase C) — it has no
@@ -1292,6 +1292,36 @@ public sealed class GameServer
     private static int ResolveEntityGridCellSize(float interestRadius)
     {
         return Math.Max(1, (int)Math.Ceiling(interestRadius));
+    }
+
+    // P0 (monster-behavior architecture, docs/monster-behavior-design.md): load monster TYPES from the loose data
+    // manifest at <output>/Content/monsters.json so they can be authored/edited in data without a code build. The
+    // loose file is AUTHORITATIVE at runtime (edit it + restart → new monsters); the code-seeded registry is the
+    // safety net used when the file is absent OR fails to parse. NOT a ServerOptions field by design — it follows
+    // the AppContext.BaseDirectory/Content convention. Server-only STARTUP data: no protocol change.
+    private static MonsterTypeRegistry LoadMonsterTypes(int tickRate)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Content", "monsters.json");
+        if (File.Exists(path))
+        {
+            try
+            {
+                var registry = MonsterTypeRegistry.FromManifestJson(tickRate, File.ReadAllText(path));
+                Log.Info($"Loaded {registry.Types.Count} monster type(s) from data manifest: {path}.");
+                return registry;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn(
+                    $"Failed to load monster manifest {path} ({ex.Message}); using the code-seeded defaults.");
+            }
+        }
+        else
+        {
+            Log.Info($"No monster manifest at {path}; using the code-seeded defaults.");
+        }
+
+        return new MonsterTypeRegistry(tickRate);
     }
 
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)

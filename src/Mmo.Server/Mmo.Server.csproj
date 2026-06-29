@@ -13,4 +13,13 @@
   <ItemGroup>
     <ProjectReference Include="..\Mmo.Shared\Mmo.Shared.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Monster TYPE data manifest (P0): shipped to the output dir so the server loads it from
+         <output>/Content/monsters.json at startup. PreserveNewest so an edit re-copies on build.
+         None+CopyToOutputDirectory also propagates transitively to projects that reference this one
+         (e.g. Mmo.Server.Tests), so the parity test can read the SAME shipped file from its output. -->
+    <None Include="Content\monsters.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 </Project>
