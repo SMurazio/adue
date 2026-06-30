@@ -126,21 +126,22 @@ public sealed class MmoClient : IDisposable
     // Tile/Position stay authoritative for targeting (S53 invariant). See Continuous.ContinuousPredictor.
     private ContinuousPredictor? _predictor;
 
-    // PLAYER↔MONSTER COLLISION: the reused per-call scratch for the LOCAL player's nearby-MONSTER obstacle set. Refilled
-    // (GatherMonsterObstacles clears it) before each predict frame AND before each reconcile, then handed to the
-    // predictor so the client predicts/​replays the SAME stop/slide vs a monster the server integrates (parity → no
-    // rubber-band). Built from each monster's REPLICATED Position (the Monster-kind filter excludes the local + other
-    // players), so it is exact vs a stationary/slow monster and a bounded approximation vs a fast mover (see the
-    // predictor header). One reused list → zero per-frame alloc (the predict + reconcile calls never interleave).
+    // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: the reused per-call scratch for the LOCAL player's nearby-body obstacle
+    // set (monsters + OTHER players). Refilled (GatherEntityObstacles clears it) before each predict frame AND before each
+    // reconcile, then handed to the predictor so the client predicts/​replays the SAME stop/slide vs a monster OR another
+    // player the server integrates (parity → no rubber-band). Built from each body's REPLICATED Position (the filter keeps
+    // Monster|Player and excludes the local player), so it is exact vs a stationary/slow body and a bounded — now
+    // SYMMETRIC, vs another player — approximation vs a fast mover (see the predictor header). One reused list → zero
+    // per-frame alloc (the predict + reconcile calls never interleave).
     private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
     // PLAYER↔MONSTER COLLISION (review MEDIUM — crowd parity): (id, pos) staging so the obstacle set is emitted in
     // STABLE NetworkId order. The circle de-penetration is Gauss-Seidel (order-dependent), so the client predictor and
     // the server integrate MUST process a crowd in the same order or the resolved position diverges → a persistent
-    // reconcile (crowd rubber-band). The server's Zone.GatherMonsterObstacles sorts by the same Id. Reused → no alloc.
+    // reconcile (crowd rubber-band). The server's Zone.GatherEntityObstacles sorts by the same Id. Reused → no alloc.
     private readonly List<(uint Id, double X, double Y)> _obstacleSortScratch = new();
 
-    // PLAYER↔MONSTER COLLISION: the spatial cutoff (world units) for including a monster in the local obstacle set — a
+    // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: the spatial cutoff (world units) for including a body in the local obstacle set — a
     // body collides only within radius+radius (=2×BodyRadius) of its centre, so a small fixed reach beyond that (plus a
     // sub-tile move delta) bounds the gather without a spatial index on the client (entity count is already AOI-bounded).
     private const double ObstacleGatherReachUnits = 2.0d;
@@ -467,10 +468,11 @@ public sealed class MmoClient : IDisposable
             // input seq we stamp on the wire — so sent == buffered for byte-for-byte replay on reconcile. The
             // predictor was seeded from _inputSeqHighWater on attach (EnsurePredictor), so its minted seq is already
             // above the high-water; capture it back so the next re-attach seeds above THIS seq (re-attach freeze fix).
-            // PLAYER↔MONSTER COLLISION: gather the nearby monster obstacle set from the predictor's CURRENT predicted
-            // position and predict collision against it this frame — the same set the reconcile replay uses, so the
-            // client stops at / slides along a monster exactly as the server does (no rubber-band).
-            GatherMonsterObstacles(predictor.PredictedX, predictor.PredictedY);
+            // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: gather the nearby obstacle set (monsters + OTHER players, self
+            // excluded) from the predictor's CURRENT predicted position and predict collision against it this frame —
+            // the same set the reconcile replay uses, so the client stops at / slides along a monster or another player
+            // exactly as the server does (no rubber-band vs a stationary body; symmetric mutual correction vs a mover).
+            GatherEntityObstacles(predictor.PredictedX, predictor.PredictedY);
             seq = predictor.PredictAndBuffer(dirX, dirY, dtSeconds, _obstacleScratch);
             _inputSeqHighWater = seq;
         }
@@ -561,19 +563,23 @@ public sealed class MmoClient : IDisposable
             return;
         }
 
-        // PLAYER↔MONSTER COLLISION: feed the REPLAY the same nearby-monster obstacle set, gathered from the server's
-        // just-confirmed base position. Best-effort (current monster positions, not per-frame history — see the
-        // predictor header); exact vs a stationary monster, a bounded reconcile vs a fast mover.
-        GatherMonsterObstacles(localEntity.Position.X, localEntity.Position.Y);
+        // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: feed the REPLAY the same nearby obstacle set (monsters + OTHER
+        // players, self excluded), gathered from the server's just-confirmed base position. Best-effort (current
+        // replicated positions, not per-frame history — see the predictor header); exact vs a stationary body, a
+        // bounded reconcile vs a fast mover (now symmetric — the other player corrects too).
+        GatherEntityObstacles(localEntity.Position.X, localEntity.Position.Y);
         predictor.Reconcile(localEntity.Position, _lastInputSeq, _obstacleScratch);
     }
 
-    // PLAYER↔MONSTER COLLISION: refill `_obstacleScratch` (cleared first) with the nearby MONSTER bodies — as Circles of
-    // the server body radius — near the local player at (centerX, centerY). The Monster-kind filter excludes the local
-    // player AND every other player (player↔player is the NEXT phase — to enable it, also include IsLocal-excluded
-    // EntityKind.Player here). Each monster contributes its REPLICATED Position; a cheap distance cutoff keeps the set to
-    // the bodies actually within collision reach (no client spatial index — the AOI already bounds _entities). NO alloc.
-    private void GatherMonsterObstacles(double centerX, double centerY)
+    // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: refill `_obstacleScratch` (cleared first) with the nearby MONSTER and
+    // OTHER-PLAYER bodies — as Circles of the server body radius — near the local player at (centerX, centerY). The filter
+    // keeps Monster OR Player and EXCLUDES the LOCAL player (it must NEVER be its own obstacle — that pins it in place).
+    // Each body contributes its REPLICATED Position (the authoritative-tracking position, the same one monsters use — NOT
+    // the rendered/interpolated one): exact vs a STATIONARY other player/monster (no rubber-band); a bounded, now SYMMETRIC
+    // approximation vs a MOVING one (both predicted bodies correct a little — see the mutual-prediction note below and the
+    // predictor header). A cheap distance cutoff keeps the set to the bodies actually within collision reach (no client
+    // spatial index — the AOI already bounds _entities). NO alloc.
+    private void GatherEntityObstacles(double centerX, double centerY)
     {
         _obstacleScratch.Clear();
         if (Server is not { } server)
@@ -588,7 +594,14 @@ public sealed class MmoClient : IDisposable
         foreach (var pair in _entities)
         {
             var entity = pair.Value;
-            if (entity.Kind != EntityKind.Monster)
+            if (entity.Kind != EntityKind.Monster && entity.Kind != EntityKind.Player)
+            {
+                continue;
+            }
+
+            // SELF-EXCLUSION (no-collide-with-yourself): skip the local player. Guard the uint? — only an attached local
+            // id can match. A bug here would make the player its own obstacle and pin it permanently in place.
+            if (LocalNetworkId is { } local && pair.Key == local)
             {
                 continue;
             }
@@ -610,6 +623,15 @@ public sealed class MmoClient : IDisposable
         {
             _obstacleScratch.Add(new ContinuousCollision.Circle(x, y, radius));
         }
+    }
+
+    // TEST HOOK (player↔player collision): run the local obstacle gather at (centerX, centerY) and return a copy of the
+    // resulting circles so a test can assert WHICH bodies were emitted and in what order (self excluded, monsters + other
+    // players included, Id-sorted). Production never calls this — it reads the reused _obstacleScratch directly.
+    internal IReadOnlyList<ContinuousCollision.Circle> GatherEntityObstaclesForTests(double centerX, double centerY)
+    {
+        GatherEntityObstacles(centerX, centerY);
+        return _obstacleScratch.ToArray();
     }
 
     public void SendChat(string text)

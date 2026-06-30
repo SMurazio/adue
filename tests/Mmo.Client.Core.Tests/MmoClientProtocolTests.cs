@@ -284,6 +284,42 @@ public sealed class MmoClientProtocolTests
         Assert.Equal(200d, client.MovementDebug.EffectiveCadenceMs);
     }
 
+    // PLAYER↔PLAYER COLLISION: the LOCAL player's predicted obstacle gather now keeps MONSTERS *and* OTHER PLAYERS and
+    // EXCLUDES the local player itself (it must NEVER be its own obstacle — that would pin it in place), emitted in stable
+    // NetworkId order (parity with the server). Mutual prediction (two predicted bodies) is FEEL — the human tests two
+    // clients; this pins the gather composition + self-exclusion + Id-sort headlessly.
+    [Fact]
+    public void EntityObstacleGatherExcludesSelf_IncludesOtherPlayersAndMonsters_IdSorted()
+    {
+        using var client = CreateClient(out _);
+        var localCharacter = Guid.NewGuid();
+
+        // BodyRadius 0.5 ⇒ gather reach = 2*0.5 + 2.0 = 3.0 units around the local centre (1 tile == 1 world unit).
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30, 0.5f));
+        client.HandleMessageForTests(new LoginResultMessage(true, localCharacter, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(9, localCharacter, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
+        Assert.Equal(9u, client.LocalNetworkId);
+
+        // Three OTHER bodies within reach (distinct characterIds ⇒ none is the local player): two players + a monster.
+        client.HandleMessageForTests(new EntitySpawnMessage(20, Guid.NewGuid(), EntityKind.Player, "P20", new TileCoord(6, 5), Direction8.S, StepCooldownMs: 140));
+        client.HandleMessageForTests(new EntitySpawnMessage(10, Guid.NewGuid(), EntityKind.Player, "P10", new TileCoord(7, 5), Direction8.S, StepCooldownMs: 140));
+        client.HandleMessageForTests(new EntitySpawnMessage(15, Guid.NewGuid(), EntityKind.Monster, "M15", new TileCoord(5, 6), Direction8.S, StepCooldownMs: 140));
+        // A body FAR outside the gather box ⇒ dropped by the distance cutoff.
+        client.HandleMessageForTests(new EntitySpawnMessage(30, Guid.NewGuid(), EntityKind.Player, "Far", new TileCoord(20, 20), Direction8.S, StepCooldownMs: 140));
+
+        var obstacles = client.GatherEntityObstaclesForTests(5d, 5d);
+
+        // SELF never an obstacle (no circle at the local centre); the far body is out of reach.
+        Assert.DoesNotContain(obstacles, c => c.X == 5d && c.Y == 5d);
+        Assert.DoesNotContain(obstacles, c => c.X == 20d && c.Y == 20d);
+        // Exactly the three nearby bodies (players 10,20 + monster 15), in STABLE Id order 10 → 15 → 20.
+        Assert.Equal(3, obstacles.Count);
+        Assert.Equal(7d, obstacles[0].X); Assert.Equal(5d, obstacles[0].Y); // id 10 (player)
+        Assert.Equal(5d, obstacles[1].X); Assert.Equal(6d, obstacles[1].Y); // id 15 (monster)
+        Assert.Equal(6d, obstacles[2].X); Assert.Equal(5d, obstacles[2].Y); // id 20 (player)
+        Assert.All(obstacles, c => Assert.Equal(0.5d, c.Radius));
+    }
+
     private static MmoClient CreateClient(out List<IProtocolMessage> outbound, bool debugMovement = false, Action<string>? traceSink = null)
     {
         outbound = [];

@@ -3358,8 +3358,9 @@ public sealed class GameServer
 
     // PLAYER↔MONSTER COLLISION: the action-executor obstacle gather (injected into ServerActionExecutor). KIND-AWARE: a
     // MONSTER actor (a hop arc / charge dash) collides with nearby PLAYERS so it STOPS at the player; a PLAYER actor (a
-    // predicted jump) gathers NOTHING this phase — player jumps stay byte-identical + parity-safe (the client predictor
-    // jump path is unchanged). This is the seam to widen for player-jump↔monster collision later.
+    // predicted jump) gathers NOTHING — player jumps stay byte-identical + parity-safe (the client predictor jump path is
+    // unchanged). Player↔player collision (just shipped) covers only the WALKING integrate path; a predicted jump-vs-player
+    // (and jump-vs-monster) is a FUTURE refinement — this is the seam to widen for it. Leave it gathering nothing.
     private void GatherActionObstacles(WorldEntity actor, WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch)
     {
         scratch.Clear();

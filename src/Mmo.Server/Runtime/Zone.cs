@@ -19,18 +19,18 @@ public sealed class Zone
     // inside the same call). NEVER touched by the monster TryStep path.
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
 
-    // PLAYER↔MONSTER COLLISION: the reused per-tick scratch for the player integrator's nearby-MONSTER obstacle set.
-    // `_obstacleCandidateScratch` receives the spatial-grid superset (GatherInterestCandidates clears it); the Monster
-    // candidates within reach of the swept move are projected into `_obstacleScratch` as Circles and handed to the
-    // swept-circle resolver so a player STOPS at / SLIDES along a monster (never walks through it). Both reused → zero
-    // per-tick alloc. Single-threaded tick loop, so one shared pair is safe (each IntegrateMovement fully consumes them
-    // before the next entity's call). Other PLAYERS are intentionally NOT gathered this phase (player↔player is next).
+    // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: the reused per-tick scratch for the player integrator's nearby-body
+    // obstacle set (monsters + OTHER players). `_obstacleCandidateScratch` receives the spatial-grid superset
+    // (GatherInterestCandidates clears it); the Monster|Player candidates within reach of the swept move (self excluded)
+    // are projected into `_obstacleScratch` as Circles and handed to the swept-circle resolver so a player STOPS at /
+    // SLIDES along a monster OR another player (never walks through it). Both reused → zero per-tick alloc. Single-threaded
+    // tick loop, so one shared pair is safe (each IntegrateMovement fully consumes them before the next entity's call).
     private readonly List<WorldEntity> _obstacleCandidateScratch = new();
     private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
-    // The spatial-grid query radius (TILES) for the player's nearby-monster obstacle gather. Two bodies overlap only
+    // The spatial-grid query radius (TILES) for the player's nearby-body obstacle gather. Two bodies overlap only
     // when their centres are within radius+radius = 1.0 tile; a 2-tile box comfortably covers that plus the sub-tile
-    // per-input move delta, so the exact circle-vs-circle test in the resolver never misses a blocking monster. A pure
+    // per-input move delta, so the exact circle-vs-circle test in the resolver never misses a blocking body. A pure
     // perf bound — correctness is the resolver's distance test (the grid returns a superset).
     private const int ObstacleQueryRadiusTiles = 2;
 
@@ -151,12 +151,12 @@ public sealed class Zone
         var delta = entity.ComputeMoveDelta(unitDir, dtSeconds);
         _tileGrid.QueryNearbyWalls(start, delta, radius, _wallScratch);
 
-        // PLAYER↔MONSTER COLLISION: gather the nearby MONSTER bodies as Circle obstacles so the player STOPS at / SLIDES
-        // along a monster, resolved by the SAME shared swept-circle resolver as walls (so the Phase-4 client predictor,
-        // feeding the SAME monster set, predicts the same slide → no rubber-band). Self (a Player) and other players are
-        // excluded by the Monster-only filter. With no monster nearby the obstacle list is empty and the result is
-        // byte-identical to the walls-only path.
-        GatherMonsterObstacles(entity, start, radius, _obstacleScratch);
+        // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: gather the nearby MONSTER and OTHER-PLAYER bodies as Circle obstacles
+        // so the moving player STOPS at / SLIDES along a monster OR another player, resolved by the SAME shared swept-circle
+        // resolver as walls (so the Phase-4 client predictor, feeding the SAME body set, predicts the same slide → no
+        // rubber-band). SELF (the moving player) is excluded by the Id != self.Id guard (no-collide-with-yourself). With no
+        // other body nearby the obstacle list is empty and the result is byte-identical to the walls-only path.
+        GatherEntityObstacles(entity, start, radius, _obstacleScratch);
         var resolved = _obstacleScratch.Count == 0
             ? ContinuousCollision.Resolve(start, delta, radius, _wallScratch)
             : ContinuousCollision.Resolve(start, delta, radius, _wallScratch, _obstacleScratch);
@@ -170,25 +170,29 @@ public sealed class Zone
         return crossedTile;
     }
 
-    // PLAYER↔MONSTER COLLISION: fill `destination` (cleared first) with the nearby MONSTER bodies — as Circles of the
-    // shared body radius — that the moving player `self` could collide with this step. Queries the spatial grid for a
-    // small tile box around the start tile (a superset; the resolver applies the exact circle-vs-circle test), keeps
-    // only EntityKind.Monster (so self — a Player — and other players are excluded this phase), and projects each to a
-    // Circle at its authoritative Position. Deterministic order (the grid's stable candidate order). Reuses the Zone's
-    // candidate scratch internally; appends Circles to the caller's reused `destination`. NO per-tick alloc.
-    private void GatherMonsterObstacles(WorldEntity self, WorldVector start, double radius, List<ContinuousCollision.Circle> destination)
+    // PLAYER↔MONSTER + PLAYER↔PLAYER COLLISION: fill `destination` (cleared first) with the nearby MONSTER and
+    // OTHER-PLAYER bodies — as Circles of the shared body radius — that the moving player `self` could collide with this
+    // step. Queries the spatial grid for a small tile box around the start tile (a superset; the resolver applies the
+    // exact circle-vs-circle test), keeps Monster|Player and ALWAYS excludes `self` (the no-collide-with-yourself guard —
+    // `self` is the moving player; it must NEVER be its own obstacle or it pins in place), and projects each to a Circle
+    // at its AUTHORITATIVE Position. Each client predicts the LOCAL player against each OTHER player's REPLICATED
+    // position (the same authoritative-tracking position used here), so the resolves are mutual + symmetric. Deterministic
+    // order (the grid's stable candidate order, then the Id sort). Reuses the Zone's candidate scratch internally; appends
+    // Circles to the caller's reused `destination`. NO per-tick alloc.
+    private void GatherEntityObstacles(WorldEntity self, WorldVector start, double radius, List<ContinuousCollision.Circle> destination)
     {
         destination.Clear();
         World.GatherInterestCandidates(start.ToTileRounded(), ObstacleQueryRadiusTiles, _obstacleCandidateScratch);
         // PARITY (player↔monster review MEDIUM): resolve obstacles in STABLE Id order so this server integrate and the
         // client predictor process a crowd in the SAME order — the circle de-penetration is Gauss-Seidel (order-
-        // dependent), so without a shared order a player overlapping >=2 monsters resolves differently on each side →
+        // dependent), so without a shared order a player overlapping >=2 bodies resolves differently on each side →
         // a persistent reconcile (crowd rubber-band). The client gather sorts by the same Id (the shared NetworkId).
         _obstacleCandidateScratch.Sort(static (a, b) => a.Id.CompareTo(b.Id));
         for (var i = 0; i < _obstacleCandidateScratch.Count; i++)
         {
             var candidate = _obstacleCandidateScratch[i];
-            if (candidate.Kind != EntityKind.Monster || candidate.Id == self.Id)
+            // Keep MONSTERS and OTHER PLAYERS; drop anything else, and ALWAYS drop self (no-collide-with-yourself).
+            if ((candidate.Kind != EntityKind.Monster && candidate.Kind != EntityKind.Player) || candidate.Id == self.Id)
             {
                 continue;
             }

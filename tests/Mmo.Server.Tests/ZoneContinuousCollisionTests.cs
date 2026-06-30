@@ -185,6 +185,122 @@ public sealed class ZoneContinuousCollisionTests
         Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.Y), BitConverter.DoubleToInt64Bits(b.Position.Y));
     }
 
+    // ---- PLAYER↔PLAYER COLLISION ---------------------------------------------------------------------------
+    //
+    // Extends player↔monster: the player integrator now gathers OTHER PLAYERS as obstacles too (self excluded), so a
+    // player STOPS at / SLIDES along another player. Mutual prediction (two predicted bodies) is FEEL — not headless-
+    // testable; the human tests two clients (walk together → both stop/slide, no major rubber-band). These pin the
+    // SERVER authoritative behaviour: blocked, slide-around, self-NEVER-an-obstacle, and the no-other-body regression.
+
+    // Spawn a SECOND player body at `tile`'s centre into the zone (registers it in the spatial index so the integrator's
+    // nearby-body gather finds it). Distinct networkId + session/character from the first player.
+    private static WorldEntity SpawnSecondPlayer(Zone zone, TileCoord tile, uint networkId)
+    {
+        var session = new ClientSession(null!);
+        var characterId = Guid.NewGuid();
+        session.Authenticate(networkId, characterId, "Other", ClientRole.Player, Zone.DefaultId);
+        var player = zone.SpawnPlayer(networkId, characterId, "Other", tile, session, new Inventory(ItemRegistry.Default));
+        session.AttachEntity(player);
+        return player;
+    }
+
+    [Fact]
+    public void PlayerIntegratingIntoAnotherPlayer_IsBlocked_CentreDistanceStaysAtLeastTwoRadii()
+    {
+        // Open ground. Mover at (8,8); a STATIONARY other player at (11,8) due east. Drive east many ticks: the mover must
+        // STOP at the radius-sum (centre distance >= 2×radius = 1.0), never overlapping, never passing to the other side.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var other = SpawnSecondPlayer(zone, new TileCoord(11, 8), networkId: 2);
+
+        for (var i = 0; i < 200; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.True(Dist(player.Position, other.Position) >= (2d * Radius) - Eps,
+            $"overlapped the other player: dist={Dist(player.Position, other.Position)}");
+        Assert.True(player.Position.X <= other.Position.X + Eps, $"passed through the other player to x={player.Position.X}");
+    }
+
+    [Fact]
+    public void PlayerMovingPastAnOffsetPlayer_SlidesAround_ReachesTheFarSide()
+    {
+        // The other player sits slightly OFF the straight-east path (at (11, 8.45)); driving east, the mover slides around
+        // it (tangential motion preserved) and ends up EAST of it, never overlapping along the way.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var other = SpawnSecondPlayer(zone, new TileCoord(11, 8), networkId: 2);
+        other.ApplyResolvedMove(new WorldVector(11d, 8.45d)); // nudge off-axis so the mover slides past, not stalls
+
+        for (var i = 0; i < 300; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            Assert.True(Dist(player.Position, other.Position) >= (2d * Radius) - 1e-3,
+                $"overlapped the other player mid-slide: dist={Dist(player.Position, other.Position)}");
+        }
+
+        Assert.True(player.Position.X > other.Position.X + Radius,
+            $"did not get past the other player (x={player.Position.X}, other x={other.Position.X})");
+    }
+
+    [Fact]
+    public void LonePlayer_IsNeverItsOwnObstacle_MovesUnobstructed()
+    {
+        // SELF-EXCLUSION (no-collide-with-yourself): the gather now keeps EntityKind.Player, so the moving player is itself
+        // a Player candidate — the Id != self.Id guard must drop it. If that guard broke, the player would collide with its
+        // own body and pin in place. With no OTHER entity present, a lone player must advance exactly like open ground.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 10d);
+
+        for (var i = 0; i < 5; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.1d, Radius); // 1 unit/tick east
+        }
+
+        Assert.Equal(13d, player.Position.X, Eps); // advanced ~5 tiles east — NOT pinned by itself
+        Assert.Equal(8d, player.Position.Y, Eps);
+    }
+
+    [Fact]
+    public void PlayerWithNoOtherPlayerNearby_MovesByteIdentical_ToWallsOnlyPath()
+    {
+        // Another player parked FAR away (outside the obstacle-gather box) must leave the integrated path byte-identical to
+        // the same zone with no other player at all — the empty-obstacle regression (walls-only / player↔monster path
+        // unchanged when no other body is nearby).
+        var (zoneA, a) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        SpawnSecondPlayer(zoneA, new TileCoord(28, 28), networkId: 2); // ~20 tiles away — far outside the gather box
+
+        var (zoneB, b) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+
+        for (var i = 0; i < 50; i++)
+        {
+            zoneA.IntegrateMovement(a, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            zoneB.IntegrateMovement(b, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.X), BitConverter.DoubleToInt64Bits(b.Position.X));
+        Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.Y), BitConverter.DoubleToInt64Bits(b.Position.Y));
+    }
+
+    [Fact]
+    public void PlayerBlockedBy_BothAMonsterAndAnotherPlayer_StopsAtWhicheverIsInThePath()
+    {
+        // The gather now includes BOTH kinds (monsters + other players), self excluded. Place a MONSTER directly east at
+        // (11,8) and another PLAYER directly east at (11,8) is impossible (same tile), so: monster east at (11,8), other
+        // player NORTH-east off-axis at (10,7). Driving NE, the mover must collide with at least one body and never
+        // overlap either — proving both kinds are in the obstacle set simultaneously.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var monster = SpawnMonster(zone, new TileCoord(11, 8), networkId: 2);
+        var other = SpawnSecondPlayer(zone, new TileCoord(10, 7), networkId: 3);
+
+        for (var i = 0; i < 300; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.NE.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            Assert.True(Dist(player.Position, monster.Position) >= (2d * Radius) - 1e-3,
+                $"overlapped the monster: dist={Dist(player.Position, monster.Position)}");
+            Assert.True(Dist(player.Position, other.Position) >= (2d * Radius) - 1e-3,
+                $"overlapped the other player: dist={Dist(player.Position, other.Position)}");
+        }
+    }
+
     // NOTE (Phase 11 coherence sweep): the former MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression
     // test was DELETED here. It asserted monsters block via the tile-step path (Zone.TryStep / IsStepWalkable), but
     // after Phase 8 monsters move via the continuous HopLocomotion (no TryStep), and the hop's collision-valid landing
