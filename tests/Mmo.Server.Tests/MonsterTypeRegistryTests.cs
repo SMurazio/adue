@@ -503,19 +503,26 @@ public sealed class MonsterTypeRegistryTests
         Assert.True(registry.TryApply("gnoll.chargeCooldownMs", 999999d, out var ccHi));
         Assert.Equal(60000d, ccHi, 6);
 
-        // chargeDistanceUnits clamps to [0.25, 16].
+        // chargeDistanceUnits clamps to [0, 16] — MIN 0 (0 = disabled; a non-charger carries 0, which must survive a
+        // Save→reload round-trip). A negative is clamped up to 0; a huge value to 16.
         Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 6d, out var cd));
         Assert.Equal(6d, cd, 6);
         Assert.Equal(6d, gnoll.ChargeDistanceUnits, 6);
-        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 0d, out var cdLo));
-        Assert.Equal(0.25d, cdLo, 6);
+        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 0d, out var cdZero));
+        Assert.Equal(0d, cdZero, 6); // 0 is valid (disabled), NOT bumped to a positive floor.
+        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", -5d, out var cdLo));
+        Assert.Equal(0d, cdLo, 6);
+        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 99d, out var cdHi));
+        Assert.Equal(16d, cdHi, 6);
 
-        // chargeTriggerRangeUnits clamps to [0.5, 64].
+        // chargeTriggerRangeUnits clamps to [0, 64] — same 0-is-valid rationale.
         Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 10d, out var ct));
         Assert.Equal(10d, ct, 6);
         Assert.Equal(10d, gnoll.ChargeTriggerRangeUnits, 6);
-        Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 0d, out var ctLo));
-        Assert.Equal(0.5d, ctLo, 6);
+        Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 0d, out var ctZero));
+        Assert.Equal(0d, ctZero, 6);
+        Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 99d, out var ctHi));
+        Assert.Equal(64d, ctHi, 6);
     }
 
     // CONTEXTUAL-KNOBS: a live flee/charge retune flows into BuildTunables (the AI reads it fresh each tick → effective

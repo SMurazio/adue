@@ -67,7 +67,11 @@ public static class ProtocolCodec
     // Monsters set these from their MonsterType so a type renders visibly distinct (a gnoll bigger + tinted) with NO
     // art; every other kind ships the defaults so its render is byte-identical. The replicated hook stays when real
     // per-type models/animations replace the client-side tint/scale mapping later. Server + every in-repo client flip.
-    public const byte Version = 41;
+    // v42 — MONSTER-TUNING-SAVE: a new client->server SaveMonsterTuningMessage (parameterless, admin-gated) — the F1
+    // Monster tab's Save button persists the live-tuned monster TYPE values back to Content/monsters.json so they survive
+    // a restart (AdminSetTuning is in-memory only). Additive command message + the new MessageType tag; no existing wire
+    // layout changes. Server + every in-repo client flip together.
+    public const byte Version = 42;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -150,6 +154,10 @@ public static class ProtocolCodec
             case AdminSetTuningMessage value:
                 WriteString(writer, value.Key);
                 writer.Write(value.Value);
+                break;
+            case SaveMonsterTuningMessage:
+                // MONSTER-TUNING-SAVE (v42): a parameterless command — the header (magic/version/type) IS the whole
+                // packet, no payload. Mirrored by the SaveMonsterTuning decode (which reads nothing).
                 break;
             case SnapshotAckMessage value:
                 writer.Write(value.LastSnapshotSequence);
@@ -332,6 +340,8 @@ public static class ProtocolCodec
             MessageType.ChatSend => new ChatSendMessage(ReadString(reader)),
             MessageType.AdminSetStat => new AdminSetStatMessage(reader.ReadByte(), reader.ReadInt32()),
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
+            // MONSTER-TUNING-SAVE (v42): parameterless — no payload to read; mirrors the empty encode body.
+            MessageType.SaveMonsterTuning => new SaveMonsterTuningMessage(),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),

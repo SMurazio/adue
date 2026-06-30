@@ -571,12 +571,22 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyOne()
+    public void ProtocolVersionIsFortyTwo()
     {
-        // MONSTER-BEHAVIOR P6 (v41): EntitySpawn gained the placeholder per-type visual — a replicated TintRgb (uint
-        // 0xRRGGBB) + ScaleMilli (ushort, scale × 1000). Bump on top of v40 (data-driven MonsterTuning). Pin it so a
-        // change is caught.
-        Assert.Equal(41, ProtocolCodec.Version);
+        // MONSTER-TUNING-SAVE (v42): added the parameterless, admin-gated SaveMonsterTuningMessage (F1 Monster-tab Save
+        // persists live monster tuning to Content/monsters.json). Additive command + tag; bump on top of v41 (the
+        // placeholder per-type visual). Pin it so a change is caught.
+        Assert.Equal(42, ProtocolCodec.Version);
+    }
+
+    // MONSTER-TUNING-SAVE (v42): the parameterless Save command round-trips through the codec (header-only, no payload).
+    [Fact]
+    public void SaveMonsterTuningRoundTrips()
+    {
+        var original = new SaveMonsterTuningMessage();
+        var decoded = Assert.IsType<SaveMonsterTuningMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+        Assert.Equal(original, decoded);
+        Assert.Equal(MessageType.SaveMonsterTuning, decoded.Type);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).

@@ -29,6 +29,10 @@ public enum MessageType : ushort
     // 15 is the next free client->server tag (8-11 are the deleted tile-step gaps, 12-14 are AdminSetStat/Attack/Loot).
     // See ActionIntentMessage.
     ActionIntent = 15,
+    // MONSTER-TUNING-SAVE (v42): admin-gated, parameterless command — PERSIST the current live-tuned monster TYPE values
+    // back to the data manifest (Content/monsters.json) so they survive a restart (AdminSetTuning is in-memory only).
+    // Tag 16 is the next free client->server tag (8-11 are the deleted tile-step gaps). See SaveMonsterTuningMessage.
+    SaveMonsterTuning = 16,
 
     ServerHello = 100,
     LoginResult = 101,

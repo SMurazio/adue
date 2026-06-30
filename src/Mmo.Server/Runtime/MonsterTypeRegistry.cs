@@ -56,13 +56,16 @@ public sealed class MonsterTypeRegistry
     private const int MinHopDelayMs = 0;
     private const int MaxHopDelayMs = 5000;
     // MONSTER-BEHAVIOR P5 charge bounds (behavior-specific data, clamped on load like FleeHealthPct — NOT live F1
-    // knobs). Cooldown 0 (no charge) .. 60 s; dash distance 0.25 .. 16 units; trigger range 0.5 .. 64 units (the aggro
-    // band). A nonsense author value is clamped, never honoured, so the data file cannot author an insane charge.
+    // knobs). Cooldown 0 (no charge) .. 60 s; dash distance 0 (disabled) .. 16 units; trigger range 0 (disabled) .. 64
+    // units (the aggro band). A nonsense author value is clamped, never honoured, so the data file cannot author an
+    // insane charge. MIN 0 (not a positive floor): 0 is the legitimate value a NON-charger carries (ChargeEnabled gates
+    // on the "charge" ability + a positive cooldown, not on distance), so a positive floor would corrupt a non-charger's
+    // 0 to the floor on manifest load — breaking the Save→reload round-trip (Part B). A real charger authors 0.5..16.
     private const int MinChargeCooldownMs = 0;
     private const int MaxChargeCooldownMs = 60000;
-    private const double MinChargeDistanceUnits = 0.25d;
+    private const double MinChargeDistanceUnits = 0d;
     private const double MaxChargeDistanceUnits = 16d;
-    private const double MinChargeTriggerRangeUnits = 0.5d;
+    private const double MinChargeTriggerRangeUnits = 0d;
     private const double MaxChargeTriggerRangeUnits = 64d;
     // MONSTER-BEHAVIOR P6 render-scale bounds: 0.25× (a quarter size) .. 4× (clearly large). A nonsense author value
     // is clamped, never honoured, so the data file cannot author an invisible or world-filling placeholder visual.
@@ -356,6 +359,70 @@ public sealed class MonsterTypeRegistry
 
         return registry;
     }
+
+    // MONSTER-TUNING-SAVE: the FAITHFUL INVERSE of FromManifestJson — serialize ALL live types back to the manifest
+    // JSON shape, writing EVERY field FromManifestJson reads (id, displayName, the lootTableId/locomotion/behavior/
+    // ability selectors, the charge tuning, every numeric tunable, the renderTint as "#RRGGBB" + renderScale). Used by
+    // the F1 Monster-tab Save button (via GameServer) to PERSIST live-tuned values to Content/monsters.json so they
+    // survive a restart (today AdminSetTuning is in-memory only). CRITICAL: it must drop NOTHING — a Save that omitted a
+    // selector (locomotion/behavior/abilities/tint/scale) would, on reload, revert e.g. the gnoll to a default slime-like
+    // monster. Round-trip pinned by a test: FromManifestJson(tickRate, ToManifestJson()) reproduces every field of every
+    // type. The values are written AS-IS (already in-range — clamped on the first load / each TryApply); the reload
+    // re-clamps idempotently. System.Text.Json cannot write `//` comments, so the annotations the shipped file carries
+    // are DROPPED on Save (acceptable for a dev tool — the data is preserved, only the prose is lost).
+    public string ToManifestJson()
+    {
+        var types = _ordered.Select(t => (MonsterTypeDto?)ToDto(t)).ToList();
+        return JsonSerializer.Serialize(new MonsterManifestDto(types), SerializeManifestJsonOptions);
+    }
+
+    // MONSTER-TUNING-SAVE: project a live MonsterType onto the on-disk DTO — the inverse mapping of the per-field reads
+    // in FromManifestJson. NAMED args (not positional) so a new DTO field forces a compile error here until it is mapped,
+    // keeping the serializer from silently dropping a field a later phase adds. AbilityIds is copied (a fresh list) so the
+    // DTO never aliases the live type's mutable list. RenderTintRgb is formatted back to the authoring "#RRGGBB" hex.
+    private static MonsterTypeDto ToDto(MonsterType t) => new(
+        Id: t.Id,
+        DisplayName: t.DisplayName,
+        LootTableId: t.LootTableId,
+        LocomotionId: t.LocomotionId,
+        BehaviorId: t.BehaviorId,
+        AbilityIds: new List<string>(t.AbilityIds),
+        ChargeCooldownMs: t.ChargeCooldownMs,
+        ChargeDistanceUnits: t.ChargeDistanceUnits,
+        ChargeTriggerRangeUnits: t.ChargeTriggerRangeUnits,
+        MaxHealth: t.MaxHealth,
+        FleeHealthPct: t.FleeHealthPct,
+        MoveSpeedMultiplier: t.MoveSpeedMultiplier,
+        RoamRadius: t.RoamRadius,
+        PauseMinMs: t.PauseMinMs,
+        PauseMaxMs: t.PauseMaxMs,
+        AggroRadius: t.AggroRadius,
+        ChaseLeash: t.ChaseLeash,
+        AttackDamage: t.AttackDamage,
+        AttackCooldownMs: t.AttackCooldownMs,
+        AttackRangeUnits: t.AttackRangeUnits,
+        HopDistanceUnits: t.HopDistanceUnits,
+        HopHeightUnits: t.HopHeightUnits,
+        HopAirborneMs: t.HopAirborneMs,
+        HopDelayMs: t.HopDelayMs,
+        RespawnMs: t.RespawnMs,
+        RenderTint: FormatTintRgb(t.RenderTintRgb),
+        RenderScale: t.RenderScale);
+
+    // MONSTER-TUNING-SAVE: the inverse of ParseTintRgb — pack a 0xRRGGBB uint back to the authoring "#RRGGBB" hex string
+    // (uppercase, 6 digits, '#'-prefixed). The high byte is masked so only the 24 RGB bits are emitted; white 0xFFFFFF
+    // → "#FFFFFF" (re-parsed to white = no tint, the round-trip identity for an untinted type).
+    private static string FormatTintRgb(uint rgb) =>
+        "#" + (rgb & 0xFFFFFFu).ToString("X6", System.Globalization.CultureInfo.InvariantCulture);
+
+    // MONSTER-TUNING-SAVE: write options — indented (human-readable) + camelCase property names (matching the shipped
+    // manifest's casing; FromManifestJson reads case-insensitively, so the exact casing is cosmetic). DISTINCT from the
+    // READ options (ManifestJsonOptions) — Disallow/comment-skip/trailing-commas are read-time concerns.
+    private static readonly JsonSerializerOptions SerializeManifestJsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
 
     // MONSTER-BEHAVIOR P6: parse an authoring-friendly "#RRGGBB" (or "RRGGBB") hex string into a packed 0xRRGGBB uint.
     // Tolerant: a leading '#' is optional; surrounding whitespace is trimmed. ANY malformed/missing/blank value (null,

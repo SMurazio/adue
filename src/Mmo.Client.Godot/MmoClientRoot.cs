@@ -1453,10 +1453,33 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_monsterFieldRows.AddThemeConstantOverride("separation", 4);
 		rows.AddChild(_monsterFieldRows);
 
+		// Apply (tune live, in-memory) + Save (persist to the manifest so it survives a restart) side by side.
+		var buttonRow = new HBoxContainer { Name = "Row_MonsterButtons" };
+		buttonRow.AddThemeConstantOverride("separation", 8);
 		var apply = new Button { Name = "MonsterApply", Text = "Apply" };
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnMonsterApplyPressed;
-		rows.AddChild(apply);
+		buttonRow.AddChild(apply);
+		// MONSTER-TUNING-SAVE: persist the current live values to Content/monsters.json (server admin-gates the write).
+		var save = new Button { Name = "MonsterSave", Text = "Save" };
+		save.AddThemeFontSizeOverride("font_size", 14);
+		save.Pressed += OnMonsterSavePressed;
+		buttonRow.AddChild(save);
+		rows.AddChild(buttonRow);
+	}
+
+	// MONSTER-TUNING-SAVE: persist the current live-tuned monster values to the manifest so they survive a restart.
+	// Admin-gated client-side for clarity (the server also admin-gates the write); sends the parameterless
+	// SaveMonsterTuningMessage. The server replies with a "saved monster tuning to <path>" system line.
+	private void OnMonsterSavePressed()
+	{
+		if (_client?.Role != ClientRole.Admin)
+		{
+			return;
+		}
+
+		_client.SendSaveMonsterTuning();
+		ShowInteractFeedback("Monster tuning save requested.");
 	}
 
 	// Server tab (was F4): the server-side tuning knobs — aoi.interestRadius. Apply sends every server field via

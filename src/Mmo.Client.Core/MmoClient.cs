@@ -687,6 +687,15 @@ public sealed class MmoClient : IDisposable
         Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
     }
 
+    // MONSTER-TUNING-SAVE: ask the server to PERSIST the current live-tuned monster TYPE values to the data manifest
+    // (Content/monsters.json) so they survive a restart. Parameterless, reliable-ordered; the server admin-gates it (a
+    // non-admin send is a server-side no-op) and replies with a "saved ..." system line. The F1 Monster tab Save button
+    // drives this. Pairs with SendAdminSetTuning (Apply): Apply tunes live, Save persists.
+    public void SendSaveMonsterTuning()
+    {
+        Send(new SaveMonsterTuningMessage(), DeliveryMethod.ReliableOrdered);
+    }
+
     // COMBAT-S1: ask the server to set the LOCAL player's current vital (0=HP, 1=mana, 2=stamina) to value. The
     // F7 dev-set window drives this. Reliable-ordered; the server admin-gates + clamps, and the authoritative
     // result lands back via PlayerStatsMessage (no client-side prediction). A non-admin send is a server no-op.

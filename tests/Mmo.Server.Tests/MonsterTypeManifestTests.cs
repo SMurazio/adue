@@ -452,6 +452,133 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(expected, t.RenderScale, 6);
     }
 
+    // MONSTER-TUNING-SAVE: the CRITICAL round-trip — ToManifestJson must be the FAITHFUL INVERSE of FromManifestJson.
+    // A 2-type registry (the default slime + a FULLY-COMPOSED gnoll: glide locomotion / skirmisher behavior / charge
+    // ability + a NON-default tint + scale + every tunable) is serialized then re-loaded; EVERY field of EVERY type must
+    // survive. This is the single most important pin: a Save that dropped a P1–P6 selector (locomotion/behavior/abilities/
+    // tint/scale) would, on reload, revert the gnoll to a default slime-like monster. The gnoll authors a non-default
+    // tint + abilities specifically to prove those survive.
+    [Fact]
+    public void ToManifestJsonRoundTripsEveryFieldOfEveryType()
+    {
+        const string json = """
+        {
+          "types": [
+            {
+              "id": "slime",
+              "displayName": "Slime",
+              "lootTableId": "slime_loot",
+              "locomotionId": "hop",
+              "behaviorId": "basicRoamer",
+              "maxHealth": 100,
+              "moveSpeedMultiplier": 0.6,
+              "roamRadius": 4,
+              "pauseMinMs": 2000,
+              "pauseMaxMs": 5000,
+              "aggroRadius": 6,
+              "chaseLeash": 12,
+              "attackDamage": 10,
+              "attackCooldownMs": 1000,
+              "attackRangeUnits": 1.5,
+              "hopDistanceUnits": 1.5,
+              "hopHeightUnits": 0.5,
+              "hopAirborneMs": 300,
+              "hopDelayMs": 400,
+              "respawnMs": 5000
+            },
+            {
+              "id": "gnoll",
+              "displayName": "Gnoll",
+              "lootTableId": "",
+              "locomotionId": "glide",
+              "behaviorId": "skirmisher",
+              "renderTint": "#B5651D",
+              "renderScale": 1.4,
+              "abilityIds": ["charge"],
+              "chargeCooldownMs": 4000,
+              "chargeDistanceUnits": 4.0,
+              "chargeTriggerRangeUnits": 7.0,
+              "maxHealth": 200,
+              "moveSpeedMultiplier": 0.9,
+              "roamRadius": 5,
+              "aggroRadius": 8,
+              "chaseLeash": 16,
+              "attackDamage": 20,
+              "attackCooldownMs": 1200,
+              "attackRangeUnits": 1.5,
+              "fleeHealthPct": 0.3
+            }
+          ]
+        }
+        """;
+
+        var original = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        var reloaded = MonsterTypeRegistry.FromManifestJson(TickRate, original.ToManifestJson());
+
+        AssertRegistriesEqual(original, reloaded);
+
+        // Prove the gnoll's composition selectors specifically survived (the headline risk).
+        Assert.True(reloaded.TryGet("gnoll", out var g));
+        Assert.Equal("glide", g.LocomotionId);
+        Assert.Equal("skirmisher", g.BehaviorId);
+        Assert.Equal(new[] { "charge" }, g.AbilityIds);
+        Assert.Equal(0xB5651Du, g.RenderTintRgb);
+        Assert.Equal(1.4d, g.RenderScale, 6);
+        Assert.Equal(0.3d, g.FleeHealthPct, 6);
+        Assert.Equal(4000, g.ChargeCooldownMs);
+    }
+
+    // MONSTER-TUNING-SAVE: the SHIPPED Content/monsters.json round-trips through ToManifestJson → FromManifestJson with
+    // every value preserved (parity) — so saving the unchanged shipped data does not silently mutate any monster.
+    [Fact]
+    public void ShippedManifestRoundTripsThroughToManifestJsonUnchanged()
+    {
+        var fromShipped = MonsterTypeRegistry.FromManifestJson(TickRate, ReadShippedManifest());
+        var reloaded = MonsterTypeRegistry.FromManifestJson(TickRate, fromShipped.ToManifestJson());
+        AssertRegistriesEqual(fromShipped, reloaded);
+    }
+
+    // Field-by-field equality of two registries (same types in the same order, every MonsterType field equal). Used by
+    // the round-trip pins — a dropped field on Save is the main risk, so this checks ALL of them incl. the selectors.
+    private static void AssertRegistriesEqual(MonsterTypeRegistry expected, MonsterTypeRegistry actual)
+    {
+        Assert.Equal(expected.Types.Count, actual.Types.Count);
+        Assert.Equal(expected.Types.Select(t => t.Id), actual.Types.Select(t => t.Id));
+
+        for (var i = 0; i < expected.Types.Count; i++)
+        {
+            var e = expected.Types[i];
+            var a = actual.Types[i];
+            Assert.Equal(e.Id, a.Id);
+            Assert.Equal(e.DisplayName, a.DisplayName);
+            Assert.Equal(e.LootTableId, a.LootTableId);
+            Assert.Equal(e.LocomotionId, a.LocomotionId);
+            Assert.Equal(e.BehaviorId, a.BehaviorId);
+            Assert.Equal(e.AbilityIds, a.AbilityIds);
+            Assert.Equal(e.ChargeCooldownMs, a.ChargeCooldownMs);
+            Assert.Equal(e.ChargeDistanceUnits, a.ChargeDistanceUnits, 6);
+            Assert.Equal(e.ChargeTriggerRangeUnits, a.ChargeTriggerRangeUnits, 6);
+            Assert.Equal(e.MaxHealth, a.MaxHealth);
+            Assert.Equal(e.FleeHealthPct, a.FleeHealthPct, 6);
+            Assert.Equal(e.MoveSpeedMultiplier, a.MoveSpeedMultiplier, 6);
+            Assert.Equal(e.RoamRadius, a.RoamRadius, 6);
+            Assert.Equal(e.PauseMinMs, a.PauseMinMs);
+            Assert.Equal(e.PauseMaxMs, a.PauseMaxMs);
+            Assert.Equal(e.AggroRadius, a.AggroRadius, 6);
+            Assert.Equal(e.ChaseLeash, a.ChaseLeash, 6);
+            Assert.Equal(e.AttackDamage, a.AttackDamage);
+            Assert.Equal(e.AttackCooldownMs, a.AttackCooldownMs);
+            Assert.Equal(e.AttackRangeUnits, a.AttackRangeUnits, 6);
+            Assert.Equal(e.HopDistanceUnits, a.HopDistanceUnits, 6);
+            Assert.Equal(e.HopHeightUnits, a.HopHeightUnits, 6);
+            Assert.Equal(e.HopAirborneMs, a.HopAirborneMs);
+            Assert.Equal(e.HopDelayMs, a.HopDelayMs);
+            Assert.Equal(e.RespawnMs, a.RespawnMs);
+            Assert.Equal(e.RenderTintRgb, a.RenderTintRgb);
+            Assert.Equal(e.RenderScale, a.RenderScale, 6);
+        }
+    }
+
     private static string ReadShippedManifest()
     {
         var shipped = Path.Combine(System.AppContext.BaseDirectory, "Content", "monsters.json");

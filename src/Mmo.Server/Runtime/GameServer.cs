@@ -617,6 +617,12 @@ public sealed class GameServer
                     HandleAdminSetTuning(session, tuning.Key, tuning.Value);
                 }
                 break;
+            case SaveMonsterTuningMessage:
+                if (session.IsAuthenticated)
+                {
+                    HandleSaveMonsterTuning(session);
+                }
+                break;
             case AdminSetStatMessage stat:
                 if (session.IsAuthenticated)
                 {
@@ -1408,9 +1414,17 @@ public sealed class GameServer
     // loose file is AUTHORITATIVE at runtime (edit it + restart → new monsters); the code-seeded registry is the
     // safety net used when the file is absent OR fails to parse. NOT a ServerOptions field by design — it follows
     // the AppContext.BaseDirectory/Content convention. Server-only STARTUP data: no protocol change.
+    // MONSTER-TUNING-SAVE: the single source of the monster manifest path — the file LoadMonsterTypes READS at startup
+    // AND HandleSaveMonsterTuning WRITES on Save, so the loaded copy and the saved copy can never drift. AppContext.
+    // BaseDirectory/Content/monsters.json is the OUTPUT-dir copy (CopyToOutputDirectory=PreserveNewest); a Saved file
+    // survives rebuilds unless the SOURCE manifest is later edited + rebuilt (which re-clobbers it) — fine for the dev
+    // loop. We write the OUTPUT copy (not the repo source) deliberately: it is the file a restart actually loads.
+    private static string MonsterManifestPath =>
+        Path.Combine(AppContext.BaseDirectory, "Content", "monsters.json");
+
     private static MonsterTypeRegistry LoadMonsterTypes(int tickRate)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Content", "monsters.json");
+        var path = MonsterManifestPath;
         if (File.Exists(path))
         {
             try
@@ -2417,6 +2431,53 @@ public sealed class GameServer
 
         SendSystem(sender, $"tuning: {key} = {ServerTuningRegistry.Format(applied)} (applied live).");
         Log.Info($"{sender.DisplayName} set tuning {key}={ServerTuningRegistry.Format(applied)} (requested {value}).");
+    }
+
+    // MONSTER-TUNING-SAVE: PERSIST the current live-tuned monster TYPE values back to the data manifest so they survive a
+    // restart (AdminSetTuning is in-memory only — lost on restart). ADMIN-GATED with the EXACT same role check as
+    // HandleAdminSetTuning — this WRITES A FILE from a network command, so the gate is the security boundary; a non-admin
+    // send is logged + ignored (no write). On an admin Save we serialize every live type via MonsterTypeRegistry.
+    // ToManifestJson (the faithful inverse of the loader) and write the file LoadMonsterTypes reads. Wrapped in try/catch
+    // (in TrySaveMonsterTypes) so an IO error logs + replies but never crashes the tick loop. No AI/tuning behaviour
+    // changes — Save only mirrors the current values to disk.
+    private void HandleSaveMonsterTuning(ClientSession sender)
+    {
+        if (sender.Role != ClientRole.Admin)
+        {
+            Log.Warn($"Denied SaveMonsterTuning from non-admin {sender.DisplayName}.");
+            return;
+        }
+
+        var path = MonsterManifestPath;
+        if (TrySaveMonsterTypes(_monsterTypes, path, out var error))
+        {
+            SendSystem(sender, $"saved monster tuning to {path}");
+            Log.Info($"{sender.DisplayName} saved monster tuning to {path}.");
+        }
+        else
+        {
+            SendSystem(sender, $"save FAILED: {error}");
+            Log.Warn($"Failed to save monster tuning to {path}: {error}.");
+        }
+    }
+
+    // MONSTER-TUNING-SAVE: serialize the registry to the manifest JSON shape and write it to `path`, returning false +
+    // the error message on any IO/serialization failure (so the caller logs + replies but the tick loop never crashes on
+    // a bad disk). `internal` + path-parameterised so it is unit-testable against a TEMP path without touching the live
+    // Content/monsters.json (the network handler always passes MonsterManifestPath, the file a restart loads).
+    internal static bool TrySaveMonsterTypes(MonsterTypeRegistry registry, string path, out string error)
+    {
+        try
+        {
+            File.WriteAllText(path, registry.ToManifestJson());
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
     }
 
     // Replicates an entity's new effective cadence to every authenticated viewer whose AOI currently

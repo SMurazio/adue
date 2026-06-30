@@ -108,6 +108,17 @@ public sealed record AdminSetTuningMessage(string Key, double Value) : IProtocol
     public MessageType Type => MessageType.AdminSetTuning;
 }
 
+// MONSTER-TUNING-SAVE (protocol v42): admin-gated, PARAMETERLESS client->server command — "persist the current live
+// monster-type tuning to disk". The server serializes the live MonsterType values back to the data manifest
+// (Content/monsters.json, the file LoadMonsterTypes reads at startup) so live tweaks made via AdminSetTuning survive a
+// restart, completing the tune-live → Save → persisted loop. Reliable-ordered. The server REQUIRES the session to be
+// Admin (the same gate as AdminSetTuning — this WRITES A FILE from a network command); a non-admin send is ignored +
+// logged. No payload: the command carries nothing; the server reads the authoritative live registry.
+public sealed record SaveMonsterTuningMessage : IProtocolMessage
+{
+    public MessageType Type => MessageType.SaveMonsterTuning;
+}
+
 public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMessage
 {
     public MessageType Type => MessageType.SnapshotAck;

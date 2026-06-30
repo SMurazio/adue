@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using LiteNetLib;
@@ -135,6 +136,48 @@ public sealed class AdminTuningIntegrationTests
         }
     }
 
+    // MONSTER-TUNING-SAVE: a NON-admin SaveMonsterTuning must be ignored (the gate is the security boundary for a
+    // command that WRITES A FILE) — the session stays alive (no bad-packet disconnect) and the shared monster manifest
+    // on disk is NOT rewritten. We assert the file bytes are unchanged: the non-admin handler returns before any write,
+    // so nothing touches the file (a read-only check — safe under parallel test runs).
+    [Fact]
+    public async Task NonAdminSaveMonsterTuningIsIgnoredAndDoesNotWriteTheManifest()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        // No admins: the sender is a Player, so SaveMonsterTuning must be ignored.
+        var options = CreateOptions(port, database.ConnectionString, interestRadius: 30f, admins: []);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        var manifestPath = Path.Combine(AppContext.BaseDirectory, "Content", "monsters.json");
+        var before = File.Exists(manifestPath) ? File.ReadAllBytes(manifestPath) : null;
+
+        try
+        {
+            await Task.Delay(100);
+            using var watcher = new TuningClient("Watcher");
+            watcher.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => watcher.IsLoggedIn && watcher.OwnNetworkId != 0, watcher);
+
+            watcher.SendSaveMonsterTuning();
+            // Give the server time to process; the session must stay alive and keep receiving snapshots.
+            await PollForAsync(TimeSpan.FromMilliseconds(400), watcher);
+            watcher.ClearMessages();
+            await WaitUntilAsync(() => watcher.Messages.OfType<WorldSnapshotMessage>().Any(), watcher);
+
+            // The manifest on disk must be untouched (the non-admin write was denied).
+            var after = File.Exists(manifestPath) ? File.ReadAllBytes(manifestPath) : null;
+            Assert.Equal(before, after);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
     private static ServerOptions CreateOptions(int port, string connectionString, float interestRadius, string[] admins)
     {
         return new ServerOptions(
@@ -263,6 +306,9 @@ public sealed class AdminTuningIntegrationTests
 
         public void SendAdminSetTuning(string key, double value) =>
             Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+
+        public void SendSaveMonsterTuning() =>
+            Send(new SaveMonsterTuningMessage(), DeliveryMethod.ReliableOrdered);
 
         public void ClearMessages() => Messages.Clear();
 
