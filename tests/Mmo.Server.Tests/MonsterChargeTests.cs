@@ -91,14 +91,25 @@ public sealed class MonsterChargeTests
     // The brain's TryChargeDelegate, mirroring GameServer.BeginMonsterCharge: build a GROUNDED (jumpHeight 0) forward
     // arc Charge def + executor.TryStart. Returns whether the charge actually started (false = on cooldown / already acting).
     private static BasicRoamerBehavior.TryChargeDelegate CreateCharge(ServerActionExecutor executor)
-        => (WorldEntity monster, WorldVector heading, uint serverTick) =>
-            executor.TryStart(monster, ChargeDef(), heading, serverTick);
+        => (WorldEntity monster, WorldVector heading, double distanceToTarget, uint serverTick) =>
+            // Mirror GameServer.TryBeginMonsterCharge: clamp the dash to the gap (M1 review fix — never dash past the
+            // target). After a successful start, zero the stale walk velocity like BeginMonsterCharge does (L1).
+            {
+                var started = executor.TryStart(
+                    monster, ChargeDef(Math.Min(ChargeDistance, distanceToTarget)), heading, serverTick);
+                if (started)
+                {
+                    monster.StopMovement();
+                }
 
-    private static MovementActionDef ChargeDef() => MovementActionRegistry.BuildForwardArcJump(
+                return started;
+            };
+
+    private static MovementActionDef ChargeDef(double distance = ChargeDistance) => MovementActionRegistry.BuildForwardArcJump(
         ActionId.Charge,
         durationTicks: ChargeDuration,
         jumpHeight: 0d,
-        forwardDistanceUnits: ChargeDistance,
+        forwardDistanceUnits: distance,
         cooldownTicks: ChargeCooldown,
         animationId: 2);
 
@@ -411,5 +422,79 @@ public sealed class MonsterChargeTests
 
         var caseInsensitive = new MonsterType("g", "G") { AbilityIds = ["Charge"], ChargeCooldownMs = 4000 };
         Assert.True(MonsterTypeRegistry.ChargeEnabled(caseInsensitive));
+    }
+
+    [Fact]
+    public void ChargingACloseTarget_ClampsToTheGap_DoesNotDashPastTheTarget()
+    {
+        // M1 (P5 review): player 3 units east — within the trigger range (7) but CLOSER than the 4-unit dash. Entities
+        // don't collide with each other, so an UNCLAMPED fixed 4-unit dash would carry the gnoll PAST the player (~1u
+        // behind it). The clamp caps the dash at the gap → it lands on/just-before the player, never east of it.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), health: 100, maxHealth: 100);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(35, 32), Direction8.S);
+        var executor = CreateExecutor(grid, world);
+        var glide = CreateGlide(grid, world, executor);
+        var hits = new int[1];
+        var behavior = CreateBehavior(7, grid, world, player, hits, CreateCharge(executor), skirmisher: false);
+        behavior.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+
+        var playerX = player.Position.X;
+        var charged = false;
+        for (uint tick = 1; tick <= 30; tick++)
+        {
+            behavior.StepMonster(monster, tick, StepCooldownTicks, Tunables(chargeEnabled: true), glide);
+            charged |= executor.IsActive(monster.Id);
+            executor.StepAll(world, tick);
+            Assert.True(monster.Position.X <= playerX + BodyRadius + 1e-6,
+                $"charge overshot PAST the player at tick {tick}: X {monster.Position.X:F3} > playerX {playerX:F3}.");
+        }
+
+        Assert.True(charged, "the gnoll should have charged a 3-unit target.");
+    }
+
+    [Fact]
+    public void ChargeStart_ZeroesTheStaleWalkVelocity()
+    {
+        // L1 (P5 review): player 8 units east — BEYOND the trigger (7), so the gnoll first WALKS in (non-zero glide
+        // velocity), then crosses into the trigger range and charges WHILE moving. The fix zeroes the stale walk
+        // velocity at charge start, so the dash replicates via dense position with Velocity 0 (like the hop), not a
+        // wrong-speed velocity the remote would dead-reckon along under loss.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), health: 100, maxHealth: 100);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(40, 32), Direction8.S);
+        var executor = CreateExecutor(grid, world);
+        var glide = CreateGlide(grid, world, executor);
+        var hits = new int[1];
+        var behavior = CreateBehavior(7, grid, world, player, hits, CreateCharge(executor), skirmisher: false);
+        behavior.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+
+        var walked = false;
+        var chargedWhileWalking = false;
+        for (uint tick = 1; tick <= 40; tick++)
+        {
+            var vBefore = monster.Velocity;
+            behavior.StepMonster(monster, tick, StepCooldownTicks, Tunables(chargeEnabled: true, aggroRadius: 30d), glide);
+            if (!executor.IsActive(monster.Id) && monster.Velocity.Length > 1e-9)
+            {
+                walked = true; // gliding in (non-zero walk velocity) before any charge.
+            }
+
+            if (executor.IsActive(monster.Id))
+            {
+                Assert.Equal(WorldVector.Zero, monster.Velocity); // every charging tick: Velocity 0 (not the walk velocity).
+                if (vBefore.Length > 1e-9)
+                {
+                    chargedWhileWalking = true; // the charge fired on a tick where it had a non-zero walk velocity → cleared.
+                }
+            }
+
+            executor.StepAll(world, tick);
+        }
+
+        Assert.True(walked, "the gnoll should have walked in before charging.");
+        Assert.True(chargedWhileWalking, "the charge should have fired while the gnoll had a non-zero walk velocity (L1).");
     }
 }

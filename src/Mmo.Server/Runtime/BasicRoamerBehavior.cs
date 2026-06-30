@@ -145,7 +145,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // whether the charge actually STARTED — false if the executor's CanStart declined it (already in an action, or on
     // the charge cooldown), in which case the brain falls through to the normal approach. Null (the default dep) =
     // "never charge", so a behavior built without it (or for a non-charger type) is byte-identical to the pre-P5 brain.
-    public delegate bool TryChargeDelegate(WorldEntity monster, WorldVector heading, uint serverTick);
+    public delegate bool TryChargeDelegate(WorldEntity monster, WorldVector heading, double distanceToTarget, uint serverTick);
 
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
     // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
@@ -166,7 +166,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
         _findTarget = findTarget;
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
-        _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, uint _) => false);
+        _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, double _, uint _) => false);
     }
 
     public int TrackedCount => _states.Count;
@@ -366,7 +366,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
         if (t.ChargeEnabled && distToTarget > t.AttackRangeUnits && distToTarget <= t.ChargeTriggerRangeUnits)
         {
             var dirToTarget = (targetPos - monster.Position).Normalized();
-            if (dirToTarget != WorldVector.Zero && _tryCharge(monster, dirToTarget, serverTick))
+            // Pass the GAP so the dash clamps to it (BeginMonsterCharge caps at the distance to target) — entities don't
+            // collide with each other, so an unclamped fixed dash would carry the monster THROUGH and PAST a nearer
+            // target and leave it behind them. Clamping lands it on/adjacent the target (collision keeps body separation).
+            if (dirToTarget != WorldVector.Zero && _tryCharge(monster, dirToTarget, distToTarget, serverTick))
             {
                 state.LastProgressTick = serverTick;
                 return false;

@@ -3254,17 +3254,21 @@ public sealed class GameServer
     // and hands the actual MOTION to BeginMonsterCharge → the shared executor. The brain only decides WHEN; this owns
     // the type-param lookup + the HOW. Returns the executor's TryStart result (false ⇒ on cooldown / already acting →
     // the brain falls through to its normal approach). Only called for ChargeEnabled types, but resolves defensively.
-    private bool TryBeginMonsterCharge(WorldEntity monster, WorldVector heading, uint serverTick)
+    private bool TryBeginMonsterCharge(WorldEntity monster, WorldVector heading, double distanceToTarget, uint serverTick)
     {
         if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
         {
             type = _monsterTypes.Default;
         }
 
+        // M1 (P5 review): CLAMP the dash to the actual gap (like HopLocomotion clamps to toTarget.Length) so the charge
+        // lands ON/adjacent the target instead of overshooting PAST it (entities don't collide with each other, so an
+        // unclamped fixed dash would carry the monster through and behind a nearer target). A far target (gap > the type
+        // dash) still gets the full dash and the monster walks the remainder.
         return BeginMonsterCharge(
             monster,
             heading,
-            type.ChargeDistanceUnits,
+            Math.Min(type.ChargeDistanceUnits, distanceToTarget),
             MonsterChargeDurationTicks,
             _monsterTypes.ChargeCooldownTicks(type),
             serverTick);
@@ -3288,7 +3292,18 @@ public sealed class GameServer
             cooldownTicks: cooldownTicks,         // the EXECUTOR enforces the charge cooldown (unlike the hop's cadence).
             animationId: 2);                      // placeholder; the charge animation is P6.
 
-        return _actionExecutor.TryStart(monster, def, heading, serverTick);
+        var started = _actionExecutor.TryStart(monster, def, heading, serverTick);
+        if (started)
+        {
+            // L1 (P5 review): zero the stale WALK velocity at charge start so the dash replicates like the hop — via the
+            // dense action-airborne position force-include, with Velocity 0 — NOT a leftover ~walk-speed velocity the
+            // remote would dead-reckon along under packet loss (wrong speed / one tick into a wall). The executor drives
+            // the dash by position and leaves Velocity untouched, so it stays 0 for the dash. StopMovement's stop-edge
+            // revision bump re-publishes the zeroed velocity on the walk→charge transition.
+            monster.StopMovement();
+        }
+
+        return started;
     }
 
     // LIVING-ENEMIES P2: the AI's aggro-scan callback — find the NEAREST ALIVE PLAYER within `aggroRadius` (Chebyshev)
