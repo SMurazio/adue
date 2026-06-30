@@ -107,6 +107,11 @@ public sealed class MonsterTypeManifestTests
         var def = new MonsterType("blob", "Blob");
         Assert.Equal(def.MaxHealth, b.MaxHealth);
         Assert.Equal(def.FleeHealthPct, b.FleeHealthPct, 6); // MONSTER-BEHAVIOR P4: omitted fleeHealthPct = 0 (never flee).
+        // MONSTER-BEHAVIOR P5: omitted ability/charge fields fall back to no abilities + a 0 charge (never charge).
+        Assert.Empty(b.AbilityIds);
+        Assert.Equal(def.ChargeCooldownMs, b.ChargeCooldownMs);
+        Assert.Equal(def.ChargeDistanceUnits, b.ChargeDistanceUnits, 6);
+        Assert.Equal(def.ChargeTriggerRangeUnits, b.ChargeTriggerRangeUnits, 6);
         Assert.Equal(def.MoveSpeedMultiplier, b.MoveSpeedMultiplier, 6);
         Assert.Equal(def.RoamRadius, b.RoamRadius, 6);
         Assert.Equal(def.PauseMinMs, b.PauseMinMs);
@@ -318,6 +323,12 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.LocomotionId, d.LocomotionId); // MONSTER-BEHAVIOR P1: the locomotion selector must not drift.
         Assert.Equal(c.BehaviorId, d.BehaviorId); // MONSTER-BEHAVIOR P3: the behavior selector must not drift.
         Assert.Equal(c.FleeHealthPct, d.FleeHealthPct, 6); // MONSTER-BEHAVIOR P4: the slime never flees (0) in both.
+        // MONSTER-BEHAVIOR P5: the slime composes NO abilities + a 0 charge in both the data file and the code seed.
+        Assert.Equal(c.AbilityIds, d.AbilityIds);
+        Assert.Empty(d.AbilityIds);
+        Assert.Equal(c.ChargeCooldownMs, d.ChargeCooldownMs);
+        Assert.Equal(c.ChargeDistanceUnits, d.ChargeDistanceUnits, 6);
+        Assert.Equal(c.ChargeTriggerRangeUnits, d.ChargeTriggerRangeUnits, 6);
         Assert.Equal(c.MaxHealth, d.MaxHealth);
         Assert.Equal(c.MoveSpeedMultiplier, d.MoveSpeedMultiplier, 6);
         Assert.Equal(c.RoamRadius, d.RoamRadius, 6);
@@ -362,6 +373,12 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(20, g.AttackDamage);
         Assert.Equal(1200, g.AttackCooldownMs);
         Assert.Equal(1.5d, g.AttackRangeUnits, 6);
+        // MONSTER-BEHAVIOR P5: the gnoll composes the "charge" ability + its charge tuning.
+        Assert.Equal(new[] { "charge" }, g.AbilityIds);
+        Assert.Equal(4000, g.ChargeCooldownMs);
+        Assert.Equal(4.0d, g.ChargeDistanceUnits, 6);
+        Assert.Equal(7.0d, g.ChargeTriggerRangeUnits, 6);
+        Assert.True(MonsterTypeRegistry.ChargeEnabled(g)); // composed + a positive cooldown ⇒ charge-enabled.
     }
 
     private static string ReadShippedManifest()

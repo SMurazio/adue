@@ -50,4 +50,15 @@ public readonly record struct MonsterAiTunables(
     // SkirmisherBehavior reads it: while Chasing, if FleeHealthPct > 0 AND Health <= FleeHealthPct*MaxHealth, it RUNS
     // AWAY from the target instead of approaching/attacking. NOT tick-quantised (a fraction, not a duration); clamped
     // to [0,1] by BuildTunables. NOT a live F1 knob this phase (behavior-specific — see the design) so NOT on the wire.
-    double FleeHealthPct = 0d);
+    double FleeHealthPct = 0d,
+    // MONSTER-BEHAVIOR P5 (docs/monster-behavior-design.md): the CHARGE ability config consumed by the brain's charge
+    // trigger (a SHARED ability — config-gated, not skirmisher-specific). ChargeEnabled = the type composed "charge" AND
+    // a positive cooldown (BuildTunables computes it; false for every non-charger -> the trigger block is inert ->
+    // BasicRoamer/slime byte-identical). ChargeDistanceUnits/ChargeTriggerRangeUnits are the dash length + the max
+    // target distance that fires a charge (world units, fractional). ChargeCooldownTicks is the tick-quantised re-charge
+    // gate the EXECUTOR's CanStart enforces (carried for the GameServer wiring + test visibility). All default to the
+    // no-charge sentinel so a positional construction (the perf/headless tests) keeps charge inert with no extra args.
+    bool ChargeEnabled = false,
+    double ChargeDistanceUnits = 0d,
+    double ChargeTriggerRangeUnits = 0d,
+    uint ChargeCooldownTicks = 0u);

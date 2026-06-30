@@ -148,7 +148,8 @@ public sealed class BasicRoamerBehaviorTests
 
                 return crossed;
             },
-            TickRate);
+            TickRate,
+            _ => false); // MONSTER-BEHAVIOR P5: no executor wired into these glide tests → never action-active.
 
     private static AiHarness CreateAi(
         int seed,

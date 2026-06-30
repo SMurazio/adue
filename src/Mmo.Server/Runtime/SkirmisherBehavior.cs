@@ -22,13 +22,17 @@ public sealed class SkirmisherBehavior : BasicRoamerBehavior
 {
     // Same ctor deps as BasicRoamerBehavior — passed straight through to the base (GameServer registers this with the
     // identical (mapSeed, isWalkable, findTarget, tryResolveTarget, attack) wiring it builds the basicRoamer entry with).
+    // MONSTER-BEHAVIOR P5: the charge dep is threaded straight through to the base (GameServer registers the skirmisher
+    // with the SAME BeginMonsterCharge wiring as the basicRoamer). A wounded skirmisher still FLEES, never charges — the
+    // base StepChase runs the flee hook BEFORE the charge trigger, so flee precedence holds with no extra code here.
     public SkirmisherBehavior(
         int seed,
         Func<TileCoord, bool> isWalkable,
         FindTargetDelegate findTarget,
         TryResolveTargetDelegate tryResolveTarget,
-        AttackDelegate attack)
-        : base(seed, isWalkable, findTarget, tryResolveTarget, attack)
+        AttackDelegate attack,
+        TryChargeDelegate? tryCharge = null)
+        : base(seed, isWalkable, findTarget, tryResolveTarget, attack, tryCharge)
     {
     }
 

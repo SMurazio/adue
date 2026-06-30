@@ -318,7 +318,10 @@ public sealed class GameServer
                 () => _tuning.BodyRadiusUnits,
                 _zone.QueryNearbyWalls,
                 _zone.ApplyMonsterLanding,
-                options.TickRate),
+                options.TickRate,
+                // MONSTER-BEHAVIOR P5: the SAME self-guard the hop carries — while a charge dash owns the monster's
+                // movement (the executor's StepAll drives it), the glide must NOT also step it (a double-move).
+                monster => _actionExecutor.IsActive(monster)),
         };
         // MONSTER-BEHAVIOR P3/P4: the per-type BEHAVIOR ("brain") registry. Build the "basicRoamer" entry (the shared
         // BasicRoamerBehavior, formerly the standalone _monsterAi) and, as of P4, the "skirmisher" entry (the gnoll's
@@ -331,7 +334,10 @@ public sealed class GameServer
             _zone.IsWalkable,
             FindMonsterAggroTarget,
             TryResolveMonsterTarget,
-            ApplyMonsterAttack);
+            ApplyMonsterAttack,
+            // MONSTER-BEHAVIOR P5: the charge dep (both brains get it; the per-type ChargeEnabled tunable gates whether
+            // a charge ever actually fires — only the gnoll composes "charge", so basicRoamer/slime is byte-identical).
+            TryBeginMonsterCharge);
         _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
         {
             ["basicRoamer"] = _defaultBehavior,
@@ -340,7 +346,8 @@ public sealed class GameServer
                 _zone.IsWalkable,
                 FindMonsterAggroTarget,
                 TryResolveMonsterTarget,
-                ApplyMonsterAttack),
+                ApplyMonsterAttack,
+                TryBeginMonsterCharge),
         };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
@@ -3226,6 +3233,60 @@ public sealed class GameServer
             forwardDistanceUnits: hopDistance,
             cooldownTicks: 0,
             animationId: 1);
+
+        return _actionExecutor.TryStart(monster, def, heading, serverTick);
+    }
+
+    // MONSTER-BEHAVIOR P5 (docs/monster-behavior-design.md): a fixed "fast dash" airborne span for the charge, in ms.
+    // The charge is GROUNDED (jumpHeight 0) but the SAME ForwardArc executor primitive — DurationTicks is how long the
+    // dash lasts; over it the monster covers ChargeDistanceUnits, so a short span = a FAST closing dash (e.g. 4 units
+    // over 300 ms = ~13 u/s, well above the gnoll's ~3.6 u/s walk). Fixed (no per-type knob) for P5 — the human feel-test
+    // + a later tuning pass can promote it to a knob if the dash wants to be faster/slower. The charge ANIMATION is P6.
+    private const int MonsterChargeDurationMs = 300;
+
+    // Tick-quantised charge dash span (Ceiling, >= 1 tick — same convention as the cooldowns), derived from the live
+    // tick rate so the wall-clock dash duration is tick-rate-independent.
+    private uint MonsterChargeDurationTicks =>
+        (uint)Math.Max(1, (int)Math.Ceiling(MonsterChargeDurationMs / (1000d / _options.TickRate)));
+
+    // MONSTER-BEHAVIOR P5: the brain's TryChargeDelegate — START a charge on `monster` toward `heading` (a unit vector
+    // to its target) at `serverTick`. Resolves the monster's TYPE for the dash distance + the (tick-quantised) cooldown
+    // and hands the actual MOTION to BeginMonsterCharge → the shared executor. The brain only decides WHEN; this owns
+    // the type-param lookup + the HOW. Returns the executor's TryStart result (false ⇒ on cooldown / already acting →
+    // the brain falls through to its normal approach). Only called for ChargeEnabled types, but resolves defensively.
+    private bool TryBeginMonsterCharge(WorldEntity monster, WorldVector heading, uint serverTick)
+    {
+        if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
+        {
+            type = _monsterTypes.Default;
+        }
+
+        return BeginMonsterCharge(
+            monster,
+            heading,
+            type.ChargeDistanceUnits,
+            MonsterChargeDurationTicks,
+            _monsterTypes.ChargeCooldownTicks(type),
+            serverTick);
+    }
+
+    // MONSTER-BEHAVIOR P5: START the monster's CHARGE as a REAL forward-arc action on the shared executor — the SAME
+    // ForwardArc primitive the hop/player jump use, but GROUNDED (jumpHeight 0 → a flat fast forward dash, no Z arc).
+    // Mirrors BeginMonsterHop EXCEPT: (a) ActionId.Charge (a distinct per-entity cooldown key from the hop's Jump), and
+    // (b) the DEF carries `cooldownTicks` so the EXECUTOR's CanStart enforces the re-charge gate (the hop instead relies
+    // on the locomotion's TryBeginHop cadence + a 0 def cooldown). The charge MOTION replicates via the existing action-
+    // airborne dense-position force-include (forceActionAirborne = IsActive), exactly like the hop — NO protocol change
+    // (ActionId.Charge is a pre-reserved wire byte). animationId 2 is a placeholder; the charge ANIMATION lands in P6.
+    private bool BeginMonsterCharge(
+        WorldEntity monster, WorldVector heading, double distanceUnits, uint durationTicks, uint cooldownTicks, uint serverTick)
+    {
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Charge,
+            durationTicks: durationTicks,
+            jumpHeight: 0d,                       // GROUNDED — a flat dash (BallisticArc gives a 0 height arc for H=0).
+            forwardDistanceUnits: distanceUnits,
+            cooldownTicks: cooldownTicks,         // the EXECUTOR enforces the charge cooldown (unlike the hop's cadence).
+            animationId: 2);                      // placeholder; the charge animation is P6.
 
         return _actionExecutor.TryStart(monster, def, heading, serverTick);
     }

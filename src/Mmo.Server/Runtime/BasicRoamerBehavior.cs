@@ -123,6 +123,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // combat/replication path stays in GameServer and the AI never forks combat. The AI only owns the cooldown gate.
     private readonly AttackDelegate _attack;
 
+    // MONSTER-BEHAVIOR P5: the charge-ability trigger (default a no-op that returns false → never charge). See
+    // TryChargeDelegate. Resolved to a non-null delegate in the ctor so the StepChase trigger can call it unguarded.
+    private readonly TryChargeDelegate _tryCharge;
+
     // Finds the nearest alive player within `gatherRadius` (a tile/Chebyshev coarse pre-filter — pass ⌈aggro⌉(+1)) of
     // `monster`. On success returns true and outputs the target id + its current continuous Position; false when none.
     public delegate bool FindTargetDelegate(WorldEntity monster, int gatherRadius, out ulong targetId, out WorldVector targetPosition);
@@ -134,21 +138,35 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // GameServer; the AI only decides WHEN (within AttackRangeUnits + cooldown).
     public delegate void AttackDelegate(WorldEntity monster, ulong targetId, int attackDamage);
 
+    // MONSTER-BEHAVIOR P5 (docs/monster-behavior-design.md): START a CHARGE (a fast forward dash through the shared
+    // ServerActionExecutor) on `monster` toward `heading` (a unit vector to the target) at `serverTick`. Owned by
+    // GameServer (BeginMonsterCharge, which resolves the monster's TYPE for the dash distance / duration / cooldown);
+    // the brain only decides WHEN (target out of attack range but within the trigger range, not fleeing). Returns
+    // whether the charge actually STARTED — false if the executor's CanStart declined it (already in an action, or on
+    // the charge cooldown), in which case the brain falls through to the normal approach. Null (the default dep) =
+    // "never charge", so a behavior built without it (or for a non-charger type) is byte-identical to the pre-P5 brain.
+    public delegate bool TryChargeDelegate(WorldEntity monster, WorldVector heading, uint serverTick);
+
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
     // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
     // locomotion-AGNOSTIC — told its "body" each tick — so a per-type body (P2 GlideLocomotion) needs no change here.
+    // MONSTER-BEHAVIOR P5: `tryCharge` is the OPTIONAL charge-ability dep (default null = never charge). GameServer
+    // injects the real one (BeginMonsterCharge) into BOTH the basicRoamer and skirmisher entries; a behavior built
+    // without it — or one whose type's MonsterAiTunables.ChargeEnabled is false — never reaches a live charge call.
     public BasicRoamerBehavior(
         int seed,
         Func<TileCoord, bool> isWalkable,
         FindTargetDelegate findTarget,
         TryResolveTargetDelegate tryResolveTarget,
-        AttackDelegate attack)
+        AttackDelegate attack,
+        TryChargeDelegate? tryCharge = null)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
         _findTarget = findTarget;
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
+        _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, uint _) => false);
     }
 
     public int TrackedCount => _states.Count;
@@ -335,6 +353,24 @@ public class BasicRoamerBehavior : IMonsterBehavior
         if (TryChooseFleeTarget(monster, t, targetPos, out var fleeTarget))
         {
             return StepMoveTowardWithWatchdog(monster, locomotion, ref state, serverTick, stepCooldownTicks, fleeTarget);
+        }
+
+        // (1.6) CHARGE trigger (MONSTER-BEHAVIOR P5). A SHARED, config-gated ability (NOT skirmisher-specific): placed
+        // AFTER the flee hook (so a wounded/fleeing charger flees, never charges — flee takes precedence) and BEFORE the
+        // attack/approach branch. Fire a charge ONLY when the type composed it (ChargeEnabled) AND the target is OUT of
+        // attack range BUT within the trigger range (the gap is worth a dash). The executor's CanStart also gates it
+        // (already in an action, or on the charge cooldown), so a declined charge falls THROUGH to the normal approach;
+        // a started one returns for this tick — the executor now owns the dash and the glide self-guards (no double-move)
+        // until it ends. Count a started charge as progress so the no-progress watchdog never trips on the dash. When
+        // ChargeEnabled is false (every BasicRoamer/slime + a non-charger gnoll) this block is INERT → byte-identical.
+        if (t.ChargeEnabled && distToTarget > t.AttackRangeUnits && distToTarget <= t.ChargeTriggerRangeUnits)
+        {
+            var dirToTarget = (targetPos - monster.Position).Normalized();
+            if (dirToTarget != WorldVector.Zero && _tryCharge(monster, dirToTarget, serverTick))
+            {
+                state.LastProgressTick = serverTick;
+                return false;
+            }
         }
 
         // (2) Within attack range + off cooldown → attack. The attack is the monster's OWN per-monster timer,

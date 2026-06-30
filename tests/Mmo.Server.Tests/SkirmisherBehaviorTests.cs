@@ -54,7 +54,8 @@ public sealed class SkirmisherBehaviorTests
 
                 return crossed;
             },
-            TickRate);
+            TickRate,
+            _ => false); // MONSTER-BEHAVIOR P5: no executor wired into these glide tests → never action-active.
 
     // Builds a behavior (a SkirmisherBehavior, or a plain BasicRoamerBehavior for the inertness comparison) wired to a
     // live player target + a hit counter, mirroring GameServer's continuous combat path (findTarget by Euclidean

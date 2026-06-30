@@ -8,9 +8,10 @@
   //
   // SCHEMA = the MonsterType fields (stats + AI tuning + hop feel + loot) plus the composition selectors
   // `locomotionId` (P1, the id of this type's locomotion "body"; "hop"/"glide" registered today) and
-  // `behaviorId` (P3, the id of this type's "brain"; only "basicRoamer" is registered today) — an unknown
-  // id falls back loud-but-safe to the default. The remaining selectors (abilityIds / visualId) arrive in
-  // later phases and will extend this schema; do not add them yet. Optional fields may
+  // `behaviorId` (P3, the id of this type's "brain"; "basicRoamer"/"skirmisher" registered today) — an
+  // unknown id falls back loud-but-safe to the default — plus `abilityIds` (P5, the action-executor abilities
+  // this type composes; "charge" is the one primitive today) + its charge* tuning. The remaining selector
+  // (visualId) arrives in a later phase and will extend this schema; do not add it yet. Optional fields may
   // be omitted and fall back to the field default; every tunable is clamped to the same bounds the F1 live
   // tuning uses.
   "types": [
@@ -48,11 +49,22 @@
       // window from (hopAirborneMs + hopDelayMs) even for a glider (a minor P2 wart noted in the design; a cleaner
       // per-locomotion cadence is a later refinement). The defaults (300 + 400 ms) give a sane watchdog window.
       // moveSpeedMultiplier 0.9 IS the glider's walk speed (it seeds SpeedUnitsPerSecond, which GlideLocomotion reads).
+      //
+      // MONSTER-BEHAVIOR P5: the gnoll gets its first ABILITY — a CHARGE (a fast forward dash through the shared action
+      // executor to close the gap to its target). abilityIds composes "charge"; the charge* knobs tune it: it dashes
+      // chargeDistanceUnits forward when the target is OUT of attack range but within chargeTriggerRangeUnits, no more
+      // often than every chargeCooldownMs (the executor enforces the cooldown). Behavior-specific data (clamped on load,
+      // not a live F1 knob). The charge MOTION replicates via the same dense action-airborne path the hop uses (no
+      // protocol change); the charge ANIMATION is P6.
       "id": "gnoll",
       "displayName": "Gnoll",
       "lootTableId": "",
       "locomotionId": "glide",
       "behaviorId": "skirmisher",
+      "abilityIds": ["charge"],
+      "chargeCooldownMs": 4000,
+      "chargeDistanceUnits": 4.0,
+      "chargeTriggerRangeUnits": 7.0,
       "maxHealth": 200,
       "moveSpeedMultiplier": 0.9,
       "roamRadius": 5,

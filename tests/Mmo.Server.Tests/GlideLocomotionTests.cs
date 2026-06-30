@@ -28,7 +28,8 @@ public sealed class GlideLocomotionTests
 
     // Builds a GlideLocomotion wired exactly like GameServer: the SAME shared wall query + body radius ordinary
     // movement uses, and the SAME apply seam (ApplyResolvedMove + spatial-bucket migration on a tile cross).
-    private static GlideLocomotion CreateGlide(TileGrid grid, WorldState world)
+    private static GlideLocomotion CreateGlide(
+        TileGrid grid, WorldState world, Func<WorldEntity, bool>? isActionActive = null)
         => new(
             () => BodyRadius,
             grid.QueryNearbyWalls,
@@ -43,7 +44,10 @@ public sealed class GlideLocomotionTests
 
                 return crossed;
             },
-            TickRate);
+            TickRate,
+            // MONSTER-BEHAVIOR P5: the self-guard. Default = never active (these tests have no executor); the guard test
+            // passes a stub that returns true to prove the glide makes no move + reports OnCooldown while an action runs.
+            isActionActive ?? (_ => false));
 
     // A monster at `tile`'s centre with the walk speed seeded (GameServer seeds SpeedUnitsPerSecond at spawn via
     // RefreshSpeedStat; here we set it directly so the bare entity has a non-zero walk speed).
@@ -217,5 +221,30 @@ public sealed class GlideLocomotionTests
 
         var result = glide.Advance(monster, monster.Position, serverTick: 1, cooldownTicks: 7);
         Assert.Equal(HopResult.Stuck, result);
+    }
+
+    [Fact]
+    public void WhileActionActive_MakesNoMove_ReturnsOnCooldown_DoesNotTripWatchdog()
+    {
+        // MONSTER-BEHAVIOR P5: the self-guard mirrors HopLocomotion EXACTLY. While a shared-executor action (a charge
+        // dash) owns the monster's movement, the glide must NOT also step it (a double-move): Advance returns OnCooldown
+        // (a harmless wait the AI's watchdog ignores) and makes NO positional change AND no velocity change — the
+        // executor's dash + the dense force-include own the motion that tick. Pins all three: no move, OnCooldown, and
+        // the no-watchdog-trip result (NOT Stuck, which WOULD accumulate toward a false bail).
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnGlider(world, new TileCoord(32, 32));
+        var glide = CreateGlide(grid, world, isActionActive: _ => true); // an action is in flight the whole time.
+        var target = new WorldVector(monster.Position.X + 8d, monster.Position.Y); // a far target it would normally chase.
+
+        var posBefore = monster.Position;
+        var velBefore = monster.Velocity;
+        for (uint tick = 1; tick <= 20; tick++)
+        {
+            Assert.Equal(HopResult.OnCooldown, glide.Advance(monster, target, tick, cooldownTicks: 7));
+        }
+
+        Assert.Equal(posBefore, monster.Position);  // never moved while the action owned the body.
+        Assert.Equal(velBefore, monster.Velocity);  // velocity untouched (mirrors the hop's Velocity-0 guard).
     }
 }

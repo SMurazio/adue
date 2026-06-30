@@ -288,25 +288,42 @@ public sealed class GlideLocomotion : IMonsterLocomotion
     private readonly Func<double> _bodyRadiusUnits;
     private readonly HopLocomotion.QueryWallsDelegate _queryWalls;
     private readonly ApplyLandingDelegate _applyLanding;
+    private readonly Func<WorldEntity, bool> _isActionActive;
     private readonly double _dtSeconds;
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
 
     // tickRate fixes the per-tick integration step dt = 1/tickRate (the SAME fixed server tick the player integrator
     // and the ballistic Z use; the server owns speed AND dt, so anti-speedhack is intrinsic just like a player move).
+    // MONSTER-BEHAVIOR P5: `isActionActive` is the SAME self-guard HopLocomotion carries (GameServer passes
+    // `m => _actionExecutor.IsActive(m)`) — while a shared-executor action (the gnoll's charge dash) owns the monster's
+    // movement, the glide must NOT also step it (a DOUBLE-MOVE), exactly as the hop self-guards while its arc is in flight.
     public GlideLocomotion(
         Func<double> bodyRadiusUnits,
         HopLocomotion.QueryWallsDelegate queryWalls,
         ApplyLandingDelegate applyLanding,
-        int tickRate)
+        int tickRate,
+        Func<WorldEntity, bool> isActionActive)
     {
         _bodyRadiusUnits = bodyRadiusUnits;
         _queryWalls = queryWalls;
         _applyLanding = applyLanding;
+        _isActionActive = isActionActive;
         _dtSeconds = tickRate > 0 ? 1d / tickRate : 0d;
     }
 
     public HopResult Advance(WorldEntity monster, WorldVector target, uint serverTick, uint cooldownTicks)
     {
+        // MONSTER-BEHAVIOR P5: a shared-executor action (a CHARGE dash) is in flight — the executor owns the monster's
+        // movement mid-action. StepMonsterAi runs BEFORE the executor's StepAll, so without this gate a charging gnoll
+        // would DOUBLE-MOVE (executor dash + a glide step the SAME tick). Mirror HopLocomotion EXACTLY: return OnCooldown
+        // (a harmless cadence wait) WITHOUT moving and WITHOUT touching Velocity — so the no-progress watchdog is NOT
+        // tripped (the monster IS making progress along the dash, force-included densely per tick like the hop). The
+        // slime is unaffected: it uses HopLocomotion, and a glider that never charges never sees an active action here.
+        if (_isActionActive(monster))
+        {
+            return HopResult.OnCooldown;
+        }
+
         var from = monster.Position;
         var toTarget = target - from;
         if (toTarget.LengthSquared <= 0d)

@@ -59,6 +59,25 @@ public sealed class MonsterType
     // later tiny follow-up can promote it to a live knob if the feel-test wants it.
     public double FleeHealthPct { get; set; }
 
+    // MONSTER-BEHAVIOR P5 (docs/monster-behavior-design.md): the per-type ABILITY composition selector — the ids of the
+    // shared action-executor abilities this type can use, the abilities dimension of the §2 composition model. Default
+    // EMPTY (no abilities; every BasicRoamer/slime type). The gnoll carries ["charge"]. Server-side type DATA only: NOT
+    // a numeric F1 tunable / NOT replicated / NOT on the wire — set only via the manifest. The BEHAVIOR reads it (a
+    // skirmisher charges only if this contains "charge" AND ChargeCooldownMs > 0), so an ability not in the set is inert
+    // even if its tuning is authored. A genuinely-new ability is a new code primitive + an id here, per the design.
+    public List<string> AbilityIds { get; set; } = [];
+
+    // MONSTER-BEHAVIOR P5: the CHARGE ability tuning (a fast forward dash through the shared executor to close the gap).
+    // ChargeCooldownMs 0 = NO charge (every non-gnoll type; combined with AbilityIds not containing "charge" the brain's
+    // ChargeEnabled is false → the charge trigger is inert). ChargeDistanceUnits = how far the dash travels (world units,
+    // grounded — jumpHeight 0). ChargeTriggerRangeUnits = the MAX target distance at which the brain fires a charge (it
+    // charges only when the target is OUT of attack range but within this — i.e. the gap is worth closing). Behavior-
+    // specific DATA only (like FleeHealthPct): NOT a live F1 tunable / NOT replicated / NOT on the wire — set only via
+    // the manifest (clamped to sane bounds by FromManifestJson). Defaults 0 so an omitted/non-charger type never charges.
+    public int ChargeCooldownMs { get; set; }
+    public double ChargeDistanceUnits { get; set; }
+    public double ChargeTriggerRangeUnits { get; set; }
+
     // INTERNAL-ONLY (no longer user-tunable / shown on the F1 Monster tab — the confusing "move speed (x)" knob was
     // retired in favour of the intuitive RANGE / HEIGHT / AIRBORNE / DELAY hop knobs). This is still the multiplier of
     // the player's base cadence (< 1 = slower) that the entity's replicated SpeedMultiplier is seeded from AT SPAWN —

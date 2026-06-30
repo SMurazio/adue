@@ -55,6 +55,15 @@ public sealed class MonsterTypeRegistry
     private const int MaxHopAirborneMs = 2000;
     private const int MinHopDelayMs = 0;
     private const int MaxHopDelayMs = 5000;
+    // MONSTER-BEHAVIOR P5 charge bounds (behavior-specific data, clamped on load like FleeHealthPct — NOT live F1
+    // knobs). Cooldown 0 (no charge) .. 60 s; dash distance 0.25 .. 16 units; trigger range 0.5 .. 64 units (the aggro
+    // band). A nonsense author value is clamped, never honoured, so the data file cannot author an insane charge.
+    private const int MinChargeCooldownMs = 0;
+    private const int MaxChargeCooldownMs = 60000;
+    private const double MinChargeDistanceUnits = 0.25d;
+    private const double MaxChargeDistanceUnits = 16d;
+    private const double MinChargeTriggerRangeUnits = 0.5d;
+    private const double MaxChargeTriggerRangeUnits = 64d;
 
     // Per-type field suffixes (the part after "<typeId>."). Public so the client F1 tab + tests name the SAME keys.
     public const string RoamRadiusField = "roamRadius";
@@ -231,6 +240,32 @@ public sealed class MonsterTypeRegistry
                 type.FleeHealthPct = Math.Clamp(dto.FleeHealthPct.Value, 0d, 1d);
             }
 
+            // MONSTER-BEHAVIOR P5: the ability composition set + the charge tuning. AbilityIds stores the authored ids
+            // verbatim (the BEHAVIOR + ChargeEnabled gate which ones actually fire — an unknown id is simply inert);
+            // omitted -> empty (no abilities). The charge numerics are set directly + clamped to sane bounds (NOT a
+            // TryApply/F1 field — behavior-specific, like FleeHealthPct); omitted -> 0 (no charge), the field default.
+            if (dto.AbilityIds is not null)
+            {
+                type.AbilityIds = dto.AbilityIds;
+            }
+
+            if (dto.ChargeCooldownMs.HasValue)
+            {
+                type.ChargeCooldownMs = Math.Clamp(dto.ChargeCooldownMs.Value, MinChargeCooldownMs, MaxChargeCooldownMs);
+            }
+
+            if (dto.ChargeDistanceUnits.HasValue)
+            {
+                type.ChargeDistanceUnits =
+                    Math.Clamp(dto.ChargeDistanceUnits.Value, MinChargeDistanceUnits, MaxChargeDistanceUnits);
+            }
+
+            if (dto.ChargeTriggerRangeUnits.HasValue)
+            {
+                type.ChargeTriggerRangeUnits =
+                    Math.Clamp(dto.ChargeTriggerRangeUnits.Value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits);
+            }
+
             registry.Add(type);
 
             // Each provided tunable is clamped + applied through TryApply (the SAME bounds the F1 live tuning
@@ -278,9 +313,10 @@ public sealed class MonsterTypeRegistry
     };
 
     // The on-disk manifest shape. P0 = the CURRENT MonsterType fields; P1 added the `locomotionId` selector, P3 the
-    // `behaviorId` selector, and P4 (this change) the `fleeHealthPct` behavior knob; later phases GROW this with the
-    // remaining selectors (abilityIds / visualId). Each selector is a plain STORED string (resolution is GameServer's
-    // job). `fleeHealthPct` is behavior-specific DATA (NOT a live F1 tunable). All tunables are nullable so
+    // `behaviorId` selector, P4 the `fleeHealthPct` behavior knob, and P5 (this change) the `abilityIds` composition set
+    // + the `chargeCooldownMs`/`chargeDistanceUnits`/`chargeTriggerRangeUnits` charge tuning; a later phase adds the
+    // `visualId` selector. Each selector is a plain STORED string (resolution is GameServer's job). `fleeHealthPct` +
+    // the charge fields are behavior-specific DATA (NOT live F1 tunables). All tunables are nullable so
     // an omitted field falls back to the MonsterType default; id/displayName are validated as required in
     // FromManifestJson. JSON property names are camelCase (matched case-insensitively).
     private sealed record MonsterManifestDto(List<MonsterTypeDto?>? Types);
@@ -291,6 +327,10 @@ public sealed class MonsterTypeRegistry
         string? LootTableId,
         string? LocomotionId,
         string? BehaviorId,
+        List<string>? AbilityIds,
+        int? ChargeCooldownMs,
+        double? ChargeDistanceUnits,
+        double? ChargeTriggerRangeUnits,
         int? MaxHealth,
         double? FleeHealthPct,
         double? MoveSpeedMultiplier,
@@ -348,7 +388,14 @@ public sealed class MonsterTypeRegistry
         AggroScanIntervalTicks: AggroScanIntervalTicks,
         // MONSTER-BEHAVIOR P4: pass the flee threshold straight through (a fraction, not a duration — NO tick-
         // quantisation), clamped to [0,1] so a nonsense out-of-range author value can't misbehave. 0 = never flee.
-        FleeHealthPct: Math.Clamp(type.FleeHealthPct, 0d, 1d));
+        FleeHealthPct: Math.Clamp(type.FleeHealthPct, 0d, 1d),
+        // MONSTER-BEHAVIOR P5: the charge config. ChargeEnabled iff the type COMPOSED "charge" (case-insensitive) AND
+        // authored a positive cooldown — so a type with the tuning but no ability id (or vice versa) never charges. The
+        // cooldown is tick-quantised (the EXECUTOR enforces it via CanStart); the distance/trigger ranges pass through.
+        ChargeEnabled: ChargeEnabled(type),
+        ChargeDistanceUnits: type.ChargeDistanceUnits,
+        ChargeTriggerRangeUnits: type.ChargeTriggerRangeUnits,
+        ChargeCooldownTicks: ChargeCooldownTicks(type));
 
     // ~0.5 s aggro-scan cadence in ticks (floored at 1) — tick-rate-only, throttling the spatial scan.
     public uint AggroScanIntervalTicks =>
@@ -490,6 +537,17 @@ public sealed class MonsterTypeRegistry
     // this is the real, tunable idle pause the user asked for ("a delay between each jump").
     public uint HopDelayTicks(MonsterType type) =>
         (uint)Math.Max(0, (int)Math.Round(type.HopDelayMs / (1000d / _tickRate), MidpointRounding.AwayFromZero));
+
+    // MONSTER-BEHAVIOR P5: true iff this type can CHARGE — it composed the "charge" ability (case-insensitive) AND
+    // authored a positive cooldown. Both are required so a type with the tuning but no ability id (or an ability id but
+    // no tuning) never charges; the brain reads the derived MonsterAiTunables.ChargeEnabled, never these fields directly.
+    public static bool ChargeEnabled(MonsterType type) =>
+        type.ChargeCooldownMs > 0 && type.AbilityIds.Contains("charge", StringComparer.OrdinalIgnoreCase);
+
+    // MONSTER-BEHAVIOR P5: this type's charge re-trigger cooldown in TICKS (Ceiling, >= 1 so even a tiny ms gates one
+    // tick — same convention as the attack cooldown). Fed onto the charge def's CooldownTicks so the EXECUTOR's CanStart
+    // enforces the re-charge gate (unlike the hop, whose cadence is the locomotion's TryBeginHop, not an executor clock).
+    public uint ChargeCooldownTicks(MonsterType type) => CooldownMsToTicks(type.ChargeCooldownMs);
 
     // The current per-type tuning as the wire snapshot the server replicates (login + on change). DATA-DRIVEN: each
     // type ships the GENERIC field list built from the descriptor table (current value via the getter, bounds from the
