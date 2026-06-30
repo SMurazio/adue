@@ -123,7 +123,12 @@ public sealed class MonsterTypeRegistryTests
         var registry = Registry();
         Assert.True(registry.IsMonsterTypeKey("slime.roamRadius"));
         Assert.True(registry.IsMonsterTypeKey("slime.hopDelayMs"));
-        Assert.False(registry.IsMonsterTypeKey("slime.moveSpeed")); // the retired knob is no longer a recognized key.
+        // CONTEXTUAL-KNOBS: recognition is type-INDEPENDENT (derived from the FULL descriptor list) — moveSpeed/flee/
+        // charge are recognized keys even on the slime, even though the slime's F1 tab does NOT show them (the AppliesTo
+        // VISIBILITY filter lives in BuildSnapshot, so the tab only ever sends a key it showed).
+        Assert.True(registry.IsMonsterTypeKey("slime.moveSpeed"));
+        Assert.True(registry.IsMonsterTypeKey("slime.fleeHealthPct"));
+        Assert.True(registry.IsMonsterTypeKey("slime.chargeCooldownMs"));
         Assert.False(registry.IsMonsterTypeKey("dragon.roamRadius"));
         Assert.False(registry.IsMonsterTypeKey("slime.nonsense"));
         Assert.False(registry.IsMonsterTypeKey("combat.damage"));
@@ -208,8 +213,11 @@ public sealed class MonsterTypeRegistryTests
         Assert.Contains("maxHealth", keys);
         Assert.Contains("roamRadius", keys);
         Assert.Contains("respawnMs", keys);
-        // The retired "move speed (x)" knob is no longer exposed.
+        // CONTEXTUAL-KNOBS: the code-seeded slime is a HOPPER (basicRoamer, no abilities) — so walk speed (glide-only),
+        // flee (skirmisher-only) and charge (ability-only) are NOT on its tab; only the hop quartet shows.
         Assert.DoesNotContain("moveSpeed", keys);
+        Assert.DoesNotContain("fleeHealthPct", keys);
+        Assert.DoesNotContain("chargeCooldownMs", keys);
         // The hop feel-knobs, including the new delay.
         Assert.Contains("hopDistance", keys);
         Assert.Contains("hopHeight", keys);
@@ -366,5 +374,176 @@ public sealed class MonsterTypeRegistryTests
         Assert.True(registry.TryApply("slime.hopDelayMs", 0d, out _));
         Assert.Equal(0u, registry.HopDelayTicks(slime));
         Assert.Equal(registry.HopAirborneTicks(slime), Cadence());
+    }
+
+    // CONTEXTUAL-KNOBS: a 2-type registry (slime hopper + gnoll glider/skirmisher/charger) like the shipped manifest, so
+    // the per-composition snapshot filter can be pinned per type.
+    private static MonsterTypeRegistry ContextualRegistry()
+    {
+        const string json = """
+        {
+          "types": [
+            { "id": "slime", "displayName": "Slime", "locomotionId": "hop", "behaviorId": "basicRoamer" },
+            {
+              "id": "gnoll", "displayName": "Gnoll",
+              "locomotionId": "glide", "behaviorId": "skirmisher",
+              "abilityIds": ["charge"],
+              "chargeCooldownMs": 4000, "chargeDistanceUnits": 4.0, "chargeTriggerRangeUnits": 7.0,
+              "maxHealth": 200, "moveSpeedMultiplier": 0.9, "fleeHealthPct": 0.3
+            }
+          ]
+        }
+        """;
+        return MonsterTypeRegistry.FromManifestJson(TickRate, json);
+    }
+
+    private static string[] SnapshotKeys(MonsterTypeRegistry registry, string typeId) =>
+        registry.BuildSnapshot().Types.Single(t => t.Id == typeId).Fields.Select(f => f.Key).ToArray();
+
+    // CONTEXTUAL-KNOBS: the GLIDER (gnoll) tab shows walk speed + flee % + the charge trio + the common stats, and NO
+    // hop knobs — every knob shown is one its composition actually uses.
+    [Fact]
+    public void GnollSnapshotShowsGliderBehaviorAndChargeKnobsNotHopKnobs()
+    {
+        var keys = SnapshotKeys(ContextualRegistry(), "gnoll");
+
+        // Common stats are always present.
+        Assert.Contains("maxHealth", keys);
+        Assert.Contains("roamRadius", keys);
+        Assert.Contains("aggroRadius", keys);
+        Assert.Contains("chaseLeash", keys);
+        Assert.Contains("attackRange", keys);
+        Assert.Contains("attackDamage", keys);
+        Assert.Contains("attackCooldownMs", keys);
+        Assert.Contains("pauseMinMs", keys);
+        Assert.Contains("pauseMaxMs", keys);
+        Assert.Contains("respawnMs", keys);
+        // Glider walk speed + skirmisher flee + the charge trio are EXPOSED.
+        Assert.Contains("moveSpeed", keys);
+        Assert.Contains("fleeHealthPct", keys);
+        Assert.Contains("chargeCooldownMs", keys);
+        Assert.Contains("chargeDistanceUnits", keys);
+        Assert.Contains("chargeTriggerRangeUnits", keys);
+        // The hop knobs are HIDDEN (the gnoll glides, it never hops).
+        Assert.DoesNotContain("hopDistance", keys);
+        Assert.DoesNotContain("hopHeight", keys);
+        Assert.DoesNotContain("hopAirborneMs", keys);
+        Assert.DoesNotContain("hopDelayMs", keys);
+
+        // The exposed values mirror the type's live data + bounds.
+        var fields = ContextualRegistry().BuildSnapshot().Types.Single(t => t.Id == "gnoll").Fields;
+        var moveSpeed = fields.Single(f => f.Key == "moveSpeed");
+        Assert.Equal(0.9d, moveSpeed.Value, 6);
+        Assert.Equal(0.1d, moveSpeed.Min, 6);
+        Assert.Equal(3.0d, moveSpeed.Max, 6);
+        Assert.False(moveSpeed.IsInteger);
+        var flee = fields.Single(f => f.Key == "fleeHealthPct");
+        Assert.Equal(0.3d, flee.Value, 6);
+        Assert.Equal(0d, flee.Min, 6);
+        Assert.Equal(1d, flee.Max, 6);
+    }
+
+    // CONTEXTUAL-KNOBS: the HOPPER (slime) tab keeps the hop quartet and shows NONE of the glider/behavior/ability knobs.
+    [Fact]
+    public void SlimeSnapshotKeepsHopKnobsAndHidesGliderBehaviorAndChargeKnobs()
+    {
+        var keys = SnapshotKeys(ContextualRegistry(), "slime");
+
+        Assert.Contains("maxHealth", keys);
+        Assert.Contains("hopDistance", keys);
+        Assert.Contains("hopHeight", keys);
+        Assert.Contains("hopAirborneMs", keys);
+        Assert.Contains("hopDelayMs", keys);
+        Assert.Contains("roamRadius", keys);
+        Assert.Contains("respawnMs", keys);
+        // No glider walk speed, no skirmisher flee, no charge — the slime composes none of them.
+        Assert.DoesNotContain("moveSpeed", keys);
+        Assert.DoesNotContain("fleeHealthPct", keys);
+        Assert.DoesNotContain("chargeCooldownMs", keys);
+        Assert.DoesNotContain("chargeDistanceUnits", keys);
+        Assert.DoesNotContain("chargeTriggerRangeUnits", keys);
+    }
+
+    // CONTEXTUAL-KNOBS: the newly-exposed keys apply + clamp through TryApply (out-of-range → clamped; the value lands on
+    // the MonsterType), and are recognized keys. TryApply is type-independent so it works regardless of composition.
+    [Fact]
+    public void NewContextualFieldsApplyClampAndAreKnownKeys()
+    {
+        var registry = ContextualRegistry();
+        Assert.True(registry.TryGet("gnoll", out var gnoll));
+
+        Assert.True(registry.IsMonsterTypeKey("gnoll.moveSpeed"));
+        Assert.True(registry.IsMonsterTypeKey("gnoll.fleeHealthPct"));
+        Assert.True(registry.IsMonsterTypeKey("gnoll.chargeCooldownMs"));
+        Assert.True(registry.IsMonsterTypeKey("gnoll.chargeDistanceUnits"));
+        Assert.True(registry.IsMonsterTypeKey("gnoll.chargeTriggerRangeUnits"));
+
+        // moveSpeed (MoveSpeedMultiplier) clamps to [0.1, 3.0].
+        Assert.True(registry.TryApply("gnoll.moveSpeed", 1.5d, out var ms));
+        Assert.Equal(1.5d, ms, 6);
+        Assert.Equal(1.5d, gnoll.MoveSpeedMultiplier, 6);
+        Assert.True(registry.TryApply("gnoll.moveSpeed", 0d, out var msLo));
+        Assert.Equal(0.1d, msLo, 6);
+        Assert.True(registry.TryApply("gnoll.moveSpeed", 99d, out var msHi));
+        Assert.Equal(3.0d, msHi, 6);
+
+        // fleeHealthPct clamps to [0, 1].
+        Assert.True(registry.TryApply("gnoll.fleeHealthPct", 0.5d, out var fp));
+        Assert.Equal(0.5d, fp, 6);
+        Assert.Equal(0.5d, gnoll.FleeHealthPct, 6);
+        Assert.True(registry.TryApply("gnoll.fleeHealthPct", -1d, out var fpLo));
+        Assert.Equal(0d, fpLo, 6);
+        Assert.True(registry.TryApply("gnoll.fleeHealthPct", 5d, out var fpHi));
+        Assert.Equal(1d, fpHi, 6);
+
+        // chargeCooldownMs (int) clamps to [0, 60000].
+        Assert.True(registry.TryApply("gnoll.chargeCooldownMs", 2500d, out var cc));
+        Assert.Equal(2500d, cc, 6);
+        Assert.Equal(2500, gnoll.ChargeCooldownMs);
+        Assert.True(registry.TryApply("gnoll.chargeCooldownMs", 999999d, out var ccHi));
+        Assert.Equal(60000d, ccHi, 6);
+
+        // chargeDistanceUnits clamps to [0.25, 16].
+        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 6d, out var cd));
+        Assert.Equal(6d, cd, 6);
+        Assert.Equal(6d, gnoll.ChargeDistanceUnits, 6);
+        Assert.True(registry.TryApply("gnoll.chargeDistanceUnits", 0d, out var cdLo));
+        Assert.Equal(0.25d, cdLo, 6);
+
+        // chargeTriggerRangeUnits clamps to [0.5, 64].
+        Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 10d, out var ct));
+        Assert.Equal(10d, ct, 6);
+        Assert.Equal(10d, gnoll.ChargeTriggerRangeUnits, 6);
+        Assert.True(registry.TryApply("gnoll.chargeTriggerRangeUnits", 0d, out var ctLo));
+        Assert.Equal(0.5d, ctLo, 6);
+    }
+
+    // CONTEXTUAL-KNOBS: a live flee/charge retune flows into BuildTunables (the AI reads it fresh each tick → effective
+    // next tick). Pins that editing the newly-exposed behavior/ability knobs actually moves the AI's tunables.
+    [Fact]
+    public void FleeAndChargeRetunesFlowIntoBuildTunables()
+    {
+        var registry = ContextualRegistry();
+        Assert.True(registry.TryGet("gnoll", out var gnoll));
+
+        // Baseline derived from the authored data.
+        var before = registry.BuildTunables(gnoll);
+        Assert.Equal(0.3d, before.FleeHealthPct, 6);
+        Assert.True(before.ChargeEnabled); // composed "charge" + a positive cooldown.
+        Assert.Equal(4.0d, before.ChargeDistanceUnits, 6);
+        Assert.Equal(7.0d, before.ChargeTriggerRangeUnits, 6);
+
+        registry.TryApply("gnoll.fleeHealthPct", 0.6d, out _);
+        registry.TryApply("gnoll.chargeDistanceUnits", 5.5d, out _);
+        registry.TryApply("gnoll.chargeTriggerRangeUnits", 9.0d, out _);
+
+        var after = registry.BuildTunables(gnoll);
+        Assert.Equal(0.6d, after.FleeHealthPct, 6);
+        Assert.Equal(5.5d, after.ChargeDistanceUnits, 6);
+        Assert.Equal(9.0d, after.ChargeTriggerRangeUnits, 6);
+
+        // Setting the cooldown to 0 disables the charge (ChargeEnabled requires a positive cooldown).
+        registry.TryApply("gnoll.chargeCooldownMs", 0d, out _);
+        Assert.False(registry.BuildTunables(gnoll).ChargeEnabled);
     }
 }

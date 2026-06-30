@@ -68,6 +68,14 @@ public sealed class MonsterTypeRegistry
     // is clamped, never honoured, so the data file cannot author an invisible or world-filling placeholder visual.
     private const double MinRenderScale = 0.25d;
     private const double MaxRenderScale = 4.0d;
+    // CONTEXTUAL-KNOBS: walk-speed (MoveSpeedMultiplier) live bounds — exposed as a GLIDER-only F1 knob (for a glider it
+    // IS the walk speed: it seeds SpeedUnitsPerSecond, read each tick by GlideLocomotion). 0.1× (a crawl) .. 3.0× (fast).
+    private const double MinMoveSpeedMultiplier = 0.1d;
+    private const double MaxMoveSpeedMultiplier = 3.0d;
+    // CONTEXTUAL-KNOBS: wounded-flee threshold (a SkirmisherBehavior knob) live bounds — a FRACTION of MaxHealth in
+    // [0,1], the SAME bounds FromManifestJson clamps the authored value to (0 = never flee).
+    private const double MinFleeHealthPct = 0d;
+    private const double MaxFleeHealthPct = 1d;
 
     // Per-type field suffixes (the part after "<typeId>."). Public so the client F1 tab + tests name the SAME keys.
     public const string RoamRadiusField = "roamRadius";
@@ -84,38 +92,75 @@ public sealed class MonsterTypeRegistry
     public const string HopHeightField = "hopHeight";
     public const string HopAirborneMsField = "hopAirborneMs";
     public const string HopDelayMsField = "hopDelayMs";
+    // CONTEXTUAL-KNOBS: the per-composition field suffixes — exposed only on the types whose composition uses them
+    // (see the descriptor AppliesTo predicates). MoveSpeed is glide-only; FleeHealthPct is skirmisher-only; the charge
+    // trio is ability-"charge"-only. (FleeHealthPct + the charge fields were formerly manifest-only behavior DATA.)
+    public const string MoveSpeedField = "moveSpeed";
+    public const string FleeHealthPctField = "fleeHealthPct";
+    public const string ChargeCooldownMsField = "chargeCooldownMs";
+    public const string ChargeDistanceUnitsField = "chargeDistanceUnits";
+    public const string ChargeTriggerRangeUnitsField = "chargeTriggerRangeUnits";
+
+    // CONTEXTUAL-KNOBS: composition-applicability predicates a descriptor's AppliesTo points at. A type's
+    // LocomotionId / BehaviorId / AbilityIds decide which knobs its F1 tab shows — so a glider never shows hop knobs and
+    // a hopper never shows walk-speed/flee/charge. Locomotion/behavior are matched case-insensitively (they round-trip
+    // as authored strings); the charge gate mirrors ChargeEnabled's case-insensitive AbilityIds.Contains.
+    private static readonly Func<MonsterType, bool> Always = static _ => true;
+    private static readonly Func<MonsterType, bool> IsHopper =
+        static t => string.Equals(t.LocomotionId, "hop", StringComparison.OrdinalIgnoreCase);
+    private static readonly Func<MonsterType, bool> IsGlider =
+        static t => string.Equals(t.LocomotionId, "glide", StringComparison.OrdinalIgnoreCase);
+    private static readonly Func<MonsterType, bool> IsSkirmisher =
+        static t => string.Equals(t.BehaviorId, "skirmisher", StringComparison.OrdinalIgnoreCase);
+    private static readonly Func<MonsterType, bool> HasCharge =
+        static t => t.AbilityIds.Contains("charge", StringComparer.OrdinalIgnoreCase);
 
     // DATA-DRIVEN tuning (v40): the SINGLE source of the per-type tunable knobs. Each descriptor names a field's wire
     // Key (the "<typeId>." suffix), its human Label (the F1 caption), a Getter that reads the CURRENT value off a
-    // MonsterType, its clamp Min/Max (shown as a hint; TryApply clamps authoritatively), and whether it is an integer.
-    // BuildSnapshot iterates this to ship the generic field list, and IsMonsterTypeKey recognizes exactly these keys —
-    // so adding a knob is ONE descriptor entry here + one TryApply case + the MonsterType field. Order = F1 row order.
+    // MonsterType, its clamp Min/Max (shown as a hint; TryApply clamps authoritatively), whether it is an integer, and
+    // (CONTEXTUAL-KNOBS) an AppliesTo predicate that decides whether the knob shows on a given type's F1 tab. So adding
+    // a knob is ONE descriptor entry here + one TryApply case + the MonsterType field. Order = F1 row order.
     private readonly record struct TunableDescriptor(
         string Key,
         string Label,
         Func<MonsterType, double> Getter,
         double Min,
         double Max,
-        bool IsInteger);
+        bool IsInteger,
+        Func<MonsterType, bool> AppliesTo);
 
+    // CONTEXTUAL-KNOBS: the F1 row order, GROUPED — common stats, then the per-locomotion knobs (walk speed for a
+    // glider; the hop quartet for a hopper — mutually exclusive, so only one group ever shows), then the behavior knob
+    // (flee, skirmisher-only), then the ability knobs (charge trio, "charge"-only). BuildSnapshot(type) ships ONLY the
+    // descriptors whose AppliesTo(type) is true, so a glider (gnoll) shows walk speed + flee + charge and NO hop knobs,
+    // while a hopper (slime) shows the hop quartet and NO walk-speed/flee/charge. IsMonsterTypeKey/FieldKeys derive from
+    // the FULL list (recognition is type-independent; the display filter is BuildSnapshot's job).
     private static readonly TunableDescriptor[] Descriptors =
     {
-        // SLIME-FEEL-POLISH: the intuitive slime hop feel-knobs lead (RANGE / HEIGHT / AIRBORNE / DELAY) — the order
-        // here IS the F1 row order. The opaque "move speed (x)" knob is retired (interp-cadence-only now, not shown).
-        new(MaxHealthField, "hp (max)", t => t.MaxHealth, MinMaxHealth, MaxMaxHealth, true),
-        new(HopDistanceField, "hop distance", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false),
-        new(HopHeightField, "hop height", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false),
-        new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true),
-        new(HopDelayMsField, "hop delay (ms)", t => t.HopDelayMs, MinHopDelayMs, MaxHopDelayMs, true),
-        new(RoamRadiusField, "roam range", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, false),
-        new(AggroRadiusField, "aggro range", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, false),
-        new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, false),
-        new(AttackRangeField, "attack range", t => t.AttackRangeUnits, MinAttackRangeUnits, MaxAttackRangeUnits, false),
-        new(AttackDamageField, "attack damage", t => t.AttackDamage, MinAttackDamage, MaxAttackDamage, true),
-        new(AttackCooldownMsField, "attack cooldown (ms)", t => t.AttackCooldownMs, MinAttackCooldownMs, MaxAttackCooldownMs, true),
-        new(PauseMinMsField, "pause min (ms)", t => t.PauseMinMs, MinPauseMs, MaxPauseMs, true),
-        new(PauseMaxMsField, "pause max (ms)", t => t.PauseMaxMs, MinPauseMs, MaxPauseMs, true),
-        new(RespawnMsField, "respawn (ms)", t => t.RespawnMs, MinRespawnMs, MaxRespawnMs, true),
+        // COMMON — always shown.
+        new(MaxHealthField, "hp (max)", t => t.MaxHealth, MinMaxHealth, MaxMaxHealth, true, Always),
+        // LOCOMOTION — walk speed (glider) OR the hop quartet (hopper); one group per type.
+        new(MoveSpeedField, "walk speed (x)", t => t.MoveSpeedMultiplier, MinMoveSpeedMultiplier, MaxMoveSpeedMultiplier, false, IsGlider),
+        new(HopDistanceField, "hop distance", t => t.HopDistanceUnits, MinHopDistance, MaxHopDistance, false, IsHopper),
+        new(HopHeightField, "hop height", t => t.HopHeightUnits, MinHopHeight, MaxHopHeight, false, IsHopper),
+        new(HopAirborneMsField, "hop airborne (ms)", t => t.HopAirborneMs, MinHopAirborneMs, MaxHopAirborneMs, true, IsHopper),
+        new(HopDelayMsField, "hop delay (ms)", t => t.HopDelayMs, MinHopDelayMs, MaxHopDelayMs, true, IsHopper),
+        // COMMON nav/combat stats — always shown.
+        new(RoamRadiusField, "roam range", t => t.RoamRadius, MinRoamRadius, MaxRoamRadius, false, Always),
+        new(AggroRadiusField, "aggro range", t => t.AggroRadius, MinAggroRadius, MaxAggroRadius, false, Always),
+        new(ChaseLeashField, "chase leash", t => t.ChaseLeash, MinChaseLeash, MaxChaseLeash, false, Always),
+        new(AttackRangeField, "attack range", t => t.AttackRangeUnits, MinAttackRangeUnits, MaxAttackRangeUnits, false, Always),
+        new(AttackDamageField, "attack damage", t => t.AttackDamage, MinAttackDamage, MaxAttackDamage, true, Always),
+        new(AttackCooldownMsField, "attack cooldown (ms)", t => t.AttackCooldownMs, MinAttackCooldownMs, MaxAttackCooldownMs, true, Always),
+        new(PauseMinMsField, "pause min (ms)", t => t.PauseMinMs, MinPauseMs, MaxPauseMs, true, Always),
+        new(PauseMaxMsField, "pause max (ms)", t => t.PauseMaxMs, MinPauseMs, MaxPauseMs, true, Always),
+        new(RespawnMsField, "respawn (ms)", t => t.RespawnMs, MinRespawnMs, MaxRespawnMs, true, Always),
+        // BEHAVIOR — wounded-flee threshold, skirmisher-only.
+        new(FleeHealthPctField, "flee health %", t => t.FleeHealthPct, MinFleeHealthPct, MaxFleeHealthPct, false, IsSkirmisher),
+        // ABILITY — the charge trio, "charge"-composing types only.
+        new(ChargeCooldownMsField, "charge cooldown (ms)", t => t.ChargeCooldownMs, MinChargeCooldownMs, MaxChargeCooldownMs, true, HasCharge),
+        new(ChargeDistanceUnitsField, "charge distance", t => t.ChargeDistanceUnits, MinChargeDistanceUnits, MaxChargeDistanceUnits, false, HasCharge),
+        new(ChargeTriggerRangeUnitsField, "charge trigger range", t => t.ChargeTriggerRangeUnits, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits, false, HasCharge),
     };
 
     // The recognized per-type field suffixes, derived ONCE from the descriptor list so IsMonsterTypeKey never drifts
@@ -540,6 +585,27 @@ public sealed class MonsterTypeRegistry
             case HopDelayMsField:
                 type.HopDelayMs = ClampInt(value, MinHopDelayMs, MaxHopDelayMs, out applied);
                 return true;
+            // CONTEXTUAL-KNOBS: the newly-exposed per-composition knobs. TryApply is type-INDEPENDENT (it applies the
+            // field to whatever type the key names, mirroring every other field) — the per-composition VISIBILITY is
+            // BuildSnapshot's AppliesTo filter, so the F1 tab only ever SENDS a key it showed. moveSpeed mutates
+            // MoveSpeedMultiplier; the LIVE re-pace of an already-spawned glider's SpeedUnitsPerSecond is wired in
+            // GameServer.PropagateMonsterTypeSpeedToSpawned (runs after ANY per-type edit). FleeHealthPct + the charge
+            // trio flow into BuildTunables, which the AI reads fresh each tick → a retune takes effect next tick.
+            case MoveSpeedField:
+                type.MoveSpeedMultiplier = ClampDouble(value, MinMoveSpeedMultiplier, MaxMoveSpeedMultiplier, out applied);
+                return true;
+            case FleeHealthPctField:
+                type.FleeHealthPct = ClampDouble(value, MinFleeHealthPct, MaxFleeHealthPct, out applied);
+                return true;
+            case ChargeCooldownMsField:
+                type.ChargeCooldownMs = ClampInt(value, MinChargeCooldownMs, MaxChargeCooldownMs, out applied);
+                return true;
+            case ChargeDistanceUnitsField:
+                type.ChargeDistanceUnits = ClampDouble(value, MinChargeDistanceUnits, MaxChargeDistanceUnits, out applied);
+                return true;
+            case ChargeTriggerRangeUnitsField:
+                type.ChargeTriggerRangeUnits = ClampDouble(value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits, out applied);
+                return true;
             default:
                 return false;
         }
@@ -602,11 +668,17 @@ public sealed class MonsterTypeRegistry
         for (var i = 0; i < _ordered.Count; i++)
         {
             var t = _ordered[i];
-            var fields = new MonsterTuningField[Descriptors.Length];
-            for (var f = 0; f < Descriptors.Length; f++)
+            // CONTEXTUAL-KNOBS: ship ONLY the descriptors that apply to THIS type's composition (locomotion/behavior/
+            // ability), in the table's grouped order — so a glider's tab carries walk speed + flee + charge (no hop
+            // knobs) and a hopper's carries the hop quartet (no walk-speed/flee/charge). The wire shape is unchanged (a
+            // per-type VARIABLE field list), so this needs no protocol bump and the data-driven client renders what it's sent.
+            var fields = new List<MonsterTuningField>(Descriptors.Length);
+            foreach (var d in Descriptors)
             {
-                var d = Descriptors[f];
-                fields[f] = new MonsterTuningField(d.Key, d.Label, d.Getter(t), d.Min, d.Max, d.IsInteger);
+                if (d.AppliesTo(t))
+                {
+                    fields.Add(new MonsterTuningField(d.Key, d.Label, d.Getter(t), d.Min, d.Max, d.IsInteger));
+                }
             }
 
             entries[i] = new MonsterTypeSnapshot(t.Id, t.DisplayName, fields);

@@ -10,16 +10,16 @@ using Xunit;
 
 namespace Mmo.Server.Tests;
 
-// SLIME-FEEL-POLISH end-to-end: the monster hop PACING was redesigned around the intuitive RANGE / HEIGHT / AIRBORNE /
-// DELAY knobs, and the opaque "move speed (x)" knob was RETIRED as a tunable. Two consequences are pinned here against a
-// live server:
-//   (1) the entity's REPLICATED interp cadence (EntitySpawn / MovementSpeedChanged, seeded from MoveSpeedMultiplier at
-//       spawn) is intentionally DECOUPLED from the hop cadence (now HopAirborneTicks + HopDelayTicks) — so editing a hop
-//       knob (slime.hopDelayMs) re-paces the AI's hops but does NOT emit a MovementSpeedChanged for the spawned slime;
-//   (2) "slime.moveSpeed" is no longer a recognized tuning key — an AdminSetTuning on it is rejected (no re-pace, no
-//       broadcast), confirming the retirement end-to-end.
-// (The earlier LIVESPEED-DESYNC scenario — a live moveSpeed edit re-pacing + replicating the cadence — no longer exists
-// because moveSpeed can no longer be edited live; this file replaces those tests.)
+// SLIME-FEEL-POLISH / CONTEXTUAL-KNOBS end-to-end: the slime hop PACING is dialed by the intuitive RANGE / HEIGHT /
+// AIRBORNE / DELAY knobs, and "move speed" is now a CONTEXTUAL knob — exposed only on a GLIDER (where it IS the walk
+// speed), hidden on a hopper. Two consequences are pinned here against a live server:
+//   (1) the slime's REPLICATED interp cadence (EntitySpawn / MovementSpeedChanged, seeded from MoveSpeedMultiplier at
+//       spawn) is DECOUPLED from its hop cadence (HopAirborneTicks + HopDelayTicks) — so editing a hop knob
+//       (slime.hopDelayMs) re-paces the AI's hops but does NOT emit a MovementSpeedChanged for the spawned slime;
+//   (2) editing a GLIDER's walk speed ("gnoll.moveSpeed") DOES re-pace the already-spawned gnoll LIVE: because
+//       SpeedUnitsPerSecond is seeded ONCE at spawn, the per-type edit re-applies the new multiplier to the spawned
+//       gnoll (PropagateMonsterTypeSpeedToSpawned) and re-broadcasts its effective cadence (MovementSpeedChanged) — so
+//       the AI walk speed, the entity SpeedMultiplier, and the client interpolation stay in lockstep on a live edit.
 public sealed class MonsterHopPacingIntegrationTests
 {
     private const int TickRate = 20;
@@ -76,7 +76,7 @@ public sealed class MonsterHopPacingIntegrationTests
     }
 
     [Fact]
-    public async Task MoveSpeedIsNoLongerATunableKeyAndBroadcastsNothing()
+    public async Task EditingGnollWalkSpeedRepacesTheSpawnedGliderLive()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
@@ -92,17 +92,23 @@ public sealed class MonsterHopPacingIntegrationTests
             admin.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => admin.IsLoggedIn && admin.OwnNetworkId != 0, admin);
 
-            admin.SendChat("/monster");
+            // Spawn a GNOLL (the glider) at the admin's own tile so its EntitySpawn lands in AOI immediately.
+            admin.SendChat("/monster gnoll");
             await WaitUntilAsync(() => admin.TryGetMonsterSpawn(out _), admin);
-            Assert.True(admin.TryGetMonsterSpawn(out var slimeSpawn));
-            var slimeId = slimeSpawn.NetworkId;
+            Assert.True(admin.TryGetMonsterSpawn(out var gnollSpawn));
+            var gnollId = gnollSpawn.NetworkId;
 
-            // "slime.moveSpeed" is the RETIRED knob — no longer a recognized key. The server rejects + logs it, so it
-            // re-paces nothing and broadcasts no MovementSpeedChanged for the slime.
+            // The gnoll spawns at its TYPE's interp cadence seeded from MoveSpeedMultiplier (0.9× default).
+            Assert.Equal(EffectiveMs(0.9), gnollSpawn.StepCooldownMs);
+
+            // CONTEXTUAL-KNOBS: editing the glider's walk speed re-paces the already-spawned gnoll LIVE — the spawn-time
+            // SpeedUnitsPerSecond state is re-applied + the new effective cadence re-broadcast as a MovementSpeedChanged
+            // for THIS gnoll (the LIVESPEED re-apply). 0.9 → 1.5 changes the tick-quantised cadence, so it fires.
             admin.ClearSpeedChanges();
-            admin.SendAdminSetTuning("slime.moveSpeed", 1.0d);
-            await PollForAsync(TimeSpan.FromMilliseconds(500), admin);
-            Assert.DoesNotContain(admin.SpeedChanges, m => m.NetworkId == slimeId);
+            admin.SendAdminSetTuning("gnoll.moveSpeed", 1.5d);
+            await WaitUntilAsync(() => admin.SpeedChanges.Any(m => m.NetworkId == gnollId), admin);
+            var change = admin.SpeedChanges.Last(m => m.NetworkId == gnollId);
+            Assert.Equal(EffectiveMs(1.5), change.StepCooldownMs);
         }
         finally
         {
