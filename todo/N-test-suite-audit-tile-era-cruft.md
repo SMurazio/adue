@@ -19,5 +19,11 @@ KEEP (live coverage) / DELETE (dead SUT or obsolete behavior, with the file:line
 gated commits; surface DECISION/MERGE for the user. CAUTION: a green test is cheap insurance — only delete when the
 SUT is genuinely gone or the behavior is intentionally retired; when unsure, KEEP + flag.
 
+**Also watch for FLAKY tests:** during P5 a monster test failed ONCE in ~9 full-suite runs (a 2nd failure alongside the
+since-fixed charge test), never reproduced. Likely an RNG/ordering-dependent monster-AI test (the charge test had the
+same class of bug: a monster that doesn't deterministically aggro falls back to random roam, making distance/position
+assertions flaky). Sweep the monster/AI tests for assertions that depend on roam RNG without first forcing CHASING
+(aggroRadius >= target distance). Make them deterministic or seed-pinned.
+
 **When:** deferred ("at some point" per the user) — not blocking the monster-behavior phases. Good to run between
 phases or once the monster work settles. Builds on [[tile-continuous-cleanup]].
