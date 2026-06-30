@@ -180,6 +180,11 @@ public sealed class Zone
     {
         destination.Clear();
         World.GatherInterestCandidates(start.ToTileRounded(), ObstacleQueryRadiusTiles, _obstacleCandidateScratch);
+        // PARITY (player↔monster review MEDIUM): resolve obstacles in STABLE Id order so this server integrate and the
+        // client predictor process a crowd in the SAME order — the circle de-penetration is Gauss-Seidel (order-
+        // dependent), so without a shared order a player overlapping >=2 monsters resolves differently on each side →
+        // a persistent reconcile (crowd rubber-band). The client gather sorts by the same Id (the shared NetworkId).
+        _obstacleCandidateScratch.Sort(static (a, b) => a.Id.CompareTo(b.Id));
         for (var i = 0; i < _obstacleCandidateScratch.Count; i++)
         {
             var candidate = _obstacleCandidateScratch[i];

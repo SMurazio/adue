@@ -134,6 +134,12 @@ public sealed class MmoClient : IDisposable
     // predictor header). One reused list → zero per-frame alloc (the predict + reconcile calls never interleave).
     private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
+    // PLAYER↔MONSTER COLLISION (review MEDIUM — crowd parity): (id, pos) staging so the obstacle set is emitted in
+    // STABLE NetworkId order. The circle de-penetration is Gauss-Seidel (order-dependent), so the client predictor and
+    // the server integrate MUST process a crowd in the same order or the resolved position diverges → a persistent
+    // reconcile (crowd rubber-band). The server's Zone.GatherMonsterObstacles sorts by the same Id. Reused → no alloc.
+    private readonly List<(uint Id, double X, double Y)> _obstacleSortScratch = new();
+
     // PLAYER↔MONSTER COLLISION: the spatial cutoff (world units) for including a monster in the local obstacle set — a
     // body collides only within radius+radius (=2×BodyRadius) of its centre, so a small fixed reach beyond that (plus a
     // sub-tile move delta) bounds the gather without a spatial index on the client (entity count is already AOI-bounded).
@@ -578,8 +584,10 @@ public sealed class MmoClient : IDisposable
         var radius = server.BodyRadiusUnits;
         var reach = (2d * radius) + ObstacleGatherReachUnits;
         var reachSq = reach * reach;
-        foreach (var entity in _entities.Values)
+        _obstacleSortScratch.Clear();
+        foreach (var pair in _entities)
         {
+            var entity = pair.Value;
             if (entity.Kind != EntityKind.Monster)
             {
                 continue;
@@ -593,7 +601,14 @@ public sealed class MmoClient : IDisposable
                 continue;
             }
 
-            _obstacleScratch.Add(new ContinuousCollision.Circle(pos.X, pos.Y, radius));
+            _obstacleSortScratch.Add((pair.Key, pos.X, pos.Y));
+        }
+
+        // PARITY: emit in stable NetworkId order (matches the server gather) so a crowd resolves identically both sides.
+        _obstacleSortScratch.Sort(static (a, b) => a.Id.CompareTo(b.Id));
+        foreach (var (_, x, y) in _obstacleSortScratch)
+        {
+            _obstacleScratch.Add(new ContinuousCollision.Circle(x, y, radius));
         }
     }
 

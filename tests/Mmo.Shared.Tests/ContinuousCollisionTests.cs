@@ -187,6 +187,27 @@ public sealed class ContinuousCollisionTests
     }
 
     [Fact]
+    public void Circle_MultipleObstacles_ResolveIsDeterministicAndFinite()
+    {
+        // The player-vs-crowd path resolves against 2+ circles. The de-penetration is Gauss-Seidel (order-dependent),
+        // so for a FIXED obstacle order the result must be deterministic + finite. PARITY: the client predictor and the
+        // server integrate feed the SAME order (both gathers sort by the shared NetworkId), so they resolve a crowd
+        // identically → no rubber-band. (Across DIFFERENT orders the result CAN differ — exactly why the gathers sort.)
+        var obstacles = new[]
+        {
+            new ContinuousCollision.Circle(0.3d, 0.1d, 0.5d),
+            new ContinuousCollision.Circle(-0.2d, -0.3d, 0.5d),
+            new ContinuousCollision.Circle(0.1d, 0.4d, 0.5d),
+        };
+        var (x1, y1) = ContinuousCollision.Resolve(0d, 0d, deltaX: 0.4d, deltaY: 0.2d, Radius, NoWalls, obstacles);
+        var (x2, y2) = ContinuousCollision.Resolve(0d, 0d, deltaX: 0.4d, deltaY: 0.2d, Radius, NoWalls, obstacles);
+
+        Assert.True(double.IsFinite(x1) && double.IsFinite(y1), "resolve produced a non-finite result");
+        Assert.Equal(x1, x2, 12); // same obstacles + same order → identical result
+        Assert.Equal(y1, y2, 12);
+    }
+
+    [Fact]
     public void Circle_BetweenWallAndObstacle_ResolvesBoth_NoPenetrationOfEither()
     {
         // A body pinned between a wall (below) and a circle obstacle (ahead) must settle clear of BOTH — the
