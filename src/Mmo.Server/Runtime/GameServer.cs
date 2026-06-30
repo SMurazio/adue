@@ -179,6 +179,18 @@ public sealed class GameServer
     // executor is exercised headlessly and is ready to wire.
     private readonly ServerActionExecutor _actionExecutor;
 
+    // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): the server-authoritative monster↔monster
+    // de-penetration pass, run each tick AFTER all movement is resolved and BEFORE the snapshot (SeparateMonsters in
+    // TickCore). Constructed after _zone since it closes over the SAME shared seams the hop/glide use — the spatial
+    // neighbour query (World.GatherInterestCandidates), the wall query + resolver (QueryNearbyWalls), and the
+    // apply-landing seam (ApplyMonsterLanding) — plus the live shared body radius. Pure position resolution: no
+    // protocol/AI/wall-collision change, never touches Velocity.
+    private readonly MonsterSeparation _monsterSeparation;
+
+    // Reused participant buffer for the separation pass — refilled each tick from the live monster set (no per-tick
+    // allocation in the hot loop).
+    private readonly List<WorldEntity> _monsterSeparationScratch = new();
+
     // MOVEMENT-ACTIONS Phase B1: the SHARED action registry — the SAME defs the client loads (MovementActionRegistry
     // .Default is built from the shared assembly). HandleActionIntent resolves the wire ActionId to a def from here,
     // so server execution and (B2) client prediction run identical trajectories. Static-shared today (compile-time
@@ -287,6 +299,14 @@ public sealed class GameServer
         _actionExecutor = new ServerActionExecutor(
             options.TickRate,
             () => _tuning.BodyRadiusUnits,
+            _zone.QueryNearbyWalls,
+            _zone.ApplyMonsterLanding);
+        // MONSTER-SEPARATION: wire the de-penetration pass to the SAME shared seams (live body radius, the spatial
+        // neighbour query, the wall query + resolver, and the apply-landing seam) the locomotions/actions use, so a
+        // separation nudge collides byte-identically with walls and migrates the spatial bucket exactly like a hop.
+        _monsterSeparation = new MonsterSeparation(
+            () => _tuning.BodyRadiusUnits,
+            _zone.World.GatherInterestCandidates,
             _zone.QueryNearbyWalls,
             _zone.ApplyMonsterLanding);
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
@@ -823,6 +843,11 @@ public sealed class GameServer
             // tick — XY through the shared resolver, Z via the ballistic arc, ending + arming cooldown on the landing
             // tick. Sibling pass to StepMonsterAi; ~free while no action is active (no trigger source until Phase B/C).
             _actionExecutor.StepAll(_zone.World, _serverTick);
+            // MONSTER-SEPARATION: with ALL movement resolved this tick (AI tile-step / glide + the action executor),
+            // push any overlapping monster bodies apart (pure position de-penetration, no physics) BEFORE the snapshot,
+            // so the corrected positions replicate this same tick. Bounded by the spatial grid (no O(n²) scan); a no-op
+            // when nothing overlaps.
+            SeparateMonsters();
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -3133,6 +3158,23 @@ public sealed class GameServer
     // Iterates the live entity collection directly (no per-tick allocation); the count is tiny. A hop mutates a
     // monster's Position and (on a tile cross) migrates its spatial-grid bucket but never adds/removes a dictionary
     // entry, so iterating Entities while stepping is safe — same as RegenEnemies.
+    // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): the per-tick monster↔monster de-penetration
+    // pass — gather the live monster participants into the reused buffer and run the separation primitive. Early-out
+    // when there are <2 monsters (nothing can overlap), keyed off GameServer's own monster count (the same guard
+    // StepMonsterAi uses). The primitive itself is a no-op when no pair overlaps, so the cost at rest is just the gather
+    // + the spatial neighbour queries (grid-bounded, no O(n²) scan).
+    private void SeparateMonsters()
+    {
+        if (_monsterTypeOf.Count < 2)
+        {
+            return;
+        }
+
+        _monsterSeparationScratch.Clear();
+        _zone.World.CopyMonstersTo(_monsterSeparationScratch);
+        _monsterSeparation.Separate(_monsterSeparationScratch);
+    }
+
     private void StepMonsterAi()
     {
         // MONSTER-BEHAVIOR P3: skip the pass when there are no live monsters. Keyed off GameServer's OWN monster count

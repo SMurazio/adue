@@ -39,6 +39,21 @@ public sealed class WorldState
         }
     }
 
+    // MONSTER-SEPARATION: gather the live MONSTER participants for the per-tick separation pass into a reused buffer
+    // (struct-enumerator over _entities.Values → no boxing/alloc, unlike a foreach over the IReadOnlyCollection).
+    // PLAYER SEAM: this is the participant gather — to let players collide with monsters later, also include
+    // EntityKind.Player here AND widen MonsterSeparation's candidate filter to match (the two must agree).
+    public void CopyMonstersTo(ICollection<WorldEntity> destination)
+    {
+        foreach (var entity in _entities.Values)
+        {
+            if (entity.Kind == EntityKind.Monster)
+            {
+                destination.Add(entity);
+            }
+        }
+    }
+
     // Gathers AOI candidates for a viewer centered at `center`: every entity in the spatial cells
     // overlapping the [center ± radiusTiles] box, appended to `destination` (cleared first). This is a
     // SUPERSET of the in-interest set — the caller applies the exact interest test to each candidate, so

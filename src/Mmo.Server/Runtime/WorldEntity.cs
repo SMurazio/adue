@@ -599,6 +599,18 @@ public sealed class WorldEntity
         }
     }
 
+    // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): re-publish a position the separation pass
+    // nudged WITHOUT a tile cross. ApplyResolvedMove bumps StateRevision/StepSequence only on a rounded-tile crossing
+    // (R1), so a sub-tile separation nudge on an IDLE monster (Velocity 0, no tile cross) would be delta'd OUT of the
+    // snapshot (the recipient already acked the unchanged revision) and the corrected position would never replicate.
+    // Bump StateRevision so the nudged position re-includes next snapshot — the SAME stop-edge (StopMovement) /
+    // SnapToGround re-publish mechanism. Velocity is NOT touched (the pass is pure de-penetration, no physics), and
+    // StepSequence is NOT bumped (it counts the OWNING client predictor's steps — monsters have no local predictor).
+    public void MarkRepositioned()
+    {
+        StateRevision++;
+    }
+
     // MONSTER-BEHAVIOR P2: set the replicated Velocity to the ACTUAL resolved per-tick velocity (not the pre-collision
     // desired one). A continuous mover (GlideLocomotion) sets the desired Velocity = dir x speed via ComputeMoveDelta,
     // resolves it against walls (slide/stop), then calls this with (resolvedDelta / dt) so the wire carries the velocity
