@@ -304,4 +304,38 @@ public sealed class ContinuousPredictorTests
         // It DID slide north (the tangential component was preserved).
         Assert.True(predictor.PredictedY > 8.5d, $"did not slide along the wall: y={predictor.PredictedY}");
     }
+
+    // PLAYER↔MONSTER COLLISION: the predicted local player collides against a MONSTER obstacle (a Circle) via the SAME
+    // shared resolver the server uses, so the prediction stops at the radius-sum and a "server" running the IDENTICAL
+    // resolve over the SAME obstacle set opens NO correction. PARITY NOTE: this unit test feeds client + server the
+    // SAME obstacle set, so it is trivially equal — exactly the point. The real-world divergence is NOT modelled here:
+    // it is the MOVING-obstacle STALENESS (the client predicts vs the monster's last replicated position while the
+    // server uses its authoritative current one), which is a bounded reconcile feel-tested live, not a headless unit.
+    [Fact]
+    public void PredictsCollisionAgainstAMonsterObstacle_StopsAtRadiusSum_ParityNoCorrection()
+    {
+        const double radius = CollisionDefaults.BodyRadius; // 0.5
+        var predictor = new ContinuousPredictor(Speed, startX: 0d, startY: 0d, blocked: null, radius: radius);
+
+        // A stationary monster body at (3,0). Bodies overlap within radius+radius = 1.0, so the predicted centre must
+        // stop at x = 2.0 (the radius-sum west of the obstacle), never overlapping.
+        var obstacles = new List<ContinuousCollision.Circle> { new(3d, 0d, radius) };
+        var noWalls = new List<ContinuousCollision.Wall>();
+
+        double serverX = 0d, serverY = 0d;
+        for (int i = 0; i < 60; i++)
+        {
+            var seq = predictor.PredictAndBuffer(1d, 0d, Dt, obstacles);
+
+            // The "server" runs the IDENTICAL shared resolve over the SAME obstacle set (open field → empty walls).
+            var dx = Speed * Dt;
+            (serverX, serverY) = ContinuousCollision.Resolve(serverX, serverY, dx, 0d, radius, noWalls, obstacles);
+
+            predictor.Reconcile(new WorldVector(serverX, serverY), seq, obstacles);
+            Assert.Equal(0d, predictor.LastCorrectionUnits, 6); // same obstacle both sides → no correction (parity).
+        }
+
+        Assert.Equal(2.0d, predictor.PredictedX, 4); // stopped exactly at the radius-sum, never overlapping.
+        Assert.Equal(0d, predictor.PredictedY, 6);
+    }
 }

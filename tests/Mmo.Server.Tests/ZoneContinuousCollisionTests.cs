@@ -117,6 +117,74 @@ public sealed class ZoneContinuousCollisionTests
         Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.Y), BitConverter.DoubleToInt64Bits(b.Position.Y));
     }
 
+    // ---- PLAYER↔MONSTER COLLISION --------------------------------------------------------------------------
+
+    // Spawn a stationary monster body at `tile`'s centre into the zone's spatial index (so the player integrator's
+    // nearby-monster gather finds it).
+    private static WorldEntity SpawnMonster(Zone zone, TileCoord tile, uint networkId)
+        => zone.SpawnTransient(networkId, EntityKind.Monster, "M", tile, Direction8.S);
+
+    private static double Dist(WorldVector a, WorldVector b) => (a - b).Length;
+
+    [Fact]
+    public void PlayerIntegratingIntoMonster_IsBlocked_CentreDistanceStaysAtLeastTwoRadii()
+    {
+        // Open ground (block tile parked far away). Player at (8,8); a monster body at (11,8) due east. Drive the player
+        // east many ticks: it must STOP at the radius-sum (centre distance >= 2×radius = 1.0), never overlapping, and
+        // never pass to the monster's east side.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var monster = SpawnMonster(zone, new TileCoord(11, 8), networkId: 2);
+
+        for (var i = 0; i < 200; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.True(Dist(player.Position, monster.Position) >= (2d * Radius) - Eps,
+            $"overlapped the monster: dist={Dist(player.Position, monster.Position)}");
+        Assert.True(player.Position.X <= monster.Position.X + Eps, $"passed through the monster to x={player.Position.X}");
+    }
+
+    [Fact]
+    public void PlayerMovingPastAnOffsetMonster_SlidesAround_ReachesTheFarSide()
+    {
+        // The monster sits slightly OFF the straight-east path (at (11, 8.45)); driving east, the player slides around
+        // it (tangential motion preserved) and ends up EAST of it, never overlapping along the way.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var monster = SpawnMonster(zone, new TileCoord(11, 8), networkId: 2);
+        monster.ApplyResolvedMove(new WorldVector(11d, 8.45d)); // nudge off-axis so the player slides past, not stalls
+
+        for (var i = 0; i < 300; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            Assert.True(Dist(player.Position, monster.Position) >= (2d * Radius) - 1e-3,
+                $"overlapped the monster mid-slide: dist={Dist(player.Position, monster.Position)}");
+        }
+
+        Assert.True(player.Position.X > monster.Position.X + Radius,
+            $"did not get past the monster (x={player.Position.X}, monster x={monster.Position.X})");
+    }
+
+    [Fact]
+    public void PlayerWithNoMonsterNearby_MovesByteIdentical_ToWallsOnlyPath()
+    {
+        // A monster parked FAR away (outside the obstacle-gather box) must leave the integrated path byte-identical to
+        // the same zone with no monster at all — the empty-obstacle regression (walls-only path unchanged).
+        var (zoneA, a) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        SpawnMonster(zoneA, new TileCoord(28, 28), networkId: 2); // ~20 tiles away — far outside the gather box
+
+        var (zoneB, b) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+
+        for (var i = 0; i < 50; i++)
+        {
+            zoneA.IntegrateMovement(a, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            zoneB.IntegrateMovement(b, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.X), BitConverter.DoubleToInt64Bits(b.Position.X));
+        Assert.Equal(BitConverter.DoubleToInt64Bits(a.Position.Y), BitConverter.DoubleToInt64Bits(b.Position.Y));
+    }
+
     // NOTE (Phase 11 coherence sweep): the former MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression
     // test was DELETED here. It asserted monsters block via the tile-step path (Zone.TryStep / IsStepWalkable), but
     // after Phase 8 monsters move via the continuous HopLocomotion (no TryStep), and the hop's collision-valid landing

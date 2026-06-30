@@ -151,4 +151,95 @@ public sealed class ContinuousCollisionTests
         Assert.Equal(System.BitConverter.DoubleToInt64Bits(ax), System.BitConverter.DoubleToInt64Bits(bx));
         Assert.Equal(System.BitConverter.DoubleToInt64Bits(ay), System.BitConverter.DoubleToInt64Bits(by));
     }
+
+    // ---- circular body obstacles (PLAYER↔MONSTER COLLISION) -------------------------------------------------
+
+    private static readonly ContinuousCollision.Wall[] NoWalls = System.Array.Empty<ContinuousCollision.Wall>();
+
+    private static double Dist(double ax, double ay, double bx, double by)
+        => System.Math.Sqrt(((ax - bx) * (ax - bx)) + ((ay - by) * (ay - by)));
+
+    [Fact]
+    public void Circle_BlocksHeadOnMove_StopsAtRadiusSum_NeverInside()
+    {
+        // An obstacle of radius 0.5 at the origin; a body of radius 0.5 drives straight east into it from x=-5. The
+        // bodies overlap when their centres are within 0.5+0.5 = 1.0, so the moving centre must stop at x=-1.0 — exactly
+        // the radius-sum west of the obstacle centre — never penetrating it.
+        var obstacles = new[] { new ContinuousCollision.Circle(0d, 0d, 0.5d) };
+        var (x, y) = ContinuousCollision.Resolve(-5d, 0d, deltaX: 10d, deltaY: 0d, Radius, NoWalls, obstacles);
+
+        Assert.True(Dist(x, y, 0d, 0d) >= 1.0d - 1e-9, $"penetrated the obstacle: dist={Dist(x, y, 0d, 0d)}");
+        Assert.Equal(-1.0d, x, 6); // stopped exactly at the radius-sum surface
+        Assert.Equal(0d, y, 6);    // no lateral drift on a head-on hit
+    }
+
+    [Fact]
+    public void Circle_AngledApproach_SlidesTangentially_NeverInside()
+    {
+        // Drive into the obstacle with a strong into-it (+X) component and a tangential (+Y) component. The into-circle
+        // motion is removed (the body never penetrates), but the tangential motion is preserved => it slides AROUND.
+        var obstacles = new[] { new ContinuousCollision.Circle(0d, 0d, 0.5d) };
+        var startY = -0.2d;
+        var (x, y) = ContinuousCollision.Resolve(-5d, startY, deltaX: 6d, deltaY: 2d, Radius, NoWalls, obstacles);
+
+        Assert.True(Dist(x, y, 0d, 0d) >= 1.0d - 1e-9, $"penetrated the obstacle: dist={Dist(x, y, 0d, 0d)}");
+        Assert.True(y > startY + 0.5d, $"tangential motion was not preserved (y only reached {y} from {startY})");
+    }
+
+    [Fact]
+    public void Circle_BetweenWallAndObstacle_ResolvesBoth_NoPenetrationOfEither()
+    {
+        // A body pinned between a wall (below) and a circle obstacle (ahead) must settle clear of BOTH — the
+        // walls+circles passes iterate so neither is penetrated. Wall: the box [-10,10]x[-10,0] (a floor; its +Y face
+        // is y=0). Obstacle: a circle at (0, 1.0) radius 0.5. Drive a body up-and-into both from (-5,-0.2).
+        var walls = new[] { ContinuousCollision.Wall.FromCenter(0d, -5d, 10d, 5d) }; // +Y face at y=0
+        var obstacles = new[] { new ContinuousCollision.Circle(0d, 1.0d, 0.5d) };
+        var (x, y) = ContinuousCollision.Resolve(-5d, -0.2d, deltaX: 6d, deltaY: 3d, Radius, walls, obstacles);
+
+        // Clear of the wall: centre y must be >= the +Y face (0) + radius (0.5).
+        Assert.True(y >= 0.5d - 1e-9, $"penetrated the wall floor: y={y}");
+        // Clear of the obstacle: centre at least the radius-sum (1.0) from the obstacle centre.
+        Assert.True(Dist(x, y, 0d, 1.0d) >= 1.0d - 1e-9, $"penetrated the obstacle: dist={Dist(x, y, 0d, 1.0d)}");
+    }
+
+    [Fact]
+    public void Circle_ExactOverlap_EjectsDeterministically_NoNaN_ToRadiusSum()
+    {
+        // Degenerate: the body centre starts EXACTLY on the obstacle centre (a monster spawned/teleported on top). The
+        // resolver must eject it to the radius-sum along a DETERMINISTIC axis (no 0/0 NaN), and repeat byte-identically.
+        var obstacles = new[] { new ContinuousCollision.Circle(3d, 3d, 0.5d) };
+        var (x, y) = ContinuousCollision.Resolve(3d, 3d, deltaX: 0d, deltaY: 0d, Radius, NoWalls, obstacles);
+
+        Assert.True(double.IsFinite(x) && double.IsFinite(y), $"NaN/Inf eject: ({x},{y})");
+        Assert.Equal(1.0d, Dist(x, y, 3d, 3d), 6); // ejected to exactly the radius-sum
+
+        var (x2, y2) = ContinuousCollision.Resolve(3d, 3d, deltaX: 0d, deltaY: 0d, Radius, NoWalls, obstacles);
+        Assert.Equal(System.BitConverter.DoubleToInt64Bits(x), System.BitConverter.DoubleToInt64Bits(x2));
+        Assert.Equal(System.BitConverter.DoubleToInt64Bits(y), System.BitConverter.DoubleToInt64Bits(y2));
+    }
+
+    [Fact]
+    public void ObstacleOverload_WithEmptyObstacles_ByteIdentical_ToWallsOnlyResolve()
+    {
+        // The new walls+obstacles overload with an EMPTY obstacle list must reproduce the walls-only Resolve bit-for-bit
+        // — the regression guard that the obstacle plumbing never perturbs the existing predicted/integrated wall path.
+        var walls = OneBox();
+        var noObstacles = System.Array.Empty<ContinuousCollision.Circle>();
+
+        var (wx, wy) = ContinuousCollision.Resolve(-5d, -1d, 6d, 2d, Radius, walls);
+        var (ox, oy) = ContinuousCollision.Resolve(-5d, -1d, 6d, 2d, Radius, walls, noObstacles);
+
+        Assert.Equal(System.BitConverter.DoubleToInt64Bits(wx), System.BitConverter.DoubleToInt64Bits(ox));
+        Assert.Equal(System.BitConverter.DoubleToInt64Bits(wy), System.BitConverter.DoubleToInt64Bits(oy));
+    }
+
+    [Fact]
+    public void ObstacleOverload_NoWallsNoObstacles_IsPurePassThrough()
+    {
+        // Open field AND no obstacle: the move is returned exactly (start + delta), the same fast path the walls-only
+        // overload takes — so an entity with neither walls nor monsters nearby integrates unchanged.
+        var (x, y) = ContinuousCollision.Resolve(1d, 2d, 5d, -3d, Radius, NoWalls, System.Array.Empty<ContinuousCollision.Circle>());
+        Assert.Equal(6d, x, 9);
+        Assert.Equal(-1d, y, 9);
+    }
 }

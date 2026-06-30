@@ -127,6 +127,49 @@ public sealed class ServerActionExecutorTests
     }
 
     [Fact]
+    public void MonsterHopArc_IntoAStationaryPlayer_StopsAtThePlayer_NeverArcsThrough()
+    {
+        // PLAYER↔MONSTER COLLISION: the slime's hop is a real ballistic arc advanced by THIS executor. With the kind-
+        // aware obstacle gather wired (a MONSTER actor collides with nearby PLAYERS), a monster hopping EAST into a
+        // stationary player 3 tiles ahead must STOP at the player (centre distance >= 2×radius) — never arc through it.
+        var grid = new TileGrid(64, 64, System.Array.Empty<TileCoord>());
+        var player = new WorldVector(11d, 8d); // 3 tiles east of the monster spawn (8,8).
+        var executor = new ServerActionExecutor(
+            TickRate,
+            () => Radius,
+            grid.QueryNearbyWalls,
+            (entity, resolved) => entity.ApplyResolvedMove(resolved),
+            // Kind-aware: a Monster actor sees the player body as an obstacle; a Player actor would see nothing.
+            (actor, _, _, radius, scratch) =>
+            {
+                scratch.Clear();
+                if (actor.Kind == EntityKind.Monster)
+                {
+                    scratch.Add(new ContinuousCollision.Circle(player.X, player.Y, radius));
+                }
+            });
+
+        var monster = new WorldEntity(
+            id: 1, networkId: 1, EntityKind.Monster, new TileCoord(8, 8), Direction8.S, "Slime",
+            characterId: null, ownerSession: null, isDurable: false);
+        monster.SetSpeedUnitsPerSecond(5d);
+
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: 10, jumpHeight: 2d, forwardDistanceUnits: 5d, cooldownTicks: 0, animationId: 1);
+
+        Assert.True(executor.TryStart(monster, def, Direction8.E.ToUnitVector(), serverTick: 0));
+        for (uint t = 1; t <= 10; t++)
+        {
+            executor.Step(monster, t);
+            var d = System.Math.Sqrt((monster.Position - player).LengthSquared);
+            Assert.True(d >= (2d * Radius) - 1e-6, $"hop arc overlapped the player at tick {t}: dist={d:F4}");
+        }
+
+        Assert.True(monster.Position.X <= player.X + 1e-6, "the hop arc passed through the player.");
+        Assert.Equal(2d * Radius, System.Math.Sqrt((monster.Position - player).LengthSquared), 2); // landed AT the player.
+    }
+
+    [Fact]
     public void ForwardArcJump_ReachesForwardTarget_AlongTheArc()
     {
         // Open ground, jump EAST. The un-collided forward arc advances the full ForwardDistanceUnits along the locked

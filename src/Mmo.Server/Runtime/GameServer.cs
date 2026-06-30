@@ -191,6 +191,13 @@ public sealed class GameServer
     // allocation in the hot loop).
     private readonly List<WorldEntity> _monsterSeparationScratch = new();
 
+    // PLAYER↔MONSTER COLLISION: reused spatial-candidate buffer for the monster-side player-obstacle gathers (the
+    // locomotions' GatherPlayerObstacles + the executor's GatherActionObstacles). Refilled per gather call
+    // (GatherInterestCandidates clears it). Single-threaded tick loop, and the monster-AI pass and the executor's
+    // StepAll run sequentially (never reentrant within one gather), so one shared buffer is safe — no per-tick alloc.
+    // (The PLAYER integrator's own monster-obstacle gather lives in Zone with its own scratch — a separate seam.)
+    private readonly List<WorldEntity> _obstacleCandidateScratch = new();
+
     // MOVEMENT-ACTIONS Phase B1: the SHARED action registry — the SAME defs the client loads (MovementActionRegistry
     // .Default is built from the shared assembly). HandleActionIntent resolves the wire ActionId to a def from here,
     // so server execution and (B2) client prediction run identical trajectories. Static-shared today (compile-time
@@ -300,7 +307,10 @@ public sealed class GameServer
             options.TickRate,
             () => _tuning.BodyRadiusUnits,
             _zone.QueryNearbyWalls,
-            _zone.ApplyMonsterLanding);
+            _zone.ApplyMonsterLanding,
+            // PLAYER↔MONSTER COLLISION: a monster's hop arc / charge dash STOPS at a nearby player (kind-aware gather —
+            // a player jump avoids nothing this phase, staying byte-identical + prediction-parity-safe).
+            GatherActionObstacles);
         // MONSTER-SEPARATION: wire the de-penetration pass to the SAME shared seams (live body radius, the spatial
         // neighbour query, the wall query + resolver, and the apply-landing seam) the locomotions/actions use, so a
         // separation nudge collides byte-identically with walls and migrates the spatial bucket exactly like a hop.
@@ -325,7 +335,10 @@ public sealed class GameServer
             () => _tuning.BodyRadiusUnits,
             _zone.QueryNearbyWalls,
             BeginMonsterHop,
-            id => _actionExecutor.IsActive(id));
+            id => _actionExecutor.IsActive(id),
+            // PLAYER↔MONSTER COLLISION: the hop DECISION probe accounts for a player in the way (the executor does the
+            // physical stop per tick; see GatherActionObstacles above).
+            GatherPlayerObstacles);
         // MONSTER-BEHAVIOR P2: the second body — GlideLocomotion (a continuous velocity-based WALK). Same shared
         // collision seams the hop uses (QueryNearbyWalls + the resolver, ApplyMonsterLanding, the live player body
         // radius); it SETS the monster's Velocity = heading × SpeedUnitsPerSecond, which already rides the wire (v39)
@@ -341,7 +354,9 @@ public sealed class GameServer
                 options.TickRate,
                 // MONSTER-BEHAVIOR P5: the SAME self-guard the hop carries — while a charge dash owns the monster's
                 // movement (the executor's StepAll drives it), the glide must NOT also step it (a double-move).
-                monster => _actionExecutor.IsActive(monster)),
+                monster => _actionExecutor.IsActive(monster),
+                // PLAYER↔MONSTER COLLISION: a chasing glider STOPS at / slides along a nearby player (server-only).
+                GatherPlayerObstacles),
         };
         // MONSTER-BEHAVIOR P3/P4: the per-type BEHAVIOR ("brain") registry. Build the "basicRoamer" entry (the shared
         // BasicRoamerBehavior, formerly the standalone _monsterAi) and, as of P4, the "skirmisher" entry (the gnoll's
@@ -3332,6 +3347,61 @@ public sealed class GameServer
     // AI's TryBeginHop cadence is the re-trigger gate, NOT the executor's own cooldown). A small record+closure alloc per
     // hop (~once per cadence per monster) — acceptable. Reuses ActionId.Jump (a per-entity cooldown key, no collision
     // with a player's jump). Returns the executor's TryStart result.
+    // PLAYER↔MONSTER COLLISION: the monster-locomotion obstacle gather (injected into HopLocomotion + GlideLocomotion).
+    // Fills `scratch` with the nearby PLAYER bodies (as Circles of the shared body radius) a monster move should collide
+    // against, so a chasing monster STOPS at the player. The acting body is always a monster here (the locomotions run
+    // only for monsters), so a plain Player-kind filter is the correct set; monster↔monster stays the separation pass.
+    private void GatherPlayerObstacles(WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch)
+    {
+        FillPlayerCircles(start, delta, radius, scratch);
+    }
+
+    // PLAYER↔MONSTER COLLISION: the action-executor obstacle gather (injected into ServerActionExecutor). KIND-AWARE: a
+    // MONSTER actor (a hop arc / charge dash) collides with nearby PLAYERS so it STOPS at the player; a PLAYER actor (a
+    // predicted jump) gathers NOTHING this phase — player jumps stay byte-identical + parity-safe (the client predictor
+    // jump path is unchanged). This is the seam to widen for player-jump↔monster collision later.
+    private void GatherActionObstacles(WorldEntity actor, WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch)
+    {
+        scratch.Clear();
+        if (actor.Kind != EntityKind.Monster)
+        {
+            return; // a player jump avoids nothing this phase
+        }
+
+        FillPlayerCircles(start, delta, radius, scratch);
+    }
+
+    // PLAYER↔MONSTER COLLISION: the shared body-circle gather — fills `scratch` (cleared first) with the live PLAYER
+    // bodies near the swept move (start → start+delta) as Circles of `radius`. Queries the spatial grid for a tile box
+    // sized to cover the move plus both bodies (a superset; the swept-circle resolver applies the exact circle-vs-circle
+    // test). Deterministic order (the grid's stable candidate order). Reuses `_obstacleCandidateScratch`; NO per-tick
+    // alloc beyond the caller's `scratch` growth.
+    private void FillPlayerCircles(WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch)
+    {
+        scratch.Clear();
+
+        // Box radius (tiles): the move length plus both body radii, rounded up with a +1 tile margin so the grid
+        // superset never misses a player whose body just overlaps the swept circle at the far end of the step.
+        var reachTiles = (int)Math.Ceiling(delta.Length + radius + radius) + 1;
+        if (reachTiles < 1)
+        {
+            reachTiles = 1;
+        }
+
+        _zone.World.GatherInterestCandidates(start.ToTileRounded(), reachTiles, _obstacleCandidateScratch);
+        for (var i = 0; i < _obstacleCandidateScratch.Count; i++)
+        {
+            var candidate = _obstacleCandidateScratch[i];
+            if (candidate.Kind != EntityKind.Player)
+            {
+                continue;
+            }
+
+            var pos = candidate.Position;
+            scratch.Add(new ContinuousCollision.Circle(pos.X, pos.Y, radius));
+        }
+    }
+
     private bool BeginMonsterHop(WorldEntity monster, WorldVector heading, double hopDistance, uint cooldownTicks, uint serverTick)
     {
         if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))

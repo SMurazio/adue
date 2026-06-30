@@ -29,7 +29,10 @@ public sealed class GlideLocomotionTests
     // Builds a GlideLocomotion wired exactly like GameServer: the SAME shared wall query + body radius ordinary
     // movement uses, and the SAME apply seam (ApplyResolvedMove + spatial-bucket migration on a tile cross).
     private static GlideLocomotion CreateGlide(
-        TileGrid grid, WorldState world, Func<WorldEntity, bool>? isActionActive = null)
+        TileGrid grid,
+        WorldState world,
+        Func<WorldEntity, bool>? isActionActive = null,
+        HopLocomotion.QueryObstaclesDelegate? queryObstacles = null)
         => new(
             () => BodyRadius,
             grid.QueryNearbyWalls,
@@ -47,7 +50,30 @@ public sealed class GlideLocomotionTests
             TickRate,
             // MONSTER-BEHAVIOR P5: the self-guard. Default = never active (these tests have no executor); the guard test
             // passes a stub that returns true to prove the glide makes no move + reports OnCooldown while an action runs.
-            isActionActive ?? (_ => false));
+            isActionActive ?? (_ => false),
+            queryObstacles);
+
+    // PLAYER↔MONSTER COLLISION: a player-obstacle gather mirroring GameServer.GatherPlayerObstacles — scans the world for
+    // PLAYER bodies (as Circles of the body radius) near the move, so a glider STOPS at a player. (Bare-world variant of
+    // the GameServer spatial-grid gather: a small world, so a linear scan is fine for the test.)
+    private static HopLocomotion.QueryObstaclesDelegate PlayerObstacleGather(WorldState world)
+        => (start, delta, radius, scratch) =>
+        {
+            scratch.Clear();
+            foreach (var entity in world.Entities)
+            {
+                if (entity.Kind != EntityKind.Player)
+                {
+                    continue;
+                }
+
+                var pos = entity.Position;
+                scratch.Add(new ContinuousCollision.Circle(pos.X, pos.Y, radius));
+            }
+        };
+
+    private static WorldEntity SpawnPlayerBody(WorldState world, TileCoord tile, uint networkId)
+        => world.AddTransient(networkId, EntityKind.Player, "P", tile, Direction8.S);
 
     // A monster at `tile`'s centre with the walk speed seeded (GameServer seeds SpeedUnitsPerSecond at spawn via
     // RefreshSpeedStat; here we set it directly so the bare entity has a non-zero walk speed).
@@ -207,6 +233,56 @@ public sealed class GlideLocomotionTests
         Assert.True(
             monster.StateRevision > revBefore,
             "wedged glider did not bump StateRevision — Velocity=0 won't re-publish, so the client drifts into the wall.");
+    }
+
+    [Fact]
+    public void GlidesIntoAStationaryPlayer_StopsAtThePlayer_NeverOverlaps()
+    {
+        // PLAYER↔MONSTER COLLISION: a glider chasing a target BEYOND a stationary player must STOP at the player (centre
+        // distance >= 2×radius) instead of gliding through it. The player sits 3 tiles east; the target is further east.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnGlider(world, new TileCoord(32, 32));
+        var player = SpawnPlayerBody(world, new TileCoord(35, 32), networkId: 2);
+        var glide = CreateGlide(grid, world, queryObstacles: PlayerObstacleGather(world));
+        var target = new WorldVector(40d, 32d); // east, past the player.
+
+        for (uint tick = 1; tick <= 80; tick++)
+        {
+            glide.Advance(monster, target, tick, cooldownTicks: 7);
+            Assert.True(Distance(monster.Position, player.Position) >= (2d * BodyRadius) - 1e-3,
+                $"glider overlapped the player at tick {tick}: dist={Distance(monster.Position, player.Position):F4}");
+        }
+
+        // It closed the gap to the player (stopped AT it) and never passed to the player's east side.
+        Assert.Equal(2d * BodyRadius, Distance(monster.Position, player.Position), 2);
+        Assert.True(monster.Position.X <= player.Position.X + 1e-6, "glider passed through the player.");
+    }
+
+    [Fact]
+    public void WithNoPlayerNearby_GlideIsUnchanged_ByObstaclePlumbing()
+    {
+        // PLAYER↔MONSTER COLLISION regression: with the obstacle gather injected but NO player present, the glide path is
+        // identical to the gather-less glide — the empty-obstacle set takes the walls-only resolve, byte-for-byte.
+        var gridA = OpenGrid();
+        var worldA = new WorldState();
+        var monsterA = SpawnGlider(worldA, new TileCoord(32, 32));
+        var glideA = CreateGlide(gridA, worldA, queryObstacles: PlayerObstacleGather(worldA));
+
+        var gridB = OpenGrid();
+        var worldB = new WorldState();
+        var monsterB = SpawnGlider(worldB, new TileCoord(32, 32));
+        var glideB = CreateGlide(gridB, worldB); // no gather at all
+
+        var target = new WorldVector(48d, 40d);
+        for (uint tick = 1; tick <= 40; tick++)
+        {
+            glideA.Advance(monsterA, target, tick, cooldownTicks: 7);
+            glideB.Advance(monsterB, target, tick, cooldownTicks: 7);
+        }
+
+        Assert.Equal(BitConverter.DoubleToInt64Bits(monsterA.Position.X), BitConverter.DoubleToInt64Bits(monsterB.Position.X));
+        Assert.Equal(BitConverter.DoubleToInt64Bits(monsterA.Position.Y), BitConverter.DoubleToInt64Bits(monsterB.Position.Y));
     }
 
     [Fact]

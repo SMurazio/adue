@@ -19,6 +19,21 @@ public sealed class Zone
     // inside the same call). NEVER touched by the monster TryStep path.
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
 
+    // PLAYER↔MONSTER COLLISION: the reused per-tick scratch for the player integrator's nearby-MONSTER obstacle set.
+    // `_obstacleCandidateScratch` receives the spatial-grid superset (GatherInterestCandidates clears it); the Monster
+    // candidates within reach of the swept move are projected into `_obstacleScratch` as Circles and handed to the
+    // swept-circle resolver so a player STOPS at / SLIDES along a monster (never walks through it). Both reused → zero
+    // per-tick alloc. Single-threaded tick loop, so one shared pair is safe (each IntegrateMovement fully consumes them
+    // before the next entity's call). Other PLAYERS are intentionally NOT gathered this phase (player↔player is next).
+    private readonly List<WorldEntity> _obstacleCandidateScratch = new();
+    private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
+
+    // The spatial-grid query radius (TILES) for the player's nearby-monster obstacle gather. Two bodies overlap only
+    // when their centres are within radius+radius = 1.0 tile; a 2-tile box comfortably covers that plus the sub-tile
+    // per-input move delta, so the exact circle-vs-circle test in the resolver never misses a blocking monster. A pure
+    // perf bound — correctness is the resolver's distance test (the grid returns a superset).
+    private const int ObstacleQueryRadiusTiles = 2;
+
     public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles)
         : this(id, tileGrid, spawnTiles, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion)
     {
@@ -135,7 +150,16 @@ public sealed class Zone
 
         var delta = entity.ComputeMoveDelta(unitDir, dtSeconds);
         _tileGrid.QueryNearbyWalls(start, delta, radius, _wallScratch);
-        var resolved = ContinuousCollision.Resolve(start, delta, radius, _wallScratch);
+
+        // PLAYER↔MONSTER COLLISION: gather the nearby MONSTER bodies as Circle obstacles so the player STOPS at / SLIDES
+        // along a monster, resolved by the SAME shared swept-circle resolver as walls (so the Phase-4 client predictor,
+        // feeding the SAME monster set, predicts the same slide → no rubber-band). Self (a Player) and other players are
+        // excluded by the Monster-only filter. With no monster nearby the obstacle list is empty and the result is
+        // byte-identical to the walls-only path.
+        GatherMonsterObstacles(entity, start, radius, _obstacleScratch);
+        var resolved = _obstacleScratch.Count == 0
+            ? ContinuousCollision.Resolve(start, delta, radius, _wallScratch)
+            : ContinuousCollision.Resolve(start, delta, radius, _wallScratch, _obstacleScratch);
 
         var crossedTile = entity.ApplyResolvedMove(resolved);
         if (crossedTile)
@@ -144,6 +168,29 @@ public sealed class Zone
         }
 
         return crossedTile;
+    }
+
+    // PLAYER↔MONSTER COLLISION: fill `destination` (cleared first) with the nearby MONSTER bodies — as Circles of the
+    // shared body radius — that the moving player `self` could collide with this step. Queries the spatial grid for a
+    // small tile box around the start tile (a superset; the resolver applies the exact circle-vs-circle test), keeps
+    // only EntityKind.Monster (so self — a Player — and other players are excluded this phase), and projects each to a
+    // Circle at its authoritative Position. Deterministic order (the grid's stable candidate order). Reuses the Zone's
+    // candidate scratch internally; appends Circles to the caller's reused `destination`. NO per-tick alloc.
+    private void GatherMonsterObstacles(WorldEntity self, WorldVector start, double radius, List<ContinuousCollision.Circle> destination)
+    {
+        destination.Clear();
+        World.GatherInterestCandidates(start.ToTileRounded(), ObstacleQueryRadiusTiles, _obstacleCandidateScratch);
+        for (var i = 0; i < _obstacleCandidateScratch.Count; i++)
+        {
+            var candidate = _obstacleCandidateScratch[i];
+            if (candidate.Kind != EntityKind.Monster || candidate.Id == self.Id)
+            {
+                continue;
+            }
+
+            var pos = candidate.Position;
+            destination.Add(new ContinuousCollision.Circle(pos.X, pos.Y, radius));
+        }
     }
 
     // CONTINUOUS MIGRATION (Phase 8): the nearby-walls query seam for the MONSTER hop locomotion (HopLocomotion). A

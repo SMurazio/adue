@@ -34,11 +34,22 @@ public sealed class ServerActionExecutor
     // the rounded tile crossed (unused by the executor; kept to mirror the existing apply-seam signature). Injected.
     public delegate bool ApplyResolvedMoveDelegate(WorldEntity entity, WorldVector resolvedPosition);
 
+    // PLAYER↔MONSTER COLLISION: fills `scratch` with the body Circles `actor` should collide with this action step —
+    // KIND-AWARE: a MONSTER actor (a hop arc / charge dash) gathers nearby PLAYERS so it STOPS at the player instead of
+    // arcing through it; a PLAYER actor (a predicted jump) gathers NOTHING this phase, so player jumps stay byte-
+    // identical (and parity-safe — the client predictor's action path is unchanged). Injected like the wall query and
+    // OPTIONAL — null ⇒ no body obstacles (the executor's Phase-A/B unit tests, unchanged). The GameServer impl gathers
+    // via the SAME spatial index + body radius ordinary movement uses; monster↔monster stays the separation pass's job.
+    public delegate void QueryObstaclesDelegate(
+        WorldEntity actor, WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch);
+
     private readonly int _tickRate;
     private readonly Func<double> _bodyRadiusUnits;
     private readonly QueryWallsDelegate _queryWalls;
+    private readonly QueryObstaclesDelegate? _queryObstacles;
     private readonly ApplyResolvedMoveDelegate _applyResolvedMove;
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
+    private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
     // The per-entity active action instance (one at a time — design §2.8). Absent ⇒ the entity is not in an action.
     private readonly Dictionary<ulong, ActionInstance> _active = new();
@@ -52,7 +63,8 @@ public sealed class ServerActionExecutor
         int tickRate,
         Func<double> bodyRadiusUnits,
         QueryWallsDelegate queryWalls,
-        ApplyResolvedMoveDelegate applyResolvedMove)
+        ApplyResolvedMoveDelegate applyResolvedMove,
+        QueryObstaclesDelegate? queryObstacles = null)
     {
         if (tickRate <= 0)
         {
@@ -63,6 +75,7 @@ public sealed class ServerActionExecutor
         _bodyRadiusUnits = bodyRadiusUnits ?? throw new ArgumentNullException(nameof(bodyRadiusUnits));
         _queryWalls = queryWalls ?? throw new ArgumentNullException(nameof(queryWalls));
         _applyResolvedMove = applyResolvedMove ?? throw new ArgumentNullException(nameof(applyResolvedMove));
+        _queryObstacles = queryObstacles;
     }
 
     // True iff `entity` currently has a running action — the predicate the caller uses to SUPPRESS normal input
@@ -172,7 +185,16 @@ public sealed class ServerActionExecutor
             var radius = _bodyRadiusUnits();
             var start = entity.Position;
             _queryWalls(start, desired, radius, _wallScratch);
-            var resolved = ContinuousCollision.Resolve(start, desired, radius, _wallScratch);
+
+            // PLAYER↔MONSTER COLLISION: gather the kind-aware body obstacles (a monster's hop arc / charge dash collides
+            // with nearby PLAYERS; a player jump gathers nothing this phase) and resolve the arc against them too, so a
+            // hopping/dashing monster STOPS at the player instead of arcing through it. No gather / empty set ⇒ the
+            // walls-only path, byte-identical to before (the player-jump path and the executor's unit tests).
+            _obstacleScratch.Clear();
+            _queryObstacles?.Invoke(entity, start, desired, radius, _obstacleScratch);
+            var resolved = _obstacleScratch.Count == 0
+                ? ContinuousCollision.Resolve(start, desired, radius, _wallScratch)
+                : ContinuousCollision.Resolve(start, desired, radius, _wallScratch, _obstacleScratch);
             _applyResolvedMove(entity, resolved);
         }
 

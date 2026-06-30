@@ -81,15 +81,25 @@ public sealed class HopLocomotion : IMonsterLocomotion
     private readonly Func<double> _hopDistanceUnits;
     private readonly Func<double> _bodyRadiusUnits;
     private readonly QueryWallsDelegate _queryWalls;
+    private readonly QueryObstaclesDelegate? _queryObstacles;
     private readonly BeginHopDelegate _beginHop;
     private readonly Func<ulong, bool> _isActionActive;
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
+    private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
     // Fills `scratch` with the collision walls near a swept move (from, delta, radius) in stable row-major order — the
     // SAME TileGrid.QueryNearbyWalls / TileWalls helper the player integrator uses, injected so the locomotion is unit-
     // testable against a bare TileGrid without a live Zone.
     public delegate void QueryWallsDelegate(
         WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Wall> scratch);
+
+    // PLAYER↔MONSTER COLLISION: fills `scratch` with the nearby PLAYER bodies (as Circles of the body radius) a monster
+    // move should collide against, so a chasing monster STOPS at the player instead of overlapping it (monster↔monster
+    // stays the separation pass's job). Injected exactly like the wall query (so the locomotion is unit-testable without
+    // a live Zone) and OPTIONAL — null ⇒ no body obstacles (the tests' open-field behaviour, byte-identical to before).
+    // Shared by HopLocomotion + GlideLocomotion (and mirrors ContinuousCollision.Circle's stable-order contract).
+    public delegate void QueryObstaclesDelegate(
+        WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch);
 
     // MOVEMENT-ACTIONS (Phase C): START a real ballistic Jump on `monster` toward `heading` for `hopDistance` units over
     // `cooldownTicks` ticks (the move cadence — the arc spans the whole window then lands), at `serverTick`. Injected
@@ -106,13 +116,15 @@ public sealed class HopLocomotion : IMonsterLocomotion
         Func<double> bodyRadiusUnits,
         QueryWallsDelegate queryWalls,
         BeginHopDelegate beginHop,
-        Func<ulong, bool> isActionActive)
+        Func<ulong, bool> isActionActive,
+        QueryObstaclesDelegate? queryObstacles = null)
     {
         _hopDistanceUnits = hopDistanceUnits;
         _bodyRadiusUnits = bodyRadiusUnits;
         _queryWalls = queryWalls;
         _beginHop = beginHop;
         _isActionActive = isActionActive;
+        _queryObstacles = queryObstacles;
     }
 
     public HopResult Advance(WorldEntity monster, WorldVector target, uint serverTick, uint cooldownTicks)
@@ -150,6 +162,13 @@ public sealed class HopLocomotion : IMonsterLocomotion
         var hopDistance = Math.Min(_hopDistanceUnits(), toTarget.Length);
 
         var primaryDir = toTarget.Normalized();
+
+        // PLAYER↔MONSTER COLLISION: snapshot the nearby PLAYER obstacle set ONCE per Advance (consistent geometry across
+        // the primary hop + the whole fan, like the radius/hopDistance snapshot) so the hop DECISION (Moved/Stuck, which
+        // heading) accounts for a player in the way — the monster won't decide to hop straight through a player. Null
+        // gather ⇒ empty set (the open-field tests, unchanged). The PHYSICAL stop is the executor's job (it re-resolves
+        // the arc per tick against the SAME player set — see GameServer.BeginMonsterHop / ServerActionExecutor).
+        GatherObstacles(from, primaryDir * hopDistance, radius);
 
         // Primary straight hop.
         var best = ResolveHop(from, primaryDir, hopDistance, radius);
@@ -223,7 +242,18 @@ public sealed class HopLocomotion : IMonsterLocomotion
     {
         var delta = unitDir * hopDistance;
         _queryWalls(from, delta, radius, _wallScratch);
-        return ContinuousCollision.Resolve(from, delta, radius, _wallScratch);
+        return _obstacleScratch.Count == 0
+            ? ContinuousCollision.Resolve(from, delta, radius, _wallScratch)
+            : ContinuousCollision.Resolve(from, delta, radius, _wallScratch, _obstacleScratch);
+    }
+
+    // PLAYER↔MONSTER COLLISION: refill `_obstacleScratch` (cleared) with the nearby player bodies for THIS Advance via
+    // the injected gather. No gather injected (the unit tests) ⇒ an empty set ⇒ ResolveHop takes the walls-only path,
+    // byte-identical to before.
+    private void GatherObstacles(WorldVector from, WorldVector delta, double radius)
+    {
+        _obstacleScratch.Clear();
+        _queryObstacles?.Invoke(from, delta, radius, _obstacleScratch);
     }
 
     // Signed progress (tile units) of a resolved landing toward the ORIGINAL target heading: the landing displacement
@@ -287,10 +317,12 @@ public sealed class GlideLocomotion : IMonsterLocomotion
     // the hop + the player integrator), pinned to the player radius so a glider fits exactly where a player does.
     private readonly Func<double> _bodyRadiusUnits;
     private readonly HopLocomotion.QueryWallsDelegate _queryWalls;
+    private readonly HopLocomotion.QueryObstaclesDelegate? _queryObstacles;
     private readonly ApplyLandingDelegate _applyLanding;
     private readonly Func<WorldEntity, bool> _isActionActive;
     private readonly double _dtSeconds;
     private readonly List<ContinuousCollision.Wall> _wallScratch = new();
+    private readonly List<ContinuousCollision.Circle> _obstacleScratch = new();
 
     // tickRate fixes the per-tick integration step dt = 1/tickRate (the SAME fixed server tick the player integrator
     // and the ballistic Z use; the server owns speed AND dt, so anti-speedhack is intrinsic just like a player move).
@@ -302,12 +334,14 @@ public sealed class GlideLocomotion : IMonsterLocomotion
         HopLocomotion.QueryWallsDelegate queryWalls,
         ApplyLandingDelegate applyLanding,
         int tickRate,
-        Func<WorldEntity, bool> isActionActive)
+        Func<WorldEntity, bool> isActionActive,
+        HopLocomotion.QueryObstaclesDelegate? queryObstacles = null)
     {
         _bodyRadiusUnits = bodyRadiusUnits;
         _queryWalls = queryWalls;
         _applyLanding = applyLanding;
         _isActionActive = isActionActive;
+        _queryObstacles = queryObstacles;
         _dtSeconds = tickRate > 0 ? 1d / tickRate : 0d;
     }
 
@@ -343,8 +377,15 @@ public sealed class GlideLocomotion : IMonsterLocomotion
 
         // Resolve the step through the SAME shared collision the player + the hop use — the resolver SLIDES along walls
         // (a glider follows a wall, no fan needed), so a blocked step yields a sideways landing or a fixpoint.
+        // PLAYER↔MONSTER COLLISION: also gather the nearby PLAYER bodies and resolve against them, so a chasing glider
+        // STOPS at / slides along the player instead of overlapping it (server-only — a monster isn't predicted). No
+        // gather injected (the unit tests) ⇒ empty set ⇒ the walls-only path, byte-identical to before.
         _queryWalls(from, delta, radius, _wallScratch);
-        var landing = ContinuousCollision.Resolve(from, delta, radius, _wallScratch);
+        _obstacleScratch.Clear();
+        _queryObstacles?.Invoke(from, delta, radius, _obstacleScratch);
+        var landing = _obstacleScratch.Count == 0
+            ? ContinuousCollision.Resolve(from, delta, radius, _wallScratch)
+            : ContinuousCollision.Resolve(from, delta, radius, _wallScratch, _obstacleScratch);
         _applyLanding(monster, landing);
 
         // VELOCITY COHERENCE (the replication guardrail): replicate the ACTUAL resolved motion, NOT the pre-collision

@@ -43,6 +43,15 @@ public static class ContinuousCollision
             new(centerX - halfX, centerY - halfY, centerX + halfX, centerY + halfY);
     }
 
+    // PLAYER↔MONSTER COLLISION: a circular body obstacle — another entity (a monster, from the player's POV; a player,
+    // from a monster's POV) the moving circle must not penetrate. Unlike a Wall (an immovable AABB), a Circle is just a
+    // centre + radius; the moving body is de-penetrated out of it to exactly (movingRadius + obstacle.Radius) along the
+    // centre→centre axis. The obstacle is treated as STATIC for the duration of one Resolve (a snapshot of where it is
+    // this step) — it is never itself moved here. Determinism: the caller passes the obstacles in a STABLE order (the
+    // server/client gather emit them in a fixed order); the de-penetration is all-double, RNG-free, and an exact-overlap
+    // (centres coincident) falls back to a deterministic axis derived from the obstacle's list INDEX (never a 0/0 NaN).
+    public readonly record struct Circle(double X, double Y, double Radius);
+
     // The longest a single sub-step's move may be, as a fraction of the body radius. <= 1 guarantees no sub-step
     // moves more than one radius, so the circle cannot pass through a wall at least ~one-radius thick without the
     // intermediate sub-step landing inside it and being resolved. 0.5 is comfortably conservative. PINNED — part of
@@ -113,6 +122,154 @@ public static class ContinuousCollision
         var (x, y) = Resolve(start.X, start.Y, delta.X, delta.Y, radius, walls);
         return new WorldVector(x, y);
     }
+
+    // PLAYER↔MONSTER COLLISION: the swept-circle resolver EXTENDED with circular body obstacles. Identical sub-stepping
+    // + wall handling to the walls-only Resolve above (same anti-tunnelling, same slide, same byte-identical math), but
+    // after the wall resolution in EACH sub-step's pass it ALSO de-penetrates the body out of every `obstacles` Circle.
+    // Iterating walls AND circles together across ResolvePasses means a body pinned between a wall and a monster settles
+    // against BOTH (it stops, never penetrating either), exactly like an inside wall corner. This is the SHARED resolver
+    // the server player integrator AND the client predictor call with the SAME monster-obstacle set, so a predicted
+    // slide along a monster lands where the server integrates it (the determinism contract, now WITH dynamic obstacles —
+    // approximate only to the extent the obstacle MOVED between the client's stale snapshot and the server's authoritative
+    // position; vs a stationary obstacle it is exact). The walls-only Resolve above is UNCHANGED (back-compat). PURE: no
+    // alloc — the caller hands in its reused walls + obstacles scratch lists. Deterministic for a given (start, delta,
+    // walls, obstacles, radius).
+    public static (double X, double Y) Resolve(
+        double startX, double startY, double deltaX, double deltaY, double radius,
+        IReadOnlyList<Wall> walls, IReadOnlyList<Circle> obstacles)
+    {
+        var x = startX;
+        var y = startY;
+
+        var wallCount = walls?.Count ?? 0;
+        var obstacleCount = obstacles?.Count ?? 0;
+        if (wallCount == 0 && obstacleCount == 0)
+        {
+            // Open move: unaffected (the no-collision fast path — identical to the walls-only Resolve's open path).
+            return (x + deltaX, y + deltaY);
+        }
+
+        var moveLen = Math.Sqrt((deltaX * deltaX) + (deltaY * deltaY));
+        if (moveLen <= 1e-12)
+        {
+            // No motion this step, but the start could already be penetrating a wall OR overlapping an obstacle that
+            // moved onto us — resolve in place against both so the body is always pushed clear.
+            return ResolvePenetration(x, y, radius, walls, obstacles);
+        }
+
+        // Anti-tunnelling sub-steps, identical to the walls-only path (a circle obstacle is at most one body across, so
+        // the same SubStepMaxFraction*radius cap that prevents wall tunnelling prevents tunnelling through a body too).
+        var maxStep = SubStepMaxFraction * radius;
+        var subSteps = (int)Math.Ceiling(moveLen / maxStep);
+        if (subSteps < 1)
+        {
+            subSteps = 1;
+        }
+
+        var stepX = deltaX / subSteps;
+        var stepY = deltaY / subSteps;
+
+        for (var i = 0; i < subSteps; i++)
+        {
+            x += stepX;
+            y += stepY;
+            (x, y) = ResolvePenetration(x, y, radius, walls, obstacles);
+        }
+
+        return (x, y);
+    }
+
+    // WorldVector overload of the walls+obstacles resolver (call-site readability for the server integrator / client
+    // predictor / monster locomotions). A thin wrapper over the primitive — same math, same determinism.
+    public static WorldVector Resolve(
+        WorldVector start, WorldVector delta, double radius,
+        IReadOnlyList<Wall> walls, IReadOnlyList<Circle> obstacles)
+    {
+        var (x, y) = Resolve(start.X, start.Y, delta.X, delta.Y, radius, walls, obstacles);
+        return new WorldVector(x, y);
+    }
+
+    // Push the circle center out of every wall AND every obstacle it penetrates, over a FIXED ResolvePasses passes (so
+    // a body wedged against a wall + a monster at once settles, like an inside wall corner). Walls are resolved FIRST in
+    // each pass (preserving the walls-only push order/result), then the circle obstacles, in their stable list order.
+    private static (double X, double Y) ResolvePenetration(
+        double x, double y, double radius, IReadOnlyList<Wall>? walls, IReadOnlyList<Circle>? obstacles)
+    {
+        var wallCount = walls?.Count ?? 0;
+        var obstacleCount = obstacles?.Count ?? 0;
+
+        for (var pass = 0; pass < ResolvePasses; pass++)
+        {
+            var movedAny = false;
+
+            for (var w = 0; w < wallCount; w++)
+            {
+                if (TryResolveOne(ref x, ref y, radius, walls![w]))
+                {
+                    movedAny = true;
+                }
+            }
+
+            for (var o = 0; o < obstacleCount; o++)
+            {
+                if (TryResolveCircle(ref x, ref y, radius, obstacles![o], o))
+                {
+                    movedAny = true;
+                }
+            }
+
+            // Early-out once a pass changed nothing — already clear of every wall + obstacle. (Pure optimisation; a
+            // no-move pass leaves x/y untouched, so the deterministic result is unaffected.)
+            if (!movedAny)
+            {
+                break;
+            }
+        }
+
+        return (x, y);
+    }
+
+    // De-penetrate the moving circle (centre x,y, radius) out of ONE obstacle Circle: if the centres are closer than
+    // (radius + obstacle.Radius), push the moving centre OUT along the centre→centre axis to exactly that sum distance.
+    // This removes only the INTO-obstacle motion component, preserving the tangential component => the body SLIDES
+    // around the obstacle (same slide property the wall face gives). `index` (the obstacle's stable position in the
+    // caller's list) seeds a deterministic ejection axis for the degenerate exact-overlap case. Returns true if it moved
+    // the centre.
+    private static bool TryResolveCircle(ref double x, ref double y, double radius, Circle obstacle, int index)
+    {
+        var dx = x - obstacle.X;
+        var dy = y - obstacle.Y;
+        var sumRadius = radius + obstacle.Radius;
+        var distSq = (dx * dx) + (dy * dy);
+
+        if (distSq >= sumRadius * sumRadius)
+        {
+            return false; // not overlapping this obstacle
+        }
+
+        if (distSq > 1e-18)
+        {
+            // Overlapping but centres distinct: push out along the centre→centre normal to exactly sumRadius.
+            var dist = Math.Sqrt(distSq);
+            var push = sumRadius - dist;
+            var inv = 1d / dist;
+            x += dx * inv * push;
+            y += dy * inv * push;
+            return true;
+        }
+
+        // EXACT OVERLAP (centres coincident): there is no real centre→centre axis, so eject along a DETERMINISTIC unit
+        // axis derived from the obstacle's list index (a golden-angle spread so multiple coincident obstacles fan the
+        // body out in different directions instead of all along one line). Never a 0/0 NaN, reproducible every call.
+        var angle = index * GoldenAngleRadians;
+        x = obstacle.X + (Math.Cos(angle) * sumRadius);
+        y = obstacle.Y + (Math.Sin(angle) * sumRadius);
+        return true;
+    }
+
+    // The golden angle (~137.5°) in radians — an irrational turn so successive index-derived ejection axes never repeat
+    // a direction, fanning coincident-overlap bodies evenly around the circle (the same spread MonsterSeparation uses).
+    private const double GoldenAngleRadians = 2.39996322972865332d;
 
     // Push the circle center (x, y) out of every wall it penetrates, along each wall's minimum-penetration axis
     // (which preserves tangential motion => slide). Runs a FIXED number of passes so overlapping walls at an inside

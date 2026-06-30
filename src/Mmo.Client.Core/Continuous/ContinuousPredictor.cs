@@ -255,7 +255,14 @@ public sealed class ContinuousPredictor
     // the CLAMPED dt for replay, and returns the monotonic inputSeq the caller stamps on the MoveIntent it sends this
     // frame. The integrator math is the SAME normalize-then-scale + shared collision the server uses, so server and
     // client agree byte-for-byte (see IntegrateWithCollision).
-    public uint PredictAndBuffer(double inputX, double inputY, double dtSeconds)
+    // PLAYER↔MONSTER COLLISION: `obstacles` is the nearby-MONSTER circle set the LOCAL player predicts collision against
+    // this frame (MmoClient gathers it from the replicated monster positions, excluding the local player). It is passed
+    // straight to the shared resolver so the client predicts the SAME stop/slide the server integrates against the SAME
+    // monster — parity → no rubber-band when sliding along a stationary/slow monster. Against a MOVING monster the
+    // prediction is APPROXIMATE: the client uses the monster's last replicated position while the server uses its
+    // authoritative current one, so a fast mover opens a small, bounded reconcile the offset-decay smooths away. Null/
+    // empty ⇒ no monster obstacles this frame (open field or none nearby) — byte-identical to the walls-only predict.
+    public uint PredictAndBuffer(double inputX, double inputY, double dtSeconds, IReadOnlyList<ContinuousCollision.Circle>? obstacles = null)
     {
         var seq = ++_nextInputSeq;
 
@@ -311,9 +318,10 @@ public sealed class ContinuousPredictor
         // speed must replay at the action speed even after the action ends and the live move speed is restored).
         _buffer.Add(new BufferedInput(seq, dirX, dirY, dt, speed));
 
-        // Integrate this frame from the current predicted position, RESOLVING collision from the running predicted
-        // position — exactly as the server applies it from its running authoritative position for the same input.
-        (_predictedX, _predictedY) = IntegrateWithCollision(_predictedX, _predictedY, dirX, dirY, dt, speed);
+        // Integrate this frame from the current predicted position, RESOLVING collision (walls + the monster obstacle
+        // set) from the running predicted position — exactly as the server applies it from its running authoritative
+        // position for the same input + the same monster set.
+        (_predictedX, _predictedY) = IntegrateWithCollision(_predictedX, _predictedY, dirX, dirY, dt, speed, obstacles);
 
         return seq;
     }
@@ -321,7 +329,14 @@ public sealed class ContinuousPredictor
     // RECONCILE against the authoritative (serverPos, lastInputSeq) from a snapshot: snap the base to the server pos,
     // drop acked inputs, replay the rest to recompute the predicted present, and decide the visible correction
     // (smooth vs snap). Deterministic and side-effect-free beyond the predictor's own state.
-    public void Reconcile(in WorldVector serverPos, uint lastInputSeq)
+    // PLAYER↔MONSTER COLLISION: `obstacles` is the monster circle set the REPLAY of unacked inputs collides against —
+    // the SAME nearby-monster set the live predict uses, gathered by MmoClient. BEST-EFFORT: replay re-resolves every
+    // unacked frame against the CURRENT monster positions (one snapshot), not the position each monster held at the
+    // instant that frame was originally predicted. A byte-perfect replay vs a MOVING obstacle would need per-frame
+    // obstacle HISTORY (OUT OF SCOPE); the residual is the same bounded moving-obstacle approximation the live predict
+    // carries, and it only appears while genuinely sliding along a moving monster with unacked inputs in flight. Vs a
+    // stationary monster (positions unchanged across the window) the replay is exact. Null/empty ⇒ walls-only replay.
+    public void Reconcile(in WorldVector serverPos, uint lastInputSeq, IReadOnlyList<ContinuousCollision.Circle>? obstacles = null)
     {
         // Monotonic guard: ignore a stale/duplicate state whose LastInputSeq is older than one we already applied
         // (unreliable transport can reorder). Re-basing on an older ack would resurrect trimmed inputs and rubberband.
@@ -349,7 +364,8 @@ public sealed class ContinuousPredictor
         {
             // Replay each unacked frame at the SPEED it was predicted at (B2: an action frame replays at the action
             // speed even after the live move speed has been restored), so replay reproduces the predicted path exactly.
-            (newX, newY) = IntegrateWithCollision(newX, newY, input.DirX, input.DirY, input.Dt, input.Speed);
+            // Collide against the current monster set (best-effort, see the method header).
+            (newX, newY) = IntegrateWithCollision(newX, newY, input.DirX, input.DirY, input.Dt, input.Speed, obstacles);
         }
 
         // The correction is how far the recomputed present moved from the live predicted present. ~0 with no loss.
@@ -401,7 +417,9 @@ public sealed class ContinuousPredictor
     // blocked set via the SAME TileWalls.NeighborhoodWallsForMove the server uses, into the REUSED scratch list, and
     // the same ContinuousCollision.Resolve — IDENTICAL math + collision to the server (Zone.IntegrateMovement), so the
     // authoritative and predicted/replayed paths agree exactly, including AT walls. Null blocked == open-field move.
-    private (double X, double Y) IntegrateWithCollision(double x, double y, double inputX, double inputY, double dtSeconds, double speed)
+    private (double X, double Y) IntegrateWithCollision(
+        double x, double y, double inputX, double inputY, double dtSeconds, double speed,
+        IReadOnlyList<ContinuousCollision.Circle>? obstacles)
     {
         if (dtSeconds <= 0d)
         {
@@ -418,15 +436,32 @@ public sealed class ContinuousPredictor
         var deltaX = inputX * inv * speed * dtSeconds;
         var deltaY = inputY * inv * speed * dtSeconds;
 
-        if (_blocked is null || _blocked.Count == 0)
+        var hasBlocked = _blocked is { Count: > 0 };
+        var hasObstacles = obstacles is { Count: > 0 };
+        if (!hasBlocked && !hasObstacles)
         {
+            // Open field AND no nearby monster — the no-collision fast path (identical to the server's open move).
             return (x + deltaX, y + deltaY);
         }
 
+        // Derive the same per-move wall set the server uses (or an empty set when open field but a monster is near), then
+        // resolve walls + the monster obstacle set through the SAME shared resolver. With no obstacles this is the exact
+        // walls-only path the predict/replay has always taken (byte-identical) — the obstacle overload is taken only when
+        // a monster is actually nearby.
         var start = new WorldVector(x, y);
         var delta = new WorldVector(deltaX, deltaY);
-        TileWalls.NeighborhoodWallsForMove(_blocked, start, delta, _radius, _wallScratch);
-        return ContinuousCollision.Resolve(x, y, deltaX, deltaY, _radius, _wallScratch);
+        if (hasBlocked)
+        {
+            TileWalls.NeighborhoodWallsForMove(_blocked!, start, delta, _radius, _wallScratch);
+        }
+        else
+        {
+            _wallScratch.Clear();
+        }
+
+        return hasObstacles
+            ? ContinuousCollision.Resolve(x, y, deltaX, deltaY, _radius, _wallScratch, obstacles)
+            : ContinuousCollision.Resolve(x, y, deltaX, deltaY, _radius, _wallScratch);
     }
 
     private static double Distance(double ax, double ay, double bx, double by)
