@@ -571,13 +571,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsForty()
+    public void ProtocolVersionIsFortyOne()
     {
-        // MONSTER-TUNING DATA-DRIVEN (v40): the MonsterTuning message reshaped from a fixed per-type record to a
-        // GENERIC per-type field list (MonsterTuningField{Key,Label,Value,Min,Max,IsInteger}), so the F1 Monster tab
-        // renders from the wire and future tunables need no protocol bump. Bump on top of v39 (combined flags byte +
-        // replicated Velocity). Pin it so a change is caught.
-        Assert.Equal(40, ProtocolCodec.Version);
+        // MONSTER-BEHAVIOR P6 (v41): EntitySpawn gained the placeholder per-type visual — a replicated TintRgb (uint
+        // 0xRRGGBB) + ScaleMilli (ushort, scale × 1000). Bump on top of v40 (data-driven MonsterTuning). Pin it so a
+        // change is caught.
+        Assert.Equal(41, ProtocolCodec.Version);
     }
 
     // LOOT P4c: the corpse loot-window verb round-trips (corpse net id + kind + the template key for TakeItem).
@@ -768,6 +767,36 @@ public sealed class ProtocolCodecTests
         Assert.Equal(new TileCoord(12, 25), decoded.Tile);
         Assert.Equal(Direction8.W, decoded.Facing);
         Assert.Equal((ushort)70, decoded.StepCooldownMs);
+        // MONSTER-BEHAVIOR P6 (v41): an omitted tint/scale defaults to white + 1000 (the no-op the client renders unchanged).
+        Assert.Equal(0xFFFFFFu, decoded.TintRgb);
+        Assert.Equal((ushort)1000, decoded.ScaleMilli);
+    }
+
+    // MONSTER-BEHAVIOR P6 (protocol v41): an EntitySpawn carrying a NON-default placeholder per-type visual (a monster's
+    // authored tint + scale×1000) round-trips its TintRgb + ScaleMilli identically through encode→decode.
+    [Fact]
+    public void EntitySpawnRoundTripsPlaceholderVisual()
+    {
+        var characterId = Guid.NewGuid();
+        var original = new EntitySpawnMessage(
+            7,
+            characterId,
+            EntityKind.Monster,
+            "Gnoll",
+            new TileCoord(4, 9),
+            Direction8.S,
+            StepCooldownMs: 250,
+            TintRgb: 0xB5651Du,
+            ScaleMilli: 1400);
+
+        var decoded = Assert.IsType<EntitySpawnMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(0xB5651Du, decoded.TintRgb);
+        Assert.Equal((ushort)1400, decoded.ScaleMilli);
+        // The pre-existing fields are unaffected by the new tail.
+        Assert.Equal(EntityKind.Monster, decoded.Kind);
+        Assert.Equal("Gnoll", decoded.DisplayName);
+        Assert.Equal((ushort)250, decoded.StepCooldownMs);
     }
 
     [Fact]

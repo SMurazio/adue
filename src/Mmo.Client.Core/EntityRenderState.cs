@@ -30,7 +30,14 @@ public readonly record struct EntityRenderState(
     // it. Phase C retired the cosmetic monster HopHeight arc in favour of this — a slime's hop is now a REAL replicated
     // Z, so its arc renders from this single field. Presentation-only — it never touches Position/AuthoritativeTile/
     // AuthoritativePosition, so targeting/harvest/combat are byte-identical.
-    double VerticalOffset = 0d)
+    double VerticalOffset = 0d,
+    // MONSTER-BEHAVIOR P6: the PLACEHOLDER per-type visual replicated on EntitySpawn (protocol v41). TintRgb is a packed
+    // 0xRRGGBB the renderer modulates the entity's body by (0xFFFFFF = white = NO tint, the default); RenderScale
+    // multiplies the visual node's size (1.0 = unchanged, the default). A monster carries its type's authored values
+    // (a gnoll = brown + 1.4); every other entity (and a default-constructed test state) gets white + 1.0 → a no-op,
+    // so its render is byte-identical. Presentation-only — the replicated hook real per-type models slot into later.
+    uint TintRgb = 0xFFFFFFu,
+    float RenderScale = 1f)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

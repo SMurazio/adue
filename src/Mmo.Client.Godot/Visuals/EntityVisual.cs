@@ -113,6 +113,12 @@ void fragment() {
         UpdateHealthBar(state);
 
         OnAcquire(state);
+
+        // MONSTER-BEHAVIOR P6: apply the replicated PLACEHOLDER per-type visual AFTER OnAcquire (so the subclass has
+        // built/bound its body + base material first). White (0xFFFFFF) + scale 1.0 are an exact no-op, so a pooled
+        // visual reused for a default entity (slime/player) resets to unscaled + untinted. Done on (re)acquire only —
+        // the tint/scale are constant per entity (they ride EntitySpawn, not the per-frame snapshot).
+        ApplyAppearance(state);
     }
 
     // Return the visual to a clean reusable state and re-bind it to a (different) entity. Default is the same
@@ -191,6 +197,34 @@ void fragment() {
     // spawned visual so an F5-panel apply moves/resizes the sprite WITHOUT a respawn. Default no-op; only
     // CatoSpriteVisual overrides it.
     public virtual void ApplyCatoPlacement() { }
+
+    // ---- MONSTER-BEHAVIOR P6 placeholder per-type visual -------------------------------------------
+
+    // Applies the replicated placeholder appearance: SCALE the wrapper node by RenderScale (1.0 = no-op; the label +
+    // HP bar children scale with the body, acceptable for a placeholder), and MODULATE the body by TintRgb via the
+    // subclass tint hook (white = no-op). The wrapper's per-frame Position setter (UpdateFrom) leaves Scale untouched,
+    // so applying it once on acquire holds. This is the seam where a real per-type model/animation mapping slots in
+    // later (the wire fields TintRgb/RenderScale stay; only how the client renders them changes).
+    private void ApplyAppearance(EntityRenderState state)
+    {
+        var s = state.RenderScale > 0f ? state.RenderScale : 1f;
+        Scale = new Vector3(s, s, s);
+        ApplyRenderTint(ColorFromRgb(state.TintRgb));
+    }
+
+    // Unpack a 0xRRGGBB into a Godot Color (alpha 1). 0xFFFFFF → white (the modulate no-op).
+    protected static Color ColorFromRgb(uint rgb)
+    {
+        return new Color(
+            ((rgb >> 16) & 0xFFu) / 255f,
+            ((rgb >> 8) & 0xFFu) / 255f,
+            (rgb & 0xFFu) / 255f);
+    }
+
+    // Modulate the body by the per-type tint. Default no-op (white is also a no-op for overriders): only archetypes
+    // with a tintable body (BoxVisual — how monsters render today) override it. Real per-type monster models replace
+    // this mapping later; the replicated hook (EntityRenderState.TintRgb) stays.
+    protected virtual void ApplyRenderTint(Color tint) { }
 
     // ---- subclass extension points -----------------------------------------------------------------
     protected virtual void OnAcquire(EntityRenderState state) { }

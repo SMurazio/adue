@@ -1207,6 +1207,19 @@ public sealed class GameServer
                 continue;
             }
 
+            // MONSTER-BEHAVIOR P6: the placeholder per-type VISUAL — a MONSTER ships its type's authored render tint +
+            // scale (×1000) so the client renders it visibly distinct (a gnoll bigger + tinted) with no art assets.
+            // Every other kind (players/dummies/resources/corpses) ships the defaults (white 0xFFFFFF / scale 1.0 →
+            // 1000), a no-op the client renders byte-identically. The type is looked up by the monster's entity id
+            // (_monsterTypeOf, set at spawn); a monster missing from the map falls back to the defaults too.
+            var tintRgb = 0xFFFFFFu;
+            var scaleMilli = (ushort)1000;
+            if (entity.Kind == EntityKind.Monster && _monsterTypeOf.TryGetValue(entity.Id, out var spawnType))
+            {
+                tintRgb = spawnType.RenderTintRgb;
+                scaleMilli = (ushort)Math.Clamp((int)Math.Round(spawnType.RenderScale * 1000d), 0, ushort.MaxValue);
+            }
+
             var packet = _messageEncodeBuffer.EncodeEntitySpawn(
                 entity.NetworkId,
                 entity.CharacterId ?? Guid.Empty,
@@ -1214,7 +1227,9 @@ public sealed class GameServer
                 entity.DisplayName,
                 entity.TileCoord,
                 entity.Facing,
-                EffectiveStepCooldownMs(entity));
+                EffectiveStepCooldownMs(entity),
+                tintRgb,
+                scaleMilli);
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
         }
@@ -3631,10 +3646,12 @@ internal sealed class ProtocolEncodeBuffer
         string displayName,
         TileCoord tile,
         Direction8 facing,
-        ushort stepCooldownMs)
+        ushort stepCooldownMs,
+        uint tintRgb = 0xFFFFFFu,
+        ushort scaleMilli = 1000)
     {
         Reset();
-        ProtocolCodec.EncodeEntitySpawn(_writer, networkId, characterId, kind, displayName, tile, facing, stepCooldownMs);
+        ProtocolCodec.EncodeEntitySpawn(_writer, networkId, characterId, kind, displayName, tile, facing, stepCooldownMs, tintRgb, scaleMilli);
         return Finish();
     }
 

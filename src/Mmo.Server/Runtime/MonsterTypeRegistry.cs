@@ -64,6 +64,10 @@ public sealed class MonsterTypeRegistry
     private const double MaxChargeDistanceUnits = 16d;
     private const double MinChargeTriggerRangeUnits = 0.5d;
     private const double MaxChargeTriggerRangeUnits = 64d;
+    // MONSTER-BEHAVIOR P6 render-scale bounds: 0.25× (a quarter size) .. 4× (clearly large). A nonsense author value
+    // is clamped, never honoured, so the data file cannot author an invisible or world-filling placeholder visual.
+    private const double MinRenderScale = 0.25d;
+    private const double MaxRenderScale = 4.0d;
 
     // Per-type field suffixes (the part after "<typeId>."). Public so the client F1 tab + tests name the SAME keys.
     public const string RoamRadiusField = "roamRadius";
@@ -266,6 +270,16 @@ public sealed class MonsterTypeRegistry
                     Math.Clamp(dto.ChargeTriggerRangeUnits.Value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits);
             }
 
+            // MONSTER-BEHAVIOR P6: the placeholder per-type VISUAL. RenderTint is authored as a friendly "#RRGGBB" hex
+            // string, parsed to a packed 0xRRGGBB uint (an omitted/blank/malformed value → white 0xFFFFFF = no tint, so
+            // a type that authors nothing is visually unchanged). RenderScale is set directly + clamped to [0.25, 4.0]
+            // (behavior-specific DATA, NOT a live F1 knob — like FleeHealthPct/charge); omitted → 1.0 (unchanged).
+            type.RenderTintRgb = ParseTintRgb(dto.RenderTint);
+            if (dto.RenderScale.HasValue)
+            {
+                type.RenderScale = Math.Clamp(dto.RenderScale.Value, MinRenderScale, MaxRenderScale);
+            }
+
             registry.Add(type);
 
             // Each provided tunable is clamped + applied through TryApply (the SAME bounds the F1 live tuning
@@ -296,6 +310,32 @@ public sealed class MonsterTypeRegistry
         }
 
         return registry;
+    }
+
+    // MONSTER-BEHAVIOR P6: parse an authoring-friendly "#RRGGBB" (or "RRGGBB") hex string into a packed 0xRRGGBB uint.
+    // Tolerant: a leading '#' is optional; surrounding whitespace is trimmed. ANY malformed/missing/blank value (null,
+    // wrong length, non-hex) falls back to white 0xFFFFFF (= no tint) so a typo can never author a bizarre tint — it
+    // just renders untinted, the safe default. The high byte is masked off so only the 24 RGB bits survive.
+    private static uint ParseTintRgb(string? hex)
+    {
+        if (string.IsNullOrWhiteSpace(hex))
+        {
+            return 0xFFFFFFu;
+        }
+
+        var s = hex.Trim();
+        if (s.StartsWith('#'))
+        {
+            s = s[1..];
+        }
+
+        if (s.Length == 6
+            && uint.TryParse(s, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var rgb))
+        {
+            return rgb & 0xFFFFFFu;
+        }
+
+        return 0xFFFFFFu;
     }
 
     // Tolerant of camelCase casing, `//` comments (the manifest is annotated), and trailing commas — but STRICT on
@@ -346,7 +386,11 @@ public sealed class MonsterTypeRegistry
         double? HopHeightUnits,
         int? HopAirborneMs,
         int? HopDelayMs,
-        int? RespawnMs);
+        int? RespawnMs,
+        // MONSTER-BEHAVIOR P6: the placeholder per-type visual. RenderTint is an authoring-friendly "#RRGGBB" hex string
+        // (parsed by ParseTintRgb; omitted/malformed → white); RenderScale is a double clamped to [0.25, 4.0] (omitted → 1.0).
+        string? RenderTint,
+        double? RenderScale);
 
     private void Add(MonsterType type)
     {

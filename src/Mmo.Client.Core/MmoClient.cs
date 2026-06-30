@@ -764,7 +764,9 @@ public sealed class MmoClient : IDisposable
             case EntitySpawnMessage spawn:
                 // EntitySpawn.Tile stays a genuine TileCoord anchor (Phase 3 keeps spawns/login tile-typed); lift it
                 // to the continuous Position the upsert now takes. Tile-centred, so behaviour is unchanged.
-                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, WorldVector.FromTile(spawn.Tile), spawn.Facing, spawn.StepCooldownMs);
+                // MONSTER-BEHAVIOR P6 (v41): thread the placeholder per-type visual (replicated tint + scale×1000) onto
+                // the entity so ToRenderState hands it to the renderer. Defaults (white / 1000) are a no-op for non-monsters.
+                UpsertEntity(spawn.NetworkId, spawn.CharacterId, spawn.Kind, spawn.DisplayName, WorldVector.FromTile(spawn.Tile), spawn.Facing, spawn.StepCooldownMs, spawn.TintRgb, spawn.ScaleMilli / 1000f);
                 break;
             case MovementSpeedChangedMessage speed:
                 HandleMovementSpeedChanged(speed);
@@ -1247,13 +1249,20 @@ public sealed class MmoClient : IDisposable
         string displayName,
         WorldVector position,
         Direction8 facing,
-        ushort? stepCooldownMs = null)
+        ushort? stepCooldownMs = null,
+        // MONSTER-BEHAVIOR P6: the placeholder per-type visual (replicated on EntitySpawn). Defaults = white / 1.0 = a
+        // no-op, so the snapshot-created placeholder path (which never sees these) keeps an unchanged render.
+        uint tintRgb = 0xFFFFFFu,
+        float renderScale = 1f)
     {
         var isLocal = characterId != Guid.Empty && characterId == _localCharacterId;
         var effectiveCooldown = stepCooldownMs is > 0 ? stepCooldownMs : null;
         if (_entities.TryGetValue(networkId, out var existing))
         {
             existing.UpdateMetadata(characterId, kind, displayName, isLocal);
+            // MONSTER-BEHAVIOR P6: an EntitySpawn for an already-known entity (e.g. a placeholder→reveal) refreshes
+            // the replicated visual too, so a later authoritative spawn can correct it.
+            existing.SetAppearance(tintRgb, renderScale);
             if (effectiveCooldown.HasValue)
             {
                 var existingCadence = ResolveCadence(effectiveCooldown);
@@ -1288,7 +1297,9 @@ public sealed class MmoClient : IDisposable
             facing,
             isLocal,
             CreateInterpolator(position, isLocal, effectiveCooldown),
-            effectiveCooldown);
+            effectiveCooldown,
+            tintRgb,
+            renderScale);
         _entities[networkId] = entity;
         if (isLocal)
         {
@@ -1478,7 +1489,9 @@ public sealed class MmoClient : IDisposable
             Direction8 facing,
             bool isLocal,
             RemotePositionInterpolator remoteInterp,
-            ushort? stepCooldownMs)
+            ushort? stepCooldownMs,
+            uint tintRgb = 0xFFFFFFu,
+            float renderScale = 1f)
         {
             NetworkId = networkId;
             CharacterId = characterId;
@@ -1489,6 +1502,8 @@ public sealed class MmoClient : IDisposable
             IsLocal = isLocal;
             _remoteInterp = remoteInterp;
             StepCooldownMs = stepCooldownMs;
+            TintRgb = tintRgb;
+            RenderScale = renderScale;
         }
 
         public uint NetworkId { get; }
@@ -1537,6 +1552,21 @@ public sealed class MmoClient : IDisposable
         // driven like VerticalOffset. Zero at rest, non-zero while walking. Phase 1 BUFFERS it in the interpolator
         // (via Confirm) but does NOT extrapolate from it yet (Sample is unchanged) — that is Phase 2.
         public WorldVector Velocity { get; private set; } = WorldVector.Zero;
+
+        // MONSTER-BEHAVIOR P6: the PLACEHOLDER per-type visual replicated on EntitySpawn (protocol v41), constant per
+        // entity (set at spawn). TintRgb is a packed 0xRRGGBB (0xFFFFFF = white = no tint); RenderScale multiplies the
+        // visual node's size (1.0 = unchanged). ToRenderState threads both into the render state; the renderer applies
+        // them. Snapshot-created placeholders never set these, so they keep the white/1.0 no-op default.
+        public uint TintRgb { get; private set; } = 0xFFFFFFu;
+
+        public float RenderScale { get; private set; } = 1f;
+
+        // Adopt a (re)replicated placeholder visual from a later EntitySpawn for an already-known entity.
+        public void SetAppearance(uint tintRgb, float renderScale)
+        {
+            TintRgb = tintRgb;
+            RenderScale = renderScale;
+        }
 
         public bool IsPlaceholder => CharacterId == Guid.Empty
             && Kind == EntityKind.Player
@@ -1661,7 +1691,11 @@ public sealed class MmoClient : IDisposable
                 // it is the confirmed value. 0 grounded, so the common case is the unchanged flat render. Phase C retired
                 // the cosmetic monster HopHeight arc in favour of this — the slime's hop is now a REAL replicated Z, so a
                 // remote slime renders its hop from this same VerticalOffset (no separate cosmetic parabola).
-                VerticalOffset: renderVerticalOffset);
+                VerticalOffset: renderVerticalOffset,
+                // MONSTER-BEHAVIOR P6: thread the replicated placeholder per-type visual (tint + scale) to the renderer.
+                // White / 1.0 for every non-authoring entity → a no-op (the slime/players render unchanged).
+                TintRgb: TintRgb,
+                RenderScale: RenderScale);
         }
     }
 

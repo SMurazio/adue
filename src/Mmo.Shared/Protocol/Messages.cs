@@ -209,6 +209,12 @@ public sealed record WorldSnapshotMessage(
     public MessageType Type => MessageType.WorldSnapshot;
 }
 
+// MONSTER-BEHAVIOR P6 (protocol v41, docs/monster-behavior-design.md): EntitySpawn now carries a PLACEHOLDER per-type
+// VISUAL — a replicated TintRgb (0xRRGGBB; 0xFFFFFF = white = no tint) + ScaleMilli (render scale × 1000; 1000 = 1.0 =
+// unchanged) the client applies to the entity's visual node so a type renders visibly distinct (a gnoll bigger +
+// tinted) with NO art assets. Monsters set these from their MonsterType; every other kind (players/dummies/resources/
+// corpses) ships the defaults (0xFFFFFF / 1000) so its render is byte-identical. This is the replicated hook where real
+// per-type models/animations slot in later (the client-side tint/scale mapping is replaced; the wire fields stay).
 public sealed record EntitySpawnMessage(
     uint NetworkId,
     Guid CharacterId,
@@ -216,7 +222,9 @@ public sealed record EntitySpawnMessage(
     string DisplayName,
     TileCoord Tile,
     Direction8 Facing,
-    ushort StepCooldownMs) : IProtocolMessage
+    ushort StepCooldownMs,
+    uint TintRgb = 0xFFFFFFu,
+    ushort ScaleMilli = 1000) : IProtocolMessage
 {
     public MessageType Type => MessageType.EntitySpawn;
 }

@@ -344,6 +344,12 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.HopAirborneMs, d.HopAirborneMs);
         Assert.Equal(c.HopDelayMs, d.HopDelayMs);
         Assert.Equal(c.RespawnMs, d.RespawnMs);
+        // MONSTER-BEHAVIOR P6: the slime authors NO placeholder visual in either source → white (0xFFFFFF) + 1.0 scale
+        // (the no-op the client renders unchanged); the data file and the code seed must not drift on these either.
+        Assert.Equal(c.RenderTintRgb, d.RenderTintRgb);
+        Assert.Equal(0xFFFFFFu, d.RenderTintRgb);
+        Assert.Equal(c.RenderScale, d.RenderScale, 6);
+        Assert.Equal(1.0d, d.RenderScale, 6);
 
         // The shipped manifest now carries additional types (MONSTER-BEHAVIOR P2 added the gnoll glider), so parity is
         // pinned on the SLIME only — and the slime must stay the canonical default so /monster (no name) spawns it.
@@ -379,6 +385,71 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(4.0d, g.ChargeDistanceUnits, 6);
         Assert.Equal(7.0d, g.ChargeTriggerRangeUnits, 6);
         Assert.True(MonsterTypeRegistry.ChargeEnabled(g)); // composed + a positive cooldown ⇒ charge-enabled.
+        // MONSTER-BEHAVIOR P6: the gnoll authors the PLACEHOLDER per-type visual — a brown "#B5651D" tint + 1.4× scale,
+        // so it renders visibly bigger + tinted vs the (default white / 1.0) slime, with NO art assets.
+        Assert.Equal(0xB5651Du, g.RenderTintRgb);
+        Assert.Equal(1.4d, g.RenderScale, 6);
+    }
+
+    // MONSTER-BEHAVIOR P6: the "#RRGGBB" render-tint authoring string parses to the packed 0xRRGGBB uint; a leading '#'
+    // is optional. An omitted, blank, or malformed value falls back to white (0xFFFFFF = no tint) — a typo can never
+    // author a bizarre tint, it just renders untinted.
+    [Theory]
+    [InlineData("\"#B5651D\"", 0xB5651Du)]   // canonical hex with '#'
+    [InlineData("\"b5651d\"", 0xB5651Du)]    // '#' optional, lowercase
+    [InlineData("\"#000000\"", 0x000000u)]   // black is a valid tint (kills the body to black)
+    [InlineData("\"#FFFFFF\"", 0xFFFFFFu)]   // explicit white == the default no-op
+    [InlineData("\"#12g456\"", 0xFFFFFFu)]   // non-hex char → white
+    [InlineData("\"#1234\"", 0xFFFFFFu)]     // wrong length → white
+    [InlineData("\"\"", 0xFFFFFFu)]          // blank → white
+    public void ParsesRenderTintHexWithWhiteFallback(string tintJson, uint expected)
+    {
+        var json = $$"""
+        {
+          "types": [
+            { "id": "t", "displayName": "T", "renderTint": {{tintJson}} }
+          ]
+        }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        Assert.True(registry.TryGet("t", out var t));
+        Assert.Equal(expected, t.RenderTintRgb);
+    }
+
+    // MONSTER-BEHAVIOR P6: an omitted renderTint/renderScale defaults to white + 1.0 (the visual no-op).
+    [Fact]
+    public void OmittedRenderVisualDefaultsToWhiteAndUnitScale()
+    {
+        const string json = """
+        {
+          "types": [ { "id": "t", "displayName": "T" } ]
+        }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        Assert.True(registry.TryGet("t", out var t));
+        Assert.Equal(0xFFFFFFu, t.RenderTintRgb);
+        Assert.Equal(1.0d, t.RenderScale, 6);
+    }
+
+    // MONSTER-BEHAVIOR P6: renderScale is clamped to [0.25, 4.0] on load (a data file cannot author an invisible or
+    // world-filling placeholder); an in-range value is honoured verbatim.
+    [Theory]
+    [InlineData(1.4d, 1.4d)]      // in range → honoured
+    [InlineData(0.1d, 0.25d)]     // below min → clamped up
+    [InlineData(99.0d, 4.0d)]     // above max → clamped down
+    public void ClampsRenderScale(double authored, double expected)
+    {
+        var json = $$"""
+        {
+          "types": [ { "id": "t", "displayName": "T", "renderScale": {{authored.ToString(System.Globalization.CultureInfo.InvariantCulture)}} } ]
+        }
+        """;
+
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+        Assert.True(registry.TryGet("t", out var t));
+        Assert.Equal(expected, t.RenderScale, 6);
     }
 
     private static string ReadShippedManifest()

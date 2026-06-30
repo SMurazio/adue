@@ -137,6 +137,18 @@ public sealed class MonsterType
     // F1 Monster tab; read live by the spawner at death time.
     public int RespawnMs { get; set; } = 5000;
 
+    // MONSTER-BEHAVIOR P6 (docs/monster-behavior-design.md): the PLACEHOLDER per-type VISUAL — replicated on spawn
+    // (EntitySpawn, protocol v41) and applied by the client to make a type look distinct WITHOUT art assets. RenderTintRgb
+    // is a packed 0xRRGGBB the client modulates the entity's render by (0xFFFFFF = white = NO tint, the default → the
+    // render is unchanged); RenderScale multiplies the visual node's size (1.0 = unchanged, the default). The manifest
+    // authors RenderTintRgb as a friendly "#RRGGBB" hex (parsed by FromManifestJson; invalid/omitted → white) and
+    // RenderScale as a double clamped to [0.25, 4.0]. The gnoll authors a brown tint + 1.4 scale (bigger, tinted); the
+    // slime omits both → white + 1.0 → visually unchanged. Server-side type DATA: NOT a live F1 tunable / NOT replicated
+    // as a tunable — it rides the EntitySpawn wire as TintRgb (uint) + ScaleMilli (RenderScale × 1000). This is the
+    // replicated hook where real per-type models/animations slot in later (the client mapping changes; the field stays).
+    public uint RenderTintRgb { get; set; } = 0xFFFFFFu;
+    public double RenderScale { get; set; } = 1.0d;
+
     // LOOT P4a: the LootTableRegistry id this type rolls on death. Empty string = no loot (the explicit
     // "this type drops nothing" sentinel — distinct from an unknown id). STATIC seed data for now: it is
     // NOT live-tunable or replicated, unlike the AI knobs above, because it is content authored once, not a

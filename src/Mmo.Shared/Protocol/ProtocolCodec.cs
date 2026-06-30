@@ -62,7 +62,12 @@ public static class ProtocolCodec
     // renders one row per replicated field and exposing a NEW knob is one server-side registration — no further bump.
     // A rare reliable admin/replication message (login + on change), NOT a hot path; the extra bytes are irrelevant.
     // Server + every in-repo client flip together.
-    public const byte Version = 40;
+    // v41 — MONSTER-BEHAVIOR P6 (docs/monster-behavior-design.md): EntitySpawn gains a PLACEHOLDER per-type VISUAL —
+    // a replicated TintRgb (uint 0xRRGGBB; 0xFFFFFF = no tint) + ScaleMilli (ushort, render scale × 1000; 1000 = 1.0).
+    // Monsters set these from their MonsterType so a type renders visibly distinct (a gnoll bigger + tinted) with NO
+    // art; every other kind ships the defaults so its render is byte-identical. The replicated hook stays when real
+    // per-type models/animations replace the client-side tint/scale mapping later. Server + every in-repo client flip.
+    public const byte Version = 41;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -197,6 +202,9 @@ public static class ProtocolCodec
                 WriteTile(writer, value.Tile);
                 writer.Write((byte)value.Facing);
                 writer.Write(value.StepCooldownMs);
+                // MONSTER-BEHAVIOR P6 (v41): the placeholder per-type visual — replicated tint (0xRRGGBB) + scale×1000.
+                writer.Write(value.TintRgb);
+                writer.Write(value.ScaleMilli);
                 break;
             case MovementSpeedChangedMessage value:
                 writer.Write(value.NetworkId);
@@ -268,7 +276,9 @@ public static class ProtocolCodec
         string displayName,
         TileCoord tile,
         Direction8 facing,
-        ushort stepCooldownMs)
+        ushort stepCooldownMs,
+        uint tintRgb = 0xFFFFFFu,
+        ushort scaleMilli = 1000)
     {
         WriteHeader(writer, MessageType.EntitySpawn);
         writer.Write(networkId);
@@ -278,6 +288,9 @@ public static class ProtocolCodec
         WriteTile(writer, tile);
         writer.Write((byte)facing);
         writer.Write(stepCooldownMs);
+        // MONSTER-BEHAVIOR P6 (v41): the placeholder per-type visual — replicated tint (0xRRGGBB) + scale×1000.
+        writer.Write(tintRgb);
+        writer.Write(scaleMilli);
     }
 
     public static void EncodeEntityDespawn(BinaryWriter writer, uint serverTick, uint networkId)
@@ -342,6 +355,9 @@ public static class ProtocolCodec
                 ReadString(reader),
                 ReadTile(reader),
                 ReadDirection(reader),
+                reader.ReadUInt16(),
+                // MONSTER-BEHAVIOR P6 (v41): the placeholder per-type visual — replicated tint (0xRRGGBB) + scale×1000.
+                reader.ReadUInt32(),
                 reader.ReadUInt16()),
             MessageType.MovementSpeedChanged => new MovementSpeedChangedMessage(reader.ReadUInt32(), reader.ReadUInt16()),
             MessageType.PlayerStats => new PlayerStatsMessage(ReadCharacterStats(reader)),

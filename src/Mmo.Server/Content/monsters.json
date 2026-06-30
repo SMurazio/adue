@@ -56,11 +56,19 @@
       // often than every chargeCooldownMs (the executor enforces the cooldown). Behavior-specific data (clamped on load,
       // not a live F1 knob). The charge MOTION replicates via the same dense action-airborne path the hop uses (no
       // protocol change); the charge ANIMATION is P6.
+      //
+      // MONSTER-BEHAVIOR P6 (docs/monster-behavior-design.md): the PLACEHOLDER per-type VISUAL — a data-authored tint +
+      // scale replicated on spawn (EntitySpawn, protocol v41) and applied by the client, so the gnoll renders visibly
+      // DISTINCT from the slime with NO art assets. renderTint "#B5651D" = a brown/orange the client modulates the gnoll
+      // render by; renderScale 1.4 = clearly bigger. The SLIME omits both → white + 1.0 → visually unchanged. This is the
+      // replicated hook where real per-type models/animations replace the client-side tint/scale mapping later.
       "id": "gnoll",
       "displayName": "Gnoll",
       "lootTableId": "",
       "locomotionId": "glide",
       "behaviorId": "skirmisher",
+      "renderTint": "#B5651D",
+      "renderScale": 1.4,
       "abilityIds": ["charge"],
       "chargeCooldownMs": 4000,
       "chargeDistanceUnits": 4.0,

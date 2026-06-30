@@ -28,6 +28,10 @@ public sealed partial class BoxVisual : EntityVisual
 
     private MeshInstance3D _body = null!;
 
+    // MONSTER-BEHAVIOR P6: a per-instance tinted material clone, built lazily when a non-white tint is applied. Kept
+    // off the SHARED static materials (mutating those would tint every entity that shares them).
+    private StandardMaterial3D? _tintedMaterial;
+
     protected override float LabelHeight => _isResource ? 1.3f : (_isCorpse ? 0.6f : 0.9f);
 
     private bool _isResource;
@@ -76,6 +80,28 @@ public sealed partial class BoxVisual : EntityVisual
         _body.Scale = _isResource
             ? new Vector3(Tuning.PlantModelScale, Tuning.PlantModelScale, Tuning.PlantModelScale)
             : Vector3.One;
+    }
+
+    // MONSTER-BEHAVIOR P6: modulate the body by the replicated per-type tint. White is an exact no-op — keep the
+    // SHARED static material ApplyMaterial set in OnAcquire (so the slime/players/resources are untouched). A non-white
+    // tint MODULATES (multiplies) the body's base albedo via a per-instance clone of that shared material, so a gnoll
+    // reads as a distinct colour without ever mutating the shared materials. Called by the base after OnAcquire, so
+    // _body.MaterialOverride is already the chosen shared material. Placeholder — real per-type models replace it later.
+    protected override void ApplyRenderTint(Color tint)
+    {
+        if (tint == Colors.White)
+        {
+            return;
+        }
+
+        if (_body.MaterialOverride is not StandardMaterial3D baseMaterial)
+        {
+            return;
+        }
+
+        _tintedMaterial = (StandardMaterial3D)baseMaterial.Duplicate();
+        _tintedMaterial.AlbedoColor = baseMaterial.AlbedoColor * tint;
+        _body.MaterialOverride = _tintedMaterial;
     }
 
     private void ApplyMaterial(EntityRenderState state)
