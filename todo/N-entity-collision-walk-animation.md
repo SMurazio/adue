@@ -27,5 +27,20 @@ position → idle. Pushing into a monster leaves RESIDUAL per-frame render motio
 **Repro question for the user:** does it keep walking when you push STRAIGHT into a stationary monster (fully blocked),
 or only when angled/sliding around it? Straight-in → a real bug (residual jitter); angled-only → arguably correct.
 
-Relates to [[monster-behavior-architecture]] + the player↔monster collision. Queue AFTER player↔player lands (same
-prediction/render area). Polish, not blocking.
+## Investigation findings (code confirmed)
+Walk/idle is RENDER-DELTA driven: `CatoSpriteVisual`/`PlayerVisual` treat per-frame render-position displacement >
+`MovingEpsilonSquared` (0.0000004 → ~0.0006 u/frame, TINY) as "moving", LATCHED for `WalkHoldSeconds` = 0.2s after the
+last detected motion. So ANY sub-tile residual motion (once every few frames) keeps "walk" continuously. A flat wall
+freezes the render (zero delta) → idle; pushing into a BODY leaves residual motion (two players both pushing → contact
+shifts; or predict/reconcile micro-correction) → latched walk. Confirmed live on BOTH clients when two players push
+together (2025 session). The velocity-coherence fix (a14c26f) stabilises the REMOTE render (blocked → replicated
+velocity ~0 → position holds), which should help the remote view; the LOCAL predicted position + the active-push case
+still trip the render-delta.
+
+**Preferred fix:** now that Velocity is COHERENT (resolved, ~0 when blocked — a14c26f), drive walk/idle off the entity's
+VELOCITY / movement-intent (idle when speed ~0) instead of raw render-delta — a blocked player (wall or body) has
+velocity ~0 → idle; a sliding player has tangential velocity → walk (correct). For the LOCAL player, expose the
+predictor's resolved velocity (or use net displacement over the hold window with a bigger threshold). Verify it keeps
+the clean wall→idle + doesn't stutter the normal walk loop (the 0.2s hold exists to bridge tile-step gaps).
+
+Relates to [[monster-behavior-architecture]] + [[entity-collision-predicted]]. Polish, not blocking.
