@@ -94,12 +94,6 @@ public sealed class GameServer
     private readonly Dictionary<NetPeer, ClientSession> _sessions = new();
     private readonly ConcurrentQueue<Action> _mainThreadActions = new();
     private readonly SyntheticClientLoad _syntheticLoad = new();
-    // STRESS: the synthetic bots spawn CLUSTERED at spawn tiles, so player↔player collision wedges them into a
-    // jittering pile AND blows up to O(n²) collision resolves that overload the tick loop (the jitter + slow despawn
-    // the user hit). /stress SUPPRESSES player-collision for the run (bots roam → they exercise movement/AOI, the point
-    // of a load test) and RESTORES the prior setting on stop.
-    private bool _stressPlayerCollisionSuppressed;
-    private bool _stressPriorPlayerCollision;
     private readonly ServerMetrics _metrics = new();
     private readonly ServerRuntimeGuard _runtimeGuard;
     private readonly ServerMovementTrace _movementTrace;
@@ -444,7 +438,6 @@ public sealed class GameServer
             {
                 _netManager.PollEvents();
                 _syntheticLoad.Poll();
-                RestorePlayerCollisionAfterStress(); // re-enable player-collision once the stress load ends (auto or /stress stop)
                 DrainMainThreadActions();
 
                 var now = Stopwatch.GetTimestamp();
@@ -2107,46 +2100,9 @@ public sealed class GameServer
             : DefaultStressDuration;
         duration = ClampDuration(duration, TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(10));
 
-        SuppressPlayerCollisionForStress();
         _syntheticLoad.Start(clientCount, duration, _options.Port, _options.ConnectionKey);
-        SendSystem(sender, $"stress started: clients={clientCount}, duration={FormatDuration(duration)} (player-collision suppressed so the bots roam; restored on stop).");
+        SendSystem(sender, $"stress started: clients={clientCount}, duration={FormatDuration(duration)}.");
         Log.Info($"{sender.DisplayName} started synthetic load: clients={clientCount}, duration={FormatDuration(duration)}.");
-    }
-
-    // STRESS: turn player-collision OFF for the load run (save the prior value once) so the clustered bots don't wedge
-    // into a jittering, O(n²)-colliding pile. Broadcasts the change so real viewers' clients stay in parity. Idempotent.
-    private void SuppressPlayerCollisionForStress()
-    {
-        if (_stressPlayerCollisionSuppressed)
-        {
-            return;
-        }
-
-        _stressPriorPlayerCollision = _zone.PlayerCollisionEnabled;
-        _stressPlayerCollisionSuppressed = true;
-        if (_zone.PlayerCollisionEnabled)
-        {
-            _zone.PlayerCollisionEnabled = false;
-            BroadcastPlayerCollisionSetting();
-        }
-    }
-
-    // STRESS: once the load has stopped (duration elapsed or /stress stop → IsRunning false), restore the pre-stress
-    // player-collision setting. Called every server-loop iteration right after the load poll; a no-op unless a stress
-    // just ended. Broadcasts so clients re-sync.
-    private void RestorePlayerCollisionAfterStress()
-    {
-        if (!_stressPlayerCollisionSuppressed || _syntheticLoad.IsRunning)
-        {
-            return;
-        }
-
-        _stressPlayerCollisionSuppressed = false;
-        if (_zone.PlayerCollisionEnabled != _stressPriorPlayerCollision)
-        {
-            _zone.PlayerCollisionEnabled = _stressPriorPlayerCollision;
-            BroadcastPlayerCollisionSetting();
-        }
     }
 
     // Admin dev command (v1 way to exercise S51): /speed <multiplier> sets the CALLER's own entity speed
