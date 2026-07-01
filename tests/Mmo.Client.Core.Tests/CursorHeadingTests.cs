@@ -92,4 +92,77 @@ public sealed class CursorHeadingTests
         var dy = Math.Sin(156.0 * Math.PI / 180.0) * 3.0;
         Assert.Equal(Direction8.W, CursorHeading.FromWorldVector(dx, dy, Direction8.W, DeadZone, Hysteresis));
     }
+
+    // ---- FREE-ANGLE A/B TEST: FreeAngleFromWorldVector (raw unit heading, dead-zone stop, NO octant snap) -------
+
+    [Theory]
+    // Inside the dead-zone (|v| < 0.6 tile): no heading (null) — the avatar STOPS, exactly like FromWorldVector.
+    [InlineData(0.0, 0.0)]
+    [InlineData(0.3, 0.3)]   // |v| ~= 0.42 < 0.6
+    [InlineData(-0.4, 0.2)]  // |v| ~= 0.45 < 0.6
+    public void FreeAngle_InsideDeadZone_ReturnsNull(double dx, double dy)
+    {
+        Assert.Null(CursorHeading.FreeAngleFromWorldVector(dx, dy, DeadZone));
+    }
+
+    [Theory]
+    // Outside the dead-zone: the RAW normalized heading — length 1, same direction as (dx,dy), NOT snapped to an
+    // octant. Each row is a plain axis/diagonal to check normalization; the off-octant angle is checked below.
+    [InlineData(3.0, 0.0, 1.0, 0.0)]
+    [InlineData(0.0, -3.0, 0.0, -1.0)]
+    [InlineData(2.0, 2.0, 0.70710678, 0.70710678)]
+    public void FreeAngle_OutsideDeadZone_ReturnsRawUnitVector(double dx, double dy, double ux, double uy)
+    {
+        var heading = CursorHeading.FreeAngleFromWorldVector(dx, dy, DeadZone);
+        Assert.NotNull(heading);
+        Assert.Equal(ux, heading!.Value.X, 6);
+        Assert.Equal(uy, heading.Value.Y, 6);
+        Assert.Equal(1.0, heading.Value.Length, 9); // unit length
+    }
+
+    [Fact]
+    public void FreeAngle_OffOctantAngle_KeepsExactHeading_NotSnapped()
+    {
+        // A cursor at ~26° (past the 22.5° E|SE boundary). FromWorldVector SNAPS this to the SE octant; FreeAngle
+        // keeps the EXACT 26° heading (the whole point of the A/B mode). Compare the two on the identical input.
+        const double angleRad = 26.0 * Math.PI / 180.0;
+        var dx = Math.Cos(angleRad) * 3.0;
+        var dy = Math.Sin(angleRad) * 3.0;
+
+        // 8-dir path: snapped to the nearest octant.
+        Assert.Equal(Direction8.SE, CursorHeading.FromWorldVector(dx, dy, lastHeading: null, DeadZone, Hysteresis));
+
+        // Free-angle path: the raw 26° unit vector, NOT SE's 45° (cos/sin 26° != cos/sin 45°).
+        var heading = CursorHeading.FreeAngleFromWorldVector(dx, dy, DeadZone);
+        Assert.NotNull(heading);
+        Assert.Equal(Math.Cos(angleRad), heading!.Value.X, 6);
+        Assert.Equal(Math.Sin(angleRad), heading.Value.Y, 6);
+        Assert.Equal(1.0, heading.Value.Length, 9);
+    }
+
+    // ---- FREE-ANGLE A/B TEST: NearestDirection8 (the 8-way facing derivation for a raw heading) ------------------
+
+    [Theory]
+    // The raw heading still resolves to an 8-way sprite facing via the same angular sector snap FromWorldVector uses.
+    [InlineData(1.0, 0.0, Direction8.E)]
+    [InlineData(1.0, 1.0, Direction8.SE)]
+    [InlineData(0.0, 1.0, Direction8.S)]
+    [InlineData(-1.0, 1.0, Direction8.SW)]
+    [InlineData(-1.0, 0.0, Direction8.W)]
+    [InlineData(-1.0, -1.0, Direction8.NW)]
+    [InlineData(0.0, -1.0, Direction8.N)]
+    [InlineData(1.0, -1.0, Direction8.NE)]
+    public void NearestDirection8_SnapsHeadingToOctant(double dx, double dy, Direction8 expected)
+    {
+        Assert.Equal(expected, CursorHeading.NearestDirection8(dx, dy));
+    }
+
+    [Fact]
+    public void NearestDirection8_OffOctant26Deg_SnapsToSE_MatchesFromWorldVector()
+    {
+        // The 26° free-angle heading's 8-way facing is SE — the same octant FromWorldVector would send in 8-dir mode,
+        // so the sprite faces consistently across the toggle even though the free-angle heading itself is off-octant.
+        const double angleRad = 26.0 * Math.PI / 180.0;
+        Assert.Equal(Direction8.SE, CursorHeading.NearestDirection8(Math.Cos(angleRad), Math.Sin(angleRad)));
+    }
 }

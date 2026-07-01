@@ -286,6 +286,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _lastSentMoving;
 	private Direction8 _lastSentDirection;
 
+	// FREE-ANGLE A/B TEST (client-local, NOT server-authoritative — no message/replication): when TRUE the MOUSE
+	// hold-to-walk path sends the RAW player->cursor unit heading (any angle) instead of the nearest of 8 octants,
+	// so the avatar follows the cursor exactly. Default FALSE = the current 8-direction behaviour. WASD is
+	// inherently 8-way (8 sign combos) and is IDENTICAL in both modes; only the mouse heading changes. The predictor
+	// consumes the same unit vector the client sends, so prediction stays in parity either way. Flipped live via the
+	// F1 Movement-tab checkbox (no restart, no round-trip). Facing stays an 8-way sprite (nearest Direction8) in both.
+	private bool _freeAngleMovement;
+
 	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
 	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
 	// the PREDICTED local tile toward the cursor tile (CursorHeading) — exactly the keyboard path, re-aimed
@@ -895,6 +903,49 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			MouseHeadingHysteresisDegrees);
 	}
 
+	// FREE-ANGLE A/B TEST: the free-angle counterpart to CurrentMouseHeading — the RAW player->cursor unit heading
+	// (any angle, no octant snap, no hysteresis) while the RIGHT mouse button is held, or null when the button is up,
+	// before login, with no render position, on a missed ground ray, OR inside the dead-zone (caller stops). Uses the
+	// SAME continuous origin (predictor-tweened render position), the SAME ground pick, the SAME dead-zone constant,
+	// and the SAME injected/autopilot pre-emption as CurrentMouseHeading — only the octant/hysteresis snap is dropped
+	// so the heading is the exact cursor direction. Called from SendHeldMovement in place of CurrentMouseHeading when
+	// _freeAngleMovement is on.
+	private WorldVector? CurrentFreeAngleMouseHeading()
+	{
+		if (!Input.IsMouseButtonPressed(MouseButton.Right))
+		{
+			return null;
+		}
+
+		if (_client?.IsLoggedIn != true)
+		{
+			return null;
+		}
+
+		if (!TryGetLocalRenderPosition(out var playerX, out var playerZ))
+		{
+			return null;
+		}
+
+		var screenPosition = GetViewport().GetMousePosition();
+		if (!TryPickGroundPoint(screenPosition, out var hit))
+		{
+			return null;
+		}
+
+		// A deliberate mouse move overrides any debug-injected/autopilot motion so they never fight (mirrors
+		// CurrentMouseHeading).
+		if (_injectedDirection.HasValue || _autopilotPattern is not null)
+		{
+			_injectedDirection = null;
+			StopAutopilot();
+		}
+
+		var dx = hit.X - playerX;
+		var dy = hit.Z - playerZ;
+		return CursorHeading.FreeAngleFromWorldVector(dx, dy, MouseHeadingDeadZoneUnits);
+	}
+
 	// The local player's continuous rendered world position (X = east, Z = south) from the per-frame render
 	// states — for the local entity this is the predictor's smooth tween (what the avatar is drawn at), exactly
 	// the position UpdateCamera focuses on. Returns false before the local entity has a render state this frame.
@@ -1362,6 +1413,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		note.Text = "Move speed — one control: /speed <multiplier> (label: mult / ms-per-tile / tiles-per-sec)";
 		rows.AddChild(note);
 
+		// FREE-ANGLE A/B TEST — live client-local toggle (no Apply, no restart, no server round-trip, per the
+		// live-toggle rule). OFF (default) = the current 8-direction movement. ON = the MOUSE hold-to-walk follows
+		// the cursor at any angle (WASD stays 8-way in both). Purely input/presentation — flips instantly while
+		// playing so both modes can be A/B'd back-to-back.
+		var freeAngle = new CheckBox { Name = "FreeAngleMovement", Text = "Free-angle movement (follow mouse)", ButtonPressed = _freeAngleMovement };
+		freeAngle.AddThemeFontSizeOverride("font_size", 13);
+		freeAngle.Toggled += ApplyFreeAngleMovement;
+		rows.AddChild(freeAngle);
+
 		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
 		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
 		// live via /speed <multiplier> (the existing per-entity path), which scales off the pinned global base
@@ -1693,6 +1753,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private void ApplySpawnerTiles(bool enabled)
 	{
 		_showSpawnerTiles = enabled;
+	}
+
+	// FREE-ANGLE A/B TEST — F1 Movement "Free-angle movement" live toggle. Flips the client-local flag that
+	// SendHeldMovement reads each frame to pick the mouse heading source (8-dir octant vs raw cursor unit vector).
+	// Client-local only: no message, no server round-trip — the wire already carries a float heading either way.
+	private void ApplyFreeAngleMovement(bool enabled)
+	{
+		_freeAngleMovement = enabled;
 	}
 
 	// F1 Visual "Server positions" live toggle — show/hide the cyan remote-entity server-tile debug markers (default
@@ -2979,10 +3047,62 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var chatFocused = _chatInput?.HasFocus() == true;
 		var keyboard = chatFocused ? null : CurrentDirection();
 
-		Direction8? mouseDir = keyboard.HasValue || chatFocused ? null : CurrentMouseHeading();
-		var injected = keyboard.HasValue || mouseDir.HasValue || chatFocused ? null : CurrentInjectedDirection();
-		var direction = keyboard ?? mouseDir ?? injected;
-		var moving = direction.HasValue;
+		// Resolve the MOUSE hold-to-walk contribution. 8-dir mode (default): the nearest-of-8 octant (Direction8),
+		// exactly as before. FREE-ANGLE mode: the RAW player->cursor unit heading (any angle). Only one is active
+		// per mode; both carry the same right-button/dead-zone/side-effect semantics (CurrentFreeAngleMouseHeading
+		// mirrors CurrentMouseHeading). WASD (keyboard) is unaffected by the mode — it is inherently 8-way.
+		Direction8? mouseDir = null;   // 8-dir mode: the octant heading
+		WorldVector? mouseFree = null; // free-angle mode: the raw unit heading
+		if (!keyboard.HasValue && !chatFocused)
+		{
+			if (_freeAngleMovement)
+			{
+				mouseFree = CurrentFreeAngleMouseHeading();
+			}
+			else
+			{
+				mouseDir = CurrentMouseHeading();
+			}
+		}
+
+		var mouseActive = mouseDir.HasValue || mouseFree.HasValue;
+		var injected = keyboard.HasValue || mouseActive || chatFocused ? null : CurrentInjectedDirection();
+
+		// The heading the client SENDS + the predictor consumes: a unit WorldVector (null = stopped). Priority
+		// keyboard > mouse > injected, unchanged. In 8-dir mode every source is a Direction8 whose ToUnitVector() is
+		// byte-identical to the pre-free-angle code (keyboard ?? mouseDir ?? injected -> .ToUnitVector()). In
+		// free-angle mode ONLY the mouse contributes a raw off-octant vector; WASD/injected stay 8-way. `headingOctant`
+		// is the nearest Direction8 of that heading — it drives the 8-way sprite facing / HUD (facing stays 8-way in
+		// both modes by design); for an 8-dir source it IS the source octant, so 8-dir facing is unchanged.
+		WorldVector? heading;
+		Direction8? headingOctant;
+		if (keyboard.HasValue)
+		{
+			heading = keyboard.Value.ToUnitVector();
+			headingOctant = keyboard.Value;
+		}
+		else if (mouseFree.HasValue)
+		{
+			heading = mouseFree.Value;
+			headingOctant = CursorHeading.NearestDirection8(mouseFree.Value.X, mouseFree.Value.Y);
+		}
+		else if (mouseDir.HasValue)
+		{
+			heading = mouseDir.Value.ToUnitVector();
+			headingOctant = mouseDir.Value;
+		}
+		else if (injected.HasValue)
+		{
+			heading = injected.Value.ToUnitVector();
+			headingOctant = injected.Value;
+		}
+		else
+		{
+			heading = null;
+			headingOctant = null;
+		}
+
+		var moving = heading.HasValue;
 
 		// CONTINUOUS MIGRATION (Phase 4): predict + send ONE per-input continuous MoveIntent PER RENDER FRAME — the RAW
 		// direction (the held Direction8's unit world vector, or (0,0) when stopped) and THIS frame's dt. The predictor
@@ -3000,10 +3120,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		if (moving)
 		{
-			var unit = direction!.Value.ToUnitVector();
+			var unit = heading!.Value;
 			_client.PredictAndSendMove((float)unit.X, (float)unit.Y, dt);
 			_lastSentMoving = true;
-			_lastSentDirection = direction.Value;
+			_lastSentDirection = headingOctant!.Value;
 		}
 		else
 		{

@@ -74,6 +74,40 @@ public static class CursorHeading
         return nearest;
     }
 
+    // FREE-ANGLE A/B TEST: the RAW player->cursor unit heading — any angle, NO octant snap, NO hysteresis. The
+    // free-angle counterpart to FromWorldVector: when the client's free-angle toggle is on, the mouse hold-to-walk
+    // path sends THIS exact heading instead of the nearest of 8 octants, so the avatar follows the cursor at any
+    // angle. Same dead-zone/stop behaviour as FromWorldVector: returns null inside `deadZoneUnits` (cursor on/near
+    // the player -> caller emits moving:false and the avatar stops), else (dx,dy) normalized to length 1. There is
+    // no octant table and no hysteresis (a raw heading has no boundary to flicker across). Pure + allocation-free
+    // so the dead-zone / normalization unit-tests headlessly.
+    public static WorldVector? FreeAngleFromWorldVector(double dx, double dy, double deadZoneUnits)
+    {
+        var magnitude = Math.Sqrt((dx * dx) + (dy * dy));
+        if (magnitude < deadZoneUnits)
+        {
+            return null;
+        }
+
+        return new WorldVector(dx / magnitude, dy / magnitude);
+    }
+
+    // The nearest of 8 octants for a world vector (0=E, increasing clockwise in screen space, +Y down) — the same
+    // angular sector snap FromWorldVector uses, exposed for the FREE-ANGLE facing derivation: a raw off-octant
+    // heading still resolves to a Direction8 so the 8-way sprite faces ~right. No dead-zone / hysteresis (the
+    // caller passes an already-non-zero heading); a zero vector degenerates to E (atan2(0,0)=0), which callers avoid.
+    public static Direction8 NearestDirection8(double dx, double dy)
+    {
+        var degrees = Math.Atan2(dy, dx) * (180.0 / Math.PI);
+        if (degrees < 0)
+        {
+            degrees += 360.0;
+        }
+
+        var sector = ((int)Math.Round(degrees / 45.0) % 8 + 8) % 8;
+        return SectorToDirection[sector];
+    }
+
     // Smallest absolute angular distance (degrees) between two angles, accounting for wrap at 360°.
     private static double AngularDistanceDegrees(double a, double b)
     {
