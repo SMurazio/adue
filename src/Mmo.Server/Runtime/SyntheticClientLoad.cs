@@ -151,13 +151,14 @@ public sealed class SyntheticClientLoad : IDisposable
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
 
-        // Keepalive cadence for the per-input continuous move intent — MUST match NominalMoveDtSeconds (≈ one 20 Hz
-        // tick), like a real client sending ~per-frame. If the keepalive is LONGER than the nominal dt (it was 500 ms
-        // vs a 50 ms dt), the bot integrates only 0.05 s of motion per keepalive → it CRAWLS at ~1/10 speed, while its
-        // replicated Velocity is the full dir×speed. The remote render (extrapolate-to-now) then projects it forward at
-        // full speed and SNAPS BACK each sparse update = jitter in place. Matching the cadence to the dt makes the
-        // per-interval motion equal velocity×interval, so the extrapolation lands exactly right → smooth roaming.
-        private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(50);
+        // Send cadence — mirror a REAL client's per-frame input: ~60 Hz (16 ms) with the REAL elapsed dt (computed at
+        // the send site), NOT a coarse fixed-dt tick. The server loop polls the load ~every 2 ms, so 16 ms is reachable.
+        // Why fine + real-dt: the server integrates each MoveIntent ON RECEIVE and clamps it to a per-tick real-time dt
+        // BUDGET. A coarse 50 ms cadence with a FIXED 50 ms dt lands ONE 0.05-unit jump per tick at a random phase vs the
+        // 50 ms tick (the timers drift) → per-tick motion aliases (a single big step at a random time) → jerky snapshots
+        // no interp buffer can smooth. Fine + real-dt = several small steps per tick that sum to real-elapsed → regular,
+        // smooth motion like a real client. (Earlier bug: a 500 ms cadence made the bot CRAWL at ~1/10 speed.)
+        private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(16);
 
         // CONTINUOUS MIGRATION (Phase 3, v36): the synthetic load client does not predict — it sends one continuous
         // MoveIntent on change + keepalive with a fixed NOMINAL dt (≈ one 20 Hz tick) and a UNIT direction. The
@@ -169,6 +170,7 @@ public sealed class SyntheticClientLoad : IDisposable
         private uint _inputSequence;
         private TimeSpan _nextKeepaliveAt;
         private TimeSpan _nextDirectionAt;
+        private TimeSpan _lastMoveSendElapsed;
         private Direction8? _direction;
         private bool _intentMoving;
         private Direction8 _intentDirection;
@@ -245,9 +247,14 @@ public sealed class SyntheticClientLoad : IDisposable
                 _intentMoving = desiredMoving;
                 _intentDirection = desiredDirection;
                 var dir = desiredMoving ? _intentDirection.ToUnitVector() : WorldVector.Zero;
+                // REAL elapsed dt since the last send (not the fixed nominal): each intent moves a small amount
+                // proportional to real time — several small steps per server tick that sum to real-elapsed → smooth,
+                // like a real client. Clamped so a long gap (after a stopped stretch) can't teleport past the budget.
+                var moveDt = (float)Math.Clamp((elapsed - _lastMoveSendElapsed).TotalSeconds, 0d, 0.1d);
+                _lastMoveSendElapsed = elapsed;
                 Send(
                     _serverPeer,
-                    new MoveIntentMessage(++_inputSequence, (float)dir.X, (float)dir.Y, NominalMoveDtSeconds),
+                    new MoveIntentMessage(++_inputSequence, (float)dir.X, (float)dir.Y, moveDt),
                     DeliveryMethod.Unreliable);
                 _nextKeepaliveAt = elapsed + MoveIntentKeepalive;
             }
