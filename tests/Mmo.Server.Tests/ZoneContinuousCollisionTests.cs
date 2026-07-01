@@ -332,6 +332,85 @@ public sealed class ZoneContinuousCollisionTests
         }
     }
 
+    // ---- PLAYER-COLLISION-TOGGLE (the live player↔player collision flag) -----------------------------------
+    //
+    // Zone.PlayerCollisionEnabled (default TRUE) gates ONLY whether OTHER PLAYERS are obstacles. Monster collision is
+    // unaffected either way. These pin the SERVER behaviour headlessly; the client gather mirrors the SAME flag (parity).
+
+    [Fact]
+    public void PlayerCollisionFlagDefaultsTrue()
+    {
+        var (zone, _) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        Assert.True(zone.PlayerCollisionEnabled); // shipped default = players collide
+    }
+
+    [Fact]
+    public void PlayerCollisionOFF_PlayerPassesThroughAnotherPlayer_ButMonsterStillBlocks()
+    {
+        // Flag OFF: another PLAYER is dropped from the obstacle set, so the mover passes through it (its rounded X reaches
+        // the far side / centre distance < 2r along the way). A MONSTER at the same spot with the flag OFF still blocks —
+        // proving the flag gates ONLY players, never monsters.
+        var (playerZone, mover) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        playerZone.PlayerCollisionEnabled = false;
+        var other = SpawnSecondPlayer(playerZone, new TileCoord(11, 8), networkId: 2);
+
+        var passedThrough = false;
+        for (var i = 0; i < 200; i++)
+        {
+            playerZone.IntegrateMovement(mover, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            if (Dist(mover.Position, other.Position) < (2d * Radius) - Eps)
+            {
+                passedThrough = true; // centres came closer than the radius-sum ⇒ not blocked by the other player
+            }
+        }
+
+        Assert.True(passedThrough, "flag OFF but the other player still blocked the mover");
+        Assert.True(mover.Position.X > other.Position.X + Radius, $"did not pass through to x={mover.Position.X}");
+
+        // Same setup, flag still OFF, but the east body is a MONSTER: it MUST block (monster collision is unaffected).
+        var (monsterZone, monsterMover) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        monsterZone.PlayerCollisionEnabled = false;
+        var monster = SpawnMonster(monsterZone, new TileCoord(11, 8), networkId: 2);
+        for (var i = 0; i < 200; i++)
+        {
+            monsterZone.IntegrateMovement(monsterMover, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.True(Dist(monsterMover.Position, monster.Position) >= (2d * Radius) - Eps,
+            $"monster failed to block with the player-flag OFF: dist={Dist(monsterMover.Position, monster.Position)}");
+        Assert.True(monsterMover.Position.X <= monster.Position.X + Eps, $"passed through the monster to x={monsterMover.Position.X}");
+    }
+
+    [Fact]
+    public void PlayerCollisionON_BlocksAnotherPlayer_OFF_ByteIdenticalToNoOtherPlayer()
+    {
+        // With the flag ON a player blocks another player (centre distance >= 2r). With it OFF the integrated path is
+        // byte-identical to a zone with NO other player at all — i.e. the other player contributes nothing to the gather.
+        var (onZone, onMover) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        var onOther = SpawnSecondPlayer(onZone, new TileCoord(11, 8), networkId: 2); // flag defaults ON
+        for (var i = 0; i < 200; i++)
+        {
+            onZone.IntegrateMovement(onMover, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.True(Dist(onMover.Position, onOther.Position) >= (2d * Radius) - Eps, "flag ON but did not block the other player");
+
+        var (offZone, offMover) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        offZone.PlayerCollisionEnabled = false;
+        SpawnSecondPlayer(offZone, new TileCoord(11, 8), networkId: 2);
+
+        var (bareZone, bareMover) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+
+        for (var i = 0; i < 50; i++)
+        {
+            offZone.IntegrateMovement(offMover, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+            bareZone.IntegrateMovement(bareMover, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.Equal(BitConverter.DoubleToInt64Bits(bareMover.Position.X), BitConverter.DoubleToInt64Bits(offMover.Position.X));
+        Assert.Equal(BitConverter.DoubleToInt64Bits(bareMover.Position.Y), BitConverter.DoubleToInt64Bits(offMover.Position.Y));
+    }
+
     // NOTE (Phase 11 coherence sweep): the former MonsterStillBlocksViaTileStep_NotTheContinuousCollision_Regression
     // test was DELETED here. It asserted monsters block via the tile-step path (Zone.TryStep / IsStepWalkable), but
     // after Phase 8 monsters move via the continuous HopLocomotion (no TryStep), and the hop's collision-valid landing

@@ -64,6 +64,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private double _lastFrameDelta;
 	private CheckBox? _uncapFpsCheck;
 	private bool _fpsUncapped;
+	// PLAYER-COLLISION-TOGGLE: the F1 Server-tab live toggle for server-authoritative player↔player collision. Flips on
+	// click (sends an admin message; the server broadcasts the new flag back). Re-seeded to the replicated value on each
+	// panel open via SetPressedNoSignal (so seeding never fires the toggle handler → never sends a spurious admin flip).
+	private CheckBox? _playerCollisionCheck;
 	private CheckBox? _frameCsvCheck;
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
@@ -1497,7 +1501,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnTuningApplyPressed;
 		rows.AddChild(apply);
+
+		// PLAYER-COLLISION-TOGGLE: a live, server-authoritative toggle for player↔player collision. Flips on click (no
+		// Apply) — sends an admin-gated request; the server flips its authoritative flag and broadcasts the new value to
+		// ALL clients, so both the server integrator's gather and every client predictor's gather flip TOGETHER (parity).
+		// Monster collision (player↔monster + monster↔monster) is UNAFFECTED. Re-seeded to the replicated value on each
+		// panel open. Sits on the Server tab since it is a server rule (admin-only panel), separate from the Apply fields.
+		var collisionHeader = CreateOverlayLabel("TuningCollisionHeader", 12);
+		collisionHeader.Text = "— server rules (instant) —";
+		rows.AddChild(collisionHeader);
+		var playerCollision = new CheckBox { Name = "PlayerCollision", Text = "Player-vs-player collision", ButtonPressed = _client?.PlayerCollisionEnabled ?? true };
+		playerCollision.AddThemeFontSizeOverride("font_size", 13);
+		playerCollision.Toggled += OnPlayerCollisionToggled;
+		rows.AddChild(playerCollision);
+		_playerCollisionCheck = playerCollision;
 	}
+
+	// PLAYER-COLLISION-TOGGLE: the F1 Server-tab checkbox flipped — send the admin-gated request live. The server
+	// admin-gates it, flips its authoritative flag, and broadcasts the new value back (which re-seeds the client's
+	// replicated copy); the client never predicts the flip itself. A brief 1-tick prediction blip at the flip instant
+	// (message round-trip) is accepted. A non-admin never reaches here (the F1 panel is admin-only).
+	private void OnPlayerCollisionToggled(bool enabled) => _client?.SendSetPlayerCollision(enabled);
 
 	// Vitals tab (was F7): set the local player's current HP/mana/stamina live. Apply sends each via AdminSetStat
 	// (the server admin-gates + clamps, then replicates the result back so the bars track it). Verbatim from F7.
@@ -2372,6 +2396,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			SeedStatFields();
 			SeedCombatFields();
 			SeedMonsterFields();
+			// PLAYER-COLLISION-TOGGLE: reflect the current replicated flag in the checkbox on each open (another admin may
+			// have flipped it). SetPressedNoSignal so seeding never fires the toggle handler (no spurious admin flip).
+			_playerCollisionCheck?.SetPressedNoSignal(_client?.PlayerCollisionEnabled ?? true);
 		}
 
 		_debugPanel!.Visible = visible;

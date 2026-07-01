@@ -638,6 +638,12 @@ public sealed class GameServer
                     HandleSaveMonsterTuning(session);
                 }
                 break;
+            case AdminSetPlayerCollisionMessage playerCollision:
+                if (session.IsAuthenticated)
+                {
+                    HandleAdminSetPlayerCollision(session, playerCollision.Enabled);
+                }
+                break;
             case AdminSetStatMessage stat:
                 if (session.IsAuthenticated)
                 {
@@ -754,6 +760,10 @@ public sealed class GameServer
                         // LIVING-ENEMIES P2-POLISH: replicate the per-monster-TYPE tuning so an admin's F1 Monster tab
                         // can list the types (dropdown) and show + edit the live values immediately on login.
                         SendMonsterTuning(current);
+                        // PLAYER-COLLISION-TOGGLE: replicate the authoritative player↔player collision flag so this
+                        // client's obstacle gather gates on the SAME value the server integrator does (prediction
+                        // parity) from the first frame — and the F1 Server-tab checkbox seeds to the live value.
+                        SendPlayerCollisionSetting(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -2855,6 +2865,49 @@ public sealed class GameServer
     private void BroadcastMonsterTuning()
     {
         var message = new MonsterTuningMessage(_monsterTypes.BuildSnapshot());
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated)
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // PLAYER-COLLISION-TOGGLE: admin-gated handler for the live player↔player collision flip. ADMIN-GATED with the same
+    // role check as HandleAdminSetTuning — it affects EVERYONE (a non-admin send is logged + ignored). On an admin flip
+    // we write the authoritative flag onto the Zone (the source of truth GatherEntityObstacles reads) and broadcast the
+    // new value to ALL clients so every client predictor's obstacle gather and the server integrator's gather flip
+    // TOGETHER (prediction parity). Monster collision is unaffected. A no-op flip (same value) still re-broadcasts so any
+    // just-opened panel re-seeds to the truth — cheap, rare, reliable.
+    private void HandleAdminSetPlayerCollision(ClientSession sender, bool enabled)
+    {
+        if (sender.Role != ClientRole.Admin)
+        {
+            Log.Warn($"Denied AdminSetPlayerCollision from non-admin {sender.DisplayName}: enabled={enabled}.");
+            return;
+        }
+
+        _zone.PlayerCollisionEnabled = enabled;
+        BroadcastPlayerCollisionSetting();
+        SendSystem(sender, $"player↔player collision: {(enabled ? "ON" : "OFF")} (applied live).");
+        Log.Info($"{sender.DisplayName} set player↔player collision = {enabled}.");
+    }
+
+    // PLAYER-COLLISION-TOGGLE: replicate the authoritative player↔player collision flag to one client (login initial
+    // truth). Reliable-ordered, like SendMonsterTuning. The client mirrors it so its obstacle gather gates on the same
+    // value the server does.
+    private void SendPlayerCollisionSetting(ClientSession session)
+    {
+        TrySend(session.Peer, new PlayerCollisionSettingMessage(_zone.PlayerCollisionEnabled), DeliveryMethod.ReliableOrdered);
+    }
+
+    // PLAYER-COLLISION-TOGGLE: push the current player↔player collision flag to every authenticated client. Called when
+    // an admin flips it so every client's obstacle gather re-gates on the new authoritative value (prediction parity).
+    // Global (not AOI-scoped), like BroadcastCombatTuning — every authenticated session gets it.
+    private void BroadcastPlayerCollisionSetting()
+    {
+        var message = new PlayerCollisionSettingMessage(_zone.PlayerCollisionEnabled);
         foreach (var session in _sessions.Values)
         {
             if (session.IsAuthenticated)

@@ -33,6 +33,11 @@ public enum MessageType : ushort
     // back to the data manifest (Content/monsters.json) so they survive a restart (AdminSetTuning is in-memory only).
     // Tag 16 is the next free client->server tag (8-11 are the deleted tile-step gaps). See SaveMonsterTuningMessage.
     SaveMonsterTuning = 16,
+    // PLAYER-COLLISION-TOGGLE (v43): admin-gated client->server request to flip whether OTHER PLAYERS are collision
+    // obstacles (player↔player collision on/off). Server-authoritative + broadcast so the client predictor's obstacle
+    // gather and the server integrator's gather flip TOGETHER (prediction parity — a client-only flag would desync).
+    // Tag 17 is the next free client->server tag (8-11 are the deleted tile-step gaps). See AdminSetPlayerCollisionMessage.
+    AdminSetPlayerCollision = 17,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -71,5 +76,10 @@ public enum MessageType : ushort
     // corpse (InteractRequest on it) and re-sent after each take/loot-all so the window reflects the live remaining
     // contents; Open=false tells the client to CLOSE the window (last item taken / out of range / corpse gone).
     // Owner-only + reliable-ordered (like InventoryUpdate — corpse loot never AOI-replicates). See CorpseContentsMessage.
-    CorpseContents = 116
+    CorpseContents = 116,
+    // PLAYER-COLLISION-TOGGLE (v43): server->client replication of the authoritative player↔player collision flag. Sent
+    // on login (initial truth) + broadcast on every change so every client's obstacle gather gates on the SAME value the
+    // server integrator does (prediction parity). Monster collision is unaffected — this gates ONLY whether OTHER PLAYERS
+    // are obstacles. Reliable-ordered, global (not AOI-scoped). See PlayerCollisionSettingMessage.
+    PlayerCollisionSetting = 117
 }

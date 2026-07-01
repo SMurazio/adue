@@ -77,6 +77,14 @@ public sealed class Zone
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
     public WorldState World { get; }
 
+    // PLAYER-COLLISION-TOGGLE: the live, server-authoritative flag gating whether OTHER PLAYERS are collision obstacles
+    // for a moving player (player↔player collision). DEFAULT TRUE = the shipped behaviour (players collide). GameServer
+    // owns the toggle plumbing (admin message + replication) and writes this; GatherEntityObstacles below READS it each
+    // integrate. When FALSE, players are dropped from the obstacle gather → they pass through each other (byte-identical
+    // to the player↔monster-only path); MONSTER collision (player↔monster + monster↔monster) is UNAFFECTED either way.
+    // A plain bool read per gather (no per-tick cost). Single-threaded tick loop, so no synchronisation is needed.
+    public bool PlayerCollisionEnabled { get; set; } = true;
+
     public static Zone CreateDefault(int width, int height, SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
     {
         return CreateGenerated(width, height, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion, spawnDistribution);
@@ -212,8 +220,13 @@ public sealed class Zone
         for (var i = 0; i < _obstacleCandidateScratch.Count; i++)
         {
             var candidate = _obstacleCandidateScratch[i];
-            // Keep MONSTERS and OTHER PLAYERS; drop anything else, and ALWAYS drop self (no-collide-with-yourself).
-            if ((candidate.Kind != EntityKind.Monster && candidate.Kind != EntityKind.Player) || candidate.Id == self.Id)
+            // Keep MONSTERS always; keep OTHER PLAYERS only when player↔player collision is enabled (the live server flag,
+            // PLAYER-COLLISION-TOGGLE) — when it is OFF, players are dropped so a mover passes through them (monster
+            // collision unaffected). ALWAYS drop self (no-collide-with-yourself — self is the moving player; it must NEVER
+            // be its own obstacle or it pins in place). The CLIENT gather mirrors this gate on the SAME replicated flag.
+            var isObstacleKind = candidate.Kind == EntityKind.Monster
+                || (candidate.Kind == EntityKind.Player && PlayerCollisionEnabled);
+            if (!isObstacleKind || candidate.Id == self.Id)
             {
                 continue;
             }

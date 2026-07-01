@@ -178,6 +178,86 @@ public sealed class AdminTuningIntegrationTests
         }
     }
 
+    // PLAYER-COLLISION-TOGGLE: the flag replicates on login (initial truth = ON) and an admin flip broadcasts the new
+    // value to EVERY client (so the server integrator + every client predictor gate on the same flag). An admin "Watcher"
+    // flips it OFF; both clients must receive PlayerCollisionSettingMessage(false).
+    [Fact]
+    public async Task AdminPlayerCollisionFlipReplicatesToAllClients()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, interestRadius: 30f, admins: ["Watcher"]);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var watcher = new TuningClient("Watcher");
+            using var other = new TuningClient("Other");
+            watcher.Connect(port, options.ConnectionKey);
+            other.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(
+                () => watcher.IsLoggedIn && watcher.OwnNetworkId != 0 && other.IsLoggedIn && other.OwnNetworkId != 0,
+                watcher,
+                other);
+
+            // Initial replication on login: the flag is ON (true) for both clients.
+            await WaitUntilAsync(
+                () => watcher.Messages.OfType<PlayerCollisionSettingMessage>().Any(m => m.Enabled)
+                    && other.Messages.OfType<PlayerCollisionSettingMessage>().Any(m => m.Enabled),
+                watcher,
+                other);
+
+            // Admin flips it OFF: both clients must receive the false broadcast.
+            watcher.SendSetPlayerCollision(false);
+            await WaitUntilAsync(
+                () => watcher.Messages.OfType<PlayerCollisionSettingMessage>().Any(m => !m.Enabled)
+                    && other.Messages.OfType<PlayerCollisionSettingMessage>().Any(m => !m.Enabled),
+                watcher,
+                other);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    // PLAYER-COLLISION-TOGGLE: a NON-admin flip must be ignored — the flag stays ON, so no false broadcast is ever sent.
+    [Fact]
+    public async Task NonAdminPlayerCollisionFlipIsIgnored()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, interestRadius: 30f, admins: []);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var player = new TuningClient("Player");
+            player.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => player.IsLoggedIn && player.OwnNetworkId != 0, player);
+            // The login replication (ON) arrives.
+            await WaitUntilAsync(() => player.Messages.OfType<PlayerCollisionSettingMessage>().Any(m => m.Enabled), player);
+            player.ClearMessages();
+
+            // Non-admin attempt to flip OFF. The server ignores it; no PlayerCollisionSettingMessage(false) is broadcast.
+            player.SendSetPlayerCollision(false);
+            await PollForAsync(TimeSpan.FromMilliseconds(600), player);
+            Assert.DoesNotContain(player.Messages.OfType<PlayerCollisionSettingMessage>(), m => !m.Enabled);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
     private static ServerOptions CreateOptions(int port, string connectionString, float interestRadius, string[] admins)
     {
         return new ServerOptions(
@@ -309,6 +389,9 @@ public sealed class AdminTuningIntegrationTests
 
         public void SendSaveMonsterTuning() =>
             Send(new SaveMonsterTuningMessage(), DeliveryMethod.ReliableOrdered);
+
+        public void SendSetPlayerCollision(bool enabled) =>
+            Send(new AdminSetPlayerCollisionMessage(enabled), DeliveryMethod.ReliableOrdered);
 
         public void ClearMessages() => Messages.Clear();
 

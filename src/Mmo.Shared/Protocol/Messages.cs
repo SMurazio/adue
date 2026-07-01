@@ -119,6 +119,27 @@ public sealed record SaveMonsterTuningMessage : IProtocolMessage
     public MessageType Type => MessageType.SaveMonsterTuning;
 }
 
+// PLAYER-COLLISION-TOGGLE (protocol v43): admin-gated client->server request to flip PLAYER↔PLAYER collision — whether
+// OTHER PLAYERS are collision obstacles. Enabled=true ⇒ players collide (the shipped default); false ⇒ players pass
+// through each other. Server-authoritative + admin-gated (the same gate as AdminSetTuning) because it affects EVERYONE:
+// the server flips the flag on its Zone, then broadcasts the new value (PlayerCollisionSettingMessage) to ALL clients so
+// every client predictor's obstacle gather and the server integrator's gather flip TOGETHER (prediction parity — a
+// client-only flag would rubber-band). Monster collision (player↔monster + monster↔monster) is unaffected either way.
+// Reliable-ordered — a dropped toggle must not be lost. A non-admin send is ignored + logged.
+public sealed record AdminSetPlayerCollisionMessage(bool Enabled) : IProtocolMessage
+{
+    public MessageType Type => MessageType.AdminSetPlayerCollision;
+}
+
+// PLAYER-COLLISION-TOGGLE (protocol v43): server->client replication of the authoritative player↔player collision flag.
+// Sent on login (initial truth) and broadcast on every change, so the client's obstacle gather gates on the SAME value
+// the server integrator does (prediction parity — see AdminSetPlayerCollisionMessage). Monster collision is unaffected;
+// this flag gates ONLY whether OTHER PLAYERS are obstacles. Reliable-ordered, global (not AOI-scoped).
+public sealed record PlayerCollisionSettingMessage(bool Enabled) : IProtocolMessage
+{
+    public MessageType Type => MessageType.PlayerCollisionSetting;
+}
+
 public sealed record SnapshotAckMessage(uint LastSnapshotSequence) : IProtocolMessage
 {
     public MessageType Type => MessageType.SnapshotAck;

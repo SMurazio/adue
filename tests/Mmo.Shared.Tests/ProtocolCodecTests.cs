@@ -571,12 +571,30 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyTwo()
+    public void ProtocolVersionIsFortyThree()
     {
-        // MONSTER-TUNING-SAVE (v42): added the parameterless, admin-gated SaveMonsterTuningMessage (F1 Monster-tab Save
-        // persists live monster tuning to Content/monsters.json). Additive command + tag; bump on top of v41 (the
-        // placeholder per-type visual). Pin it so a change is caught.
-        Assert.Equal(42, ProtocolCodec.Version);
+        // PLAYER-COLLISION-TOGGLE (v43): added the admin-gated AdminSetPlayerCollisionMessage + the server->client
+        // PlayerCollisionSettingMessage (replicate the live player↔player collision flag). Two additive messages + tags;
+        // bump on top of v42 (monster-tuning save). Pin it so a change is caught.
+        Assert.Equal(43, ProtocolCodec.Version);
+    }
+
+    // PLAYER-COLLISION-TOGGLE (v43): both the admin toggle and the replication message round-trip their single bool
+    // (both true and false, so a dropped/flipped bit is caught).
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void PlayerCollisionMessagesRoundTrip(bool enabled)
+    {
+        var admin = new AdminSetPlayerCollisionMessage(enabled);
+        var decodedAdmin = Assert.IsType<AdminSetPlayerCollisionMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(admin)));
+        Assert.Equal(enabled, decodedAdmin.Enabled);
+        Assert.Equal(MessageType.AdminSetPlayerCollision, decodedAdmin.Type);
+
+        var setting = new PlayerCollisionSettingMessage(enabled);
+        var decodedSetting = Assert.IsType<PlayerCollisionSettingMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(setting)));
+        Assert.Equal(enabled, decodedSetting.Enabled);
+        Assert.Equal(MessageType.PlayerCollisionSetting, decodedSetting.Type);
     }
 
     // MONSTER-TUNING-SAVE (v42): the parameterless Save command round-trips through the codec (header-only, no payload).

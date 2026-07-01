@@ -320,6 +320,40 @@ public sealed class MmoClientProtocolTests
         Assert.All(obstacles, c => Assert.Equal(0.5d, c.Radius));
     }
 
+    // PLAYER-COLLISION-TOGGLE: the client gather gates OTHER PLAYERS on the replicated flag (PlayerCollisionSettingMessage)
+    // exactly as the server integrator does (parity). Flag OFF ⇒ other players are excluded, monsters still included; flag
+    // back ON ⇒ both included. Self is always excluded regardless.
+    [Fact]
+    public void EntityObstacleGather_GatesOtherPlayersOnTheReplicatedFlag_MonstersAlwaysIncluded()
+    {
+        using var client = CreateClient(out _);
+        var localCharacter = Guid.NewGuid();
+
+        client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 140, 30, 0.5f));
+        client.HandleMessageForTests(new LoginResultMessage(true, localCharacter, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
+        client.HandleMessageForTests(new EntitySpawnMessage(9, localCharacter, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 140));
+        client.HandleMessageForTests(new EntitySpawnMessage(10, Guid.NewGuid(), EntityKind.Player, "P10", new TileCoord(7, 5), Direction8.S, StepCooldownMs: 140));
+        client.HandleMessageForTests(new EntitySpawnMessage(15, Guid.NewGuid(), EntityKind.Monster, "M15", new TileCoord(5, 6), Direction8.S, StepCooldownMs: 140));
+
+        // Default (no setting received) is ON — both the player and the monster are obstacles.
+        Assert.True(client.PlayerCollisionEnabled);
+        Assert.Equal(2, client.GatherEntityObstaclesForTests(5d, 5d).Count);
+
+        // Flag OFF ⇒ the other player is dropped; the monster remains (at (5,6)). Self never appears.
+        client.HandleMessageForTests(new PlayerCollisionSettingMessage(false));
+        Assert.False(client.PlayerCollisionEnabled);
+        var off = client.GatherEntityObstaclesForTests(5d, 5d);
+        Assert.Single(off);
+        Assert.Equal(5d, off[0].X); Assert.Equal(6d, off[0].Y); // the monster
+        Assert.DoesNotContain(off, c => c.X == 7d && c.Y == 5d); // the player is gone
+        Assert.DoesNotContain(off, c => c.X == 5d && c.Y == 5d); // self never an obstacle
+
+        // Flag back ON ⇒ both bodies included again.
+        client.HandleMessageForTests(new PlayerCollisionSettingMessage(true));
+        Assert.True(client.PlayerCollisionEnabled);
+        Assert.Equal(2, client.GatherEntityObstaclesForTests(5d, 5d).Count);
+    }
+
     private static MmoClient CreateClient(out List<IProtocolMessage> outbound, bool debugMovement = false, Action<string>? traceSink = null)
     {
         outbound = [];

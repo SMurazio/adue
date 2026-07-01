@@ -71,7 +71,12 @@ public static class ProtocolCodec
     // Monster tab's Save button persists the live-tuned monster TYPE values back to Content/monsters.json so they survive
     // a restart (AdminSetTuning is in-memory only). Additive command message + the new MessageType tag; no existing wire
     // layout changes. Server + every in-repo client flip together.
-    public const byte Version = 42;
+    // v43 — PLAYER-COLLISION-TOGGLE: two additive messages — an admin-gated client->server AdminSetPlayerCollisionMessage
+    // (bool) to flip PLAYER↔PLAYER collision live, and a server->client PlayerCollisionSettingMessage (bool) that
+    // replicates the authoritative flag on login + on every change so the client predictor's obstacle gather and the
+    // server integrator's gather gate on the SAME value (prediction parity). No existing wire layout changes; monster
+    // collision is unaffected. Server + every in-repo client flip together.
+    public const byte Version = 43;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -158,6 +163,14 @@ public static class ProtocolCodec
             case SaveMonsterTuningMessage:
                 // MONSTER-TUNING-SAVE (v42): a parameterless command — the header (magic/version/type) IS the whole
                 // packet, no payload. Mirrored by the SaveMonsterTuning decode (which reads nothing).
+                break;
+            case AdminSetPlayerCollisionMessage value:
+                // PLAYER-COLLISION-TOGGLE (v43): a single bool — the desired player↔player collision state.
+                writer.Write(value.Enabled);
+                break;
+            case PlayerCollisionSettingMessage value:
+                // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
+                writer.Write(value.Enabled);
                 break;
             case SnapshotAckMessage value:
                 writer.Write(value.LastSnapshotSequence);
@@ -342,6 +355,9 @@ public static class ProtocolCodec
             MessageType.AdminSetTuning => new AdminSetTuningMessage(ReadString(reader), reader.ReadDouble()),
             // MONSTER-TUNING-SAVE (v42): parameterless — no payload to read; mirrors the empty encode body.
             MessageType.SaveMonsterTuning => new SaveMonsterTuningMessage(),
+            // PLAYER-COLLISION-TOGGLE (v43): a single bool mirrors the encode order.
+            MessageType.AdminSetPlayerCollision => new AdminSetPlayerCollisionMessage(reader.ReadBoolean()),
+            MessageType.PlayerCollisionSetting => new PlayerCollisionSettingMessage(reader.ReadBoolean()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),

@@ -594,7 +594,13 @@ public sealed class MmoClient : IDisposable
         foreach (var pair in _entities)
         {
             var entity = pair.Value;
-            if (entity.Kind != EntityKind.Monster && entity.Kind != EntityKind.Player)
+            // PLAYER-COLLISION-TOGGLE: keep MONSTERS always; keep OTHER PLAYERS only when the REPLICATED player↔player
+            // collision flag is on. The server integrator gates its gather on the SAME flag, so client prediction and
+            // server integration flip together (parity — a client-only gate would rubber-band). When OFF, players are
+            // dropped → they pass through each other; monster collision is unaffected.
+            var isObstacleKind = entity.Kind == EntityKind.Monster
+                || (entity.Kind == EntityKind.Player && _playerCollisionEnabled);
+            if (!isObstacleKind)
             {
                 continue;
             }
@@ -623,6 +629,24 @@ public sealed class MmoClient : IDisposable
         {
             _obstacleScratch.Add(new ContinuousCollision.Circle(x, y, radius));
         }
+    }
+
+    // PLAYER-COLLISION-TOGGLE: the client's mirror of the server-authoritative player↔player collision flag, replicated
+    // via PlayerCollisionSettingMessage on login + on every change. GatherEntityObstacles reads it to gate OTHER PLAYERS
+    // in/out of the obstacle set on the SAME value the server integrator uses (prediction parity). DEFAULT TRUE so a
+    // client that hasn't yet received the setting matches the shipped default (players collide). Read-only to callers.
+    private bool _playerCollisionEnabled = true;
+
+    // PLAYER-COLLISION-TOGGLE: the current replicated flag — read by the F1 Server-tab checkbox to seed itself to the
+    // authoritative value on panel open (and by tests). Pure read-out; the flag only ever changes via the server message.
+    public bool PlayerCollisionEnabled => _playerCollisionEnabled;
+
+    // PLAYER-COLLISION-TOGGLE: admin request to flip player↔player collision live. Reliable-ordered (a dropped toggle
+    // must not be lost). The server admin-gates it, flips its authoritative flag, and broadcasts the new value back
+    // (PlayerCollisionSettingMessage) which re-seeds _playerCollisionEnabled — the client never predicts the flip itself.
+    public void SendSetPlayerCollision(bool enabled)
+    {
+        Send(new AdminSetPlayerCollisionMessage(enabled), DeliveryMethod.ReliableOrdered);
     }
 
     // TEST HOOK (player↔player collision): run the local obstacle gather at (centerX, centerY) and return a copy of the
@@ -922,6 +946,12 @@ public sealed class MmoClient : IDisposable
                 // tab re-seeds. Pure mirror — the client runs no monster simulation; this only feeds the admin panel.
                 MonsterTuning = monsterTuning.Tuning;
                 MonsterTuningVersion++;
+                break;
+            case PlayerCollisionSettingMessage playerCollision:
+                // PLAYER-COLLISION-TOGGLE: adopt the authoritative player↔player collision flag. GatherEntityObstacles
+                // reads it so the client predictor's obstacle set gates on the SAME value the server integrator does
+                // (parity). Pure mirror — the flag only ever changes here, never predicted locally.
+                _playerCollisionEnabled = playerCollision.Enabled;
                 break;
             case SpawnerMarkerMessage spawnerMarker:
                 // LIVING-ENEMIES P3: a persistent spawner's red-tile marker entered (Active=true) or left (Active=false)
