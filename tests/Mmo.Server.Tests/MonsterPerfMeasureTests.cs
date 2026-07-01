@@ -10,6 +10,9 @@ namespace Mmo.Server.Tests;
 // SLIME-LAG investigation harness. Measures the per-tick cost of a single monster's AI: hop cadence, StateRevision
 // bumps (snapshot-inclusion driver), and wall-query count per tick. Not an assertion suite — it prints numbers so the
 // hot path can be pinned with data. Mirrors the GameServer wiring exactly (real HopLocomotion + TileGrid).
+// QUARANTINED: non-asserting measurement harness — excluded from the default gate via Category=Measure (run-checks
+// filters Category!=Measure). Run on demand: dotnet test --filter "Category=Measure".
+[Trait("Category", "Measure")]
 public sealed class MonsterPerfMeasureTests
 {
     private readonly ITestOutputHelper _out;

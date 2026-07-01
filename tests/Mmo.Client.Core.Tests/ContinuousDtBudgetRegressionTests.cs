@@ -52,6 +52,10 @@ public sealed class ContinuousDtBudgetRegressionTests
 
     // ---- the measurement: reproduce the divergence, pin the mechanism --------------------------------------
 
+    // QUARANTINED: pure logging, no asserts — excluded from the default gate (Category=Measure). The real regression
+    // guards in this file (the ServerStall buggy/fix pair, Fix_RealElapsedCredit, the anti-speedhack test) are NOT
+    // tagged and keep running.
+    [Trait("Category", "Measure")]
     [Theory]
     [InlineData(60d, false, "60fps steady")]
     [InlineData(145d, false, "145fps steady (uncapped)")]
@@ -74,6 +78,7 @@ public sealed class ContinuousDtBudgetRegressionTests
     // server REFUSED to integrate even though the client's summed dt never exceeded real elapsed time (honest by
     // construction). MaxDivergence is the resulting predicted-vs-authoritative gap the reconcile then has to yank
     // back (the visible rubberband). Reported across the realistic streams; the buggy-vs-fix DELTA is the proof.
+    [Trait("Category", "Measure")]
     [Theory]
     [InlineData(60d, false, "60fps steady")]
     [InlineData(145d, false, "145fps steady (uncapped)")]

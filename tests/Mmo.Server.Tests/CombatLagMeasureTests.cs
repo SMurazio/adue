@@ -19,6 +19,9 @@ namespace Mmo.Server.Tests;
 // wire (/metrics → FormatWindowSummary) so the per-tick cost is the ground truth from the live tick loop, NOT a
 // re-implemented model. Prints idle-vs-combat tickMs avg/max + the per-category budget so a combat hot path can be
 // pinned with numbers. Not an assertion suite (the budgets are environment-dependent); it surfaces deltas.
+// QUARANTINED: non-asserting measurement harness — excluded from the default gate via Category=Measure (run-checks
+// filters Category!=Measure). Run on demand: dotnet test --filter "Category=Measure".
+[Trait("Category", "Measure")]
 public sealed class CombatLagMeasureTests
 {
     private readonly ITestOutputHelper _out;
