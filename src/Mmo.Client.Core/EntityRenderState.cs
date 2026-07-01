@@ -37,7 +37,15 @@ public readonly record struct EntityRenderState(
     // (a gnoll = brown + 1.4); every other entity (and a default-constructed test state) gets white + 1.0 → a no-op,
     // so its render is byte-identical. Presentation-only — the replicated hook real per-type models slot into later.
     uint TintRgb = 0xFFFFFFu,
-    float RenderScale = 1f)
+    float RenderScale = 1f,
+    // N (entity-collision walk anim): true when this entity is actually TRANSLATING (a coherent MOVING signal), false
+    // when stopped or blocked. Computed in MmoClient.ToRenderState — REMOTE entities from the replicated Velocity
+    // (~0 when blocked, tangential when sliding), the LOCAL player from the predictor's resolved velocity — NOT from
+    // the per-frame render-position delta the visuals used to read. The player walk/idle visuals (PlayerVisual +
+    // CatoSpriteVisual) drive off this (with a short anti-flicker hold), so a player pinned against a wall / monster /
+    // another player goes IDLE just like a flat wall already does, while a walk or a slide keeps animating. Defaults
+    // false so a default-constructed (test) state and any velocity-less entity read idle. Presentation-only.
+    bool Moving = false)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

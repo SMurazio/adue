@@ -358,13 +358,27 @@ public sealed class MmoClient : IDisposable
                 // MOVEMENT-ACTIONS Phase B2 (carry-forward #1): the LOCAL player's PREDICTED airborne height (0 unless
                 // mid-action). The avatar renders THIS, never its own replicated VerticalOffset (which is for remote
                 // viewers) — one Z source, no double-count, and the end seam never pops to a lagging server Z.
-                predictor.PredictedVerticalOffset)
+                predictor.PredictedVerticalOffset,
+                // N (entity-collision walk anim): the LOCAL player is client-PREDICTED, so its MOVING signal comes from
+                // the predictor's RESOLVED velocity (coherent with intent + collision), NOT the render-position delta.
+                // Pinned against a wall/monster/player ⇒ resolved velocity ~0 ⇒ Moving false ⇒ idle; a walk or a slide
+                // keeps a non-zero (tangential) resolved velocity ⇒ Moving true.
+                Moving: predictor.ResolvedSpeedSquared > MovingSpeedEpsilonSquared)
             : null;
 
     // MOVEMENT-ACTIONS Phase B2: the LOCAL player's render override — the predictor's smooth RenderX/RenderY PLUS its
-    // predicted airborne height. Carried together so ToRenderState applies both (position + Z) from the one predicted
-    // source for the local entity, while remote entities keep gliding off their playout buffer.
-    private readonly record struct LocalRenderState(RenderPosition Position, double VerticalOffset);
+    // predicted airborne height. N: also carries the predicted MOVING signal (resolved-velocity based) so the local
+    // avatar's walk/idle keys off real translation, not the render delta. Carried together so ToRenderState applies
+    // them from the one predicted source for the local entity, while remote entities key off their replicated Velocity.
+    private readonly record struct LocalRenderState(RenderPosition Position, double VerticalOffset, bool Moving);
+
+    // N (entity-collision walk anim): the walk/idle threshold on the coherent MOVING signal — velocity magnitude
+    // (units/sec) SQUARED. ~0.5 u/s (0.25 squared) is ~1/8 of the 250ms-cadence 4 u/s base walk speed: a truly-stopped
+    // or blocked entity (resolved/replicated velocity ~0) reads idle, while even a slow slide along a wall/body stays
+    // walking. Applied to BOTH the local player's predicted resolved velocity and a remote entity's replicated
+    // Velocity, so every animated entity idles when blocked and animates when translating. Replaces the old per-frame
+    // render-delta epsilon (which latched "walk" on sub-pixel entity-collision jitter). Presentation-only.
+    private const double MovingSpeedEpsilonSquared = 0.25d;
 
     public bool TryGetEntity(uint networkId, out ReplicatedEntity entity)
     {
@@ -1821,6 +1835,15 @@ public sealed class MmoClient : IDisposable
                 ? (localOverride?.VerticalOffset ?? VerticalOffset)
                 : _remoteInterp.SampledVerticalOffset;
 
+            // N (entity-collision walk anim): the coherent MOVING signal the walk/idle visuals key off. The LOCAL
+            // player (client-predicted) reads the predictor's resolved-velocity signal threaded in via localOverride;
+            // EVERY other entity — remote players, monsters, and the local player pre-spawn (no override yet) — reads
+            // its REPLICATED Velocity (already coherent: ~0 when blocked, tangential when sliding). Static entities
+            // replicate Velocity 0 ⇒ Moving false ⇒ idle. Presentation-only; Velocity is never re-derived from render.
+            var moving = IsLocal && localOverride.HasValue
+                ? localOverride.Value.Moving
+                : Velocity.LengthSquared > MovingSpeedEpsilonSquared;
+
             return new EntityRenderState(NetworkId, CharacterId, Kind, DisplayName, position, Tile, Facing, IsLocal, Depleted, Health, MaxHealth,
                 AuthoritativePosition: RenderPosition.FromWorld(Position),
                 // MOVEMENT-ACTIONS Phase B1 + finding #1: thread the REPLICATED airborne height to the render state. For
@@ -1832,7 +1855,9 @@ public sealed class MmoClient : IDisposable
                 // MONSTER-BEHAVIOR P6: thread the replicated placeholder per-type visual (tint + scale) to the renderer.
                 // White / 1.0 for every non-authoring entity → a no-op (the slime/players render unchanged).
                 TintRgb: TintRgb,
-                RenderScale: RenderScale);
+                RenderScale: RenderScale,
+                // N (entity-collision walk anim): the coherent MOVING signal (predicted for local, replicated for remote).
+                Moving: moving);
         }
     }
 

@@ -338,4 +338,86 @@ public sealed class ContinuousPredictorTests
         Assert.Equal(2.0d, predictor.PredictedX, 4); // stopped exactly at the radius-sum, never overlapping.
         Assert.Equal(0d, predictor.PredictedY, 6);
     }
+
+    // N (entity-collision walk anim): ResolvedSpeedSquared is the REAL per-frame translation the collider produced,
+    // NOT the raw input — so the local avatar's walk/idle can key off actual motion. Open field ⇒ dir×speed; a
+    // zero-input (stopped) frame ⇒ 0; driving head-on into a wall ⇒ ~0 (pinned, so the visual idles like a flat wall);
+    // sliding along a wall ⇒ the tangential component (non-zero, so it keeps walking).
+
+    [Fact]
+    public void ResolvedSpeed_OpenField_EqualsWalkSpeed()
+    {
+        var predictor = new ContinuousPredictor(Speed);
+
+        predictor.PredictAndBuffer(1d, 0d, Dt); // held east on open ground
+
+        // The resolved motion is the full walk step, so the resolved speed magnitude == the walk speed.
+        Assert.Equal(Speed * Speed, predictor.ResolvedSpeedSquared, 6);
+    }
+
+    [Fact]
+    public void ResolvedSpeed_NoInput_IsZero()
+    {
+        var predictor = new ContinuousPredictor(Speed);
+
+        predictor.PredictAndBuffer(1d, 0d, Dt); // move once
+        Assert.True(predictor.ResolvedSpeedSquared > 0d);
+
+        predictor.PredictAndBuffer(0d, 0d, Dt); // release input → no translation this frame → resolved velocity 0
+
+        Assert.Equal(0d, predictor.ResolvedSpeedSquared, 9);
+    }
+
+    [Fact]
+    public void ResolvedSpeed_BlockedHeadOnIntoWall_IsNearZero()
+    {
+        // A wall column at x=10; the player pinned at the -X face (x = 9.5 - radius 0.5 = 9.0) pushing straight east is
+        // fully blocked → the resolve produces no translation → ResolvedSpeedSquared ~0 → the avatar idles (like a flat
+        // wall). Well BELOW the walk/idle epsilon (0.25 = (0.5 u/s)²) that MmoClient.ToRenderState keys the anim off.
+        var blocked = new HashSet<TileCoord>();
+        for (var ty = 0; ty <= 30; ty++)
+        {
+            blocked.Add(new TileCoord(10, ty));
+        }
+
+        const double radius = CollisionDefaults.BodyRadius; // 0.5
+        var predictor = new ContinuousPredictor(Speed, startX: 9.0d, startY: 8d, blocked: blocked, radius: radius);
+
+        for (var i = 0; i < 10; i++)
+        {
+            predictor.PredictAndBuffer(1d, 0d, Dt); // shove east into the wall face
+        }
+
+        Assert.True(predictor.ResolvedSpeedSquared < 0.25d,
+            $"blocked-into-wall resolved speed not idle: {predictor.ResolvedSpeedSquared}");
+    }
+
+    [Fact]
+    public void ResolvedSpeed_SlidingAlongWall_KeepsTangentialMotion()
+    {
+        // Driving NE into a wall column east: the +X (into-wall) component is blocked, the +Y (tangential) component
+        // slides north — a genuine translation, so ResolvedSpeedSquared stays well ABOVE the idle epsilon (the avatar
+        // keeps walking while grinding along the wall, which is correct).
+        var blocked = new HashSet<TileCoord>();
+        for (var ty = 0; ty <= 30; ty++)
+        {
+            blocked.Add(new TileCoord(10, ty));
+        }
+
+        const double radius = CollisionDefaults.BodyRadius; // 0.5
+        var predictor = new ContinuousPredictor(Speed, startX: 8d, startY: 8d, blocked: blocked, radius: radius);
+
+        // A few frames to reach the wall face and settle into the pure north slide.
+        for (var i = 0; i < 20; i++)
+        {
+            predictor.PredictAndBuffer(1d, 1d, Dt);
+        }
+
+        Assert.True(predictor.ResolvedSpeedSquared > 0.25d,
+            $"sliding resolved speed read as idle: {predictor.ResolvedSpeedSquared}");
+        // The slide is the tangential half of the diagonal walk (into-wall component blocked), so its magnitude is
+        // ~Speed/√2; assert it is a clear, non-degenerate translation.
+        Assert.True(predictor.ResolvedSpeedSquared < Speed * Speed,
+            "a fully-blocked axis should reduce the resolved speed below the open-field walk speed");
+    }
 }

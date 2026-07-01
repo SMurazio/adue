@@ -7,8 +7,9 @@ namespace Mmo.Client.Godot.Visuals;
 // A player avatar: the rigged humanoid GLB (S54) + an AnimationTree cross-fading idle<->walk (S55) + facing
 // driven by the entity's 8-way Facing, including the S59 predicted-turn rotation. ALL of this is read from
 // the computed EntityRenderState: Core bakes the predictor's live facing into state.Facing for the local
-// entity, and "moving" is inferred purely from the interpolated render position changing — no game logic
-// lives here. The behaviour is lifted verbatim from MmoClientRoot's TryCreatePlayerNode / UpdatePlayerModel.
+// entity, and "moving" is the coherent MOVING signal Core computes (N: the local player's predicted resolved
+// velocity; a remote's replicated Velocity) — no game logic lives here. The behaviour is lifted from
+// MmoClientRoot (N swapped the old render-delta detection for state.Moving).
 //
 // Build is pool-aware but conservative: re-instancing a skinned GLB + rebuilding its AnimationTree is the
 // expensive part, so the model rig is built ONCE in BuildChildren and reused across Acquire/Reset; only the
@@ -27,13 +28,9 @@ public sealed partial class PlayerVisual : EntityVisual
     // Vertical offset so the feet sit on the ground plane (y=0). Most rigs author the origin at the feet.
     private const float ModelYOffset = 0f;
 
-    // Keep the walk loop playing this long after the last detected positional change, bridging the brief idle
-    // gap between confirmed tile steps so the loop doesn't stutter on/off. TUNABLE.
+    // Keep the walk loop playing this long after the MOVING signal last went false, bridging brief false gaps so the
+    // loop doesn't flicker on/off. TUNABLE.
     private const double WalkHoldSeconds = 0.2d;
-
-    // A tile step is ~1 unit; treat per-frame displacement above this (squared) as "moving". Small enough to
-    // catch slow interpolation, large enough to ignore float jitter at rest.
-    private const double MovingEpsilonSquared = 0.0000004d;
 
     private const string AnimStateIdle = "Idle";
     private const string AnimStateWalk = "Walk";
@@ -50,7 +47,6 @@ public sealed partial class PlayerVisual : EntityVisual
     private Node3D? _model;
     private AnimationNodeStateMachinePlayback? _stateMachine;
     private string? _currentAnimState;
-    private Vector3 _lastPosition;
     private double _movingUntilSeconds;
 
     protected override bool TracksLabelHeight => true;
@@ -80,7 +76,6 @@ public sealed partial class PlayerVisual : EntityVisual
 
     protected override void OnAcquire(EntityRenderState state)
     {
-        _lastPosition = ToWorld(state.Position);
         _movingUntilSeconds = 0d;
         // The state machine auto-starts in the first-added node (Idle); seed the latch to match so the first
         // detected movement Travels to Walk and a stop Travels back to Idle.
@@ -98,13 +93,13 @@ public sealed partial class PlayerVisual : EntityVisual
 
     protected override void OnUpdate(EntityRenderState state, double now)
     {
-        // Detect movement from the interpolated render position (the same position that drives the wrapper),
-        // play/stop the walk loop with a short hold to bridge the idle gap between confirmed steps, and rotate
-        // the model to the entity's 8-way facing (predicted facing already baked into state.Facing by Core).
-        var position = ToWorld(state.Position);
-        var moved = position.DistanceSquaredTo(_lastPosition) > MovingEpsilonSquared;
-        _lastPosition = position;
-        if (moved)
+        // N (entity-collision walk anim): drive the walk/idle loop off the coherent MOVING signal Core computes
+        // (the local player's predicted resolved velocity; a remote's replicated Velocity) — NOT the per-frame
+        // render-position delta, which latched "walk" on the sub-pixel jitter left when pushing into a body. A
+        // player pinned against a wall / monster / another player has Moving false → idles, exactly like a flat
+        // wall already does; a walk or a slide keeps Moving true. KEEP the short hold so the loop doesn't flicker
+        // on brief false gaps. Rotate the model to the entity's 8-way facing (predicted facing already baked in).
+        if (state.Moving)
         {
             _movingUntilSeconds = now + WalkHoldSeconds;
         }
@@ -120,8 +115,8 @@ public sealed partial class PlayerVisual : EntityVisual
             return;
         }
 
-        // Latch to the target state and only Travel() on a change. When the render position stops changing the
-        // moving signal latches false, so the machine cross-fades into Idle and holds the standing pose.
+        // Latch to the target state and only Travel() on a change. When the MOVING signal has been false for the
+        // hold, moving latches false, so the machine cross-fades into Idle and holds the standing pose.
         var target = moving ? AnimStateWalk : AnimStateIdle;
         if (_currentAnimState == target)
         {

@@ -7,7 +7,7 @@ namespace Mmo.Client.Godot.Visuals;
 // S96: the "Cato" character — a 2D-in-3D billboard built from PNG frame sequences (idle 10 frames, walk 17
 // frames), rendered with an AnimatedSprite3D. Swapped in for a Player (local + remote) when the F5 "Cato sprite
 // (player)" toggle is on, mirroring the S73 DebugFacingBox alternate-Player pattern. Plays idle at rest and walk
-// while moving (movement detected from the interpolated render-position delta, exactly like PlayerVisual), and
+// while moving (N: off the coherent MOVING signal Core computes, exactly like PlayerVisual), and
 // flips horizontally by facing per the user's side-view rule (E/NE/SE normal, W/NW/SW flipped, N/S keep last —
 // see CatoFacingFlip in Mmo.Client.Core, the pure unit-tested seam).
 //
@@ -48,12 +48,9 @@ public sealed partial class CatoSpriteVisual : EntityVisual
     // Alpha-scissor (cutout) threshold — drop the fully-transparent border while keeping soft edges. TUNABLE.
     private const float AlphaScissorThreshold = 0.5f;
 
-    // Keep the walk loop playing this long after the last detected positional change, bridging the brief idle
-    // gap between confirmed tile steps so the loop doesn't stutter on/off. Mirrors PlayerVisual. TUNABLE.
+    // Keep the walk loop playing this long after the MOVING signal last went false, bridging brief false gaps so the
+    // loop doesn't flicker on/off. Mirrors PlayerVisual. TUNABLE.
     private const double WalkHoldSeconds = 0.2d;
-
-    // A tile step is ~1 unit; treat per-frame displacement above this (squared) as "moving". Mirrors PlayerVisual.
-    private const double MovingEpsilonSquared = 0.0000004d;
 
     // S101: ground unit vector toward the fixed iso camera (it sits at (24,28,24) looking at origin, so the
     // ground-projected toward-camera direction is (1,0,1)/√2). CatoDepth (world units) is multiplied by this and
@@ -67,7 +64,6 @@ public sealed partial class CatoSpriteVisual : EntityVisual
     private static bool _loadFailed;
 
     private AnimatedSprite3D? _sprite;
-    private Vector3 _lastPosition;
     private double _movingUntilSeconds;
     private bool _walking;
     private bool _lastFlipH;
@@ -159,7 +155,6 @@ public sealed partial class CatoSpriteVisual : EntityVisual
 
     protected override void OnAcquire(EntityRenderState state)
     {
-        _lastPosition = ToWorld(state.Position);
         _movingUntilSeconds = 0d;
         _walking = false;
         _lastFlipH = CatoFacingFlip.Resolve(state.Facing, lastFlipH: false);
@@ -185,12 +180,12 @@ public sealed partial class CatoSpriteVisual : EntityVisual
             return;
         }
 
-        // Detect movement from the interpolated render position (the same position that drives the wrapper),
-        // with a short hold to bridge the idle gap between confirmed steps — identical to PlayerVisual.
-        var position = ToWorld(state.Position);
-        var moved = position.DistanceSquaredTo(_lastPosition) > MovingEpsilonSquared;
-        _lastPosition = position;
-        if (moved)
+        // N (entity-collision walk anim): drive walk/idle off the coherent MOVING signal Core computes (the local
+        // player's predicted resolved velocity; a remote's replicated Velocity) — NOT the per-frame render-position
+        // delta, which latched "walk" on the sub-pixel jitter left when pushing into a body. Pinned against a wall /
+        // monster / another player → Moving false → idle (like a flat wall); a walk or slide keeps it true. KEEP the
+        // short hold so the loop doesn't flicker on brief false gaps — identical to PlayerVisual.
+        if (state.Moving)
         {
             _movingUntilSeconds = now + WalkHoldSeconds;
         }

@@ -93,6 +93,16 @@ public sealed class ContinuousPredictor
 
     private double _lastCorrectionUnits;
 
+    // N (entity-collision walk anim): the RESOLVED per-frame velocity (units/sec) the collider actually produced for
+    // the predicted local player this frame — the true translation, NOT the raw held input. Blocked head-on ⇒ the
+    // resolve pins the position ⇒ ~0; sliding along a wall/body ⇒ the tangential component; open walk ⇒ dir×speed.
+    // Mirrors the SERVER's coherent Zone velocity so the local avatar's walk/idle can key off real motion (idle when
+    // pinned against a wall/monster/player, exactly like the clean wall case). Updated ONLY by PredictAndBuffer (the
+    // per-frame movement intent); Reconcile re-bases position via replay but NEVER touches this — a latency catch-up
+    // is not "movement". Zero on a zero-dt / zero-input frame.
+    private double _resolvedVelX;
+    private double _resolvedVelY;
+
     // MOVEMENT-ACTIONS Phase B2: the LOCAL player's predicted movement action (jump). The action layers ON TOP of the
     // existing predict/reconcile/replay WITHOUT new reconcile machinery (design §2.6): while active, PredictAndBuffer
     // IGNORES the held input and integrates the LOCKED heading at the action's speed, buffering each frame exactly like
@@ -164,6 +174,11 @@ public sealed class ContinuousPredictor
 
     // The magnitude of the correction the last Reconcile applied to the predicted present (0 == clean match).
     public double LastCorrectionUnits => _lastCorrectionUnits;
+
+    // N (entity-collision walk anim): the squared magnitude of the latest RESOLVED per-frame velocity (units/sec)².
+    // The local player's walk/idle visual keys off this — above a small epsilon ⇒ actually translating ⇒ walk; ~0 ⇒
+    // stopped or blocked (wall/monster/player) ⇒ idle. Coherent with intent + collision, not the render smoothing.
+    public double ResolvedSpeedSquared => (_resolvedVelX * _resolvedVelX) + (_resolvedVelY * _resolvedVelY);
 
     // The current render-vs-predicted offset magnitude (the visible catch-up still in flight). Zero in steady state.
     public double RenderVsPredictedUnits => Math.Sqrt((_offsetX * _offsetX) + (_offsetY * _offsetY));
@@ -321,7 +336,23 @@ public sealed class ContinuousPredictor
         // Integrate this frame from the current predicted position, RESOLVING collision (walls + the monster obstacle
         // set) from the running predicted position — exactly as the server applies it from its running authoritative
         // position for the same input + the same monster set.
+        var startX = _predictedX;
+        var startY = _predictedY;
         (_predictedX, _predictedY) = IntegrateWithCollision(_predictedX, _predictedY, dirX, dirY, dt, speed, obstacles);
+
+        // N (entity-collision walk anim): derive the RESOLVED per-frame velocity from the ACTUAL translation the
+        // collider produced over the integrated dt — blocked ⇒ ~0 (pinned), sliding ⇒ tangential, open ⇒ dir×speed.
+        // A zero-dt / zero-input frame produced no motion, so the resolved velocity is zero (the visual then idles).
+        if (dt > 1e-9)
+        {
+            _resolvedVelX = (_predictedX - startX) / dt;
+            _resolvedVelY = (_predictedY - startY) / dt;
+        }
+        else
+        {
+            _resolvedVelX = 0d;
+            _resolvedVelY = 0d;
+        }
 
         return seq;
     }
