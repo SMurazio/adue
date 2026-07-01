@@ -130,18 +130,18 @@ public sealed class SyntheticClientLoad : IDisposable
 
     private sealed class SyntheticClient : IDisposable
     {
-        private static readonly Direction8?[] Directions =
-        [
-            Direction8.N,
-            Direction8.NE,
-            Direction8.E,
-            Direction8.SE,
-            Direction8.S,
-            Direction8.SW,
-            Direction8.W,
-            Direction8.NW,
-            null
-        ];
+        // REALISTIC WANDER: bots walk toward a random INTERIOR waypoint on a CONTINUOUS heading, arrive, pick a new
+        // one, and occasionally pause — like players roaming a zone — instead of snapping to a random octant every
+        // second (robotic 90° turns that read as janky and don't represent real clients). Position is dead-reckoned
+        // locally (approximate; it only needs to keep the wander in-bounds), so no snapshot parsing is required.
+        private const double WanderMinCoord = 24d;    // interior of the 128-tile map so bots don't pile at the edges
+        private const double WanderMaxCoord = 104d;
+        private const double NominalSpeedUnitsPerSecond = 4d; // ~1000/250ms step cooldown; dead-reckon pacing only
+        private const double WaypointReachRadius = 1.5d;
+        private const double ArrivalIdleChance = 0.25d;       // ~a quarter of arrivals pause before moving on
+
+        private static readonly TimeSpan MinIdle = TimeSpan.FromMilliseconds(400);
+        private static readonly TimeSpan MaxIdle = TimeSpan.FromMilliseconds(2200);
 
         private readonly string _name;
         private readonly int _serverPort;
@@ -160,20 +160,20 @@ public sealed class SyntheticClientLoad : IDisposable
         // smooth motion like a real client. (Earlier bug: a 500 ms cadence made the bot CRAWL at ~1/10 speed.)
         private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(16);
 
-        // CONTINUOUS MIGRATION (Phase 3, v36): the synthetic load client does not predict — it sends one continuous
-        // MoveIntent on change + keepalive with a fixed NOMINAL dt (≈ one 20 Hz tick) and a UNIT direction. The
-        // server's anti-speedhack budget caps the integrated distance to real elapsed regardless of this nominal dt.
-        private const float NominalMoveDtSeconds = 1f / 20f;
-
         private NetPeer? _serverPeer;
         private bool _disposed;
         private uint _inputSequence;
         private TimeSpan _nextKeepaliveAt;
-        private TimeSpan _nextDirectionAt;
         private TimeSpan _lastMoveSendElapsed;
-        private Direction8? _direction;
         private bool _intentMoving;
-        private Direction8 _intentDirection;
+
+        // Dead-reckoned wander state (seeded on the first authenticated poll).
+        private bool _wanderSeeded;
+        private double _estX;
+        private double _estY;
+        private double _targetX;
+        private double _targetY;
+        private TimeSpan _idleUntil;
 
         public SyntheticClient(int id, string name, int serverPort, string connectionKey, SyntheticClientLoad owner)
         {
@@ -208,7 +208,13 @@ public sealed class SyntheticClientLoad : IDisposable
             _client.Start(System.Net.IPAddress.Any, System.Net.IPAddress.IPv6Any, 0, manualMode: true);
             _client.Connect("127.0.0.1", _serverPort, _connectionKey);
             _nextKeepaliveAt = TimeSpan.FromMilliseconds(_random.Next(0, 500));
-            _nextDirectionAt = TimeSpan.Zero;
+        }
+
+        // A fresh random interior waypoint for the bot to walk toward.
+        private void PickWaypoint()
+        {
+            _targetX = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
+            _targetY = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
         }
 
         public void Poll(TimeSpan elapsed, int deltaTimeMs)
@@ -228,28 +234,65 @@ public sealed class SyntheticClientLoad : IDisposable
                 return;
             }
 
-            if (elapsed >= _nextDirectionAt)
+            if (!_wanderSeeded)
             {
-                _direction = Directions[_random.Next(Directions.Length)];
-                _nextDirectionAt = elapsed + TimeSpan.FromSeconds(1);
+                _wanderSeeded = true;
+                // Seed the dead-reckoned position to the central spawn belt (bots spawn on the distributed spawn
+                // tiles); it only needs to be roughly right — steering toward interior waypoints self-corrects.
+                _estX = 32d + (_random.NextDouble() * 64d);
+                _estY = 32d + (_random.NextDouble() * 64d);
+                PickWaypoint();
             }
 
-            // CONTINUOUS MIGRATION (Phase 3, v36): per-input continuous MoveIntent — send on change plus a 500 ms
-            // keepalive. The server integrates each fresh input by its dt on the receive path. A held direction sends
-            // its UNIT world vector + a nominal dt; a stop sends (0,0). Sent unreliable (latest input wins), matching
-            // the real client's per-frame model.
-            var desiredMoving = _direction.HasValue;
-            var desiredDirection = _direction ?? _intentDirection;
-            var changed = desiredMoving != _intentMoving || (desiredMoving && desiredDirection != _intentDirection);
+            // Arrived at the waypoint (and not mid-pause)? Occasionally pause like a player, then head somewhere new.
+            if (elapsed >= _idleUntil)
+            {
+                var toTargetX = _targetX - _estX;
+                var toTargetY = _targetY - _estY;
+                if (((toTargetX * toTargetX) + (toTargetY * toTargetY)) < (WaypointReachRadius * WaypointReachRadius))
+                {
+                    if (_random.NextDouble() < ArrivalIdleChance)
+                    {
+                        var idleSpan = (MaxIdle - MinIdle).Ticks;
+                        _idleUntil = elapsed + MinIdle + TimeSpan.FromTicks((long)(_random.NextDouble() * idleSpan));
+                    }
+
+                    PickWaypoint();
+                }
+            }
+
+            // Steer on a CONTINUOUS heading toward the waypoint (idle → no heading). Dead-reckon the estimate by the
+            // real poll dt so waypoints get reached at roughly the true pace.
+            var desiredMoving = elapsed >= _idleUntil;
+            var desiredDir = WorldVector.Zero;
+            if (desiredMoving)
+            {
+                var dx = _targetX - _estX;
+                var dy = _targetY - _estY;
+                var dist = Math.Sqrt((dx * dx) + (dy * dy));
+                if (dist > 1e-6d)
+                {
+                    var inv = 1d / dist;
+                    desiredDir = new WorldVector(dx * inv, dy * inv);
+                    var stepDt = Math.Clamp(deltaTimeMs / 1000d, 0d, 0.1d);
+                    _estX += desiredDir.X * NominalSpeedUnitsPerSecond * stepDt;
+                    _estY += desiredDir.Y * NominalSpeedUnitsPerSecond * stepDt;
+                }
+                else
+                {
+                    desiredMoving = false;
+                }
+            }
+
+            // Send on a move/idle transition or the keepalive tick; the keepalive re-sends the CURRENT continuous
+            // heading each tick, so a turn toward a fresh waypoint lands within one tick. Real elapsed dt keeps the
+            // integrated motion proportional to real time (see the cadence note above). A stop sends (0,0).
+            var changed = desiredMoving != _intentMoving;
             var keepaliveDue = _intentMoving && elapsed >= _nextKeepaliveAt;
             if (changed || keepaliveDue)
             {
                 _intentMoving = desiredMoving;
-                _intentDirection = desiredDirection;
-                var dir = desiredMoving ? _intentDirection.ToUnitVector() : WorldVector.Zero;
-                // REAL elapsed dt since the last send (not the fixed nominal): each intent moves a small amount
-                // proportional to real time — several small steps per server tick that sum to real-elapsed → smooth,
-                // like a real client. Clamped so a long gap (after a stopped stretch) can't teleport past the budget.
+                var dir = desiredMoving ? desiredDir : WorldVector.Zero;
                 var moveDt = (float)Math.Clamp((elapsed - _lastMoveSendElapsed).TotalSeconds, 0d, 0.1d);
                 _lastMoveSendElapsed = elapsed;
                 Send(
