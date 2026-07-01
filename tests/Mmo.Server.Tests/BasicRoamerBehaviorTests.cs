@@ -514,7 +514,10 @@ public sealed class BasicRoamerBehaviorTests
         var grid = OpenGrid();
         var world = new WorldState();
         var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
-        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(38, 32), Direction8.S);
+        // Player 5 tiles east = Euclidean 5.0, COMFORTABLY inside the 6.0 aggro radius (not AT the 6.0 boundary — a
+        // boundary setup relied on the aggro test being inclusive `<=`; 5.0 aggros unambiguously so this can't fall
+        // back to RNG roam if the comparison ever tightens).
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(37, 32), Direction8.S);
         var hits = new int[1];
         var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
         ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
