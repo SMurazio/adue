@@ -30,6 +30,12 @@ internal interface IControlHost
     IReadOnlyList<EntityRenderState> ReadEntities();
 
     ControlState ReadState();
+
+    // Render trace: arm a per-frame recording of one entity's render(+authoritative) position, then read back the
+    // computed ON-SCREEN smoothness metrics — a per-frame read the ~1 Hz ReadEntities poll cannot provide.
+    void StartRenderTrace(uint networkId, double durationMs);
+
+    RenderTraceStatus ReadRenderTrace();
 }
 
 internal readonly record struct ControlTelemetry(
@@ -61,3 +67,22 @@ internal readonly record struct ControlState(
     string Zone,
     int VisibleEntities,
     string LocalTile);
+
+// Result of a render trace. Active = still recording; HasResult = a completed measurement is present. The metrics
+// are derived from consecutive per-frame render-position deltas (normalised by the frame dt): SpeedStdDev is the
+// jitter signature (low = constant velocity = smooth), MaxJerk flags hitches, Reversals count >90° velocity flips
+// (a jitter tell), and MeanRenderVsAuth/MaxRenderVsAuth are the interp lag vs the server position.
+internal readonly record struct RenderTraceStatus(
+    bool Active,
+    bool HasResult,
+    uint NetworkId,
+    int Frames,
+    double DurationMs,
+    double MeanSpeed,
+    double SpeedStdDev,
+    double MaxJerk,
+    int Reversals,
+    double MeanRenderVsAuth,
+    double MaxRenderVsAuth,
+    double[] SampleX,
+    double[] SampleY);

@@ -306,6 +306,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private double _autopilotEndsAtSeconds;
 	private double _autopilotLegSeconds;
 	private int _autopilotLegIndex;
+
+	// Render trace (agent smoothness read): when armed via the control channel, capture a target entity's per-frame
+	// render + authoritative position; on completion compute jitter/jerk/reversal/lag metrics. Recorded in _Process
+	// right after SampleRenderStates. Lets an agent judge a bot's ON-SCREEN smoothness in one call — the ~1 Hz
+	// entities poll can only catch coarse snapshots, not per-frame micro-jitter.
+	private bool _renderTraceActive;
+	private uint _renderTraceNetworkId;
+	private double _renderTraceEndsAtSeconds;
+	private readonly List<(double T, double Rx, double Ry, double Ax, double Ay)> _renderTraceSamples = new(256);
+	private RenderTraceStatus? _renderTraceResult;
 	private StreamWriter? _frameCsv;
 	private int _frameCsvGc0;
 	private int _frameCsvGc1;
@@ -455,6 +465,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		var t0 = Time.GetTicksUsec();
 		SampleRenderStates(now);
+		RecordRenderTraceFrame(); // agent render-smoothness trace: sample the armed entity's per-frame render/auth position
 		var t1 = Time.GetTicksUsec();
 		UpdateEntities();
 		UpdateFloatingDamageNumbers(delta);
@@ -3297,6 +3308,140 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// _renderStates is refreshed each frame in SampleRenderStates; returning it directly avoids an
 		// extra copy on the (rare) query path. The channel serializes synchronously before the next frame.
 		return _renderStates;
+	}
+
+	// Called each frame from _Process after SampleRenderStates. While a trace is armed, append the target entity's
+	// current render + authoritative position; when the window elapses, compute the smoothness result and disarm.
+	private void RecordRenderTraceFrame()
+	{
+		if (!_renderTraceActive)
+		{
+			return;
+		}
+
+		if (_elapsedSeconds >= _renderTraceEndsAtSeconds)
+		{
+			_renderTraceResult = ComputeRenderTraceResult();
+			_renderTraceActive = false;
+			return;
+		}
+
+		foreach (var state in _renderStates)
+		{
+			if (state.NetworkId == _renderTraceNetworkId)
+			{
+				_renderTraceSamples.Add((_elapsedSeconds, state.Position.X, state.Position.Y,
+					state.AuthoritativePosition.X, state.AuthoritativePosition.Y));
+				break;
+			}
+		}
+	}
+
+	// Per-frame smoothness metrics from the captured samples: speed jitter (stddev of per-frame speed), max jerk
+	// (largest frame-to-frame velocity change), direction reversals (>90° velocity flips — a jitter tell), and the
+	// render-vs-authoritative offset (interp lag), plus a downsampled render path. Velocities are normalised by dt.
+	private RenderTraceStatus ComputeRenderTraceResult()
+	{
+		var n = _renderTraceSamples.Count;
+		if (n < 3)
+		{
+			return new RenderTraceStatus(false, true, _renderTraceNetworkId, n, 0d, 0d, 0d, 0d, 0, 0d, 0d,
+				System.Array.Empty<double>(), System.Array.Empty<double>());
+		}
+
+		double sumSpeed = 0d, sumSpeedSq = 0d, maxJerk = 0d, sumOffset = 0d, maxOffset = 0d;
+		var steps = 0;
+		var reversals = 0;
+		double prevVx = 0d, prevVy = 0d;
+		var havePrevV = false;
+		for (var i = 1; i < n; i++)
+		{
+			var a = _renderTraceSamples[i - 1];
+			var b = _renderTraceSamples[i];
+			var dt = b.T - a.T;
+			if (dt <= 1e-6d)
+			{
+				continue;
+			}
+
+			var vx = (b.Rx - a.Rx) / dt;
+			var vy = (b.Ry - a.Ry) / dt;
+			var speed = System.Math.Sqrt((vx * vx) + (vy * vy));
+			sumSpeed += speed;
+			sumSpeedSq += speed * speed;
+			steps++;
+			if (havePrevV)
+			{
+				var jerk = System.Math.Sqrt(((vx - prevVx) * (vx - prevVx)) + ((vy - prevVy) * (vy - prevVy)));
+				if (jerk > maxJerk)
+				{
+					maxJerk = jerk;
+				}
+
+				// A backward velocity flip (>90°) at a non-trivial speed — smooth travel never reverses frame-to-frame.
+				if (((vx * prevVx) + (vy * prevVy)) < 0d && speed > 0.05d)
+				{
+					reversals++;
+				}
+			}
+
+			prevVx = vx;
+			prevVy = vy;
+			havePrevV = true;
+		}
+
+		foreach (var s in _renderTraceSamples)
+		{
+			var off = System.Math.Sqrt(((s.Rx - s.Ax) * (s.Rx - s.Ax)) + ((s.Ry - s.Ay) * (s.Ry - s.Ay)));
+			sumOffset += off;
+			if (off > maxOffset)
+			{
+				maxOffset = off;
+			}
+		}
+
+		var meanSpeed = steps > 0 ? sumSpeed / steps : 0d;
+		var variance = steps > 0 ? System.Math.Max(0d, (sumSpeedSq / steps) - (meanSpeed * meanSpeed)) : 0d;
+		var speedStdDev = System.Math.Sqrt(variance);
+		var durationMs = (_renderTraceSamples[n - 1].T - _renderTraceSamples[0].T) * 1000d;
+
+		// Downsample the render path to ~16 points for a compact trajectory readout.
+		const int maxPoints = 16;
+		var stride = System.Math.Max(1, n / maxPoints);
+		var points = (n + stride - 1) / stride;
+		var sampleX = new double[points];
+		var sampleY = new double[points];
+		var idx = 0;
+		for (var i = 0; i < n && idx < points; i += stride)
+		{
+			sampleX[idx] = _renderTraceSamples[i].Rx;
+			sampleY[idx] = _renderTraceSamples[i].Ry;
+			idx++;
+		}
+
+		return new RenderTraceStatus(false, true, _renderTraceNetworkId, n, durationMs, meanSpeed, speedStdDev,
+			maxJerk, reversals, n > 0 ? sumOffset / n : 0d, maxOffset, sampleX, sampleY);
+	}
+
+	void IControlHost.StartRenderTrace(uint networkId, double durationMs)
+	{
+		_renderTraceNetworkId = networkId;
+		_renderTraceEndsAtSeconds = _elapsedSeconds + (System.Math.Clamp(durationMs, 100d, 15000d) / 1000d);
+		_renderTraceSamples.Clear();
+		_renderTraceResult = null;
+		_renderTraceActive = true;
+	}
+
+	RenderTraceStatus IControlHost.ReadRenderTrace()
+	{
+		if (_renderTraceActive)
+		{
+			return new RenderTraceStatus(true, false, _renderTraceNetworkId, _renderTraceSamples.Count, 0d, 0d, 0d,
+				0d, 0, 0d, 0d, System.Array.Empty<double>(), System.Array.Empty<double>());
+		}
+
+		return _renderTraceResult ?? new RenderTraceStatus(false, false, 0u, 0, 0d, 0d, 0d, 0d, 0, 0d, 0d,
+			System.Array.Empty<double>(), System.Array.Empty<double>());
 	}
 
 	ControlState IControlHost.ReadState()

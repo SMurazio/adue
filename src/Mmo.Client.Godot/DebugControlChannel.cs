@@ -208,6 +208,7 @@ internal sealed class DebugControlChannel : IDisposable
                 "interp" => HandleInterp(),
                 "entities" => HandleEntities(),
                 "state" => HandleState(),
+                "render_trace" => HandleRenderTrace(root, hasRoot),
                 "ping" => Ok(writer => writer.WriteString("pong", "ok")),
                 _ => Error($"unknown cmd '{command}'")
             };
@@ -383,6 +384,52 @@ internal sealed class DebugControlChannel : IDisposable
             writer.WriteString("zone", s.Zone);
             writer.WriteNumber("visibleEntities", s.VisibleEntities);
             writer.WriteString("localTile", s.LocalTile);
+        });
+    }
+
+    // Render trace: with a networkId, (re)arm a per-frame recording of that entity's render/auth position; without,
+    // return the latest status (active + frames captured) or the completed smoothness result.
+    private string HandleRenderTrace(JsonElement root, bool hasRoot)
+    {
+        if (hasRoot && root.TryGetProperty("networkId", out var idElement)
+            && idElement.ValueKind == JsonValueKind.Number && idElement.TryGetUInt32(out var networkId))
+        {
+            var durationMs = ReadDouble(root, "durationMs", 2000d);
+            _host.StartRenderTrace(networkId, durationMs);
+            return Ok(writer =>
+            {
+                writer.WriteBoolean("active", true);
+                writer.WriteNumber("networkId", networkId);
+                writer.WriteNumber("durationMs", durationMs);
+            });
+        }
+
+        var r = _host.ReadRenderTrace();
+        return Ok(writer =>
+        {
+            writer.WriteBoolean("active", r.Active);
+            writer.WriteBoolean("hasResult", r.HasResult);
+            writer.WriteNumber("networkId", r.NetworkId);
+            writer.WriteNumber("frames", r.Frames);
+            writer.WriteNumber("durationMs", r.DurationMs);
+            writer.WriteStartObject("metrics");
+            writer.WriteNumber("meanSpeed", r.MeanSpeed);
+            writer.WriteNumber("speedStdDev", r.SpeedStdDev);
+            writer.WriteNumber("maxJerk", r.MaxJerk);
+            writer.WriteNumber("reversals", r.Reversals);
+            writer.WriteNumber("meanRenderVsAuth", r.MeanRenderVsAuth);
+            writer.WriteNumber("maxRenderVsAuth", r.MaxRenderVsAuth);
+            writer.WriteEndObject();
+            writer.WriteStartArray("renderPath");
+            for (var i = 0; i < r.SampleX.Length; i++)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("x", r.SampleX[i]);
+                writer.WriteNumber("y", r.SampleY[i]);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
         });
     }
 

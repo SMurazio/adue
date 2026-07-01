@@ -308,6 +308,34 @@ server.registerTool(
 );
 
 server.registerTool(
+  "client.render_trace",
+  {
+    title: "Trace a bot's on-screen render smoothness",
+    description:
+      "Measure ONE entity's per-frame ON-SCREEN render smoothness — what the ~1 Hz client.entities poll can't see. Two-step: (1) call with a networkId to ARM a per-frame recording of that entity's render + authoritative position for durationMs (default 2000). (2) After that long, call again with NO args to read the result. Metrics: speedStdDev (per-frame speed jitter — low = smooth constant velocity), maxJerk (largest frame-to-frame velocity change — spikes = hitches), reversals (>90 deg velocity flips — a jitter tell, 0 = clean), meanRenderVsAuth/maxRenderVsAuth (interp lag vs the server), plus a downsampled renderPath. Smooth = low speedStdDev, low maxJerk, 0 reversals.",
+    inputSchema: {
+      networkId: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Entity to trace (ARMS a new recording). Omit to read the latest status/result."),
+      durationMs: z
+        .number()
+        .min(100)
+        .optional()
+        .describe("Recording window in ms when arming. Default 2000."),
+    },
+  },
+  async ({ networkId, durationMs }) => {
+    const req = { cmd: "render_trace" };
+    if (typeof networkId === "number") req.networkId = networkId;
+    if (typeof durationMs === "number") req.durationMs = durationMs;
+    return callChannel(req);
+  }
+);
+
+server.registerTool(
   "client.state",
   {
     title: "Read client state",
