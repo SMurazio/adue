@@ -36,6 +36,10 @@ internal interface IControlHost
     void StartRenderTrace(uint networkId, double durationMs);
 
     RenderTraceStatus ReadRenderTrace();
+
+    // Live-set the remote-entity interp buffer (ms) for jitter tuning; negative reverts to the computed default.
+    // Applies to every current remote interpolator immediately (the local predicted avatar is untouched).
+    void SetRemoteInterpolationBuffer(double bufferMs);
 }
 
 internal readonly record struct ControlTelemetry(

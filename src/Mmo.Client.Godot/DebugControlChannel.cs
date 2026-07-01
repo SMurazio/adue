@@ -209,6 +209,7 @@ internal sealed class DebugControlChannel : IDisposable
                 "entities" => HandleEntities(),
                 "state" => HandleState(),
                 "render_trace" => HandleRenderTrace(root, hasRoot),
+                "set_interp_buffer" => HandleSetInterpBuffer(root),
                 "ping" => Ok(writer => writer.WriteString("pong", "ok")),
                 _ => Error($"unknown cmd '{command}'")
             };
@@ -431,6 +432,14 @@ internal sealed class DebugControlChannel : IDisposable
 
             writer.WriteEndArray();
         });
+    }
+
+    // Live-set the remote interp buffer (ms) for jitter tuning; a negative value reverts to the computed default.
+    private string HandleSetInterpBuffer(JsonElement root)
+    {
+        var bufferMs = ReadDouble(root, "bufferMs", -1d);
+        _host.SetRemoteInterpolationBuffer(bufferMs);
+        return Ok(writer => writer.WriteNumber("bufferMs", bufferMs));
     }
 
     // ---- Response helpers --------------------------------------------------------------------

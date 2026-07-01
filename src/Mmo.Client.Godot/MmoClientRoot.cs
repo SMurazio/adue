@@ -3444,6 +3444,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			System.Array.Empty<double>(), System.Array.Empty<double>());
 	}
 
+	void IControlHost.SetRemoteInterpolationBuffer(double bufferMs)
+	{
+		_client?.SetRemoteInterpolationBufferMs(bufferMs);
+	}
+
 	ControlState IControlHost.ReadState()
 	{
 		return new ControlState(
