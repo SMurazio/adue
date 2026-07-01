@@ -674,6 +674,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_client.SendAttack(AimAngle.Quantize(aimRadians));
 		ShowInteractFeedback("Swing!");
 
+		// Play the LOCAL cat's kick (attack) animation on the swing — cosmetic; the server stays authoritative on
+		// damage. Remote players' kicks would need a replicated attack event (not wired yet).
+		if (_client.LocalNetworkId is uint localAttackerId && _renderer is not null
+			&& _renderer.TryGetActiveVisual(localAttackerId, out var attackerVisual)
+			&& attackerVisual is PlayerVisual localPlayerVisual)
+		{
+			localPlayerVisual.TriggerAttack();
+		}
+
 		if (TryGetLocalRenderPosition(out var px, out var pz))
 		{
 			// Flash the free-aim WEDGE (a pie slice: FreeAimHalfAngle, FreeAimRadius) on the ground from the local

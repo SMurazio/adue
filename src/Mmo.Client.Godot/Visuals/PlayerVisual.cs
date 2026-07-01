@@ -4,26 +4,31 @@ using Mmo.Shared.Domain;
 
 namespace Mmo.Client.Godot.Visuals;
 
-// A player avatar: the rigged humanoid GLB (S54) + an AnimationTree cross-fading idle<->walk (S55) + facing
-// driven by the entity's 8-way Facing, including the S59 predicted-turn rotation. ALL of this is read from
-// the computed EntityRenderState: Core bakes the predictor's live facing into state.Facing for the local
-// entity, and "moving" is the coherent MOVING signal Core computes (N: the local player's predicted resolved
-// velocity; a remote's replicated Velocity) — no game logic lives here. The behaviour is lifted from
-// MmoClientRoot (N swapped the old render-delta detection for state.Moving).
+// A player avatar: the Cato cat model (Tripo FBX) driven by a state machine over its four clips —
+//   idle  (idle_251105_remap)      : standing still
+//   walk  (walk_normal_m_remap)    : the MOVING signal is true at walk pace
+//   run   (move_run_m_remap)       : wired for a FUTURE sprint (dormant today — nothing sets sprinting yet)
+//   attack(heavy-attack1-…)        : the kick, a ONE-SHOT fired by TriggerAttack() when the LOCAL player swings
+// Clips are matched by keyword (the FBX/scn hides the exact names on disk; they're logged at load). idle/walk/run
+// loop; the attack plays once then locomotion resumes. Facing tracks the entity's 8-way Facing plus the free-aim
+// continuous-yaw override. Everything reads from the computed EntityRenderState — no game logic here.
 //
-// Build is pool-aware but conservative: re-instancing a skinned GLB + rebuilding its AnimationTree is the
-// expensive part, so the model rig is built ONCE in BuildChildren and reused across Acquire/Reset; only the
-// per-entity latch (position/facing/anim state) resets.
+// Build is pool-aware: the skinned model + AnimationTree are built ONCE in BuildChildren and reused across
+// Acquire/Reset; only the per-entity latch (anim state, attack timer) resets.
 public sealed partial class PlayerVisual : EntityVisual
 {
-    private const string ModelPath = "res://content/characters/ProvaPersonaggioWalkLoop.glb";
+    // Cato cat model (FBX + T_Cato.jpg imported into the same folder), substituting the old rig. Godot 4.6/4.7
+    // imports FBX natively (ufbx); its AnimationPlayer clips are resolved by keyword below. If it imports grey the
+    // embedded texture didn't assign — ApplyCatoTexture forces T_Cato.jpg as the albedo.
+    private const string ModelPath = "res://content/characters/Cato.fbx";
 
-    // TUNABLE. Model native height ~1.086 units (grid = 1 unit/tile); scale ~1.6 renders it ~1.74 tiles tall.
+    // TUNABLE — FIRST GUESS for the cat (native size unknown until imported; asset packs vary wildly). Adjust once
+    // it's on screen.
     public const float ModelScale = 1.6f;
 
-    // TUNABLE. glTF/Godot forward is -Z; N maps to -Z (tile delta 0,-1). 180 corrects a rig that play-tested
-    // facing front-to-back relative to movement.
-    private const float ForwardOffsetDegrees = 180f;
+    // The cat's authored front is 90° off Godot's -Z forward: at offset 0 it faced North (up) while moving East
+    // (right); -90 made it 180° (backward), so +90 lands its front on the travel direction (tuned in-client).
+    private const float ForwardOffsetDegrees = 90f;
 
     // Vertical offset so the feet sit on the ground plane (y=0). Most rigs author the origin at the feet.
     private const float ModelYOffset = 0f;
@@ -34,9 +39,14 @@ public sealed partial class PlayerVisual : EntityVisual
 
     private const string AnimStateIdle = "Idle";
     private const string AnimStateWalk = "Walk";
+    private const string AnimStateRun = "Run";
+    private const string AnimStateAttack = "Attack";
 
-    // Cross-fade time (s) on the Idle<->Walk transitions so the rig blends instead of snapping. TUNABLE.
+    // Cross-fade time (s) on state transitions so the rig blends instead of snapping. TUNABLE.
     private const float AnimCrossFadeSeconds = 0.13f;
+
+    // Fallback attack length (s) if the clip resolves but its length can't be read, so the one-shot still ends.
+    private const double AttackFallbackSeconds = 0.6d;
 
     // Loaded once on first player spawn so a build with no players never pays the load. A failed load leaves
     // _model null and the factory falls back to the box (the visual is never constructed in that case).
@@ -48,6 +58,13 @@ public sealed partial class PlayerVisual : EntityVisual
     private AnimationNodeStateMachinePlayback? _stateMachine;
     private string? _currentAnimState;
     private double _movingUntilSeconds;
+
+    // Attack (kick) one-shot: TriggerAttack sets _pendingAttack; the driver travels to Attack and blocks locomotion
+    // until _attackPlayingUntilSeconds so the swing plays fully, then resumes idle/walk.
+    private bool _pendingAttack;
+    private double _attackPlayingUntilSeconds;
+    private bool _hasAttackClip;
+    private double _attackClipLength = AttackFallbackSeconds;
 
     protected override bool TracksLabelHeight => true;
 
@@ -67,58 +84,104 @@ public sealed partial class PlayerVisual : EntityVisual
         model.Position = new Vector3(0f, ModelYOffset, 0f);
         AddChild(model);
         _model = model;
+        // The Tripo cat ships its texture EMBEDDED in the FBX (a .fbm), which Godot imports grey — force T_Cato.jpg
+        // as the albedo so the model is textured.
+        ApplyCatoTexture(model);
 
         var animationPlayer = FindAnimationPlayer(model);
-        var walkClip = ResolveWalkClip(animationPlayer);
-        var idleClip = ResolveIdleClip(animationPlayer);
-        _stateMachine = BuildAnimationTree(model, animationPlayer, idleClip, walkClip);
+        if (animationPlayer is not null)
+        {
+            // DIAG (Cato integration): dump the ACTUAL clip names to the Godot client log (compressed on disk).
+            GD.Print($"[Cato anims] clips = [{string.Join(", ", animationPlayer.GetAnimationList())}]");
+        }
+
+        // Resolve the four clips by keyword (idle/walk/run loop; attack is a one-shot).
+        var idleClip = ResolveClip(animationPlayer, loop: true, "idle");
+        var walkClip = ResolveClip(animationPlayer, loop: true, "walk");
+        var runClip = ResolveClip(animationPlayer, loop: true, "run");
+        var attackClip = ResolveClip(animationPlayer, loop: false, "attack", "kick");
+
+        _hasAttackClip = attackClip is not null;
+        if (attackClip is not null && animationPlayer is not null)
+        {
+            var anim = animationPlayer.GetAnimation(attackClip);
+            if (anim is not null && anim.Length > 0d)
+            {
+                _attackClipLength = anim.Length;
+            }
+        }
+
+        _stateMachine = BuildAnimationTree(model, animationPlayer, idleClip, walkClip, runClip, attackClip);
     }
 
     protected override void OnAcquire(EntityRenderState state)
     {
         _movingUntilSeconds = 0d;
-        // The state machine auto-starts in the first-added node (Idle); seed the latch to match so the first
-        // detected movement Travels to Walk and a stop Travels back to Idle.
-        _currentAnimState = _stateMachine is null ? null : AnimStateIdle;
+        _pendingAttack = false;
+        _attackPlayingUntilSeconds = 0d;
+        // Leave the latch UNSET so the first OnUpdate actually Travels into the locomotion state (Idle when still)
+        // and PLAYS it. The state machine does NOT auto-play its first node, so pre-latching to Idle left the rig
+        // frozen in its bind/T-pose at idle (walk/attack worked only because they were an explicit Travel).
+        _currentAnimState = null;
         ApplyFacing(state.Facing);
     }
 
     protected override void OnReset()
     {
-        // Re-bind to a different player: drop back to Idle so the reused rig doesn't keep walking. The next
-        // Acquire reseeds the latch.
+        // Re-bind to a different player: drop back to Idle so the reused rig doesn't keep walking/attacking. The
+        // next Acquire reseeds the latch.
+        _pendingAttack = false;
+        _attackPlayingUntilSeconds = 0d;
         _stateMachine?.Travel(AnimStateIdle);
         _currentAnimState = _stateMachine is null ? null : AnimStateIdle;
     }
 
     protected override void OnUpdate(EntityRenderState state, double now)
     {
+        // Attack (kick) one-shot: on a fresh trigger, travel to Attack and block locomotion until the clip finishes
+        // so the swing plays fully. Facing still tracks the aim during the kick.
+        if (_pendingAttack)
+        {
+            _pendingAttack = false;
+            if (_hasAttackClip && _stateMachine is not null)
+            {
+                _stateMachine.Travel(AnimStateAttack);
+                _currentAnimState = AnimStateAttack;
+                _attackPlayingUntilSeconds = now + _attackClipLength;
+            }
+        }
+
+        if (now < _attackPlayingUntilSeconds)
+        {
+            ApplyFacing(state.Facing);
+            return;
+        }
+
         // N (entity-collision walk anim): drive the walk/idle loop off the coherent MOVING signal Core computes
         // (the local player's predicted resolved velocity; a remote's replicated Velocity) — NOT the per-frame
-        // render-position delta, which latched "walk" on the sub-pixel jitter left when pushing into a body. A
-        // player pinned against a wall / monster / another player has Moving false → idles, exactly like a flat
-        // wall already does; a walk or a slide keeps Moving true. KEEP the short hold so the loop doesn't flicker
-        // on brief false gaps. Rotate the model to the entity's 8-way facing (predicted facing already baked in).
+        // render-position delta. KEEP the short hold so the loop doesn't flicker on brief false gaps.
         if (state.Moving)
         {
             _movingUntilSeconds = now + WalkHoldSeconds;
         }
 
-        DriveAnimation(now <= _movingUntilSeconds);
+        // Run is wired for a FUTURE sprint signal; nothing sets it today, so movement is always Walk.
+        var target = now <= _movingUntilSeconds ? AnimStateWalk : AnimStateIdle;
+        DriveLocomotion(target);
         ApplyFacing(state.Facing);
     }
 
-    private void DriveAnimation(bool moving)
+    // Called (main thread) from MmoClientRoot.TryAttack when the LOCAL player swings: queues the kick one-shot.
+    // The next OnUpdate travels to Attack and holds locomotion for the clip's length. Server stays authoritative on
+    // damage — this is cosmetic. (Remote players' kicks would need a replicated attack event; not wired yet.)
+    public void TriggerAttack()
     {
-        if (_stateMachine is null)
-        {
-            return;
-        }
+        _pendingAttack = true;
+    }
 
-        // Latch to the target state and only Travel() on a change. When the MOVING signal has been false for the
-        // hold, moving latches false, so the machine cross-fades into Idle and holds the standing pose.
-        var target = moving ? AnimStateWalk : AnimStateIdle;
-        if (_currentAnimState == target)
+    private void DriveLocomotion(string target)
+    {
+        if (_stateMachine is null || _currentAnimState == target)
         {
             return;
         }
@@ -127,12 +190,11 @@ public sealed partial class PlayerVisual : EntityVisual
         _currentAnimState = target;
     }
 
-    // Rotate the model so its forward axis points along the entity's 8-way Facing. Direction8 -> tile delta
-    // -> world heading (X=tileX, Z=tileY); yaw the model to it plus the tunable rig-forward correction.
+    // Rotate the model so its forward axis points along the entity's 8-way Facing. Direction8 -> tile delta ->
+    // world heading; yaw the model to it plus the tunable rig-forward correction.
     //
     // FREEAIM: when a continuous-yaw override is set (the local player aiming at the cursor), use THAT yaw instead of
-    // the discrete facing — the avatar then looks continuously where you aim. The override is already in the same
-    // model-forward convention (θ such that -Z maps to the aim), so it just gets the rig-forward correction added.
+    // the discrete facing — the avatar then looks continuously where you aim.
     private void ApplyFacing(Direction8 facing)
     {
         if (_model is null)
@@ -152,16 +214,16 @@ public sealed partial class PlayerVisual : EntityVisual
             return;
         }
 
-        // Godot's default model forward is -Z. A yaw θ about +Y turns -Z into (-sinθ, 0, -cosθ); solving that
-        // to equal (delta.X, delta.Y) gives θ = atan2(-x, -y). N (0,-1) -> 0, E (1,0) -> -90°, S (0,1) -> 180°.
+        // Godot's default model forward is -Z. A yaw θ about +Y turns -Z into (-sinθ, 0, -cosθ); solving that to
+        // equal (delta.X, delta.Y) gives θ = atan2(-x, -y). N (0,-1) -> 0, E (1,0) -> -90°, S (0,1) -> 180°.
         var yaw = Mathf.Atan2(-delta.X, -delta.Y);
         _model.Rotation = new Vector3(0f, yaw + Mathf.DegToRad(ForwardOffsetDegrees), 0f);
     }
 
-    // ---- model + animation loading (lifted verbatim from MmoClientRoot) ----------------------------
+    // ---- model + texture + animation loading ------------------------------------------------------
 
-    // Loads (once) the player model PackedScene. Failures are logged a single time; the factory then falls
-    // back to the box for players rather than re-attempting/spamming the log. Returns null on failure.
+    // Loads (once) the player model PackedScene. Failures are logged a single time; the factory then falls back to
+    // the box for players rather than re-attempting/spamming the log. Returns null on failure.
     public static PackedScene? LoadModelScene()
     {
         if (_loadFailed)
@@ -179,10 +241,80 @@ public sealed partial class PlayerVisual : EntityVisual
         if (_modelScene is null)
         {
             _loadFailed = true;
-            GD.PushWarning($"S54: could not load player model '{ModelPath}'; falling back to capsule.");
+            GD.PushWarning($"Cato: could not load player model '{ModelPath}'; falling back to capsule.");
         }
 
         return _modelScene;
+    }
+
+    // ---- Cato texture (embedded in the Tripo FBX; Godot leaves the mesh grey, so force T_Cato.jpg as albedo) ----
+    private const string CatoTexturePath = "res://content/characters/T_Cato.jpg";
+    private static Texture2D? _catoTexture;
+    private static bool _catoTextureAttempted;
+
+    // CEL SHADER: sample the albedo, then band N·L into just two tones — full-lit and a lifted shadow_floor — at a
+    // FIXED magnitude that ignores the sun's 2.4 energy, so the cat neither blows out (too bright) nor goes near-black
+    // (too dark). Tunables: band_threshold = where the shadow line falls; shadow_floor = how dark the shadow tone is.
+    private const string CelShaderCode = @"
+shader_type spatial;
+render_mode specular_disabled;
+
+uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
+uniform float band_threshold : hint_range(0.0, 1.0) = 0.4;
+uniform float shadow_floor : hint_range(0.0, 1.0) = 0.6;
+
+void fragment() {
+    ALBEDO = texture(albedo_tex, UV).rgb;
+}
+
+void light() {
+    float ndotl = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
+    float lit = smoothstep(band_threshold - 0.03, band_threshold + 0.03, ndotl);
+    float band = mix(shadow_floor, 1.0, lit);
+    DIFFUSE_LIGHT += ALBEDO * band * ATTENUATION;
+}
+";
+
+    private static ShaderMaterial? _catoMaterial;
+
+    // Load T_Cato.jpg once, build the cel-shader material (albedo fed in as a uniform), and apply it as a material
+    // override on every MeshInstance3D in the model. A failed texture load is warned once and leaves the model grey.
+    private static void ApplyCatoTexture(Node root)
+    {
+        if (!_catoTextureAttempted)
+        {
+            _catoTextureAttempted = true;
+            _catoTexture = GD.Load<Texture2D>(CatoTexturePath);
+            if (_catoTexture is null)
+            {
+                GD.PushWarning($"Cato: could not load texture '{CatoTexturePath}'; model stays grey.");
+            }
+            else
+            {
+                _catoMaterial = new ShaderMaterial { Shader = new Shader { Code = CelShaderCode } };
+                _catoMaterial.SetShaderParameter("albedo_tex", _catoTexture);
+            }
+        }
+
+        if (_catoMaterial is null)
+        {
+            return;
+        }
+
+        ApplyMaterialRecursive(root, _catoMaterial);
+    }
+
+    private static void ApplyMaterialRecursive(Node node, Material material)
+    {
+        if (node is MeshInstance3D mesh)
+        {
+            mesh.MaterialOverride = material;
+        }
+
+        foreach (var child in node.GetChildren())
+        {
+            ApplyMaterialRecursive(child, material);
+        }
     }
 
     private static AnimationPlayer? FindAnimationPlayer(Node node)
@@ -203,107 +335,79 @@ public sealed partial class PlayerVisual : EntityVisual
         return null;
     }
 
-    // Robustly pick the walk clip: prefer a name that looks like a walk loop, else the first non-T-pose clip,
-    // and set it to loop. Null (logged once) if there is no usable clip -> the model stands still, no crash.
-    private static string? ResolveWalkClip(AnimationPlayer? player)
+    // First clip whose lowercased name CONTAINS any keyword (the Tripo names carry Armature| prefixes + _remap
+    // suffixes, so exact matching is brittle). Sets it looping (idle/walk/run) or one-shot (attack). Null (no
+    // match) leaves that state to a fallback clip in BuildAnimationTree.
+    private static string? ResolveClip(AnimationPlayer? player, bool loop, params string[] keywords)
     {
         if (player is null)
         {
-            GD.PushWarning("S54: player model has no AnimationPlayer; rig will not animate.");
             return null;
         }
 
-        var clips = player.GetAnimationList();
-        string? firstNonTPose = null;
-        foreach (var name in clips)
+        foreach (var name in player.GetAnimationList())
         {
-            if (IsTPoseClip(name))
-            {
-                continue;
-            }
-
-            firstNonTPose ??= name;
             var lower = name.ToLowerInvariant();
-            if (lower.Contains("catwalk") || lower.Contains("loop") || lower.Contains("walk"))
+            foreach (var keyword in keywords)
             {
-                SetClipLooping(player, name);
+                if (!lower.Contains(keyword))
+                {
+                    continue;
+                }
+
+                var animation = player.GetAnimation(name);
+                if (animation is not null)
+                {
+                    animation.LoopMode = loop ? Animation.LoopModeEnum.Linear : Animation.LoopModeEnum.None;
+                }
+
                 return name;
             }
         }
 
-        if (firstNonTPose is not null)
-        {
-            SetClipLooping(player, firstNonTPose);
-            return firstNonTPose;
-        }
-
-        GD.PushWarning("S54: no non-T-pose animation found on the player model; rig will not walk.");
         return null;
     }
 
-    // The placeholder idle is the rig's T-pose (human-OK'd). Prefer a T-pose-named clip, else the first clip.
-    private static string? ResolveIdleClip(AnimationPlayer? player)
-    {
-        if (player is null)
-        {
-            return null;
-        }
-
-        var clips = player.GetAnimationList();
-        string? first = null;
-        foreach (var name in clips)
-        {
-            first ??= name;
-            if (IsTPoseClip(name))
-            {
-                SetClipLooping(player, name);
-                return name;
-            }
-        }
-
-        if (first is not null)
-        {
-            SetClipLooping(player, first);
-        }
-
-        return first;
-    }
-
-    private static bool IsTPoseClip(string name)
-    {
-        var lower = name.ToLowerInvariant();
-        return lower.Contains("t-pose") || lower.Contains("tpose") || lower.Contains("t_pose");
-    }
-
-    private static void SetClipLooping(AnimationPlayer player, string clipName)
-    {
-        var animation = player.GetAnimation(clipName);
-        if (animation is not null)
-        {
-            animation.LoopMode = Animation.LoopModeEnum.Linear;
-        }
-    }
-
-    // Build an AnimationTree driving a two-state (Idle, Walk) cross-fading state machine off the rig's
-    // instanced AnimationPlayer. Returns the live playback so the per-frame driver can Travel(); null
-    // (logged) if the player/clips are missing, in which case the rig simply stands still.
+    // Build an AnimationTree driving a four-state (Idle, Walk, Run, Attack) cross-fading state machine off the rig's
+    // instanced AnimationPlayer. Run falls back to the walk clip and Attack to idle if that specific clip is missing,
+    // so the states always exist. Returns the live playback so the per-frame driver can Travel(); null (logged) if
+    // the player or the core idle/walk clips are missing, in which case the rig simply stands still.
     private static AnimationNodeStateMachinePlayback? BuildAnimationTree(
-        Node3D model, AnimationPlayer? player, string? idleClip, string? walkClip)
+        Node3D model,
+        AnimationPlayer? player,
+        string? idleClip,
+        string? walkClip,
+        string? runClip,
+        string? attackClip)
     {
         if (player is null || idleClip is null || walkClip is null)
         {
-            GD.PushWarning("S55: missing AnimationPlayer or idle/walk clip; player rig will not animate.");
+            GD.PushWarning("Cato: missing AnimationPlayer or idle/walk clip; player rig will not animate.");
             return null;
         }
 
-        var idleNode = new AnimationNodeAnimation { Animation = idleClip };
-        var walkNode = new AnimationNodeAnimation { Animation = walkClip };
-
         var stateMachine = new AnimationNodeStateMachine();
-        stateMachine.AddNode(AnimStateIdle, idleNode);
-        stateMachine.AddNode(AnimStateWalk, walkNode);
-        stateMachine.AddTransition(AnimStateIdle, AnimStateWalk, MakeCrossFadeTransition());
-        stateMachine.AddTransition(AnimStateWalk, AnimStateIdle, MakeCrossFadeTransition());
+        stateMachine.AddNode(AnimStateIdle, new AnimationNodeAnimation { Animation = idleClip });
+        stateMachine.AddNode(AnimStateWalk, new AnimationNodeAnimation { Animation = walkClip });
+        stateMachine.AddNode(AnimStateRun, new AnimationNodeAnimation { Animation = runClip ?? walkClip });
+        stateMachine.AddNode(AnimStateAttack, new AnimationNodeAnimation { Animation = attackClip ?? idleClip });
+
+        // Direct cross-fades between all three locomotion states, plus enter/exit Attack from every locomotion state
+        // (Travel walks the transition graph; direct edges keep the blend a single cross-fade).
+        string[] locomotion = { AnimStateIdle, AnimStateWalk, AnimStateRun };
+        foreach (var from in locomotion)
+        {
+            foreach (var to in locomotion)
+            {
+                if (from != to)
+                {
+                    stateMachine.AddTransition(from, to, MakeCrossFadeTransition());
+                }
+            }
+
+            stateMachine.AddTransition(from, AnimStateAttack, MakeCrossFadeTransition());
+            stateMachine.AddTransition(AnimStateAttack, from, MakeCrossFadeTransition());
+        }
 
         var tree = new AnimationTree
         {
