@@ -73,6 +73,37 @@ public sealed class ZoneContinuousCollisionTests
     }
 
     [Fact]
+    public void PlayerPinnedHeadOnAWall_ReplicatesZeroVelocity_NotTheDesiredIntoWall()
+    {
+        // VELOCITY COHERENCE (player↔entity jitter fix): a player pinned head-on against a wall — still HOLDING east —
+        // must replicate Velocity ~0 (StopMovement), NOT the pre-collision desired dir×speed pointing INTO the wall.
+        // Otherwise remote viewers extrapolate the player INTO the wall and snap back each snapshot (the jitter seen on
+        // the other client). The SAME code path also fixes it for a player blocked against a monster / another player.
+        var (zone, player) = SpawnInto(blocked: new TileCoord(10, 8), spawn: new TileCoord(8, 8), speed: 5d);
+
+        for (var i = 0; i < 200; i++)
+        {
+            zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+        }
+
+        Assert.Equal(9.0d, player.Position.X, Eps); // pinned at the surface, still pushing east
+        Assert.True(player.Velocity.Length < 1e-9,
+            $"pinned player replicated a non-zero velocity ({player.Velocity.X:F3},{player.Velocity.Y:F3}) — must be 0 (not moving).");
+    }
+
+    [Fact]
+    public void PlayerInOpenGround_ReplicatesTheDesiredVelocity_NoRegression()
+    {
+        // The other side of the coin: when UNobstructed the resolved velocity == the desired dir×speed, so open
+        // movement replicates exactly as before (remote extrapolation unchanged for a freely-moving player).
+        var (zone, player) = SpawnInto(blocked: new TileCoord(0, 0), spawn: new TileCoord(8, 8), speed: 5d);
+        zone.IntegrateMovement(player, Direction8.E.ToUnitVector(), dtSeconds: 0.05d, Radius);
+
+        Assert.Equal(5d, player.Velocity.X, 6); // east × 5 u/s, resolved == desired
+        Assert.Equal(0d, player.Velocity.Y, 6);
+    }
+
+    [Fact]
     public void PlayerInOpenGround_MovesUnobstructed_RegressionWithPhase1()
     {
         // No wall anywhere near the path: continuous advance is unchanged from Phase 1 (the open-field regression).

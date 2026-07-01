@@ -162,6 +162,27 @@ public sealed class Zone
             : ContinuousCollision.Resolve(start, delta, radius, _wallScratch, _obstacleScratch);
 
         var crossedTile = entity.ApplyResolvedMove(resolved);
+
+        // VELOCITY COHERENCE (player↔entity jitter fix): replicate the ACTUAL resolved velocity, not the pre-collision
+        // desired dir×speed ComputeMoveDelta set. A player blocked/sliding at a wall — or now at another player/monster —
+        // otherwise replicates a velocity pointing INTO the obstacle, and remote viewers (who extrapolate along the
+        // replicated velocity) dead-reckon the player INTO the body, then snap back each snapshot = the jitter seen on
+        // the OTHER client (authoritative positions never overlapped → no compenetration, just the extrapolation
+        // overshoot). Same fix the glider got (P2): moving/sliding → the resolved velocity; fully blocked → StopMovement
+        // (Velocity 0 + the stop-edge StateRevision bump so the zero RE-PUBLISHES — a bare SetVelocity(0) would be
+        // delta'd out and leave the remote extrapolating the stale velocity). The LOCAL client predicts its own player
+        // from the confirmed POSITION and never reads this replicated velocity, so there is NO reconcile interaction —
+        // this only changes how OTHER clients render this player. Facing (set by ComputeMoveDelta) is kept.
+        var resolvedDelta = resolved - start;
+        if (resolvedDelta.LengthSquared > 0d)
+        {
+            entity.SetVelocity(resolvedDelta * (1d / dtSeconds));
+        }
+        else
+        {
+            entity.StopMovement();
+        }
+
         if (crossedTile)
         {
             World.OnEntityMoved(entity, previousTile);
