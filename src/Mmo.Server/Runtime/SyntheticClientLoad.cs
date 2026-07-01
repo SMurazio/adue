@@ -151,8 +151,13 @@ public sealed class SyntheticClientLoad : IDisposable
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
 
-        // Keepalive cadence for the per-input continuous move intent (v36), mirroring the real clients.
-        private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(500);
+        // Keepalive cadence for the per-input continuous move intent — MUST match NominalMoveDtSeconds (≈ one 20 Hz
+        // tick), like a real client sending ~per-frame. If the keepalive is LONGER than the nominal dt (it was 500 ms
+        // vs a 50 ms dt), the bot integrates only 0.05 s of motion per keepalive → it CRAWLS at ~1/10 speed, while its
+        // replicated Velocity is the full dir×speed. The remote render (extrapolate-to-now) then projects it forward at
+        // full speed and SNAPS BACK each sparse update = jitter in place. Matching the cadence to the dt makes the
+        // per-interval motion equal velocity×interval, so the extrapolation lands exactly right → smooth roaming.
+        private static readonly TimeSpan MoveIntentKeepalive = TimeSpan.FromMilliseconds(50);
 
         // CONTINUOUS MIGRATION (Phase 3, v36): the synthetic load client does not predict — it sends one continuous
         // MoveIntent on change + keepalive with a fixed NOMINAL dt (≈ one 20 Hz tick) and a UNIT direction. The
