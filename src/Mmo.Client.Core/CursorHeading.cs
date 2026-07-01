@@ -13,27 +13,6 @@ namespace Mmo.Client.Core;
 // the same-tile (no heading) case.
 public static class CursorHeading
 {
-    // The Direction8 from `from` toward `to`, or null when they are the same tile (no heading — caller stops
-    // or holds). World axes: +X = east, +Y = south (the tile grid's screen-down). The 8 sectors are 45° wide
-    // and centred on each cardinal/diagonal, so a delta is rounded to the closest compass point.
-    public static Direction8? FromTileDelta(TileCoord from, TileCoord to)
-    {
-        var dx = to.X - from.X;
-        var dy = to.Y - from.Y;
-        if (dx == 0 && dy == 0)
-        {
-            return null;
-        }
-
-        // atan2(dy, dx) is the angle in the world plane (0 = east, +90° = south because +Y is down). Snap to
-        // the nearest of 8 sectors (45° each) by dividing by 45° and rounding, then index a compass table.
-        var degrees = Math.Atan2(dy, dx) * (180.0 / Math.PI);
-        var sector = (int)Math.Round(degrees / 45.0);
-        // Round can land on -4..4; wrap into 0..7. (-180° and +180° both mean west.)
-        sector = ((sector % 8) + 8) % 8;
-        return SectorToDirection[sector];
-    }
-
     // S64: the held heading from a CONTINUOUS world vector (player render position -> cursor hit point), with a
     // dead-zone and octant hysteresis so it stays stable. This replaces the S56 FromTileDelta path, which
     // quantised BOTH endpoints to integer tiles (origin = the integer predicted tile that jumps a tile per step
