@@ -13,7 +13,10 @@ internal sealed class ClientMovementTrace
         _write = write ?? Console.WriteLine;
     }
 
-    public bool Enabled { get; }
+    // Mutable at runtime (N-movement-trace-live-toggle): the console-output gate is a LIVE diagnostic
+    // toggle (the F3 perf-panel checkbox), not a launch flag — the env var only seeds the initial value.
+    // Snapshot tracking is unconditional either way; Enabled gates only the console trace lines.
+    public bool Enabled { get; set; }
 
     public MovementDebugSnapshot Snapshot { get; private set; } = MovementDebugSnapshot.Empty;
 

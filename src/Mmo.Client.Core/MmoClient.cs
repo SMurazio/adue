@@ -242,7 +242,13 @@ public sealed class MmoClient : IDisposable
 
     public int EntityCount => _entities.Count;
 
-    public bool DebugMovementEnabled => _movementTrace.Enabled;
+    // Live-settable (N-movement-trace-live-toggle): the Godot F3 perf-panel checkbox flips the console
+    // MOVE-trace on/off at runtime; MMO_DEBUG_MOVEMENT only seeds the initial value at construction.
+    public bool DebugMovementEnabled
+    {
+        get => _movementTrace.Enabled;
+        set => _movementTrace.Enabled = value;
+    }
 
     // S76: the recipient-scoped step sequence from the latest snapshot header (server's count of our own
     // accepted tile moves). Exposed read-only for diagnostics / S77's reconcile; not yet consumed by the

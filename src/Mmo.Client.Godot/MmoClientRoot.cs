@@ -69,6 +69,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// panel open via SetPressedNoSignal (so seeding never fires the toggle handler → never sends a spurious admin flip).
 	private CheckBox? _playerCollisionCheck;
 	private CheckBox? _frameCsvCheck;
+	// N-movement-trace-live-toggle: the F3 perf-panel live toggle for the console MOVE-trace (mmo_trace lines).
+	// MMO_DEBUG_MOVEMENT only seeds the initial state (read inside MmoClient's trace); the checkbox is re-seeded
+	// from the client right after connect and flips MmoClient.DebugMovementEnabled live — no restart.
+	private CheckBox? _movementTraceCheck;
 	// F1 Visual "Spawner tiles" toggle — default OFF. Debug viz of the monster spawner anchors (red tiles), gated
 	// exactly like the prediction-tiles markers. Flipped by ApplySpawnerTiles; read by UpdateMonsterHomeMarkers.
 	private bool _showSpawnerTiles;
@@ -411,6 +415,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		GetViewport().ScreenSpaceAA = Viewport.ScreenSpaceAAEnum.Fxaa;
 		_fxaaCheck?.SetPressedNoSignal(true);
 		_client = new MmoClient(new ClientConnectionOptions(Host, Port, ConnectionKey, PlayerName, PlayerName, "mmo-godot-client"));
+		// Seed the F3 "Movement trace (console)" checkbox to the client's initial trace state (MMO_DEBUG_MOVEMENT
+		// is only the seed; the checkbox is the live control). SetPressedNoSignal so seeding never re-toggles.
+		_movementTraceCheck?.SetPressedNoSignal(_client.DebugMovementEnabled);
 		_client.Connect();
 		GD.Print($"Godot MMO client connecting to {Host}:{Port} as {PlayerName}.");
 
@@ -1218,6 +1225,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		rows.AddChild(frameCsv);
 		_frameCsvCheck = frameCsv;
 
+		// Live MOVE-trace toggle (N-movement-trace-live-toggle) — flips the console mmo_trace output on/off while
+		// running, like the two toggles above. Seeded from the client (MMO_DEBUG_MOVEMENT initial value) after
+		// connect in _Ready; the panel is built before the client exists, so it starts unchecked here.
+		var movementTrace = new CheckBox { Name = "MovementTrace", Text = "Movement trace (console)" };
+		movementTrace.AddThemeFontSizeOverride("font_size", 13);
+		movementTrace.Toggled += ApplyMovementTrace;
+		rows.AddChild(movementTrace);
+		_movementTraceCheck = movementTrace;
+
 		panel.Visible = false;
 		_perfPanel = panel;
 		layer.AddChild(panel);
@@ -1699,6 +1715,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		else
 		{
 			CloseFrameCsv();
+		}
+	}
+
+	// Live MOVE-trace toggle (N-movement-trace-live-toggle), shared by the F3 perf-panel checkbox: flips the
+	// console mmo_trace output on/off in the running client. State lives on MmoClient (its trace object);
+	// snapshot tracking for the F3 HUD is unconditional either way — this gates only the console lines.
+	private void ApplyMovementTrace(bool enabled)
+	{
+		if (_client is not null)
+		{
+			_client.DebugMovementEnabled = enabled;
 		}
 	}
 
