@@ -290,7 +290,6 @@ Legend: K=KEEP, M=KEEP-with-internal-MERGE, D=DECISION. **No file is a provable 
 | MmoClientProtocolTests | K | Snapshot reassembly/ack/cadence (live; L221 comment verified). |
 | MmoClientReattachSeqTests | K | Phase-4a re-attach seq high-water guard (real bug). |
 | MovementCadenceTests | K | `MovementCadence.EffectiveStepCadenceMs` LIVE (comment notes its origin). |
-| MovementSpeedOptionsTests | K | `MovementSpeedOptions` F6 dropdown (live). |
 | NetLatencySimulatorTests | K | `NetLatencySimulator` diagnostic (live). |
 | RemotePositionInterpolatorTests | K | LIVE float interpolator; `TileSteppedSource…` pins the new glide, not dead hop. |
 | ScreenRelativeDirectionMapperTests | K | `FromInputAxes` LIVE WASD seam (not a retired mapper). |

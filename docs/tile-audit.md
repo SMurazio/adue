@@ -41,7 +41,7 @@ Server:
 
 Client (non-graphical):
 - `CursorHeading.deadZoneTiles` → `deadZoneUnits`; `MmoClientRoot.MouseHeadingDeadZoneTiles` → `...Units`.
-- `MovementSpeedOptions.tilesPerSecond` → `unitsPerSecond` (+ the "/s" dropdown label).
+- ~~`MovementSpeedOptions.tilesPerSecond` → `unitsPerSecond`~~ — superseded: `MovementSpeedOptions` was later removed entirely, replaced by the global + per-player speed multiplier.
 - `HarvestTargeting.InteractionRadiusTilesSquared` → `...UnitsSquared` (follows the shared rename).
 - `MmoClientRoot.MotionSnapJumpTiles` → `...Units`; `_aimWedgeRadiusTiles` → `_aimWedgeRadiusUnits`.
 - `HudState.MinimapObject.FootprintTiles` → `FootprintUnits` (+ "(tile space)" comment → "continuous world coords").
