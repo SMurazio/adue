@@ -308,8 +308,9 @@ public sealed class GameServer
             () => _tuning.BodyRadiusUnits,
             _zone.QueryNearbyWalls,
             _zone.ApplyMonsterLanding,
-            // PLAYER↔MONSTER COLLISION: a monster's hop arc / charge dash STOPS at a nearby player (kind-aware gather —
-            // a player jump avoids nothing this phase, staying byte-identical + prediction-parity-safe).
+            // PLAYER↔MONSTER COLLISION: a monster's hop arc / charge dash STOPS at a nearby player (kind-aware gather).
+            // MOVEMENT-ACTIONS Phase D: a player's charge/dodge-roll dash STOPS at bodies via the SAME Zone gather its
+            // walking uses; only the player jump still avoids nothing (the P5 status quo).
             GatherActionObstacles);
         // MONSTER-SEPARATION: wire the de-penetration pass to the SAME shared seams (live body radius, the spatial
         // neighbour query, the wall query + resolver, and the apply-landing seam) the locomotions/actions use, so a
@@ -2828,9 +2829,10 @@ public sealed class GameServer
             return;
         }
 
-        // (2) Resolve the def from the SHARED registry. An unknown id (no registered def — e.g. a reserved Charge/
-        // DodgeRoll the wire carried before they ship, or a corrupt byte) is dropped, exactly like an unhandled
-        // attack kind. The codec passes the raw byte through, so the validation is here against the live registry.
+        // (2) Resolve the def from the SHARED registry. An unknown id (no registered def — a corrupt byte or a future
+        // action's byte arriving early) is dropped, exactly like an unhandled attack kind. The codec passes the raw
+        // byte through, so the validation is here against the live registry. Phase D: Jump, Charge and DodgeRoll all
+        // resolve now — the two dashes ride this SAME handler with zero handler changes (the framework payoff).
         if (!_actionRegistry.TryGet((ActionId)actionId, out var def))
         {
             return;
@@ -3484,16 +3486,28 @@ public sealed class GameServer
     }
 
     // PLAYER↔MONSTER COLLISION: the action-executor obstacle gather (injected into ServerActionExecutor). KIND-AWARE: a
-    // MONSTER actor (a hop arc / charge dash) collides with nearby PLAYERS so it STOPS at the player; a PLAYER actor (a
-    // predicted jump) gathers NOTHING — player jumps stay byte-identical + parity-safe (the client predictor jump path is
-    // unchanged). Player↔player collision (just shipped) covers only the WALKING integrate path; a predicted jump-vs-player
-    // (and jump-vs-monster) is a FUTURE refinement — this is the seam to widen for it. Leave it gathering nothing.
+    // MONSTER actor (a hop arc / charge dash) collides with nearby PLAYERS so it STOPS at the player.
+    // MOVEMENT-ACTIONS Phase D: a PLAYER actor's GROUND DASH (charge / dodge-roll) now collides with the SAME body set
+    // its walking integrate does — the Zone gather (monsters + other players when the toggle is on, self excluded,
+    // stable Id order) — so the dash EARLY-STOPS at a body on the server exactly where the client predicts it (the
+    // predictor feeds its per-frame obstacle set to action frames unconditionally, so the client was ALREADY stopping
+    // at bodies mid-action; this closes the server half of that parity for the two new dashes). The player JUMP is
+    // deliberately LEFT gathering nothing — the P5 status quo (a reviewed, shipped behavior; a predicted jump-vs-body
+    // stop is a separate refinement) — so the jump path stays byte-identical to Phase B/C.
     private void GatherActionObstacles(WorldEntity actor, WorldVector start, WorldVector delta, double radius, List<ContinuousCollision.Circle> scratch)
     {
         scratch.Clear();
         if (actor.Kind != EntityKind.Monster)
         {
-            return; // a player jump avoids nothing this phase
+            // A player CHARGE / DODGE-ROLL collides with the walking body set (the shared Zone gather); a player JUMP
+            // still avoids nothing (unchanged from P5). The executor is mid-Step for this actor, so ActiveAction is
+            // exactly the def whose trajectory is being resolved.
+            if (_actionExecutor.ActiveAction(actor.Id) is ActionId.Charge or ActionId.DodgeRoll)
+            {
+                _zone.GatherBodyObstacles(actor, start, radius, scratch);
+            }
+
+            return;
         }
 
         FillPlayerCircles(start, delta, radius, scratch);
@@ -3714,6 +3728,18 @@ public sealed class GameServer
         // death. (The AI also de-aggros a 0-HP target, but a hit resolved the same tick as death must still be guarded.)
         if (target.OwnerSession is { IsDead: true })
         {
+            return;
+        }
+
+        // MOVEMENT-ACTIONS Phase D (i-frame authority, design §2.7): a victim INSIDE its dodge-roll's i-frame window
+        // takes NO damage — decided HERE, server-side only, off the executor's OWN action instance + the def's window
+        // (anchored at the SERVER-side start tick). The wire carries only (actionId, heading), so a client can neither
+        // claim nor extend a window — a forged/late intent changes nothing at this gate. The client's roll visual is
+        // cosmetic; the negation (and its timing under latency) is authoritatively this check. Logged so a live
+        // feel-test can count negated hits (monster attacks are cooldown-paced, so this cannot spam).
+        if (_actionExecutor.HasActiveIFrames(target.Id, _serverTick))
+        {
+            Log.Info($"Monster {monster.NetworkId} hit {target.DisplayName} NEGATED by dodge-roll i-frames.");
             return;
         }
 

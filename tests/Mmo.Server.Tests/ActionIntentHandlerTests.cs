@@ -144,11 +144,130 @@ public sealed class ActionIntentHandlerTests
         var (executor, entity) = BuildExecutor();
         var registry = MovementActionRegistry.Default;
 
-        // Charge (id 2) is reserved but has NO registered def in Phase B1 — the handler drops it after advancing the
-        // cursor (the seq is fresh and consumed; the def lookup fails).
-        Assert.False(HandleActionIntentCore(session, executor, entity, registry, 1, (byte)ActionId.Charge, 0, 100));
+        // Phase D registered Charge/DodgeRoll, so an "unknown id" is now a byte with NO def at all (a corrupt byte or
+        // a future action's byte arriving early) — the handler drops it after advancing the cursor (the seq is fresh
+        // and consumed; the def lookup fails).
+        Assert.False(HandleActionIntentCore(session, executor, entity, registry, 1, actionId: 99, 0, 100));
         Assert.False(executor.IsActive(entity));
         Assert.Equal(1u, session.LastActionSeq);
+    }
+
+    // MOVEMENT-ACTIONS Phase D: the two new player defs resolve from the SAME shared registry through the SAME
+    // handler sequence with ZERO handler changes — the framework's "adding an action is cheap" payoff, pinned.
+    [Fact]
+    public void FreshChargeAndDodgeRollIntents_StartTheExecutor()
+    {
+        var session = new ClientSession(null!);
+        var (executor, entity) = BuildExecutor();
+        var registry = MovementActionRegistry.Default;
+
+        Assert.True(HandleActionIntentCore(
+            session, executor, entity, registry,
+            actionSeq: 1, actionId: (byte)ActionId.Charge, heading: AimAngle.Quantize(0d), serverTick: 100));
+        Assert.Equal(ActionId.Charge, executor.ActiveAction(entity.Id));
+
+        // Run the charge out (its cooldown arms at the end tick).
+        var tick = 100u;
+        while (executor.IsActive(entity))
+        {
+            tick++;
+            executor.Step(entity, tick);
+        }
+
+        // SERVER cooldowns are PER (entity, action) — the charge's armed cooldown does NOT gate a dodge-roll, so the
+        // roll starts IMMEDIATELY after the charge ends. (The CLIENT's mirrored cooldown is a single conservative
+        // slot that declines cross-action triggers locally — a documented, safe-side divergence: the client declines
+        // and sends nothing, so nothing mispredicts; the server model pinned here is the authoritative one.)
+        tick++;
+        Assert.True(HandleActionIntentCore(
+            session, executor, entity, registry,
+            actionSeq: 2, actionId: (byte)ActionId.DodgeRoll, heading: AimAngle.Quantize(0d), serverTick: tick));
+        Assert.Equal(ActionId.DodgeRoll, executor.ActiveAction(entity.Id));
+    }
+
+    [Fact]
+    public void SpammedSecondTrigger_WhileCharging_IsRejectedOneAtATime_EvenAcrossActionIds()
+    {
+        // One-at-a-time (design §2.8) holds ACROSS distinct action ids: a dodge-roll trigger arriving mid-charge is
+        // rejected by CanStart (the charge keeps running), not queued — the cursor still advances on the fresh seq.
+        var session = new ClientSession(null!);
+        var (executor, entity) = BuildExecutor();
+        var registry = MovementActionRegistry.Default;
+
+        Assert.True(HandleActionIntentCore(session, executor, entity, registry, 1, (byte)ActionId.Charge, 0, 100));
+        Assert.False(HandleActionIntentCore(session, executor, entity, registry, 2, (byte)ActionId.DodgeRoll, 0, 101));
+        Assert.Equal(2u, session.LastActionSeq);
+        Assert.Equal(ActionId.Charge, executor.ActiveAction(entity.Id));
+    }
+
+    // MOVEMENT-ACTIONS Phase D — I-FRAME AUTHORITY (design §2.7). The wire carries ONLY (actionSeq, actionId, heading,
+    // authoredTick) — there is NO field a client could put an i-frame claim in. The window is the SERVER def's data
+    // anchored at the SERVER receipt tick (B1/B2 deliberately IGNORE authoredTick), so a FORGED authoredTick cannot
+    // move the window, and damage resolution (the ApplyMonsterAttack gate order: dead-guard → HasActiveIFrames →
+    // ApplyDamage) negates a hit ONLY inside the def's window. This reproduces that gate order at the same seams the
+    // handler-core tests use.
+    [Fact]
+    public void IFrameAuthority_WindowAnchorsAtServerReceiptTick_ForgedAuthoredTickChangesNothing()
+    {
+        var session = new ClientSession(null!);
+        var (executor, entity) = BuildExecutor();
+        var registry = MovementActionRegistry.Default;
+        var def = registry.Get(ActionId.DodgeRoll);
+        Assert.True(def.HasIFrameWindow); // the roll ships a real window
+
+        // The client FORGES a far-future authoredTick — the handler ignores it (B1/B2 anchor at the receipt tick),
+        // exactly as HandleActionIntent binds `_ = authoredTick`. The window therefore spans the SERVER's clock.
+        const uint receiptTick = 200;
+        Assert.True(HandleActionIntentCore(
+            session, executor, entity, registry, 1, (byte)ActionId.DodgeRoll, 0, serverTick: receiptTick));
+
+        // Inside the def's window (elapsed ∈ [IFrameStartTick, IFrameEndTick]) the server reports i-frames…
+        for (var k = def.IFrameStartTick; k <= def.IFrameEndTick; k++)
+        {
+            Assert.True(executor.HasActiveIFrames(entity.Id, receiptTick + k), $"expected i-frames at elapsed {k}");
+        }
+
+        // …and OUTSIDE it (the trigger tick before the window opens, and past the window's end) it reports none —
+        // including at the forged "authored" anchor a cheating client hoped for.
+        Assert.False(executor.HasActiveIFrames(entity.Id, receiptTick));
+        Assert.False(executor.HasActiveIFrames(entity.Id, receiptTick + def.IFrameEndTick + 1));
+        Assert.False(executor.HasActiveIFrames(entity.Id, 900_000)); // the forged anchor bought nothing
+    }
+
+    [Fact]
+    public void IFrameAuthority_DamageInsideWindowNegated_OutsideWindowLands_NoActionAlwaysLands()
+    {
+        var session = new ClientSession(null!);
+        var (executor, entity) = BuildExecutor();
+        var registry = MovementActionRegistry.Default;
+        var def = registry.Get(ActionId.DodgeRoll);
+        var initialHp = entity.Stats.Health;
+        const int damage = 5;
+
+        // The ApplyMonsterAttack gate order, reproduced at the seam: a hit lands ONLY when HasActiveIFrames is false.
+        void ResolveHit(uint serverTick)
+        {
+            if (!executor.HasActiveIFrames(entity.Id, serverTick))
+            {
+                entity.ApplyDamage(damage);
+            }
+        }
+
+        // NO action running: every hit lands (a client "claiming" i-frames has no wire to claim them on).
+        ResolveHit(100);
+        Assert.Equal(initialHp - damage, entity.Stats.Health);
+
+        // Mid-roll, INSIDE the window: the hit is NEGATED server-side (HP unchanged).
+        Assert.True(HandleActionIntentCore(session, executor, entity, registry, 1, (byte)ActionId.DodgeRoll, 0, 200));
+        var hpBeforeRoll = entity.Stats.Health;
+        ResolveHit(200 + def.IFrameStartTick);
+        Assert.Equal(hpBeforeRoll, entity.Stats.Health);
+
+        // Still mid-roll but PAST the window (the vulnerable recovery tick): the hit LANDS.
+        var vulnerableTick = 200 + def.IFrameEndTick + 1;
+        Assert.True(vulnerableTick <= 200 + def.DurationTicks, "the def must leave a vulnerable in-roll tick");
+        ResolveHit(vulnerableTick);
+        Assert.Equal(hpBeforeRoll - damage, entity.Stats.Health);
     }
 
     [Fact]

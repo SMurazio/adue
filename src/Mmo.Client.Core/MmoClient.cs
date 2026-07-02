@@ -719,12 +719,17 @@ public sealed class MmoClient : IDisposable
         return sequence;
     }
 
-    // MOVEMENT-ACTIONS Phase B2: trigger a movement action (jump) AND PREDICT it locally (Model A — the client runs the
+    // MOVEMENT-ACTIONS Phase B2 (+ Phase D: charge/dodge-roll ride this SAME path with zero changes here — the
+    // framework payoff): trigger a movement action AND PREDICT it locally (Model A — the client runs the
     // deterministic action on its own clock from the trigger, leading the server by ~RTT along the same arc; the
     // existing reconcile carries the lead and absorbs a rejection). Resolves the def from the SHARED registry, decodes
     // the launch heading to a unit vector, and calls the predictor's BeginAction — which DECLINES (returns false) if an
-    // action is already active (one-at-a-time, design §2.8) or the trigger is degenerate. On a local decline we do NOT
-    // send the intent, mirroring exactly what the server's can-act would reject — so the spam case never mispredicts.
+    // action is already active (one-at-a-time, design §2.8), the mirrored cooldown is still running (a single
+    // CONSERVATIVE slot: with multiple actions it also declines a CROSS-action trigger the server's per-action clock
+    // would accept — safe-side, nothing is sent so nothing mispredicts; promote to a per-action mirror only as a
+    // deliberate change), or the trigger is degenerate. On a local decline we do NOT
+    // send the intent, mirroring (or under-approximating) what the server's can-act would accept — the spam case
+    // never mispredicts.
     // Otherwise mint the DEDICATED _nextActionSeq (never the move/attack seq — the NET6 third-cursor lesson) and send
     // the ActionIntent RELIABLE-ORDERED. The wire still carries only (actionId, heading) — never a height/distance/
     // duration, which live in the server-side def (anti-cheat). AuthoredTick stays 0: Model A anchors the action at the

@@ -21,5 +21,15 @@ snaps back. The cooldown case (common, double-press) was the one worth pre-decli
   reconstructing the swing-root locally (a small attack-side change). Defer unless the feel-test shows an
   attack→jump rubberband.
 
-Acceptance: a jump triggered while dead / mid swing-root is declined locally (not sent), so it produces no
-predicted-then-rejected correction; existing gate tests stay green.
+**Phase-D escalation (from the Phase D independent review, F2).** The dash actions raise the stakes: the
+attack→immediately-dash sequence (K/L during the swing-root window) is a NATURAL combat input, and the
+mispredicted-then-rejected correction is now a **2.5–4.0u horizontal snap-back** (the whole dash length),
+not a small hop. Still bounded + convergent (pinned by `Charge_RejectedByServer_ConvergesToServer`), but
+much more visible. Also: the client cooldown mirror is a single conservative slot shared across all 3
+actions (declines cross-action triggers, e.g. no jump for 2s after a charge, that the server's
+per-(entity,action) clocks would accept) — a per-action mirror is the fix, and it's a predictor change.
+Consider promoting this after the Phase D/E live feel-test.
+
+Acceptance: a jump/charge/roll triggered while dead / mid swing-root is declined locally (not sent), so it
+produces no predicted-then-rejected correction; cross-action triggers are declined only per the server's
+per-action clocks; existing gate tests stay green.

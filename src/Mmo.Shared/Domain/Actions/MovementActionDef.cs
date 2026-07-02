@@ -7,10 +7,11 @@ namespace Mmo.Shared.Domain.Actions;
 //
 // PHASE A SCOPE. Only the fields the headless ballistic-jump executor needs are wired: Id, DurationTicks, the XY
 // Trajectory, Cooldown, the gameplay Properties used now (Interruptible / CanSteer), the Vertical (ballistic-Z)
-// params, and AnimationId (carried, presentation-only, used by Phase E). IFrameTicks / CollisionMode / Hitbox from
-// the full design table are deferred to Phase D (charge/dodge-roll) and are NOT added here to avoid over-building —
-// they slot in additively as new defs. The executor is action-AGNOSTIC: it reads these fields, it has no per-action
-// branches.
+// params, and AnimationId (carried, presentation-only, used by Phase E). PHASE D adds the IFrame window (dodge-roll)
+// as pure DATA below — it slotted in additively exactly as planned. CollisionMode / Hitbox from the full design table
+// remain deferred: SlideStop-at-a-wall comes free from the shared resolver (the per-tick delta pins at the wall face,
+// the P5 gnoll-charge precedent), and the contact hitbox is a later combat hook. The executor is action-AGNOSTIC: it
+// reads these fields, it has no per-action branches.
 public sealed record MovementActionDef
 {
     public required ActionId Id { get; init; }
@@ -54,6 +55,18 @@ public sealed record MovementActionDef
     // The client visual id (presentation-only). For a jump the animation is DRIVEN BY the real replicated Z, not a
     // separate cosmetic arc (design §1.1). Phase A only carries it; Phase E wires the animations.
     public int AnimationId { get; init; }
+
+    // MOVEMENT-ACTIONS (Phase D): the SERVER-AUTHORITATIVE invulnerability window (design §1.1 IFrameTicks / §2.7),
+    // in ACTION-LOCAL ticks, INCLUSIVE at both ends, anchored at the trigger tick (elapsed = serverTick − startTick;
+    // tick 0 is the trigger/takeoff frame, ticks 1..DurationTicks are the active span). Empty — both 0, the default —
+    // means NO i-frames (jump/charge). Only the dodge-roll authors it. Pure DATA: the executor exposes the window via
+    // HasActiveIFrames for the DAMAGE seam; the wire carries only (actionId, heading), so a client can neither claim
+    // nor extend a window (anti-cheat, design §2.7) — the client only RENDERS the roll, the server DECIDES the damage.
+    public uint IFrameStartTick { get; init; }
+    public uint IFrameEndTick { get; init; }
+
+    // True iff this def authors a non-empty i-frame window (an inclusive [start, end] with end >= start and end > 0).
+    public bool HasIFrameWindow => IFrameEndTick > 0 && IFrameEndTick >= IFrameStartTick;
 }
 
 // MOVEMENT-ACTIONS (Phase A): the per-tick XY trajectory delegate (design §1.1). PURE + DETERMINISTIC + SHARED —

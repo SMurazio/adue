@@ -659,7 +659,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// in B1 (no client prediction) — a brief delay before the avatar rises is expected and correct for B1.
 		if (key.Keycode == Key.J && _chatInput?.HasFocus() != true)
 		{
-			TryJump();
+			TryMovementAction(ActionId.Jump, "Jump!");
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// MOVEMENT-ACTIONS Phase D — TEMPORARY DEV TRIGGERS (Phase E replaces these with real skill-input binding,
+		// exactly like J): K fires a CHARGE (a fast forward dash along the aim/facing heading, early-stopping at
+		// walls/bodies) and L a DODGE-ROLL (a short dash with SERVER-authoritative i-frames — the client only renders
+		// the roll; the damage negation is decided server-side). Both ride the SAME client-predicted action stream the
+		// jump uses (MmoClient.SendAction → BeginAction; one-at-a-time + the mirrored cooldown decline locally). K/L
+		// are otherwise unbound (no collision with WASD, E/F, Space, J, panels, chat keys). Not while typing in chat.
+		if (key.Keycode == Key.K && _chatInput?.HasFocus() != true)
+		{
+			TryMovementAction(ActionId.Charge, "Charge!");
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+		if (key.Keycode == Key.L && _chatInput?.HasFocus() != true)
+		{
+			TryMovementAction(ActionId.DodgeRoll, "Roll!");
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -727,29 +746,31 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 	}
 
-	// MOVEMENT-ACTIONS Phase B2 — TEMPORARY DEV TRIGGER (Phase E replaces it with real skill-input binding): trigger a
-	// ballistic-jump on the action stream (MmoClient.SendAction, its OWN cursor) — now CLIENT-PREDICTED (Model A): the
-	// jump moves the local avatar INSTANTLY (predicted), leading the server by ~RTT along the same arc, and the
-	// reconcile keeps it glued unless the server rejects. The launch HEADING is the cursor aim (or the discrete facing),
-	// quantized via the SAME shared AimAngle the attack aim uses, so client predict + server execute decode the
-	// identical unit heading. SendAction returns null when the trigger is DECLINED locally (one-at-a-time: an action is
-	// already in flight) — in that case nothing was sent and we show no feedback, mirroring the server's can-act reject.
-	private void TryJump()
+	// MOVEMENT-ACTIONS Phase B2 / D — TEMPORARY DEV TRIGGER (Phase E replaces it with real skill-input binding):
+	// trigger a movement action (jump / charge / dodge-roll) on the action stream (MmoClient.SendAction, its OWN
+	// cursor) — CLIENT-PREDICTED (Model A): the action moves the local avatar INSTANTLY (predicted), leading the
+	// server by ~RTT along the same path, and the reconcile keeps it glued unless the server rejects. The launch
+	// HEADING is the cursor aim (or the discrete facing), quantized via the SAME shared AimAngle the attack aim uses,
+	// so client predict + server execute decode the identical unit heading (for the dodge-roll too — a roll goes
+	// where you aim, the minimal dev binding; a roll-along-held-WASD variant is Phase E UX). SendAction returns null
+	// when the trigger is DECLINED locally (one-at-a-time / mirrored cooldown) — nothing was sent and we show no
+	// feedback, mirroring the server's can-act reject.
+	private void TryMovementAction(ActionId actionId, string feedback)
 	{
 		if (_client?.IsLoggedIn != true)
 		{
 			return;
 		}
 
-		// Aim the jump along the cursor when available (so a forward-arc jump goes where the player is looking), else
+		// Aim the action along the cursor when available (so the dash/arc goes where the player is looking), else
 		// fall back to the discrete facing — exactly the aim source TryAttack uses, so the heading is always defined.
 		var headingRadians = TryGetAimToCursor(out var cursorAim)
 			? cursorAim
 			: LocalFacingRadians();
 
-		if (_client.SendAction((byte)ActionId.Jump, AimAngle.Quantize(headingRadians)) is not null)
+		if (_client.SendAction((byte)actionId, AimAngle.Quantize(headingRadians)) is not null)
 		{
-			ShowInteractFeedback("Jump!");
+			ShowInteractFeedback(feedback);
 		}
 	}
 

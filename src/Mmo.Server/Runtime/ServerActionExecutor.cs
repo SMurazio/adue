@@ -88,6 +88,31 @@ public sealed class ServerActionExecutor
     public ActionId ActiveAction(ulong entityId) =>
         _active.TryGetValue(entityId, out var inst) ? inst.Def.Id : ActionId.None;
 
+    // MOVEMENT-ACTIONS (Phase D, i-frame authority — design §2.7): TRUE iff `entityId` is INSIDE its running action's
+    // i-frame window at `serverTick`. READ-ONLY — the DAMAGE seam (ApplyMonsterAttack) queries it; nothing here or on
+    // the wire lets a client carry, fake, or extend a window (the intent carries only actionId + heading, and the
+    // window is the SERVER def's data anchored at the SERVER-side start tick). The window is the def's inclusive
+    // [IFrameStartTick, IFrameEndTick] in action-local ticks, evaluated as elapsed = serverTick − StartTick — anchored
+    // on the CLOCK rather than TickInAction so the answer is identical whether damage resolves before or after this
+    // tick's StepAll pass (the monster-AI attack pass runs BEFORE StepAll in the tick loop). No action / no window /
+    // outside the window ⇒ false. A pre-start tick underflows huge in uint arithmetic and correctly reads false.
+    public bool HasActiveIFrames(ulong entityId, uint serverTick)
+    {
+        if (!_active.TryGetValue(entityId, out var inst))
+        {
+            return false;
+        }
+
+        var def = inst.Def;
+        if (!def.HasIFrameWindow)
+        {
+            return false;
+        }
+
+        var elapsed = serverTick - inst.StartTick;
+        return elapsed >= def.IFrameStartTick && elapsed <= def.IFrameEndTick;
+    }
+
     // True iff `entity` may trigger `def` at `serverTick`: not already in an action (one-at-a-time, design §2.8), off
     // this action's cooldown clock (design §1.1), and NOT movement-rooted (design §2.1 can-act "not rooted"). Pure —
     // does NOT mutate. These are the ENTITY-level can-act gates the executor owns; the SESSION-level gate (alive) and

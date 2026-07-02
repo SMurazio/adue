@@ -208,6 +208,17 @@ public sealed class Zone
     // position (the same authoritative-tracking position used here), so the resolves are mutual + symmetric. Deterministic
     // order (the grid's stable candidate order, then the Id sort). Reuses the Zone's candidate scratch internally; appends
     // Circles to the caller's reused `destination`. NO per-tick alloc.
+    // MOVEMENT-ACTIONS Phase D: the ACTION-EXECUTOR body-obstacle gather for a PLAYER'S ground dash (charge /
+    // dodge-roll) — a thin PUBLIC forwarder to the SAME GatherEntityObstacles the walking integrator uses (monsters +
+    // other players when the toggle is on, self ALWAYS excluded, stable Id order), so a dashing player collides with
+    // the IDENTICAL body set, gate, and resolve ORDER its walking does. The client predictor already feeds its
+    // per-frame obstacle gather to ACTION frames too (PredictAndSendMove passes the set unconditionally), so reusing
+    // this gather is what makes the dash's entity early-stop land at the SAME contact on both sides (parity — a
+    // divergent set/order here would rubber-band every charge into a crowd). Safe to call from the executor's StepAll:
+    // the tick loop is single-threaded and never inside an IntegrateMovement (the candidate scratch is not in use).
+    public void GatherBodyObstacles(WorldEntity self, WorldVector start, double radius, List<ContinuousCollision.Circle> destination)
+        => GatherEntityObstacles(self, start, radius, destination);
+
     private void GatherEntityObstacles(WorldEntity self, WorldVector start, double radius, List<ContinuousCollision.Circle> destination)
     {
         destination.Clear();

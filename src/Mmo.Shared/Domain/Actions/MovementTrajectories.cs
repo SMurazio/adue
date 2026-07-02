@@ -3,7 +3,8 @@ namespace Mmo.Shared.Domain.Actions;
 // MOVEMENT-ACTIONS (Phase A): the SHARED, DETERMINISTIC seed trajectory functions (design §1.2). Each is a pure
 // (ctx, tickInAction) -> per-tick XY delta function — the crux of the determinism contract (design §2.3): client
 // predict, client replay, and server execute call the IDENTICAL function, so "adding a new action is cheap" (a new
-// def + a one-liner here). Phase A ships only the Jump XY trajectories; Charge/DodgeRoll trajectories are Phase D.
+// def + a one-liner here). Phase A shipped the Jump XY trajectories; Phase D's Charge/DodgeRoll REUSE ForwardArc
+// verbatim (a grounded constant-speed dash is the same XY primitive with a zero apex) — no new trajectory needed.
 //
 // THE Z IS NOT HERE. A jump's vertical comes from BallisticArc over the def's (JumpHeight, AirborneTicks) — the
 // XY/Z split (design §1.4.1). These functions produce ONLY the ground-plane displacement; the executor adds the
