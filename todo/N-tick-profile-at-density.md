@@ -1,6 +1,12 @@
-# S — profile the tick's superlinear cost at 150–200 clients (measure BEFORE any scaling work)
+# N — profile the tick's superlinear cost at 150–200 clients (measure BEFORE any scaling work)
 
-Measured (2026-07-02, live PID sampling during /stress): server CPU 68% of one core @120 bots → ~107% @200 —
+**DEFERRED by the user (2026-07-02): "don't invest on tradeoffs for now — just document them and document the
+solution."** This file IS that documentation: the measurement below is the evidence, the levers section is the
+tradeoff catalogue, and the profile is the agreed first step WHEN density work resumes. Two mitigations already
+shipped meanwhile: the remote-render correction smoothing (`daa71fd`, the perception half) and the AOI radius
+30 → 18 (`0d980dc`, ~2.8× less per-viewer AOI/snapshot load — likely pushes one-core saturation well past 200).
+
+Measured (2026-07-02, live PID sampling during /stress, at the OLD radius 30): server CPU 68% of one core @120 bots → ~107% @200 —
 superlinear, and the single-threaded tick loop nearing one-core saturation is what made snapshot cadence bursty
 (the load half of the crowd-shimmer finding; the render half shipped in `daa71fd`). We do NOT yet know which pass
 is superlinear. Per the project rule, measure first — this task is ONLY the profile + writeup, no optimization.
