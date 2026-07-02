@@ -1058,6 +1058,21 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		};
 		AddChild(light);
 
+		// AGX-TONEMAP: match Blender's default AgX view transform. Godot defaults to Linear tonemapping, which reads
+		// over-saturated / "too yellow" vs Blender's muted browns; AgX rolls off + desaturates the warm tones the same
+		// way. Scene-wide via a WorldEnvironment. A modest neutral ambient keeps the non-toon models' shadow sides
+		// readable (the cat's shader disables ambient itself); the sun stays the key light.
+		var environment = new Godot.Environment
+		{
+			BackgroundMode = Godot.Environment.BGMode.Color,
+			BackgroundColor = new Color(0.36f, 0.40f, 0.45f),
+			AmbientLightSource = Godot.Environment.AmbientSource.Color,
+			AmbientLightColor = new Color(0.55f, 0.55f, 0.60f),
+			AmbientLightEnergy = 0.35f,
+			TonemapMode = Godot.Environment.ToneMapper.Agx
+		};
+		AddChild(new WorldEnvironment { Name = "WorldEnvironment", Environment = environment });
+
 		_camera = new Camera3D
 		{
 			Name = "Camera",
