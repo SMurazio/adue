@@ -21,9 +21,15 @@ public sealed class SyntheticClientLoad : IDisposable
 
     public bool IsRunning => _clients.Count > 0;
 
-    public void Start(int clientCount, TimeSpan duration, int serverPort, string connectionKey)
+    // The LIVE server base move speed (units/s). Threaded in from GameServer as a Func so the bots' local
+    // dead-reckon tracks live continuous.baseMoveSpeed changes (multiplier tweaks), not a start-time snapshot.
+    private Func<double> _baseSpeedProvider = () => 1000d / 150d;
+
+    public void Start(int clientCount, TimeSpan duration, int serverPort, string connectionKey, Func<double> baseSpeedProvider)
     {
         Stop();
+
+        _baseSpeedProvider = baseSpeedProvider;
 
         _startedAt = DateTimeOffset.UtcNow;
         _endsAt = _startedAt + duration;
@@ -35,7 +41,7 @@ public sealed class SyntheticClientLoad : IDisposable
         var prefix = $"Test{_startedAt:HHmmss}";
         for (var i = 0; i < clientCount; i++)
         {
-            var client = new SyntheticClient(i, $"{prefix}{i + 1:000}", serverPort, connectionKey, this);
+            var client = new SyntheticClient(i, $"{prefix}{i + 1:000}", serverPort, connectionKey, this, _baseSpeedProvider);
             client.Start();
             _clients.Add(client);
         }
@@ -136,9 +142,10 @@ public sealed class SyntheticClientLoad : IDisposable
         // locally (approximate; it only needs to keep the wander in-bounds), so no snapshot parsing is required.
         private const double WanderMinCoord = 24d;    // interior of the 128-tile map so bots don't pile at the edges
         private const double WanderMaxCoord = 104d;
-        private const double NominalSpeedUnitsPerSecond = 4d; // ~1000/250ms step cooldown; dead-reckon pacing only
         private const double WaypointReachRadius = 1.5d;
         private const double ArrivalIdleChance = 0.25d;       // ~a quarter of arrivals pause before moving on
+        private const double MaxTurnRateRadPerSecond = 4d;    // rate-limit heading changes so turns EASE, not snap
+        private const double MinWaypointDistanceUnits = 12d;  // keep new waypoints far enough to avoid rapid re-picking
 
         private static readonly TimeSpan MinIdle = TimeSpan.FromMilliseconds(400);
         private static readonly TimeSpan MaxIdle = TimeSpan.FromMilliseconds(2200);
@@ -147,6 +154,11 @@ public sealed class SyntheticClientLoad : IDisposable
         private readonly int _serverPort;
         private readonly string _connectionKey;
         private readonly SyntheticClientLoad _owner;
+        // The LIVE server base move speed (units/s) — the bot's ACTUAL server movement runs at this, so the local
+        // dead-reckon must too or the estimate lags the true position and the wander oversteers. Live Func (not a
+        // snapshot) so multiplier tweaks (continuous.baseMoveSpeed) retune the estimate the same tick they retune
+        // the real movement. (Was a hardcoded 4d that never matched the ~6.667 base → the oversteer bug.)
+        private readonly Func<double> _baseSpeedProvider;
         private readonly Random _random;
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
@@ -173,14 +185,16 @@ public sealed class SyntheticClientLoad : IDisposable
         private double _estY;
         private double _targetX;
         private double _targetY;
+        private double _headingAngle; // current send heading (radians); eased toward the waypoint, never snapped
         private TimeSpan _idleUntil;
 
-        public SyntheticClient(int id, string name, int serverPort, string connectionKey, SyntheticClientLoad owner)
+        public SyntheticClient(int id, string name, int serverPort, string connectionKey, SyntheticClientLoad owner, Func<double> baseSpeedProvider)
         {
             _name = name;
             _serverPort = serverPort;
             _connectionKey = connectionKey;
             _owner = owner;
+            _baseSpeedProvider = baseSpeedProvider;
             _random = new Random(Environment.TickCount + id);
             _client = new NetManager(_listener)
             {
@@ -210,11 +224,41 @@ public sealed class SyntheticClientLoad : IDisposable
             _nextKeepaliveAt = TimeSpan.FromMilliseconds(_random.Next(0, 500));
         }
 
-        // A fresh random interior waypoint for the bot to walk toward.
+        // A fresh random interior waypoint at least MinWaypointDistanceUnits away, so the bot doesn't reach it
+        // instantly and re-pick in a tight jitter (which whipped the heading around). Falls back to the last draw
+        // after a few attempts so this always terminates.
         private void PickWaypoint()
         {
-            _targetX = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
-            _targetY = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                var x = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
+                var y = WanderMinCoord + (_random.NextDouble() * (WanderMaxCoord - WanderMinCoord));
+                var dx = x - _estX;
+                var dy = y - _estY;
+                if (attempt == 7 || ((dx * dx) + (dy * dy)) >= (MinWaypointDistanceUnits * MinWaypointDistanceUnits))
+                {
+                    _targetX = x;
+                    _targetY = y;
+                    return;
+                }
+            }
+        }
+
+        // Rotate `current` toward `target` (radians) by at most `maxDelta`, taking the short way around the circle.
+        private static double RotateToward(double current, double target, double maxDelta)
+        {
+            var diff = target - current;
+            while (diff > Math.PI)
+            {
+                diff -= 2d * Math.PI;
+            }
+
+            while (diff < -Math.PI)
+            {
+                diff += 2d * Math.PI;
+            }
+
+            return current + Math.Clamp(diff, -maxDelta, maxDelta);
         }
 
         public void Poll(TimeSpan elapsed, int deltaTimeMs)
@@ -242,6 +286,7 @@ public sealed class SyntheticClientLoad : IDisposable
                 _estX = 32d + (_random.NextDouble() * 64d);
                 _estY = 32d + (_random.NextDouble() * 64d);
                 PickWaypoint();
+                _headingAngle = Math.Atan2(_targetY - _estY, _targetX - _estX); // start already facing the first waypoint
             }
 
             // Arrived at the waypoint (and not mid-pause)? Occasionally pause like a player, then head somewhere new.
@@ -261,22 +306,24 @@ public sealed class SyntheticClientLoad : IDisposable
                 }
             }
 
-            // Steer on a CONTINUOUS heading toward the waypoint (idle → no heading). Dead-reckon the estimate by the
-            // real poll dt so waypoints get reached at roughly the true pace.
+            // Steer toward the waypoint, but TURN GRADUALLY (rate-limited heading) instead of snapping to the new
+            // direction the instant a waypoint changes — so the bot curves into it like a real client rather than
+            // whipping its heading (the snap read as "doesn't turn correctly"). Dead-reckon along the eased heading.
             var desiredMoving = elapsed >= _idleUntil;
             var desiredDir = WorldVector.Zero;
             if (desiredMoving)
             {
                 var dx = _targetX - _estX;
                 var dy = _targetY - _estY;
-                var dist = Math.Sqrt((dx * dx) + (dy * dy));
-                if (dist > 1e-6d)
+                if (((dx * dx) + (dy * dy)) > 1e-6d)
                 {
-                    var inv = 1d / dist;
-                    desiredDir = new WorldVector(dx * inv, dy * inv);
                     var stepDt = Math.Clamp(deltaTimeMs / 1000d, 0d, 0.1d);
-                    _estX += desiredDir.X * NominalSpeedUnitsPerSecond * stepDt;
-                    _estY += desiredDir.Y * NominalSpeedUnitsPerSecond * stepDt;
+                    _headingAngle = RotateToward(_headingAngle, Math.Atan2(dy, dx), MaxTurnRateRadPerSecond * stepDt);
+                    desiredDir = new WorldVector(Math.Cos(_headingAngle), Math.Sin(_headingAngle));
+                    // Dead-reckon at the LIVE server base speed so the estimate matches the bot's real movement.
+                    var baseSpeed = _baseSpeedProvider();
+                    _estX += desiredDir.X * baseSpeed * stepDt;
+                    _estY += desiredDir.Y * baseSpeed * stepDt;
                 }
                 else
                 {

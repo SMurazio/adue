@@ -2100,7 +2100,8 @@ public sealed class GameServer
             : DefaultStressDuration;
         duration = ClampDuration(duration, TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(10));
 
-        _syntheticLoad.Start(clientCount, duration, _options.Port, _options.ConnectionKey);
+        // Pass a live base-speed Func so the bots' local dead-reckon tracks continuous.baseMoveSpeed changes.
+        _syntheticLoad.Start(clientCount, duration, _options.Port, _options.ConnectionKey, () => _tuning.BaseMoveSpeedUnitsPerSecond);
         SendSystem(sender, $"stress started: clients={clientCount}, duration={FormatDuration(duration)}.");
         Log.Info($"{sender.DisplayName} started synthetic load: clients={clientCount}, duration={FormatDuration(duration)}.");
     }
