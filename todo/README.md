@@ -1,7 +1,6 @@
 # TODO Queue
 
-Each file here is one self-contained work item, produced from a code review. An agent works
-through them and removes them as they land.
+Each file here is one self-contained work item. An agent works through them and removes them as they land.
 
 ## Convention
 
@@ -16,24 +15,39 @@ through them and removes them as they land.
 - Do not expand scope beyond what a file describes. New issues discovered along the way become
   new `todo/` files, not silent extra changes.
 
-## Current priority order (as of 2026-06-19)
+## Current priority order (as of 2026-07-02, post-continuous-migration)
 
-`S` before `N` is the baseline, but several `S` items are live at once. Active order:
+Branch of record: `feat/continuous-migration` (fully continuous-native; `main` is still frozen tile).
+The old tile-era order (S41/S36b/S42) is long shipped or obsolete. Active order:
 
-1. **Optimization / scaling track (do first):**
-   - `S41` grid/spatial-hash AOI — **in progress**. Now *warranted, not preventative*: S44's scattered
-     node entities made the naive AOI scan the dominant tick cost (0.14 → 1.38 ms at 120 clients).
-   - `S36b` Godot per-chunk render+cull — depends on `S42`; client/visual.
-2. **Feel-polish:** `S28` VSync/stutter (labelled nice-to-have despite the `S` prefix; needs a human).
+1. **Quick hardening wins (small, do first):**
+   - `N-atomic-manifest-write` — temp-file + atomic move for the F1 Save manifest write.
+   - `N-docs-hygiene-resync` — add the protocol.md ↔ `ProtocolCodec.Version` drift gate.
+   - `monster-types-followups` — `/clearspawners` admin command (+ the ~300 ms prose nit).
+   - `loot-followups` — #1 construction-time tableRef cycle detection (+ #2 coverage).
+2. **Guardrail compliance:** `N-movement-trace-live-toggle` — `MMO_DEBUG_MOVEMENT` env var
+   violates the live-toggle rule; make it an F1 checkbox.
+3. **Netcode feel (measure first, full rigor):** `N-gnoll-walk-jitter-extrapolation` —
+   remote extrapolation of a turning entity; then `N-remote-extrapolation-followups` as gated.
+4. **Feature track:** `S-movement-actions-phase-d` (charge + dodge-roll — framework proven by
+   A/B/C, adding actions should now be cheap) → `N-movement-actions-phase-e` (skill-input wiring
+   + animations; needs ART + human feel-tests).
+5. **Deferred / trigger-gated:** `monster-ai-dormancy` (implement when monster-AI tick cost is
+   measured material), `N-phaseC-monster-dense-bandwidth-stress` (run with the next stress pass),
+   `N-test-suite-audit-tile-era-cruft`, remaining phase-followup files, `S28` (needs a human,
+   nice-to-have despite the prefix).
 
-**Done this session** (the gameplay loop + both correct-model pivots are validated):
-- Gather loop: `S37` inventory, `S38` harvest verb, `S39` client UI, `S44` world-scattered nodes — playable.
-- Terrain pivot: `S42` seed-based (ship the map, not the tiles; abandoned the chunked-streaming S36/S36a).
-- Movement pivot: `S43` held-direction intent (retired `N21`); `S40` capacity study.
+## Waiting on the HUMAN (not agent-workable; ask, don't block)
 
-Dependencies: `S36b` needs `S42` (the map is local now); `S41` independent.
+- **Feel-tests pending:** walk-anim-idles-when-blocked (`31ab750`), free-angle movement
+  (`825d0ba`), movement speed multipliers (`ea15bea`), monster behaviors P2/P4/P5 (gnoll
+  glide/flee/charge), AgX tonemapping (`5c2823d`).
+- **Merge decision:** `feat/continuous-migration` → `main` (hard replacement of tile) after the
+  full feel-test.
+- **Scope confirmations:** `N-retire-web-client` (retirement final?), the `docs/tile-audit.md`
+  DECISION items (persistence tile cols, spatial-grid cell size, AOI gather-quant),
+  `N-slime-feel-polish` (needs the user's feel verdict).
+- **ART:** monster P6 real per-type visuals/animations (placeholder tint/scale shipped).
 
-> **Protocol changes must update `docs/protocol.md`** (version + message list) in the same unit of work —
-> it drifted to v12 while the wire reached v13; don't let it happen again.
-
-Source review: tile-stepped movement branch (`movement/tile-stepped`).
+> **Protocol changes must update `docs/protocol.md`** (version + message list) in the same unit of
+> work. `N-docs-hygiene-resync` adds a gate test so this drift fails the build instead of recurring.
