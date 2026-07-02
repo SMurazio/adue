@@ -26,6 +26,12 @@ How comparable games run hundreds+ (user asked, 2026-07-02):
 - **Skip-unchanged-velocity re-sends**: a half-step toward event-driven for steady movers (velocity already
   replicated); careful — reintroduces the staleness class the per-tick force-include retired.
 - **Threading/split**: the guardrail says single process until metrics justify — this profile IS those metrics.
+- **Albion-class (the closest comparable — also a C# server)**: one process per ZONE scaled horizontally, hot
+  zones live-migrated to dedicated hardware, zone population CAPPED + queued (the "smart cluster queue" exists
+  because uncapped ZvZ lag was chronic), remotes rendered with ~100-200ms interpolation delay at ~10Hz-class
+  update rates, plus years of hot-loop optimization. Existence proof that a C# single-process zone hosts ~300 in
+  combat — but note every piece trades something (remote latency, zone caps) we currently don't. Our unprofiled
+  tick at ~107%/core with 200 all-moving bots is roughly their starting point, not their ceiling.
 
 Design target remains 120–150 visible (holds with headroom); 200 all-moving bots in one small map is a worst
 case. Relates to [[N-remote-smoothness-tooling]] (#4 tick-schedule jitter metric would ride along nicely).
