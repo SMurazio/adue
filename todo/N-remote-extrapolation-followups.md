@@ -2,9 +2,12 @@
 
 From the independent review of the remote-walk velocity+extrapolation feature (v39, `c581922` + `e231359`). The dominant symptom (choppy straight walking) is FIXED and shipped. These are two bounded edge artifacts to address **only if the human feel-test finds them objectionable** — don't pre-optimize.
 
-## 1. Reversal staleness (~1 tile of old-direction glide on a sharp reversal)
-The client extrapolates along the last-RECEIVED velocity. The walk integrator (`WorldEntity.ComputeMoveDelta`, ~`:538`) updates `Facing`/`Velocity` SILENTLY and only re-publishes (`StateRevision` bump) on a **tile crossing** (`ApplyResolvedMove`, ~`:521`). So a remote viewer's velocity sample is fresh only as of the last tile crossing (~250ms). On a sharp direction reversal a remote viewer briefly dead-reckons ~1 tile in the OLD direction before the next crossing corrects it. (My `e231359` commit msg wrongly implied a facing change bumps StateRevision — it does so only via `TrySetFacing`/the monster path, NOT the player walk integrator.)
-**Fix if needed:** re-publish (bump `StateRevision`, or force-include for one tick) when an entity's velocity **direction/magnitude changes meaningfully**, not just on tile crossing — so a fresh velocity sample reaches viewers promptly on turns. Cost: extra re-sends on direction changes (bounded; not per-tick). Touches the hot integrator → measure, gate, review.
+## ~~1. Reversal staleness~~ — RESOLVED by `5290233` (which postdates this note)
+The premise ("a velocity sample is fresh only as of the last tile crossing") died when `5290233` shipped the
+per-tick force-include of MOVING entities (`forceMoving = Velocity.LengthSquared > 0` → re-sent every tick while
+moving, `GameServer.cs:~1109`). A turning/reversing entity now replicates a fresh resolved velocity every snapshot
+(~50ms), so the ~1-tile old-direction glide can't happen. No action; kept for the record because the fix this item
+proposed is effectively what shipped (stronger: per-tick, not per-change).
 
 ## 2. Stop overshoot at high latency / packet loss (~1 tile, bounded by the 250ms cap)
 If a stop confirm is lost or arrives after the playout buffer has entered starvation, the render glides up to the `MaxExtrapolationMs`=250ms cap (~1 tile at walk speed 4 u/s) then snaps/lerps back when the next confirm lands. At LAN latency the 125ms playout delay absorbs it (no artifact); the risk is ~200-300ms+ RTT with a stop right after a tile crossing.
