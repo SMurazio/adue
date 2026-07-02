@@ -20,7 +20,7 @@ public sealed partial class PlayerVisual : EntityVisual
     // Cato cat model (FBX + T_Cato.jpg imported into the same folder), substituting the old rig. Godot 4.6/4.7
     // imports FBX natively (ufbx); its AnimationPlayer clips are resolved by keyword below. If it imports grey the
     // embedded texture didn't assign — ApplyCatoTexture forces T_Cato.jpg as the albedo.
-    private const string ModelPath = "res://content/characters/Cato.fbx";
+    private const string ModelPath = "res://content/characters/cato_test.fbx";
 
     // TUNABLE — FIRST GUESS for the cat (native size unknown until imported; asset packs vary wildly). Adjust once
     // it's on screen.
@@ -252,47 +252,48 @@ public sealed partial class PlayerVisual : EntityVisual
     private static Texture2D? _catoTexture;
     private static bool _catoTextureAttempted;
 
-    // CEL SHADER: sample the albedo, then band N·L into just two tones — full-lit and a lifted shadow_floor — at a
-    // FIXED magnitude that ignores the sun's 2.4 energy, so the cat neither blows out (too bright) nor goes near-black
-    // (too dark). Tunables: band_threshold = where the shadow line falls; shadow_floor = how dark the shadow tone is.
-    private const string CelShaderCode = @"
-shader_type spatial;
-render_mode specular_disabled;
+    // The cat material as an EDITABLE Godot resource: a ShaderMaterial .tres wrapping cato_toon.gdshader + T_Cato.jpg.
+    // Loading the .tres directly means you can open it in Godot and tweak the shader uniforms (rim, bands) in the
+    // inspector — proper lookdev — and the game picks up whatever you save. The .gdshader is the shader itself.
+    private const string CatoMaterialPath = "res://content/characters/cato_material.tres";
+    private const string CatoShaderPath = "res://content/characters/cato_toon.gdshader";
+    private static Material? _catoMaterial;
 
-uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
-uniform float band_threshold : hint_range(0.0, 1.0) = 0.4;
-uniform float shadow_floor : hint_range(0.0, 1.0) = 0.6;
-
-void fragment() {
-    ALBEDO = texture(albedo_tex, UV).rgb;
-}
-
-void light() {
-    float ndotl = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
-    float lit = smoothstep(band_threshold - 0.03, band_threshold + 0.03, ndotl);
-    float band = mix(shadow_floor, 1.0, lit);
-    DIFFUSE_LIGHT += ALBEDO * band * ATTENUATION;
-}
-";
-
-    private static ShaderMaterial? _catoMaterial;
-
-    // Load T_Cato.jpg once, build the cel-shader material (albedo fed in as a uniform), and apply it as a material
-    // override on every MeshInstance3D in the model. A failed texture load is warned once and leaves the model grey.
+    // Resolve the cat material once and apply it as a material override on every MeshInstance3D in the model.
+    // Preference order: (1) the editable cato_material.tres (lookdev — carries the shader + albedo already);
+    // (2) build a ShaderMaterial from cato_toon.gdshader in code with the texture fed in; (3) a plain unlit textured
+    // material so the cat still shows. A missing texture is warned once and leaves the model as imported.
     private static void ApplyCatoTexture(Node root)
     {
         if (!_catoTextureAttempted)
         {
             _catoTextureAttempted = true;
             _catoTexture = GD.Load<Texture2D>(CatoTexturePath);
-            if (_catoTexture is null)
+
+            if (ResourceLoader.Exists(CatoMaterialPath) && GD.Load<Material>(CatoMaterialPath) is { } authored)
+            {
+                // The .tres already references the shader + texture; use it as-is so inspector tweaks apply. Guarded
+                // by ResourceLoader.Exists so a not-yet-authored material doesn't spam a red load error each run.
+                _catoMaterial = authored;
+            }
+            else if (_catoTexture is null)
             {
                 GD.PushWarning($"Cato: could not load texture '{CatoTexturePath}'; model stays grey.");
             }
+            else if (GD.Load<Shader>(CatoShaderPath) is { } shader)
+            {
+                var material = new ShaderMaterial { Shader = shader };
+                material.SetShaderParameter("albedo_tex", _catoTexture);
+                _catoMaterial = material;
+            }
             else
             {
-                _catoMaterial = new ShaderMaterial { Shader = new Shader { Code = CelShaderCode } };
-                _catoMaterial.SetShaderParameter("albedo_tex", _catoTexture);
+                GD.PushWarning($"Cato: could not load shader '{CatoShaderPath}'; falling back to a plain textured material.");
+                _catoMaterial = new StandardMaterial3D
+                {
+                    AlbedoTexture = _catoTexture,
+                    ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
+                };
             }
         }
 

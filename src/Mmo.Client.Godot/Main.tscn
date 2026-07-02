@@ -1,6 +1,6 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://chijogh4nar3t"]
 
-[ext_resource type="Script" path="res://MmoClientRoot.cs" id="1_3o0sj"]
+[ext_resource type="Script" uid="uid://bblgyrxqgamtc" path="res://MmoClientRoot.cs" id="1_3o0sj"]
 
-[node name="MmoClientRoot" type="Node3D"]
+[node name="MmoClientRoot" type="Node3D" unique_id=276949239]
 script = ExtResource("1_3o0sj")
