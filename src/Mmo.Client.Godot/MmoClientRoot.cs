@@ -367,7 +367,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	[Export] public string Host { get; set; } = ReadString("MMO_HOST", "127.0.0.1");
 	[Export] public int Port { get; set; } = ReadInt("MMO_PORT", 7777);
 	[Export] public string ConnectionKey { get; set; } = ReadString("MMO_CONNECTION_KEY", "local-dev");
-	[Export] public string PlayerName { get; set; } = ReadString("MMO_PLAYER_NAME", $"Godot{Random.Shared.Next(1000, 9999)}");
+	// Login name. MMO_PLAYER_NAME picks it (the launch script sets GodotA/GodotB, which the server marks admin). When
+	// that env var is UNSET: in the Godot EDITOR (F5 play) default to "Admin" — an admin name — so the F1 admin panel
+	// works during lookdev/dev; in a standalone build, a random name. The launch's env var still wins for GodotA/GodotB.
+	[Export] public string PlayerName { get; set; } = ReadString(
+		"MMO_PLAYER_NAME",
+		OS.HasFeature("editor") ? "Admin" : $"Godot{Random.Shared.Next(1000, 9999)}");
 	[Export] public float CameraSize { get; set; } = 28f;
 	[Export] public double FrameHitchThresholdMs { get; set; } = ReadDouble("MMO_GODOT_FRAME_HITCH_MS", 33.3d);
 
