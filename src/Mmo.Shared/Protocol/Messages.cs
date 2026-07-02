@@ -28,7 +28,7 @@ public sealed record LoginRequestMessage(string AccountName, string DisplayName)
 // per-input sanity clamp bounds DtSeconds into [0, ~0.25s], AND a per-peer WALL-CLOCK dt BUDGET caps the TOTAL
 // integrated sim-time to real elapsed time (+ a small burst allowance for jitter). Net: over any window a peer's
 // integrated distance cannot exceed real-time distance. See ClientSession.ConsumeMoveDtBudget + GameServer.
-// Sent UNRELIABLE-sequenced (latest frame wins; a dropped input is superseded by the next frame's).
+// Sent plain UNRELIABLE (freshness is gated by InputSeq server-side; a dropped input is superseded by the next frame's).
 public sealed record MoveIntentMessage(uint InputSeq, float DirX, float DirY, float DtSeconds) : IProtocolMessage
 {
     public MessageType Type => MessageType.MoveIntent;
