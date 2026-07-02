@@ -2493,14 +2493,32 @@ public sealed class GameServer
     // Content/monsters.json (the network handler always passes MonsterManifestPath, the file a restart loads).
     internal static bool TrySaveMonsterTypes(MonsterTypeRegistry registry, string path, out string error)
     {
+        // ATOMIC WRITE: serialize to a temp file IN THE SAME DIRECTORY, then File.Move(overwrite) it into place —
+        // an atomic same-volume replace. A crash mid-write can no longer leave a half-written (corrupt)
+        // monsters.json for the next startup to choke on; the worst case is a stray .tmp file (best-effort deleted
+        // on failure below; harmless if a hard crash orphans one — LoadMonsterTypes only reads the exact manifest name).
+        var temp = path + ".tmp";
         try
         {
-            File.WriteAllText(path, registry.ToManifestJson());
+            File.WriteAllText(temp, registry.ToManifestJson());
+            File.Move(temp, path, overwrite: true);
             error = string.Empty;
             return true;
         }
         catch (Exception ex)
         {
+            try
+            {
+                if (File.Exists(temp))
+                {
+                    File.Delete(temp);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only — the original error is the one worth reporting.
+            }
+
             error = ex.Message;
             return false;
         }

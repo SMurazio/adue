@@ -51,18 +51,50 @@ public sealed class GameServerMonsterSaveTests
         }
     }
 
+    // ATOMIC WRITE: Save must REPLACE an existing manifest in place (the everyday case — every Save after the first
+    // overwrites the last one) and leave no ".tmp" staging file behind. The atomicity itself (write-temp-then-move)
+    // can't be black-box-crash-tested; this pins the observable contract: the destination holds the NEW content and
+    // the temp is gone.
+    [Fact]
+    public void TrySaveMonsterTypesReplacesAnExistingFileAndLeavesNoTempBehind()
+    {
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, ReadShippedManifest());
+
+        var path = Path.Combine(Path.GetTempPath(), $"mmo-monsters-save-{Path.GetRandomFileName()}.json");
+        try
+        {
+            File.WriteAllText(path, "{ \"stale\": \"previous save\" }");
+
+            Assert.True(GameServer.TrySaveMonsterTypes(registry, path, out var error));
+            Assert.Equal(string.Empty, error);
+
+            // The destination is the fresh manifest (reloads intact), not the stale content, and no staging file remains.
+            var reloaded = MonsterTypeRegistry.FromManifestJson(TickRate, File.ReadAllText(path));
+            Assert.Equal(registry.Types.Count, reloaded.Types.Count);
+            Assert.False(File.Exists(path + ".tmp"));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
     [Fact]
     public void TrySaveMonsterTypesReturnsFalseOnAnUnwritablePathInsteadOfThrowing()
     {
         var registry = new MonsterTypeRegistry(TickRate);
 
-        // A path whose parent directory does not exist → File.WriteAllText throws DirectoryNotFoundException, which the
-        // helper must catch + report (so the tick loop never crashes on an IO error).
+        // A path whose parent directory does not exist → the temp-file write throws DirectoryNotFoundException, which
+        // the helper must catch + report (so the tick loop never crashes on an IO error).
         var bad = Path.Combine(Path.GetTempPath(), $"mmo-no-such-dir-{Path.GetRandomFileName()}", "monsters.json");
 
         Assert.False(GameServer.TrySaveMonsterTypes(registry, bad, out var error));
         Assert.False(string.IsNullOrEmpty(error));
         Assert.False(File.Exists(bad));
+        Assert.False(File.Exists(bad + ".tmp"));
     }
 
     // Reads the shipped manifest from the test output dir (transitively copied via Mmo.Server.csproj), falling back to
