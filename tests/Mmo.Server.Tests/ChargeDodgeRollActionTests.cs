@@ -87,6 +87,64 @@ public sealed class ChargeDodgeRollActionTests
         Assert.False(executor.IsActive(entity));
     }
 
+    // ACTION-END STOP-EDGE (todo/S-dash-end-replication-bump): the reviewer-constructed replication gap. A
+    // STANDSTILL dash whose FINAL tick does not cross a rounded tile had NO re-publish path once the instance ended
+    // (IsActive false, Velocity 0, Z unchanged, no tile cross) — remote viewers held the previous tick's position
+    // indefinitely. EndInstance now bumps StateRevision unconditionally, so the delta gate (!HasAckedCurrentRevision)
+    // re-includes the final position on the next snapshot. Pinned at the mechanism level: the revision MUST advance
+    // across the final Step even when the final tick provably stays inside one rounded tile.
+    [Fact]
+    public void FlatDashEnd_BumpsStateRevision_EvenWithoutATileCross()
+    {
+        var (executor, ent) = Build(new TileCoord(8, 8));
+        // Place the roller at x=7.6 (sub-tile, still tile 8): per-tick step 0.5u → 8.1, 8.6, 9.1, 9.6, 10.1. The
+        // final tick moves 9.6 → 10.1: both round to tile 10 — the no-tile-cross final step the gap needs.
+        ent.ApplyResolvedMove(new WorldVector(7.6, 8.0));
+
+        Assert.True(executor.TryStart(ent, DodgeRollDef, new WorldVector(1, 0), serverTick: 100));
+        uint tick = 100;
+        for (var i = 1; i < DodgeRollDef.DurationTicks; i++)
+        {
+            tick++;
+            Assert.True(executor.Step(ent, tick));
+        }
+
+        // At the penultimate tick: x=9.6 (tile 10). Capture the revision the viewer would have acked.
+        Assert.Equal(9.6d, ent.Position.X, 6);
+        Assert.Equal(new TileCoord(10, 8), ent.TileCoord);
+        var ackedRevision = ent.StateRevision;
+
+        // The final tick lands at 10.1 — SAME rounded tile, grounded Z, instance removed, Velocity 0.
+        tick++;
+        Assert.False(executor.Step(ent, tick));
+        Assert.Equal(10.1d, ent.Position.X, 6);
+        Assert.Equal(new TileCoord(10, 8), ent.TileCoord);
+        Assert.False(executor.IsActive(ent));
+
+        // The action-end stop-edge: the revision advanced, so the final sub-tile position re-publishes.
+        Assert.True(ent.StateRevision > ackedRevision,
+            "action end must bump StateRevision — otherwise the dash's final sub-tile step never replicates");
+    }
+
+    // The same stop-edge must fire on a CANCEL (an interrupt mid-dash leaves the entity at an arbitrary sub-tile
+    // position with the instance gone — the identical delta'd-out exposure).
+    [Fact]
+    public void FlatDashCancel_BumpsStateRevision()
+    {
+        var (executor, ent) = Build(new TileCoord(8, 8));
+        ent.ApplyResolvedMove(new WorldVector(7.6, 8.0));
+
+        Assert.True(executor.TryStart(ent, DodgeRollDef, new WorldVector(1, 0), serverTick: 100));
+        Assert.True(executor.Step(ent, 101)); // one tick in — x=8.1, still tile 8, no cross from 7.6
+        var ackedRevision = ent.StateRevision;
+
+        executor.Cancel(ent, 102);
+
+        Assert.False(executor.IsActive(ent));
+        Assert.True(ent.StateRevision > ackedRevision,
+            "cancel must bump StateRevision — the interrupted position needs the same re-publish");
+    }
+
     [Fact]
     public void Registry_ShipsTheTwoPlayerDashDefs_WithTheExpectedShape()
     {

@@ -319,6 +319,17 @@ public sealed class ServerActionExecutor
         {
             _cooldownUntil[(entity.Id, inst.Def.Id)] = serverTick + inst.Def.CooldownTicks;
         }
+
+        // ACTION-END STOP-EDGE (todo/S-dash-end-replication-bump): re-publish the entity's FINAL action position.
+        // The instance is removed above, so IsActive no longer force-includes it, and a FLAT dash's last sub-tile
+        // step has no other re-publish path: SnapToGround only bumps when VerticalOffset actually changed (a
+        // JumpHeight=0 dash keeps Z at exactly 0 — no-op), ApplyResolvedMove only bumps on a rounded-tile crossing,
+        // and a standstill-triggered dash has Velocity 0. Without this, a dash whose final tick doesn't cross a
+        // tile leaves remote viewers holding the previous tick's position INDEFINITELY (delta'd out — up to ~0.67u
+        // ghost offset). The jump landing already re-published via SnapToGround's Z-change bump; this makes the
+        // action-end re-publish unconditional for every action shape (the same StateRevision stop-edge mechanism
+        // as StopMovement / MarkRepositioned — one discrete re-send per action end, never a per-tick cost).
+        entity.MarkRepositioned();
     }
 
     // Reused scratch list of active entity ids for StepAll (avoids a per-tick alloc while still iterating a stable
