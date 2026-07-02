@@ -175,8 +175,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	// ---- Movement / feel tab (was F6) -------------------------------------------------------------
 	// The movement/camera-FEEL levers. All live (no restart); seeded from the current values on first open.
-	// Per-entity SPEED is the "Move speed" dropdown (sends /speed); the GLOBAL base cooldown is a pinned constant
-	// (SPEED1) — there is no longer a global move-speed server knob.
+	// Speed has two free-multiplier fields: "My speed" sets the local player's per-entity SpeedMultiplier via /speed;
+	// "Global speed" scales continuous.baseMoveSpeed (base cadence, SPEED1) live for everyone incl. bots.
 	// Moved from the visual surface: net latency (S93), camera smoothing (S95). (Camera follow-blend removed — tile remnant.)
 	private LineEdit? _moveNetLatencyMs;
 	private LineEdit? _moveCameraSmoothing;
@@ -186,12 +186,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// smoothness in-client (no restart) — lower = the slime renders tighter to its server tile; raise to absorb more
 	// arrival jitter. Empty/blank or < 0 reverts to the computed default. Applies to all remote interpolators live.
 	private LineEdit? _moveRemoteInterpBufferMs;
-	// S106: the "Move speed" dropdown — discrete tick-quantized speeds (unnamed, numeric labels). Each item carries
-	// its multiplier; selecting one sends /speed <mult> live. Populated once on first open from ServerHello (base
-	// cadence + tick rate). _moveSpeedOptions is the parallel option list (item index -> SpeedOption) so the
-	// selection handler can read the multiplier without re-deriving it.
-	private OptionButton? _moveSpeedDropdown;
-	private IReadOnlyList<MovementSpeedOptions.SpeedOption> _moveSpeedOptions = Array.Empty<MovementSpeedOptions.SpeedOption>();
+	// GLOBAL speed as a single free MULTIPLIER (replaced the S106 discrete-bracket dropdown). Applied on Apply/Enter,
+	// it scales the GLOBAL base move speed live: continuous.baseMoveSpeed = (1000 / ServerHello.StepCooldownMs) ×
+	// multiplier — so the local player AND the synthetic bots (and every other entity) all move at base × multiplier.
+	// Seeded to 1.0 (= default base) on first open.
+	private LineEdit? _moveSpeedMultiplier;
+	// PER-PLAYER speed as a free MULTIPLIER (replaced the S106 dropdown's per-entity send). Applied on Apply/Enter, it
+	// sets ONLY the local player's per-entity SpeedMultiplier by sending the `/speed <multiplier>` server command (the
+	// same path the removed dropdown used). Multiplies on top of the global base: effective local speed = base ×
+	// globalMult × playerMult. Seeded to 1.0 on first open. Admin-gated server-side (and client-side).
+	private LineEdit? _movePlayerSpeedMultiplier;
 
 	// ---- Vitals tab (was F7) ----------------------------------------------------------------------
 	// Set the LOCAL player's CURRENT vitals live (HP/mana/stamina). Each row is a label + LineEdit; Apply sends the
@@ -1446,11 +1450,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var rows = AddDebugTab(tabs, "Movement");
 
 		var note = CreateOverlayLabel("MovementSpeedNote", 12);
-		// One speed control (not a base+multiplier split): the dropdown sets the local player's speed via /speed
-		// <multiplier>. Each item label is "<mult>x - <ms to cross one tile> - <tiles/sec>"; the server speed is
-		// BaseMoveSpeedUnitsPerSecond x multiplier (continuous). The discrete set is tick-quantized so client
-		// prediction matches the server's per-tick integration.
-		note.Text = "Move speed — one control: /speed <multiplier> (label: mult / ms-per-tile / tiles-per-sec)";
+		// Two free multipliers (replaced the discrete-bracket dropdown): a GLOBAL one that scales the base move speed
+		// live via continuous.baseMoveSpeed = defaultBase × multiplier (player + bots + every entity), and a PER-PLAYER
+		// one that sends /speed <multiplier> to scale ONLY the local player on top of the global base. 1.0 = default.
+		note.Text = "Speed — Global × scales base (player + bots); My speed × scales only the local player on top.";
 		rows.AddChild(note);
 
 		// FREE-ANGLE A/B TEST — live client-local toggle (no Apply, no restart, no server round-trip, per the
@@ -1462,24 +1465,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		freeAngle.Toggled += ApplyFreeAngleMovement;
 		rows.AddChild(freeAngle);
 
-		// S106: the "Move speed" dropdown — a list of discrete tick-quantized speeds (UNNAMED, numbers only). ALWAYS
-		// shown (speed is mode-agnostic, like net latency). Selecting one sets the LOCAL player's per-entity speed
-		// live via /speed <multiplier> (the existing per-entity path), which scales off the pinned global base
-		// cadence (SPEED1). The items are populated on first panel open (SeedMovementFields) from ServerHello's
-		// base cadence + tick rate.
-		var speedRow = new HBoxContainer { Name = "Row_MoveSpeed" };
-		speedRow.AddThemeConstantOverride("separation", 8);
-		var speedCaption = CreateOverlayLabel("Cap_MoveSpeed", 13);
-		speedCaption.Text = "Move speed";
-		speedCaption.CustomMinimumSize = new Vector2(170, 0);
-		speedRow.AddChild(speedCaption);
-		_moveSpeedDropdown = new OptionButton { Name = "MoveSpeedDropdown", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-		_moveSpeedDropdown.AddThemeFontSizeOverride("font_size", 13);
-		_moveSpeedDropdown.ItemSelected += OnMoveSpeedSelected;
-		speedRow.AddChild(_moveSpeedDropdown);
-		rows.AddChild(speedRow);
-
 		// Applied on Apply/Enter:
+		// GLOBAL speed as a single free multiplier of the base (replaced the discrete-bracket dropdown). On apply it
+		// sends continuous.baseMoveSpeed = defaultBase × multiplier (see OnMovementApplyPressed), so it retunes the
+		// player, the bots, and every entity live. Seeded to 1.0 by SeedMovementFields.
+		_moveSpeedMultiplier = AddTuningField(rows, "Global speed (× multiplier)", OnMovementApplyPressed);
+		// PER-PLAYER speed as a free multiplier of the local player only (replaced the dropdown's per-entity /speed
+		// send). On apply it sends the /speed <multiplier> server command (see OnMovementApplyPressed), setting only the
+		// local player's per-entity SpeedMultiplier — multiplies on top of the global base. Seeded to 1.0.
+		_movePlayerSpeedMultiplier = AddTuningField(rows, "My speed (× multiplier)", OnMovementApplyPressed);
 		// S93: artificial one-way network latency (ms each way). 0 = off (default I/O path). Felt RTT ≈ 2× this.
 		_moveNetLatencyMs = AddTuningField(rows, "Net latency (ms, each way)", OnMovementApplyPressed);
 		// S95: camera follow smoothing as a per-second rate (frame-rate independent). 0 = off/hard-follow. CONTINUOUS
@@ -1641,63 +1635,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		apply.AddThemeFontSizeOverride("font_size", 14);
 		apply.Pressed += OnStatApplyPressed;
 		rows.AddChild(apply);
-	}
-
-	// S106: (re)populate the "Move speed" dropdown from ServerHello's base cadence + tick rate, and preselect the
-	// default walk (1.0x). Built lazily on first panel open (ServerHello has landed by login, so the base cadence is
-	// known). The item index maps 1:1 to _moveSpeedOptions so OnMoveSpeedSelected reads the multiplier directly.
-	// SetItemMetadata is avoided (the parallel list is simpler + test-mirrored by MovementSpeedOptions).
-	private void PopulateMoveSpeedDropdown()
-	{
-		if (_moveSpeedDropdown is null)
-		{
-			return;
-		}
-
-		var baseStepMs = _client?.Server?.StepCooldownMs ?? 150;
-		var tickRate = _client?.Server?.TickRate ?? 20;
-		_moveSpeedOptions = MovementSpeedOptions.Build(baseStepMs, tickRate);
-
-		_moveSpeedDropdown.Clear();
-		var selectIndex = 0;
-		for (var i = 0; i < _moveSpeedOptions.Count; i++)
-		{
-			var option = _moveSpeedOptions[i];
-			_moveSpeedDropdown.AddItem(option.Label, i);
-			if (option.IsDefaultWalk)
-			{
-				selectIndex = i;
-			}
-		}
-
-		if (_moveSpeedOptions.Count > 0)
-		{
-			// Preselect the default walk WITHOUT firing ItemSelected (we don't want to send a /speed on open — the
-			// player is already at walk; selecting reflects the live state, it doesn't change it).
-			_moveSpeedDropdown.Select(selectIndex);
-		}
-	}
-
-	// S106: a speed item was picked — set the LOCAL player's per-entity speed live by sending /speed <multiplier>
-	// (the existing chat-command path, like other dev commands). Admin-gated to match the rest of F6 (the server
-	// also admin-gates /speed, so a non-admin send is a server-side no-op; we gate client-side too for clarity). The
-	// server recomputes the effective cadence and replies with MovementSpeedChanged, which retunes the local
-	// predictor via EntityState.SetStepCooldownMs — so the avatar's step rate tracks the new cadence live.
-	private void OnMoveSpeedSelected(long index)
-	{
-		if (_client?.Role != ClientRole.Admin)
-		{
-			return;
-		}
-
-		if (index < 0 || index >= _moveSpeedOptions.Count)
-		{
-			return;
-		}
-
-		var option = _moveSpeedOptions[(int)index];
-		_client.SendChat($"/speed {MovementSpeedOptions.FormatSpeedCommandArgument(option.Multiplier)}");
-		ShowInteractFeedback($"Move speed: {option.Label}");
 	}
 
 	// Live FXAA toggle (Visual tab "FXAA" checkbox). Flips GetViewport().ScreenSpaceAA between Fxaa (on) and
@@ -2694,9 +2631,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// computed default in effect — so the knob shows the real value, not a blank or a raw multiplier.
 		SetField(_moveRemoteInterpBufferMs,
 			_client?.RemoteInterpolationBufferOverrideMs ?? _client?.EffectiveDefaultRemoteInterpolationBufferMs ?? 0d);
-		// S106: build the "Move speed" dropdown items from ServerHello (base cadence + tick rate) and preselect the
-		// default walk. Done here (first open) since ServerHello has landed by login.
-		PopulateMoveSpeedDropdown();
+		// Move-speed multiplier: seed to 1.0 (= the current base ÷ default base). At first open — the only time this
+		// runs — no base change has been applied yet, so the live base equals the default and the multiplier is 1.0.
+		// (The client tracks only the pinned default base from ServerHello, not a replicated live global base.)
+		SetField(_moveSpeedMultiplier, 1.0d);
+		// Per-player /speed multiplier: seed to 1.0 (= no per-entity multiplier; the local player runs at the global
+		// base until a value is applied). The client tracks no replicated per-entity SpeedMultiplier, so 1.0 on open.
+		SetField(_movePlayerSpeedMultiplier, 1.0d);
 	}
 
 	private static void SetField(LineEdit? field, double value)
@@ -2960,6 +2901,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (TryReadField(_moveRemoteInterpBufferMs, out var remoteBuffer))
 		{
 			_client.SetRemoteInterpolationBufferMs(remoteBuffer < 0d ? -1d : Mathf.Clamp((float)remoteBuffer, 0f, 2000f));
+		}
+
+		// Move speed × multiplier — scales the GLOBAL base move speed live. Sends continuous.baseMoveSpeed =
+		// DEFAULT_BASE_SPEED × multiplier, where DEFAULT_BASE_SPEED = 1000 / ServerHello.StepCooldownMs (the pinned
+		// base cadence, SPEED1). The server admin-gates + clamps (0.1..100) authoritatively. Ignore ≤0 / unparseable
+		// input (would stop or reverse everything). Retunes the local player, the bots, and every other entity.
+		if (TryReadField(_moveSpeedMultiplier, out var speedMultiplier) && speedMultiplier > 0d)
+		{
+			var defaultBaseSpeed = 1000d / (_client.Server?.StepCooldownMs ?? 150);
+			_client.SendAdminSetTuning("continuous.baseMoveSpeed", defaultBaseSpeed * speedMultiplier);
+		}
+
+		// PER-PLAYER speed × multiplier — sets ONLY the local player's per-entity SpeedMultiplier live by sending the
+		// /speed <multiplier> server command (the same per-entity path the removed dropdown used). It multiplies on top
+		// of the global base, so the effective local speed = base × globalMult × playerMult. The server admin-gates +
+		// clamps /speed authoritatively; ignore ≤0 / unparseable input (a non-positive multiplier would be rejected).
+		if (TryReadField(_movePlayerSpeedMultiplier, out var playerSpeedMultiplier) && playerSpeedMultiplier > 0d)
+		{
+			_client.SendChat($"/speed {playerSpeedMultiplier.ToString("0.###", CultureInfo.InvariantCulture)}");
 		}
 
 		ShowInteractFeedback("Movement tuning applied.");
