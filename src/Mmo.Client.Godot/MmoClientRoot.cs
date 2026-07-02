@@ -46,6 +46,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _cameraSizeMin = 8f;
 	private float _cameraSizeMax = 30f;
 	private const float CameraZoomStep = 2.5f;
+	// AOI-EDGE ZOOM CLAMP (user, 2026-07-02 — companion to the server AOI 30→18 default): cap the zoom-OUT so the
+	// screen never shows the interest-radius edge (entities popping in/out of AOI). Derived, not hard-coded: from
+	// the ServerHello-replicated InterestRadiusUnits, the fixed camera rig pitch, and the live viewport aspect —
+	// the worst-case SCREEN-CORNER ground distance is kept ≥ this margin inside the radius (margin covers the
+	// entity mesh + the spawn-at-exactly-r case). Re-derived if the hello radius changes; an admin can still widen
+	// the clamp live via the F1 zoom-range knobs (deliberate override).
+	private const float AoiEdgeHideMarginUnits = 2f;
+	private float _appliedAoiZoomClampRadius = -1f;
+	// The fixed camera rig offset (also the pitch source for the AOI zoom clamp) — one definition for both the
+	// per-frame follow and the clamp math.
+	private static readonly Vector3 CameraRigOffset = new(24, 28, 24);
 	// S95: camera temporal smoothing (S102: live F1 lever). The tracker frame-rate-independently smooths a persistent
 	// focus toward the rendered (continuous) character position, snapping on the first frame and on teleports
 	// (> _cameraTeleportSnapTiles). The old "follow blend toward the confirmed TILE" knob was a tile-era remnant and
@@ -1110,7 +1121,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			Name = "Camera",
 			Projection = Camera3D.ProjectionType.Orthogonal,
 			Size = CameraSize,
-			Position = new Vector3(24, 28, 24)
+			Position = CameraRigOffset
 		};
 		AddChild(_camera);
 		_camera.LookAt(Vector3.Zero, Vector3.Up);
@@ -2082,9 +2093,40 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_lastFrameDelta,
 			_cameraTeleportSnapTiles);
 		var focus = new Vector3((float)focusX, 0, (float)focusY);
-		_camera.Position = focus + new Vector3(24, 28, 24);
+		_camera.Position = focus + CameraRigOffset;
 		_camera.LookAt(focus, Vector3.Up);
+		ApplyAoiZoomClampIfNeeded();
 		_camera.Size = _cameraSize;
+	}
+
+	// AOI-EDGE ZOOM CLAMP: cap zoom-out so the AOI edge sits OFF-SCREEN. For an orthographic camera of Size S at
+	// the rig's pitch (sinPitch = rig.Y / |rig|), the ground-plane footprint half-extents are S·aspect/2 across
+	// (screen-x maps 1:1 to ground) and (S/2)/sinPitch up the screen (foreshortening), so the worst case — a
+	// screen CORNER — sees ground distance S·√((aspect/2)² + (0.5/sinPitch)²). Solve that ≤ radius − margin for
+	// the max Size. Runs once per hello radius (and re-runs live if the radius value changes); reads the live
+	// viewport aspect so fullscreen/portrait layouts stay covered.
+	private void ApplyAoiZoomClampIfNeeded()
+	{
+		if (_client?.Server is not { } server || server.InterestRadiusUnits == _appliedAoiZoomClampRadius)
+		{
+			return;
+		}
+
+		var viewport = GetViewport().GetVisibleRect().Size;
+		var aspect = viewport.Y > 0f ? viewport.X / viewport.Y : 16f / 9f;
+		var sinPitch = CameraRigOffset.Y / CameraRigOffset.Length();
+		var cornerFactor = MathF.Sqrt(MathF.Pow(aspect / 2f, 2f) + MathF.Pow(0.5f / sinPitch, 2f));
+		var usableRadius = server.InterestRadiusUnits - AoiEdgeHideMarginUnits;
+		var maxSize = usableRadius > 0f ? usableRadius / cornerFactor : _cameraSizeMin;
+
+		_cameraSizeMax = Mathf.Max(_cameraSizeMin, maxSize);
+		if (_cameraSize > _cameraSizeMax)
+		{
+			_cameraSize = _cameraSizeMax;
+		}
+
+		_appliedAoiZoomClampRadius = server.InterestRadiusUnits;
+		GD.Print($"AOI zoom clamp: radius={server.InterestRadiusUnits:0.#}u, aspect={aspect:0.##}, maxCameraSize={_cameraSizeMax:0.#} (corner stays ≥{AoiEdgeHideMarginUnits:0.#}u inside the AOI edge).");
 	}
 
 	private void UpdateOverlay(TimeSpan now)
