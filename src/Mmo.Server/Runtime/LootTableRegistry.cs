@@ -39,6 +39,76 @@ public sealed class LootTableRegistry
         {
             ValidateReferences(table, itemRegistry);
         }
+
+        // Fail fast on CYCLES too (loot-followups #1): the roll-time depth guard makes a cycle SAFE (finite
+        // loot, no stack overflow) but every rolled kill would pay up to MaxNestingDepth wasted hops and emit
+        // a warn-spam line. An authoring cycle is a content bug — surface it at startup, not once per kill.
+        DetectCycles();
+    }
+
+    // DFS three-color cycle detection over the tableRef nesting graph (edges: TableRefDrop + tableRef
+    // WeightedPickOptions). Throws naming the cycle path so the mis-authored table is obvious.
+    private void DetectCycles()
+    {
+        var visiting = new HashSet<string>(StringComparer.Ordinal); // on the current DFS path (gray)
+        var done = new HashSet<string>(StringComparer.Ordinal);     // fully explored, provably acyclic (black)
+        var path = new List<string>();
+
+        foreach (var id in _byId.Keys)
+        {
+            Visit(id);
+        }
+
+        return;
+
+        void Visit(string id)
+        {
+            if (done.Contains(id))
+            {
+                return;
+            }
+
+            if (!visiting.Add(id))
+            {
+                var cycleStart = path.IndexOf(id);
+                var cycle = string.Join(" -> ", path.Skip(cycleStart).Append(id));
+                throw new ArgumentException($"Loot table nesting cycle: {cycle}.", "tables");
+            }
+
+            path.Add(id);
+            foreach (var refId in ReferencedTableIds(_byId[id]))
+            {
+                Visit(refId); // Refs are validated to exist above, so the indexer in the recursion is safe.
+            }
+
+            path.RemoveAt(path.Count - 1);
+            visiting.Remove(id);
+            done.Add(id);
+        }
+    }
+
+    private static IEnumerable<string> ReferencedTableIds(LootTable table)
+    {
+        foreach (var drop in table.Drops)
+        {
+            switch (drop)
+            {
+                case TableRefDrop tableRef:
+                    yield return tableRef.TableId;
+                    break;
+
+                case WeightedPickDrop pick:
+                    foreach (var option in pick.Options)
+                    {
+                        if (option.IsTableRef)
+                        {
+                            yield return option.TableId!;
+                        }
+                    }
+
+                    break;
+            }
+        }
     }
 
     public bool TryGet(string id, out LootTable table) => _byId.TryGetValue(id, out table!);

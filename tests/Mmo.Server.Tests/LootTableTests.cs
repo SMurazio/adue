@@ -82,6 +82,64 @@ public sealed class LootTableTests
     }
 
     [Fact]
+    public void SlimeCoreDropsAtApproximatelyItsRate()
+    {
+        // loot-followups #2: the rarest drop (slime_core, chance 0.0008) gets its own rate pin, mirroring the
+        // rare-tail test. Over 200k seeded rolls expected ~160 hits; the wide ±0.0004 band (>6σ at this N)
+        // catches gross errors (order-of-magnitude, inversion) without flaking on the fixed seed.
+        var registry = DefaultRegistry();
+        var rng = new Random(2026);
+        const int rolls = 200_000;
+        var cores = 0;
+
+        for (var i = 0; i < rolls; i++)
+        {
+            foreach (var stack in registry.Roll("slime_loot", rng))
+            {
+                if (stack.TemplateKey == "slime_core")
+                {
+                    cores++;
+                }
+            }
+        }
+
+        var rate = cores / (double)rolls;
+        Assert.InRange(rate, 0.0008 - 0.0004, 0.0008 + 0.0004);
+    }
+
+    [Fact]
+    public void EachDropResolvesIndependently()
+    {
+        // loot-followups #2: the "each drop resolves independently" claim, asserted DIRECTLY on a synthetic
+        // table of two 50% drops: if the drops are independent, the joint hit rate is p1·p2 = 0.25 (and each
+        // marginal is 0.5). Correlated resolution (a shared roll / one drop gating the other) lands far
+        // outside the band.
+        var table = new LootTable("indep", new List<LootDrop>
+        {
+            new FixedDrop("wood", chance: 0.5, minQty: 1, maxQty: 1),
+            new FixedDrop("stone", chance: 0.5, minQty: 1, maxQty: 1),
+        });
+        var registry = new LootTableRegistry(new[] { table }, Items);
+        var rng = new Random(424242);
+        const int rolls = 100_000;
+        int wood = 0, stone = 0, both = 0;
+
+        for (var i = 0; i < rolls; i++)
+        {
+            var stacks = registry.Roll("indep", rng);
+            var hasWood = stacks.Any(s => s.TemplateKey == "wood");
+            var hasStone = stacks.Any(s => s.TemplateKey == "stone");
+            if (hasWood) wood++;
+            if (hasStone) stone++;
+            if (hasWood && hasStone) both++;
+        }
+
+        Assert.InRange(wood / (double)rolls, 0.47, 0.53);
+        Assert.InRange(stone / (double)rolls, 0.47, 0.53);
+        Assert.InRange(both / (double)rolls, 0.23, 0.27);
+    }
+
+    [Fact]
     public void NestedTableRefResolvesPoolItems()
     {
         // Roll the pool directly (it's a registered table) many times; every roll must yield exactly one of
@@ -190,30 +248,30 @@ public sealed class LootTableTests
     // ---- Recursion guard ---------------------------------------------------------------------------------
 
     [Fact]
-    public void RecursionGuardYieldsFiniteLootForACycle()
+    public void DepthGuardBoundsRunawayAcyclicNesting()
     {
-        // Build a deliberate cycle a -> b -> a (each also drops one wood so we can count hops). Construction
-        // doesn't reject a cycle (refs exist), but Roll's depth guard must terminate it, returning finite loot
-        // bounded by MaxNestingDepth rather than overflowing the stack.
-        var tableA = new LootTable("cycle_a", new List<LootDrop>
+        // Cycles are now rejected at CONSTRUCTION (see the validation tests below), so the roll-time depth
+        // guard's remaining job is bounding a legitimately-constructible but pathologically DEEP acyclic
+        // chain. Build chain_0 -> chain_1 -> ... -> chain_10 (each dropping one wood): construction passes
+        // (acyclic), and Roll terminates at the depth budget — exactly one wood per table for depths
+        // 0..MaxNestingDepth, the deeper refs dropped (logged), never a stack overflow.
+        var tables = new List<LootTable>();
+        for (var i = 0; i <= 10; i++)
         {
-            new FixedDrop("wood", chance: 1.0, minQty: 1, maxQty: 1),
-            new TableRefDrop("cycle_b"),
-        });
-        var tableB = new LootTable("cycle_b", new List<LootDrop>
-        {
-            new FixedDrop("stone", chance: 1.0, minQty: 1, maxQty: 1),
-            new TableRefDrop("cycle_a"),
-        });
-        var registry = new LootTableRegistry(new[] { tableA, tableB }, Items);
+            var drops = new List<LootDrop> { new FixedDrop("wood", chance: 1.0, minQty: 1, maxQty: 1) };
+            if (i < 10)
+            {
+                drops.Add(new TableRefDrop($"chain_{i + 1}"));
+            }
 
-        var rng = new Random(5);
-        var stacks = registry.Roll("cycle_a", rng);
+            tables.Add(new LootTable($"chain_{i}", drops));
+        }
 
-        // It terminates (no stack overflow) and the count is bounded by the depth budget — never unbounded.
-        Assert.NotEmpty(stacks);
-        Assert.True(stacks.Count <= LootTableRegistry.MaxNestingDepth + 2,
-            $"Cycle produced {stacks.Count} stacks — guard did not bound the recursion.");
+        var registry = new LootTableRegistry(tables, Items);
+
+        var stacks = registry.Roll("chain_0", new Random(5));
+
+        Assert.Equal(LootTableRegistry.MaxNestingDepth + 1, stacks.Count);
     }
 
     // ---- Determinism -------------------------------------------------------------------------------------
@@ -271,5 +329,35 @@ public sealed class LootTableTests
         var b = new LootTable("dup", new List<LootDrop> { new FixedDrop("stone", 1.0, 1, 1) });
 
         Assert.Throws<ArgumentException>(() => new LootTableRegistry(new[] { a, b }, Items));
+    }
+
+    [Fact]
+    public void ConstructorRejectsNestingCycle()
+    {
+        // loot-followups #1: an authoring cycle (a -> b -> a, here via BOTH ref kinds — a TableRefDrop and a
+        // tableRef weightedPick option) must fail fast at REGISTRY CONSTRUCTION, naming the cycle — not be
+        // discovered one warn-log at a time at roll time under the depth guard.
+        var tableA = new LootTable("cycle_a", new List<LootDrop>
+        {
+            new FixedDrop("wood", chance: 1.0, minQty: 1, maxQty: 1),
+            new TableRefDrop("cycle_b"),
+        });
+        var tableB = new LootTable("cycle_b", new List<LootDrop>
+        {
+            new WeightedPickDrop([WeightedPickOption.TableRef("cycle_a", weight: 1)], emptyWeight: 0),
+        });
+
+        var ex = Assert.Throws<ArgumentException>(() => new LootTableRegistry(new[] { tableA, tableB }, Items));
+        Assert.Contains("cycle", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cycle_a", ex.Message);
+        Assert.Contains("cycle_b", ex.Message);
+    }
+
+    [Fact]
+    public void ConstructorRejectsSelfReference()
+    {
+        var table = new LootTable("selfie", new List<LootDrop> { new TableRefDrop("selfie") });
+
+        Assert.Throws<ArgumentException>(() => new LootTableRegistry(new[] { table }, Items));
     }
 }
