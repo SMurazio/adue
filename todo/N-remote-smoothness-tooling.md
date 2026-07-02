@@ -6,17 +6,11 @@ stress gate measures SERVER health (tick ms, errors, bandwidth) and misses REMOT
 client_render_trace exists but is single-entity, dies when the target leaves AOI, and needs a live session.
 Four pieces, roughly in leverage order:
 
-## 1. Headless remote-render smoothness regression harness (CI-able) — HIGHEST VALUE
-Drive `RemotePositionInterpolator` (the real class) with SYNTHETIC sample streams and assert smoothness bounds
-frame-by-frame (60fps sampling), mirroring client_render_trace's metrics (speedStdDev / maxJerk / reversals):
-- constant velocity, regular 50ms arrivals → reversals == 0, speedStdDev ~0 (the clean baseline);
-- Q12.4-quantized positions (round each sample like PositionEncoding) → bound the added noise;
-- TURNING entity (heading rotates like a waypoint bot / chasing gnoll) → quantify the perpendicular swing
-  (this is the [[N-gnoll-walk-jitter-extrapolation]] measure, done headlessly);
-- BURSTY arrivals (late tick then two samples back-to-back — the 200-client server signature) → quantify the
-  overshoot-correct spike; this is the repro for [[S-remote-render-jitter-200-clients]] mechanism 2.
-This turns "the crowd shimmers" into failing numbers BEFORE a fix and green bounds after — and pins against
-regression forever.
+## ~~1. Headless remote-render smoothness regression harness~~ — DONE (shipped with the smoothing fix)
+`tests/Mmo.Client.Core.Tests/RemoteRenderSmoothnessTests.cs`: constant-velocity / quantized / turning / bursty
+scenarios + three latency guards (render-vs-truth, sharp-stop settle, sharp-reversal turnaround), metric
+definitions 1:1 with the live client_render_trace. Pre-fix it reproduced the 200-client shimmer headlessly
+(37 reversals/3.8s on bursty arrivals) and caught the first-cut fix bug immediately.
 
 ## 2. Snapshot-arrival cadence telemetry (client) — the missing discriminator
 Track inter-snapshot arrival deltas (mean/p95/max over a rolling window) + entities/snapshot in MmoClient

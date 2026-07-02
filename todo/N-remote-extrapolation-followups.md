@@ -14,3 +14,9 @@ If a stop confirm is lost or arrives after the playout buffer has entered starva
 **Fix if needed:** a render-side smoothing/blend on the starvation→confirm transition (mirror the predictor's decaying render-offset) so the snap-back eases instead of pops. Adds a little latency/complexity → only if the feel-test shows it.
 
 ## Minor (no action): at admin-set extreme speeds (>128 u/s) the Q-scale-256 velocity clamps (under-reports) — irrelevant at the ~4 u/s walk speed; the clamp is safe (no wrap).
+
+## 3. (from the correction-smoothing review, F3 — pre-existing) delay>0 knob users still get the un-smoothed pop
+The re-base correction smoothing covers only the default delay-0 starvation (extrapolate-to-now) regime. With a
+POSITIVE F1 "Remote interp buffer" the steady regime is bracket-lerp, and the starvation→bracket transition (a
+late sample finally landing) still steps in one frame — exactly the pre-fix behavior. Fine while the knob is a
+diagnostic; extend the capture across that transition if the buffer is ever recommended as a real setting.

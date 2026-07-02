@@ -41,7 +41,9 @@ The old tile-era order (S41/S36b/S42) is long shipped or obsolete. Active order:
 
 - **Feel-tests pending:** walk-anim-idles-when-blocked (`31ab750`), free-angle movement
   (`825d0ba`), movement speed multipliers (`ea15bea`), monster behaviors P2/P4/P5 (gnoll
-  glide/flee/charge), AgX tonemapping (`5c2823d`).
+  glide/flee/charge), AgX tonemapping (`5c2823d`), player charge/dodge-roll (K/L, Phase D),
+  **remote-render correction smoothing** — re-run the live A/B (client_render_trace on a bot at
+  120 and 200 stress clients; pre-fix baselines: 27 and 62 reversals/4s) + eyeball the crowd.
 - **Merge decision:** `feat/continuous-migration` → `main` (hard replacement of tile) after the
   full feel-test.
 - **Scope confirmations:** `N-retire-web-client` (retirement final?), the `docs/tile-audit.md`
