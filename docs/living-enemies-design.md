@@ -61,7 +61,8 @@ reads that type's `Tunables` + its `SpeedMultiplier` each tick (no global block 
 
 - **Slower than the player (outrunnable).** `slime.moveSpeed` defaults to **0.8** — the slime's effective
   step cooldown is derived from its `SpeedMultiplier` via the existing per-entity `EffectiveStepCooldown`
-  path (~312 ms vs the player's 250 ms base), so you can outrun the dumb ones.
+  path (tick-quantised at 20 Hz: round(5 / 0.8) = 6 ticks = 300 ms vs the player's 250 ms base), so you can
+  outrun the dumb ones.
 - **`/monster <name>`** spawns that type at the caller's tile (= the leash home). No name → `slime`; an
   unknown name → an error listing the available type ids.
 

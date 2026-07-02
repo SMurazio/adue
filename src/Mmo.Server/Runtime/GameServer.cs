@@ -2017,7 +2017,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /clearspawners, /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -2059,6 +2059,9 @@ public sealed class GameServer
                 break;
             case "monster":
                 HandleMonsterCommand(sender, parts);
+                break;
+            case "clearspawners":
+                HandleClearSpawnersCommand(sender);
                 break;
             default:
                 SendSystem(sender, $"unknown command: /{command}. Try /help.");
@@ -2192,6 +2195,58 @@ public sealed class GameServer
             sender,
             $"monster: spawner #{spawner.SpawnerId} for {type.DisplayName} at {spawner.Tile.X},{spawner.Tile.Y}, hp={type.MaxHealth}, step={effectiveMs}ms, roamRadius={type.RoamRadius}, aggro={type.AggroRadius}, leash={type.ChaseLeash}, atk={type.AttackDamage}/{type.AttackCooldownMs}ms, respawn={type.RespawnMs}ms.");
         Log.Info($"{sender.DisplayName} created spawner #{spawner.SpawnerId} for {type.DisplayName} at {spawner.Tile} (type={type.Id}).");
+    }
+
+    // SPAWNER-CLEANUP (todo/monster-types-followups #4): admin dev command /clearspawners — removes EVERY spawner (a
+    // long dev session otherwise only accumulates them; /monster adds, nothing deleted) and despawns each spawner's
+    // live monster. This is an ADMIN CLEAR, not a kill: no corpse, no loot roll, no respawn schedule — the monster and
+    // its AI/type/ledger/action state are simply removed, mirroring KillMonster's cleanup minus the death effects.
+    // The red markers need no explicit send: SyncSpawnerMarkers' "no longer exists" branch sends Active=false to every
+    // viewer on the next AOI pass once the spawner leaves _spawners, and EntityDespawn likewise rides the normal AOI
+    // known-entity diff.
+    private void HandleClearSpawnersCommand(ClientSession sender)
+    {
+        if (_spawners.Count == 0)
+        {
+            SendSystem(sender, "clearspawners: no spawners.");
+            return;
+        }
+
+        var spawnerCount = _spawners.Count;
+        var monsterCount = 0;
+        foreach (var spawner in _spawners.Values)
+        {
+            if (spawner.LiveMonsterId is not ulong monsterId)
+            {
+                continue; // Dead + pending respawn — dropping the spawner below cancels the respawn (RespawnMonsters iterates _spawners).
+            }
+
+            if (_zone.Despawn(monsterId, out var removed))
+            {
+                // The same leak-free cleanup KillMonster does (action cooldowns, contribution ledger, brain, type map),
+                // in the same order (behavior resolved BEFORE the type is removed).
+                _actionExecutor.ClearEntity(monsterId);
+                _contributionLedger.Forget(monsterId);
+                if (_monsterTypeOf.TryGetValue(monsterId, out var typeToForget))
+                {
+                    ResolveBehavior(typeToForget).Forget(monsterId);
+                }
+                else
+                {
+                    _defaultBehavior.Forget(monsterId);
+                }
+
+                _monsterTypeOf.Remove(monsterId);
+                _networkIds.Return(removed.NetworkId);
+                monsterCount++;
+            }
+
+            _spawnerOfMonster.Remove(monsterId);
+        }
+
+        _spawners.Clear();
+        SendSystem(sender, $"clearspawners: removed {spawnerCount} spawner(s), despawned {monsterCount} monster(s).");
+        Log.Info($"{sender.DisplayName} cleared {spawnerCount} spawner(s) ({monsterCount} live monster(s) despawned).");
     }
 
     // LIVING-ENEMIES P3: spawns a fresh full-HP monster of the spawner's type at the spawner tile, wires it to the AI +
