@@ -57,7 +57,7 @@ public sealed class ServerOptionsTests
 
         var options = ServerOptions.FromEnvironment();
 
-        Assert.Equal(30f, options.InterestRadius);
+        Assert.Equal(18f, options.InterestRadius); // 30 → 18 (user decision 2026-07-02: πr² is the AOI cost multiplier; ~2.8× smaller)
         Assert.Equal(250, options.StepCooldownMs); // default base walk cadence (the 0.6x/4.0-tiles-per-sec feel)
         Assert.Equal(15, options.PersistenceCheckpointSeconds);
         Assert.Equal(128, options.WorldWidthTiles);

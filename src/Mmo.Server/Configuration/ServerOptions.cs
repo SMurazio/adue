@@ -62,7 +62,10 @@ public sealed record ServerOptions(
             // the F1 Movement /speed dropdown brackets faster/slower around it. Override with MMO_STEP_COOLDOWN_MS.
             ReadInt("MMO_STEP_COOLDOWN_MS", 250),
             ReadInt("MMO_PERSISTENCE_CHECKPOINT_SECONDS", 15),
-            ReadFloat("MMO_INTEREST_RADIUS", 30f),
+            // AOI radius default 30 → 18 (user decision, 2026-07-02): 30 was "insanely big" — at crowd density the
+            // interest AREA (πr²) is the multiplier on AOI-gather + snapshot cost, and 18 shrinks it ~2.8×. Still
+            // comfortably beyond a screen at the default camera. Live-tunable via aoi.interestRadius (F1) anytime.
+            ReadFloat("MMO_INTEREST_RADIUS", 18f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
             ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
             ReadSet("MMO_ADMIN_NAMES", "Admin"))
