@@ -159,7 +159,8 @@ public sealed class BasicRoamerBehaviorTests
         BasicRoamerBehavior.TryResolveTargetDelegate? tryResolve = null,
         BasicRoamerBehavior.AttackDelegate? attack = null,
         Func<TileGrid, ServerActionExecutor, IMonsterLocomotion>? locomotionFactory = null,
-        BasicRoamerBehavior.TrySlamDelegate? trySlam = null)
+        BasicRoamerBehavior.TrySlamDelegate? trySlam = null,
+        Func<ServerActionExecutor, BasicRoamerBehavior.BeginSlamLeapDelegate>? beginSlamLeapFactory = null)
     {
         var executor = CreateExecutor(grid, world);
         var locomotion = (locomotionFactory ?? ((g, e) => CreateLocomotion(g, e)))(grid, executor);
@@ -181,7 +182,11 @@ public sealed class BasicRoamerBehaviorTests
             attack ?? ((WorldEntity _, ulong _, int _) => { }),
             // TELEGRAPH T1: the optional slam trigger (null = never slam, exactly like GameServer for a
             // non-slammer type); the slam-cadence test records + accepts casts through it.
-            trySlam: trySlam);
+            trySlam: trySlam,
+            // SLIME-SLAM ROOT+LEAP: the optional slam-leap dep (a factory over the harness executor so the test
+            // leap starts real arcs on the SAME executor the hop uses, mirroring GameServer.BeginMonsterSlamLeap).
+            // Null = the channel roots but never leaps (the brain's documented degenerate default).
+            beginSlamLeap: beginSlamLeapFactory?.Invoke(executor));
         return new AiHarness(ai, locomotion, executor, world);
     }
 
@@ -430,11 +435,13 @@ public sealed class BasicRoamerBehaviorTests
     // the Euclidean aggro disc); tryResolve — the target's live Position + alive; attack — face + ApplyDamage.
     private static AiHarness CreateCombatAi(
         int seed, TileGrid grid, WorldState world, WorldEntity player, int[] hitCounter,
-        BasicRoamerBehavior.TrySlamDelegate? trySlam = null)
+        BasicRoamerBehavior.TrySlamDelegate? trySlam = null,
+        Func<ServerActionExecutor, BasicRoamerBehavior.BeginSlamLeapDelegate>? beginSlamLeapFactory = null)
     {
         return CreateAi(
             seed, grid, world,
             trySlam: trySlam,
+            beginSlamLeapFactory: beginSlamLeapFactory,
             findTarget: (WorldEntity monster, int gatherRadius, out ulong id, out WorldVector pos) =>
             {
                 if (!world.TryGet(player.Id, out var p) || p.Stats.Health <= 0)
@@ -593,10 +600,15 @@ public sealed class BasicRoamerBehaviorTests
         var slamCastTicks = new List<uint>();
         var ai = CreateCombatAi(
             seed: 7, grid, world, player, hits,
-            trySlam: (WorldEntity _, ulong targetId, WorldVector _, uint tick) =>
+            trySlam: (WorldEntity _, ulong targetId, WorldVector targetPos, uint tick, out SlamCast cast) =>
             {
                 Assert.Equal(player.Id, targetId);
                 slamCastTicks.Add(tick);
+                // SLIME-SLAM ROOT+LEAP: a realistic plan (windup 10 < the 20-tick cooldown; a 4-tick leap window)
+                // so the brain runs the ROOT+LEAP channel between casts exactly like live — the cadence pin below
+                // must hold WITH the channel in the loop. No leap dep is wired here, so the channel roots in place
+                // (the leap landing has its own dedicated pins); this test pins the CAST-tick arithmetic only.
+                cast = new SlamCast(targetPos, LeapStartTick: tick + 7, ResolveTick: tick + 10);
                 return true; // cast accepted — GameServer's TryBeginMonsterSlam would schedule the telegraph here.
             });
         ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
@@ -611,8 +623,164 @@ public sealed class BasicRoamerBehaviorTests
         // Adjacent (Euclidean 1.0 <= 1.5) for the whole run and registered with NextSlamTick = 0, so the first cast
         // fires on tick 1 and each subsequent one exactly one cooldown later: ticks 1,21,41,61,81 — ⌈100/20⌉ = 5
         // casts, the same cadence arithmetic as the melee test above. Any extra entry means the re-arm is gone.
+        // The re-arm anchors at the CAST tick and the channel (10 ticks) ends well inside the cooldown window, so
+        // the root-and-leap redesign leaves these exact ticks untouched.
         Assert.Equal(new uint[] { 1, 21, 41, 61, 81 }, slamCastTicks);
         Assert.Equal((int)Math.Ceiling(ticks / (double)slamCooldown), slamCastTicks.Count);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): rooted channel + leap-to-locked-origin pins.
+    // ---------------------------------------------------------------------------------------------------------
+
+    // The test slam's timing knobs, mirroring the live derivation (slime: windup 1500 ms = 30 ticks @20 Hz, hop
+    // airborne 300 ms = 6 ticks): windup 20 / leap 4 keeps the same shape (leap ≪ windup) with short test runs.
+    private const uint SlamWindupTicks = 20;
+    private const uint SlamLeapTicks = 4;
+
+    // A trySlam fake producing GameServer's exact cast plan: origin locked at the target's CAST-time position and
+    // leapStart = resolve − leap + 1, so the arc (first-stepped the same tick it starts — the harness mirrors the
+    // GameServer StepMonsterAi→StepAll order) lands EXACTLY on the resolve tick. Records the cast tick + origin.
+    private static BasicRoamerBehavior.TrySlamDelegate PlanSlam(uint[] castTick, WorldVector[] origin)
+        => (WorldEntity _, ulong _, WorldVector targetPos, uint tick, out SlamCast cast) =>
+        {
+            castTick[0] = tick;
+            origin[0] = targetPos;
+            cast = new SlamCast(targetPos, LeapStartTick: tick + SlamWindupTicks - SlamLeapTicks + 1, ResolveTick: tick + SlamWindupTicks);
+            return true;
+        };
+
+    // The harness's slam-leap dep, mirroring GameServer.BeginMonsterSlamLeap: a real ballistic Jump on the SAME
+    // executor the hop uses (same ActionId/height/animation — the leap replicates as a hop), duration recomputed
+    // from the ticks remaining so a deferred start shortens toward the deadline, cadence armed AFTER the start.
+    private static BasicRoamerBehavior.BeginSlamLeapDelegate CreateSlamLeap(ServerActionExecutor executor)
+        => (monster, origin, resolveTick, serverTick) =>
+        {
+            var toOrigin = origin - monster.Position;
+            var remaining = resolveTick >= serverTick ? resolveTick - serverTick + 1u : 1u;
+            var duration = Math.Max(1u, Math.Min(SlamLeapTicks, remaining));
+            var def = MovementActionRegistry.BuildForwardArcJump(
+                ActionId.Jump,
+                durationTicks: duration,
+                jumpHeight: HopHeightUnits,
+                forwardDistanceUnits: toOrigin.Length,
+                cooldownTicks: 0,
+                animationId: 1);
+            var heading = toOrigin.LengthSquared > 0d ? toOrigin.Normalized() : WorldVector.Zero;
+            if (!executor.TryStart(monster, def, heading, serverTick))
+            {
+                return false;
+            }
+
+            monster.TryBeginHop(serverTick, duration); // begin first, then arm — the frozen/ready complement rule.
+            return true;
+        };
+
+    [Fact]
+    public void SlamChannel_RootsFromCastToResolve_NoMeleeNoMovement_ThenLeapLandsOnResolve()
+    {
+        // THE ROOT+LEAP HEADLINE. An adjacent target triggers a slam cast; from cast to resolve the slime is a
+        // COMMITTED channel: (a) not a hair of movement until the leap-start tick (rooted — no hops, no chasing),
+        // (b) ZERO melee swings for the whole windup (the melee timer was due the entire time — only the channel
+        // suppresses it), then (c) the leap arc lands the slime ON the locked origin exactly at the resolve tick,
+        // grounded, back in Chasing, and (d) the root has RELEASED (melee resumes immediately after).
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(33, 32), Direction8.S);
+        var hits = new int[1];
+        var castTick = new uint[1];
+        var origin = new WorldVector[1];
+        var ai = CreateCombatAi(
+            seed: 7, grid, world, player, hits,
+            trySlam: PlanSlam(castTick, origin),
+            beginSlamLeapFactory: CreateSlamLeap);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+        // Cooldown longer than the run so exactly ONE cast happens; melee damage 10 so a suppressed-swing leak
+        // would show up in hits[0] immediately.
+        var tunables = CombatTunables(attackDamage: 10, slamEnabled: true, slamCooldownTicks: 500);
+
+        // Tick 1: adjacent (Euclidean 1.0 <= 1.5) + NextSlamTick seeded at spawn → the cast fires and the channel
+        // starts THIS tick (the slam takes the tick; melee did not fire).
+        ai.StepMonster(monster, 1, StepCooldownTicks, tunables);
+        Assert.Equal(1u, castTick[0]);
+        Assert.True(ai.TryGetPhase(monster.Id, out var channeling));
+        Assert.Equal(BasicRoamerBehavior.State.SlamChanneling, channeling);
+
+        var castPos = monster.Position;
+        var resolveTick = castTick[0] + SlamWindupTicks;              // 21
+        var leapStartTick = resolveTick - SlamLeapTicks + 1;          // 18 — the arc's 4 steps land ON 21.
+        for (uint tick = 2; tick <= resolveTick; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+            Assert.Equal(0, hits[0]); // (b) no melee between cast and resolve — ever.
+            if (tick < leapStartTick)
+            {
+                // (a) ROOTED: byte-identical position until the leap fires.
+                Assert.Equal(castPos, monster.Position);
+            }
+        }
+
+        // (c) Landed ON the resolve tick at the LOCKED origin (the target's cast-time position), grounded, channel
+        // over. The tolerance is float-sum slack only — the arc is 4 exact quarter-steps on an open grid.
+        Assert.True(Distance(monster.Position, origin[0]) <= 1e-3,
+            $"leap landed {monster.Position}, expected the locked origin {origin[0]}.");
+        Assert.Equal(0d, monster.VerticalOffset, 1e-9);
+        Assert.True(ai.TryGetPhase(monster.Id, out var after));
+        Assert.Equal(BasicRoamerBehavior.State.Chasing, after);
+
+        // (d) The root released with the channel: the (never-fired) melee timer swings within a few ticks.
+        for (uint tick = resolveTick + 1; tick <= resolveTick + 5 && hits[0] == 0; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+        }
+
+        Assert.True(hits[0] > 0, "melee never resumed after the channel — the root leaked past the resolve tick.");
+    }
+
+    [Fact]
+    public void SlamLeap_LandsOnTheLockedOrigin_NotTheDodgedTarget()
+    {
+        // The commit-to-where-you-WERE fantasy: the origin locks at cast; the target dodges mid-windup; the slime
+        // still leaps to (and lands on) the LOCKED origin — never re-aims at the target's new position — and lands
+        // nowhere near the dodger.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(33, 32), Direction8.S);
+        var hits = new int[1];
+        var castTick = new uint[1];
+        var origin = new WorldVector[1];
+        var ai = CreateCombatAi(
+            seed: 7, grid, world, player, hits,
+            trySlam: PlanSlam(castTick, origin),
+            beginSlamLeapFactory: CreateSlamLeap);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+        var tunables = CombatTunables(attackDamage: 10, slamEnabled: true, slamCooldownTicks: 500);
+
+        ai.StepMonster(monster, 1, StepCooldownTicks, tunables);
+        Assert.Equal(1u, castTick[0]);
+        var resolveTick = castTick[0] + SlamWindupTicks;
+
+        for (uint tick = 2; tick <= resolveTick; tick++)
+        {
+            if (tick == 10)
+            {
+                // DODGE: step well out of the (locked) zone mid-windup — still inside de-aggro range (9).
+                var before = player.TileCoord;
+                player.TeleportTo(new TileCoord(38, 32));
+                world.OnEntityMoved(player, before);
+            }
+
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+        }
+
+        // Landed on the LOCKED origin — the dodger's new position played no part in the leap.
+        Assert.True(Distance(monster.Position, origin[0]) <= 1e-3,
+            $"leap landed {monster.Position}, expected the locked origin {origin[0]}.");
+        Assert.True(Distance(monster.Position, player.Position) > 3d,
+            "the slime ended up at the dodged target — the leap must aim at the locked origin, not track the target.");
+        Assert.Equal(0, hits[0]); // and no melee ever fired inside the channel.
     }
 
     [Fact]

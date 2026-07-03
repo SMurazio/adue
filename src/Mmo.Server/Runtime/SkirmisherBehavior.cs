@@ -27,6 +27,8 @@ public sealed class SkirmisherBehavior : BasicRoamerBehavior
     // base StepChase runs the flee hook BEFORE the charge trigger, so flee precedence holds with no extra code here.
     // TELEGRAPH T1: the slam dep threads through like the charge — a wounded skirmisher still FLEES, never slams
     // (the base StepChase runs the flee hook before the in-range branch that holds the slam trigger).
+    // SLIME-SLAM ROOT+LEAP: the slam-LEAP dep threads through too, so a future slam-composing skirmisher type gets
+    // the same root-and-leap channel for free (no gnoll behavior change today — the gnoll composes no slam).
     public SkirmisherBehavior(
         int seed,
         Func<TileCoord, bool> isWalkable,
@@ -34,8 +36,9 @@ public sealed class SkirmisherBehavior : BasicRoamerBehavior
         TryResolveTargetDelegate tryResolveTarget,
         AttackDelegate attack,
         TryChargeDelegate? tryCharge = null,
-        TrySlamDelegate? trySlam = null)
-        : base(seed, isWalkable, findTarget, tryResolveTarget, attack, tryCharge, trySlam)
+        TrySlamDelegate? trySlam = null,
+        BeginSlamLeapDelegate? beginSlamLeap = null)
+        : base(seed, isWalkable, findTarget, tryResolveTarget, attack, tryCharge, trySlam, beginSlamLeap)
     {
     }
 

@@ -21,7 +21,10 @@
       // telegraph of slamRadiusUnits LOCKED at the target's position at cast time, resolving slamWindupMs later
       // against positions AT the resolve tick (step out during the windup = dodged) for slamDamage, no more often
       // than every slamCooldownMs. Its instant melee (attackDamage/attackCooldownMs) is unchanged and runs between
-      // slams. Server-only this phase (no telegraph rendering until T2); the values here mirror the code seed
+      // slams. SLIME-SLAM ROOT+LEAP: from cast to resolve the slime is COMMITTED — rooted (no hops/chase/melee)
+      // through the windup, then it LEAPS (hopDistance/hopHeight/hopAirborneMs machinery) onto the locked circle
+      // center, landing exactly on the resolve tick; a cast farther than hopDistanceUnits is declined, so the
+      // effective trigger range is min(attackRangeUnits, hopDistanceUnits). The values here mirror the code seed
       // byte-for-byte (the parity test pins them).
       "id": "slime",
       "displayName": "Slime",

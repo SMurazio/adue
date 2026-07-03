@@ -28,6 +28,17 @@ public interface IMonsterBehavior
     bool StepMonster(WorldEntity monster, uint serverTick, uint cooldownTicks, in MonsterAiTunables tunables, IMonsterLocomotion locomotion);
 }
 
+// SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): the CAST PLAN a successful slam cast hands back to the
+// brain — everything the brain needs to run the root-and-leap channel WITHOUT knowing any locomotion/telegraph
+// internals (it stays locomotion-agnostic; GameServer computes all three from the type's windup + hop-airborne knobs
+// and the scheduler's wire-quantized shape):
+//   * Origin        — the LOCKED, wire-QUANTIZED telegraph center (the exact circle clients see and resolve tests
+//                     against — the leap aims here so the landing visually matches the drawn center).
+//   * LeapStartTick — the tick the leap should BEGIN so its arc LANDS exactly on ResolveTick (GameServer's timing
+//                     math; strictly > the cast tick). The brain stays ROOTED until this tick, then fires the leap.
+//   * ResolveTick   — the telegraph's absolute resolve tick; the channel (root + no-melee) spans cast..ResolveTick.
+public readonly record struct SlamCast(WorldVector Origin, uint LeapStartTick, uint ResolveTick);
+
 // MONSTER-BEHAVIOR P3 (docs/monster-behavior-design.md): the behavior's per-tick INPUT contract — the tick-quantised
 // per-type AI config every behavior reads. Lifted out of the (former) MonsterRoamAi.Tunables to a top-level type so it
 // is SHARED by all IMonsterBehavior impls (it is the seam's input, not one impl's private nested record). Built by

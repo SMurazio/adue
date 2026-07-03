@@ -395,7 +395,10 @@ public sealed class GameServer
             TryBeginMonsterCharge,
             // TELEGRAPH T1: the slam dep — same shape (both brains get it; the per-type SlamEnabled tunable gates
             // whether a slam ever actually casts — only the slime composes "slam" today).
-            TryBeginMonsterSlam);
+            TryBeginMonsterSlam,
+            // SLIME-SLAM ROOT+LEAP: the slam-LEAP dep — the ballistic jump to the locked telegraph origin the brain
+            // fires at the plan's leap-start tick (only ever reached after a successful TryBeginMonsterSlam).
+            BeginMonsterSlamLeap);
         _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
         {
             ["basicRoamer"] = _defaultBehavior,
@@ -406,7 +409,8 @@ public sealed class GameServer
                 TryResolveMonsterTarget,
                 ApplyMonsterAttack,
                 TryBeginMonsterCharge,
-                TryBeginMonsterSlam),
+                TryBeginMonsterSlam,
+                BeginMonsterSlamLeap),
         };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
@@ -3813,11 +3817,33 @@ public sealed class GameServer
     // brain just resolved), resolving after the type's windup against positions AT that tick — locked origin +
     // resolve-time membership is exactly what makes it dodgeable. Resolves the monster's TYPE for the radius/windup/
     // damage (read fresh so a live retune applies to the next cast) and hands the schedule to the telegraph engine;
-    // the brain owns the WHEN (in attack range + its own per-monster slam cooldown). The caster is NOT rooted/held
-    // during the windup this phase (T3 polish) and the telegraph outlives a caster that dies mid-windup (the
-    // scheduler's documented decision). Only called for SlamEnabled types, but resolves defensively like the charge.
-    private bool TryBeginMonsterSlam(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick)
+    // the brain owns the WHEN (in attack range + its own per-monster slam cooldown). The telegraph outlives a caster
+    // that dies mid-windup (the scheduler's documented decision). Only called for SlamEnabled types, but resolves
+    // defensively like the charge.
+    //
+    // SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): a successful cast now also hands the brain its CAST
+    // PLAN (`cast`) — the wire-QUANTIZED locked origin plus the leap-start/resolve ticks — so the brain runs the
+    // root-and-leap channel (rooted cast→leap-start, airborne leap-start→resolve, landing ON the resolve tick).
+    //
+    // LEAP TIMING MATH (pinned by the behavior tests): the tick loop runs StepMonsterAi BEFORE the executor's
+    // StepAll, so a leap the brain starts at tick S takes its FIRST arc step that same tick and LANDS (i == D) on
+    // tick S + D − 1; ResolveDue runs AFTER StepAll, so a landing on the resolve tick is on the ground when the
+    // membership test runs — the landing IS the hit. Landing exactly on resolveTick therefore needs
+    //   leapStartTick = resolveTick − D + 1,   D = min(HopAirborneTicks, windupTicks)
+    // (capping D at the windup keeps leapStartTick strictly AFTER the cast tick even for a degenerate sub-airborne
+    // windup; both terms are >= 1, so D >= 1 and the uint arithmetic can't wrap).
+    //
+    // REACHABILITY (the derived slam TRIGGER range — decided here, documented per the todo): the cast is DECLINED
+    // when the locked origin is farther than the type's HopDistanceUnits from the caster, so the leap is ALWAYS
+    // within one believable hop (the monster is rooted from cast, so the leap distance IS the cast distance). The
+    // brain's trigger already requires the target within AttackRangeUnits, so the EFFECTIVE trigger range is
+    // min(AttackRangeUnits, HopDistanceUnits) — for the slime both are 1.5, i.e. trigger-range ≈ hop-range (the
+    // todo's preference) and live behavior is unchanged; a future type authored with attack range > hop range simply
+    // waits for the target to close instead of launching a superhuman leap. A declined cast returns false (the brain
+    // falls through to melee and re-tries next tick) — no telegraph is scheduled, so nothing false is advertised.
+    private bool TryBeginMonsterSlam(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick, out SlamCast cast)
     {
+        cast = default;
         if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
         {
             type = _monsterTypes.Default;
@@ -3828,18 +3854,95 @@ public sealed class GameServer
             return false;
         }
 
-        var resolveTick = serverTick + _monsterTypes.SlamWindupTicks(type);
+        // Reachability gate (see the header): decline a cast whose leap would exceed the type's hop range.
+        if ((targetPosition - monster.Position).Length > type.HopDistanceUnits)
+        {
+            return false;
+        }
+
+        // GROUNDED gate (independent review of this change): a chasing slime can close to trigger range MID-HOP-ARC;
+        // casting airborne would let the in-flight arc keep moving it for the remaining ticks AFTER the circle locks
+        // — up to ~300 ms of drift inside the "rooted" channel. Decline and let the brain re-try next tick (it lands
+        // within ≤6 ticks), so the root is literal: cast only ever happens standing still. Mirrors the leap's own
+        // grounded requirement (the executor rejects a start while an action is active).
+        if (_actionExecutor.IsActive(monster))
+        {
+            return false;
+        }
+
+        // Pre-quantize the shape to the EXACT wire/resolve geometry (Schedule re-quantizes — an idempotent no-op)
+        // so the leap aims at the same center the client draws and the resolver tests: landing and circle agree.
+        var shape = TelegraphScheduler.QuantizeToWire(TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits));
+        var windupTicks = _monsterTypes.SlamWindupTicks(type);
+        var resolveTick = serverTick + windupTicks;
         var telegraphId = _telegraphs.Schedule(
             monster.Id,
-            TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits),
+            shape,
             serverTick,
             resolveTick,
             type.SlamDamage,
             $"{type.DisplayName} slam");
-        // Logged (cooldown-paced, cannot spam) — T1 has no rendering, so the log is how a live test SEES the cast.
+
+        var leapDurationTicks = Math.Min(_monsterTypes.HopAirborneTicks(type), windupTicks);
+        cast = new SlamCast(shape.Origin, LeapStartTick: resolveTick - leapDurationTicks + 1, ResolveTick: resolveTick);
+        // Logged (cooldown-paced, cannot spam) — the log is how a live test correlates cast/leap/resolve ticks.
         Log.Info(
             $"Monster {monster.NetworkId} ({type.Id}) cast slam #{telegraphId} at "
-                + $"{targetPosition.X:F2},{targetPosition.Y:F2} r={type.SlamRadiusUnits} resolving at tick {resolveTick} (target #{targetId}).");
+                + $"{shape.Origin.X:F2},{shape.Origin.Y:F2} r={type.SlamRadiusUnits} resolving at tick {resolveTick} "
+                + $"(target #{targetId}, leap at tick {cast.LeapStartTick}).");
+        return true;
+    }
+
+    // SLIME-SLAM ROOT+LEAP: the brain's BeginSlamLeapDelegate — START the slam LEAP as a REAL ballistic Jump on the
+    // shared executor, aimed at the LOCKED (quantized) telegraph `origin`. PRESENTATION-THROUGH-SIMULATION: the leap
+    // moves the body so the landing reads as the advertised hit, but resolve/damage stay the TelegraphScheduler's
+    // (positions at T, center-point membership — this path deals NO damage). Mirrors BeginMonsterHop deliberately:
+    // the SAME ActionId.Jump + hop height + animation, so the leap replicates through the EXACT channel real hops
+    // already use (the action-airborne dense force-include — no new protocol, clients just see a hop).
+    //
+    // Duration: normally the plan's min(HopAirborneTicks, windup) — computed HERE from the ticks remaining so a
+    // DEFERRED start (the executor declined at the planned tick — an in-flight pre-cast hop arc, or a pre-armed
+    // longer cadence the root's max-floor could not shorten — and the brain retried) SHORTENS the arc toward the
+    // deadline instead of landing late: started at S it lands at S + D − 1, so D = resolveTick − S + 1 lands exactly
+    // ON resolveTick (floored at 1; a start AFTER the resolve tick — only reachable through pathological retries —
+    // degrades to a 1-tick hop, still toward the origin). Distance = the full gap to the origin (reachability was
+    // gated at cast, and the monster was rooted since, so this is <= the type's hop range); the executor re-resolves
+    // the arc per tick against walls AND player bodies (GatherActionObstacles), so a player standing on the origin
+    // stops the leap at their body exactly like a normal hop/charge — never a teleport, never an overlap.
+    private bool BeginMonsterSlamLeap(WorldEntity monster, WorldVector origin, uint resolveTick, uint serverTick)
+    {
+        if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
+        {
+            type = _monsterTypes.Default;
+        }
+
+        var toOrigin = origin - monster.Position;
+        var remainingTicks = resolveTick >= serverTick ? resolveTick - serverTick + 1u : 1u;
+        var durationTicks = Math.Max(1u, Math.Min(_monsterTypes.HopAirborneTicks(type), remainingTicks));
+        var def = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump,
+            durationTicks: durationTicks,
+            jumpHeight: type.HopHeightUnits,
+            forwardDistanceUnits: toOrigin.Length,
+            cooldownTicks: 0,        // like the hop: the movement cadence (armed below), not the executor, re-gates.
+            animationId: 1);         // the hop animation — the leap IS a hop, just aimed and timed.
+
+        // A zero heading (already standing on the origin — e.g. the target cast-distance was ~0) is a legal in-place
+        // hop: the executor treats a zero heading as no forward travel, so the slime still visibly hops the slam.
+        var heading = toOrigin.LengthSquared > 0d ? toOrigin.Normalized() : WorldVector.Zero;
+        if (!_actionExecutor.TryStart(monster, def, heading, serverTick))
+        {
+            return false; // declined (in-flight arc / still rooted past plan) — the brain retries next tick.
+        }
+
+        // Mirror BeginMonsterCharge's L1: zero any stale velocity so the leap replicates purely via the dense
+        // action-airborne force-include (a no-op for the hop-bodied slime, safety for a future glider slammer).
+        monster.StopMovement();
+
+        // Arm the movement cadence like a normal hop (begin FIRST, then arm — the frozen/ready complement rule
+        // HopLocomotion documents): airborne + the type's grounded rest, so the slime does not insta-hop the tick
+        // after its slam landing but rests HopDelayTicks like any other hop.
+        monster.TryBeginHop(serverTick, durationTicks + _monsterTypes.HopDelayTicks(type));
         return true;
     }
 

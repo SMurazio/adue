@@ -18,6 +18,9 @@ namespace Mmo.Server.Runtime;
 //                    radius (intended) but is LEASHED: target lost/dead/disconnected, target beyond the de-aggro
 //                    range, or the monster farther than chaseLeash from home → drop aggro and Return.
 //        Returning — hop back toward home after dropping aggro; resume Idle on arrival.
+//        SlamChanneling — (slam types only) committed from a slam cast to its resolve tick: ROOTED (no hops, no
+//                    chasing, no melee — the honest-telegraph rule), then LEAPS to the locked telegraph origin so
+//                    the landing lands ON the resolve tick; exits back to Chasing. See BeginSlamChannel.
 //
 // CONTINUOUS NAVIGATION (Phase 8). Navigation is CONTINUOUS (Euclidean ranges on WorldVector Position, sub-tile
 // targets, obstacle-avoidance via the swept-circle resolver) but movement still HOPS — a discrete collision-valid
@@ -78,6 +81,13 @@ public class BasicRoamerBehavior : IMonsterBehavior
         Roaming = 1,
         Chasing = 2,
         Returning = 3,
+
+        // SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): the slam CHANNEL — from a successful cast until
+        // the telegraph's resolve tick the monster is COMMITTED: rooted (no hops, no chasing, no melee — the honest-
+        // telegraph rule: the wound-up danger is a committed action, not a free extra), then LEAPS to the locked
+        // telegraph origin timed to land exactly ON the resolve tick (the landing reads as the hit). Entered only
+        // from Chasing (the slam trigger); exits back to Chasing at the resolve tick.
+        SlamChanneling = 4,
     }
 
     // Per-monster AI record. Mutable struct held by value in the dictionary and written back on change. Home is the
@@ -100,6 +110,16 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // independent of the move cadence). A slam is a scheduled world event, not an executor action, so the brain
         // owns this clock (the charge instead leans on the executor's CanStart cooldown).
         public uint NextSlamTick;
+
+        // SLIME-SLAM ROOT+LEAP: the live channel bookkeeping while Phase == SlamChanneling (meaningless otherwise).
+        // SlamOrigin is the LOCKED wire-quantized telegraph center the leap aims at; SlamLeapStartTick is when the
+        // leap fires (GameServer's timing: land exactly on SlamResolveTick); SlamLeapStarted latches the one leap
+        // per channel (the begin delegate is retried each tick from the start tick until it accepts — a pre-armed
+        // longer cadence or an in-flight hop arc can defer the executor's accept by a tick or two).
+        public WorldVector SlamOrigin;
+        public uint SlamLeapStartTick;
+        public uint SlamResolveTick;
+        public bool SlamLeapStarted;
         public uint NextAggroScanTick;
 
         // The last tick this monster actually advanced (HopResult.Moved) or entered a moving phase — the watchdog base.
@@ -135,6 +155,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // Resolved to a non-null delegate in the ctor so the StepChase trigger can call it unguarded.
     private readonly TrySlamDelegate _trySlam;
 
+    // SLIME-SLAM ROOT+LEAP: the slam-leap starter (default a no-op that returns false → never leap; the channel then
+    // just roots in place). See BeginSlamLeapDelegate. Resolved non-null in the ctor for unguarded calls.
+    private readonly BeginSlamLeapDelegate _beginSlamLeap;
+
     // Finds the nearest alive player within `gatherRadius` (a tile/Chebyshev coarse pre-filter — pass ⌈aggro⌉(+1)) of
     // `monster`. On success returns true and outputs the target id + its current continuous Position; false when none.
     public delegate bool FindTargetDelegate(WorldEntity monster, int gatherRadius, out ulong targetId, out WorldVector targetPosition);
@@ -163,7 +187,21 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // see MonsterState.NextSlamTick). Returns whether the slam was actually cast (false ⇒ the brain falls through to
     // its normal melee). Null (the default dep) = "never slam", so a behavior built without it — or one whose type's
     // MonsterAiTunables.SlamEnabled is false — is byte-identical to the pre-T1 brain.
-    public delegate bool TrySlamDelegate(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick);
+    // SLIME-SLAM ROOT+LEAP: a successful cast now also hands back the CAST PLAN (`cast` — the locked quantized origin
+    // + the leap-start/resolve ticks, see SlamCast in MonsterBehavior.cs) the brain needs to run the SlamChanneling
+    // root-and-leap without knowing any telegraph/locomotion internals. `cast` is undefined when this returns false.
+    public delegate bool TrySlamDelegate(
+        WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick, out SlamCast cast);
+
+    // SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): BEGIN the slam LEAP — a real ballistic hop arc on the
+    // shared executor aimed at the LOCKED telegraph `origin`, sized/timed by the owner so the monster LANDS on (never
+    // after, barring a deferred start) `resolveTick` — the landing IS the advertised hit. Owned by GameServer
+    // (BeginMonsterSlamLeap, which reuses the type's hop height/airborne knobs and the SAME executor channel real hops
+    // replicate through — presentation-through-simulation; resolve/damage stay the TelegraphScheduler's). Returns
+    // whether the leap actually STARTED (false ⇒ the executor declined — an in-flight hop arc or a pre-armed longer
+    // movement cadence — and the brain retries next tick). Null (the default dep) = "never leap": the channel still
+    // roots + suppresses melee, the monster just stays put (the pre-leap T1 shape; also the harness default).
+    public delegate bool BeginSlamLeapDelegate(WorldEntity monster, WorldVector origin, uint resolveTick, uint serverTick);
 
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
     // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
@@ -178,7 +216,8 @@ public class BasicRoamerBehavior : IMonsterBehavior
         TryResolveTargetDelegate tryResolveTarget,
         AttackDelegate attack,
         TryChargeDelegate? tryCharge = null,
-        TrySlamDelegate? trySlam = null)
+        TrySlamDelegate? trySlam = null,
+        BeginSlamLeapDelegate? beginSlamLeap = null)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
@@ -186,7 +225,15 @@ public class BasicRoamerBehavior : IMonsterBehavior
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
         _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, double _, uint _) => false);
-        _trySlam = trySlam ?? ((WorldEntity _, ulong _, WorldVector _, uint _) => false);
+        _trySlam = trySlam ?? NeverSlam;
+        _beginSlamLeap = beginSlamLeap ?? ((WorldEntity _, WorldVector _, uint _, uint _) => false);
+    }
+
+    // The "never slam" default dep — a named method (not a lambda) because the out param needs a body.
+    private static bool NeverSlam(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick, out SlamCast cast)
+    {
+        cast = default;
+        return false;
     }
 
     public int TrackedCount => _states.Count;
@@ -325,6 +372,14 @@ public class BasicRoamerBehavior : IMonsterBehavior
                 // Returning hops toward Destination = home (set in BeginReturnHome); same machinery as roam.
                 moved = StepTowardDestination(monster, locomotion, ref state, serverTick, stepCooldownTicks, t);
                 break;
+
+            case State.SlamChanneling:
+                // SLIME-SLAM ROOT+LEAP: the committed channel — rooted, no chase/melee/hops; fires the leap at its
+                // scheduled tick and exits back to Chasing at the resolve tick. Deliberately BYPASSES StepChase (so
+                // the de-aggro/leash/flee/attack branches cannot run mid-channel) and the aggro scan above only runs
+                // for Idle/Roaming, so a channeling monster re-evaluates NOTHING until the slam resolves.
+                StepSlamChannel(monster, ref state, serverTick);
+                break;
         }
 
         _states[monster.Id] = state;
@@ -411,13 +466,21 @@ public class BasicRoamerBehavior : IMonsterBehavior
             // composed it (SlamEnabled) and this monster's OWN slam cooldown elapsed, CAST the telegraph — GameServer
             // schedules a circle LOCKED at the target's CURRENT position, resolving after the windup — INSTEAD of
             // swinging this tick (checked before the melee gate so a due slam takes the tick; the melee resumes on
-            // its own timer next tick). Casting counts as progress (in range + acting, not wedged). When SlamEnabled
-            // is false (every non-slammer) this block is INERT → byte-identical to the pre-T1 brain.
+            // its own timer AFTER the channel). Casting counts as progress (in range + acting, not wedged). When
+            // SlamEnabled is false (every non-slammer) this block is INERT → byte-identical to the pre-T1 brain.
+            // GameServer may also DECLINE the cast (reachability: origin beyond the type's hop range — see
+            // TryBeginMonsterSlam), in which case the brain falls through to its normal melee and re-tries next tick.
+            //
+            // SLIME-SLAM ROOT+LEAP: a successful cast COMMITS the monster — enter the SlamChanneling channel (rooted
+            // via the shared attack-movement-root seam until the leap fires, then the leap arc owns movement until it
+            // lands ON the resolve tick; no melee for the whole windup). The cooldown re-arm stays anchored at the
+            // CAST tick (unchanged cadence arithmetic — the cadence pin's exact-tick asserts stay green).
             if (t.SlamEnabled && serverTick >= state.NextSlamTick
-                && _trySlam(monster, state.TargetId, targetPos, serverTick))
+                && _trySlam(monster, state.TargetId, targetPos, serverTick, out var cast))
             {
                 state.NextSlamTick = serverTick + Math.Max(1u, t.SlamCooldownTicks);
                 state.LastProgressTick = serverTick;
+                BeginSlamChannel(monster, ref state, serverTick, cast);
                 return false;
             }
 
@@ -464,6 +527,55 @@ public class BasicRoamerBehavior : IMonsterBehavior
 
             default: // OnCooldown — harmless wait.
                 return false;
+        }
+    }
+
+    // SLIME-SLAM ROOT+LEAP (todo/S-slime-slam-root-and-leap.md): enter the slam CHANNEL after a successful cast.
+    // The ROOT reuses the EXISTING movement-freeze seam — WorldEntity.ApplyAttackMovementRoot, the same
+    // _nextEligibleTick floor the player swing-root uses and the same field the hop cadence (IsHopReady) and the
+    // executor's CanStart (IsMovementFrozen) already gate on. Rooting until the LEAP-START tick (not the resolve
+    // tick!) is load-bearing: IsMovementFrozen and IsHopReady are exact complements on that field, so a root running
+    // through the resolve tick would make the executor REJECT the very leap we scheduled (the same ordering trap
+    // HopLocomotion documents at its begin-before-arm). From leap start to landing the leap ARC owns movement (the
+    // executor's IsActive), so movement stays locked for the entire windup: frozen, then airborne, landing ON the
+    // resolve tick. Melee/chase/aggro suppression is the SlamChanneling phase itself (StepMonster's switch).
+    private static void BeginSlamChannel(WorldEntity monster, ref MonsterState state, uint serverTick, SlamCast cast)
+    {
+        // Defensive clamps: the leap must start strictly AFTER the cast tick (GameServer guarantees it; a degenerate
+        // plan from a test/future caller must not root for 0 ticks or resolve before the leap fires).
+        var leapStartTick = Math.Max(cast.LeapStartTick, serverTick + 1);
+        monster.ApplyAttackMovementRoot(serverTick, leapStartTick - serverTick);
+        state.Phase = State.SlamChanneling;
+        state.SlamOrigin = cast.Origin;
+        state.SlamLeapStartTick = leapStartTick;
+        state.SlamResolveTick = Math.Max(cast.ResolveTick, leapStartTick);
+        state.SlamLeapStarted = false;
+    }
+
+    // One SlamChanneling tick: rooted until the leap-start tick, then BEGIN the leap (retried each tick until the
+    // executor accepts — an in-flight hop arc from just before the cast, or a pre-armed longer movement cadence the
+    // root's max-floor could not shorten, can defer the accept; a deferred leap lands a tick or two late, which the
+    // owner's duration math shortens toward the deadline — see GameServer.BeginMonsterSlamLeap). At the RESOLVE tick
+    // the channel ends and the monster returns to Chasing: the telegraph engine resolves this same tick (after all
+    // movement, so the landed leap IS the position the membership test sees) and the normal de-aggro/leash/melee
+    // logic re-evaluates from the next tick — melee was suppressed for the whole cast→resolve window.
+    private void StepSlamChannel(WorldEntity monster, ref MonsterState state, uint serverTick)
+    {
+        if (!state.SlamLeapStarted && serverTick >= state.SlamLeapStartTick
+            && _beginSlamLeap(monster, state.SlamOrigin, state.SlamResolveTick, serverTick))
+        {
+            state.SlamLeapStarted = true;
+            state.LastProgressTick = serverTick;
+        }
+
+        if (serverTick >= state.SlamResolveTick)
+        {
+            // Channel over — back to Chasing with the target fields intact (StepChase re-runs the de-aggro/leash
+            // checks next tick, so a target that died/left mid-channel drops normally). Re-base the no-progress
+            // watchdog: a windup longer than ~2 move windows is a COMMITTED root, not a wedge — without this the
+            // watchdog would instantly bail the monster home the tick after every slam.
+            state.Phase = State.Chasing;
+            state.LastProgressTick = serverTick;
         }
     }
 

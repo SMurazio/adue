@@ -86,7 +86,11 @@ public sealed class TelegraphScheduler
     // fair-and-responsive pillar demands the drawn edge IS the rule EXACTLY, so quantize ONCE at schedule time — the
     // same rounding the codec applies (PositionEncoding round-trip for the origin, round-away-from-zero sixteenths
     // for the radius) — and server resolve, wire, and client decal all see one identical shape.
-    private static TelegraphShape QuantizeToWire(TelegraphShape shape)
+    // SLIME-SLAM ROOT+LEAP: internal (was private) so GameServer.TryBeginMonsterSlam can pre-quantize the shape and
+    // aim the slam LEAP at the EXACT wire origin the circle renders/resolves at. Idempotent (quantizing a quantized
+    // shape is a no-op), so Schedule re-applying it to a pre-quantized shape changes nothing — resolve semantics are
+    // untouched.
+    internal static TelegraphShape QuantizeToWire(TelegraphShape shape)
     {
         var (qx, qy) = PositionEncoding.Encode(shape.Origin);
         var radius = Math.Round(shape.Radius * PositionEncoding.Scale, MidpointRounding.AwayFromZero) / PositionEncoding.Scale;
