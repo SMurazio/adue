@@ -119,6 +119,14 @@ pockets, ever).
   archetype hook) + scatter-on-grass-only (D6) + ecology.json rect update (D7). Server boots
   genVersion 2 by default; genVersion 1 remains reachable (env) for old tests. Tests: expansion
   determinism, dump-to-ASCII round-trip, and the M1 flood-fill invariant on the REAL map.
+  **M1-review carry-ins (e246c73 review, all arm at M3):** (F1) pin the v2 ContentHash as a LITERAL with
+  the never-update-this comment — the hash section order is a compatibility contract and nothing pins it
+  today; (F2) keep the map as a quoted C# string[] (NOT raw string/.txt — editor trailing-whitespace
+  stripping corrupts those) and add an editor-stripping warning to the editing rules; (F3) fix
+  tests/Mmo.Server.Tests/AoiIntegrationTests.cs:215-218 (re-hashes blocked-only — false-fails the moment
+  CurrentGenVersion flips to 2); (F4) HOUSES ARE BLOCKED TILES: stamp each house footprint as `#` rect
+  with the `H` marker adjacent as the sprite anchor, so the flood-fill reachability test SEES house
+  collision (entity-level prop collision would be invisible to it).
 - **M4 — feel-test (human):** walk spawn→plaza→gate→each wing. Verdicts: town reads cozy-small? floor 1
   reads WIDE? gate reads like a threshold? arena pockets fit telegraph dodging? Iterate §4 in-place.
 
