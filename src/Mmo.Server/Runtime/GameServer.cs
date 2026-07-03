@@ -1426,13 +1426,20 @@ public sealed class GameServer
     // test can stay in lockstep with the gather-radius math.
     internal const float RoundedGatherMarginTiles = 1f;
 
-    // Spatial-index cell size (tiles): one cell ≈ the interest box, so a viewer query touches a small
-    // fixed neighborhood (~3×3 cells) regardless of world size. Derived from the interest radius and
-    // clamped to >= 1. Pure performance knob — correctness is independent of it (the query expands the
-    // cell box to cover the exit radius for whatever cell size is chosen).
+    // Spatial-index cell size (tiles). Pure performance knob — correctness is independent of it (the query
+    // expands the cell box to cover the exit radius for whatever cell size is chosen; SpatialAoiParityTests
+    // pins the parity at several sizes).
+    //
+    // AOI-GATHER OVER-SWEEP FIX (the density profile's superlinear pass, todo/N-tick-profile-at-density):
+    // cell == radius (the old ceil(radius)) made each viewer query sweep an average ~3.3 cells per axis for
+    // the ±(exit+margin) box — at radius 18 that is ~3600 tiles (~22% of the default map) of candidates per
+    // viewer per tick, ~2.6× the ideal bounding box, and EVERY entity in the sweep pays the interest test.
+    // radius/4 (cell 5 at radius 18) tightens the swept area toward the ideal box (~2450 tiles, ~32% fewer
+    // candidates) while keeping the per-query cell-dictionary lookups small (~100). The floor of 2 keeps a
+    // tiny admin-set radius from degenerating into per-tile cells (lookup-dominated).
     private static int ResolveEntityGridCellSize(float interestRadius)
     {
-        return Math.Max(1, (int)Math.Ceiling(interestRadius));
+        return Math.Max(2, (int)Math.Ceiling(interestRadius / 4f));
     }
 
     // P0 (monster-behavior architecture, docs/monster-behavior-design.md): load monster TYPES from the loose data
