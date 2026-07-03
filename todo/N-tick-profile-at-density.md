@@ -1,7 +1,11 @@
-# N — density tick-profile: MEASURED (2026-07-03). AOI gather is the superlinear pass. Levers documented, deferred.
+# N — density tick-profile: MEASURED (2026-07-03) + the first lever PULLED (`afd2da9`). Rest documented, deferred.
 
-**User directive (2026-07-02): "don't invest on tradeoffs for now — just document them and document the
-solution."** The profile itself is now DONE (below); what remains deferred is choosing/building a lever.
+**LEVER PULLED (user go, 2026-07-03):** AOI grid cell = radius/4 (was = radius), `afd2da9`. Measured at 200
+clients: aoi 5.22 → 3.58 ms (−31%, matching the model), tick avg 10.60 → 7.14 ms, tick MAX 94 → 13.9 ms (the
+login-storm spike gone), drift max 58 → 2 ms. Post-fix: 200 all-moving clients ≈ 14% of the 50 ms tick budget,
+growth 120→200 now 2.7× (was 3.8×). Also closes the docs/tile-audit.md "spatial-grid cell size" DECISION item.
+The remaining AOI superlinearity (0.83 → 3.58, 4.3×) is density×viewers — inherent to streaming AOI; the next
+levers (below) stay documented-not-built per the user's directive.
 
 ## The profile (2026-07-03, review-stress @ radius 18, Debug, 20 Hz, 60s runs, mid-run /metrics)
 
