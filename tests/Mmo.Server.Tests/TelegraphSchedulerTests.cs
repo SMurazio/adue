@@ -80,6 +80,9 @@ public sealed class TelegraphSchedulerTests
         Assert.True(shape.Contains(new WorldVector(11.5d, 10d)));     // inside
         Assert.True(shape.Contains(new WorldVector(12d, 10d)));       // exactly on the rim — INCLUSIVE
         Assert.False(shape.Contains(new WorldVector(12.001d, 10d)));  // just outside
+        Assert.False(shape.Contains(new WorldVector(12.4d, 10d)));    // CENTER-POINT membership (decided): center out
+                                                                      // by 0.4 — a 0.5-radius body clips the rim, and
+                                                                      // that still never counts
         Assert.False(shape.Contains(new WorldVector(11.5d, 11.5d)));  // Euclidean: √(1.5²+1.5²) ≈ 2.12 > 2 (a
                                                                       // Chebyshev-2 corner is OUT of a radius-2 circle)
         Assert.Equal(2d, shape.BoundingRadius);
@@ -157,6 +160,65 @@ public sealed class TelegraphSchedulerTests
         // Positions AT T, never at cast: walking in eats the hit even though the cast-time position was safe.
         Assert.Single(landed);
         Assert.Equal(85, player.Stats.Health);
+    }
+
+    [Fact]
+    public void RimVictimBucketedInANeighboringGatherCell_FractionalOrigin_IsHit()
+    {
+        // T1-review followup (gather-margin rim pin): the resolve gather is a superset box around the LOCKED ORIGIN
+        // (⌈BoundingRadius⌉ + 1 tiles), never around the caster. Every prior test parked victims ≤1 tile from the
+        // origin inside the same spatial cell, so a regression that gathered around the CASTER's position instead of
+        // the shape's origin passed the whole suite. Here the geometry stresses the gather edge: a FRACTIONAL origin
+        // (32.49, 32), a victim whose center sits EXACTLY on the rim (34.49 − 32.49 is exactly 2.0 in doubles, so
+        // LengthSquared == Radius² — the inclusive-rim hit), bucketed two tiles away in a NEIGHBORING spatial cell
+        // (cell size 2: origin tile 32 → cell 16, victim tile 34 → cell 17), and a live caster parked FAR away
+        // (10, 10) whose neighborhood does NOT contain the victim. Gathering around the caster — or any gather box
+        // that fails to cover the rim of the origin's disc — misses this victim and fails the damage assert.
+        var world = new WorldState(gridCellSize: 2);
+        var caster = world.AddTransient(1, EntityKind.Monster, "Slime", new TileCoord(10, 10), Direction8.S);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(34, 32), Direction8.S);
+        var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
+        MoveTo(world, player, new WorldVector(34.49d, 32d));
+
+        var origin = new WorldVector(32.49d, 32d);
+        Assert.True(TelegraphShape.Circle(origin, 2d).Contains(player.Position),
+            "test setup: the victim's center must sit exactly on the inclusive rim.");
+        scheduler.Schedule(caster.Id, TelegraphShape.Circle(origin, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "Slime slam");
+
+        scheduler.ResolveDue(50);
+
+        // "I was inside (on the rim) and it hit" — the origin-centered superset gather found the neighbor-cell victim.
+        var hit = Assert.Single(landed);
+        Assert.Same(player, hit.Victim);
+        Assert.Equal(85, player.Stats.Health);
+        Assert.Equal(0, scheduler.PendingCount);
+    }
+
+    [Fact]
+    public void BodyClippingTheRim_CenterJustOutside_TakesNothing()
+    {
+        // CENTER-POINT membership — DECIDED (user, 2026-07-03; see TelegraphShape.Contains): you are hit iff your
+        // CENTER is inside the drawn circle; a body clipping the rim never counts (deliberately divergent from the
+        // melee/free-aim body-clip rule — the drawn circle IS the rule, ambiguity errs player-favorable). Victim
+        // center at distance 2.2 from the origin of a radius-2 circle: OUTSIDE by 0.2, yet the 0.5-radius body
+        // overlaps the rim by 0.3 — a body-clip rule (or any "helpful" body-radius padding in the resolve) would
+        // damage this player; the decided rule must not.
+        var world = new WorldState();
+        var player = world.AddTransient(1, EntityKind.Player, "Hero", new TileCoord(34, 32), Direction8.S);
+        var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
+        MoveTo(world, player, new WorldVector(34.2d, 32d));
+
+        var origin = new WorldVector(32d, 32d);
+        Assert.True((player.Position - origin).Length - BodyRadius < 2d,
+            "test setup: the body must overlap the drawn circle (only the center is outside).");
+        scheduler.Schedule(999, TelegraphShape.Circle(origin, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "test slam");
+
+        scheduler.ResolveDue(50);
+
+        // Center outside → no damage, even though the body clipped the rim. The telegraph still resolved (and left).
+        Assert.Empty(landed);
+        Assert.Equal(100, player.Stats.Health);
+        Assert.Equal(0, scheduler.PendingCount);
     }
 
     [Fact]

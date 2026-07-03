@@ -18,9 +18,18 @@ public readonly record struct TelegraphShape(TelegraphShapeKind Kind, WorldVecto
     public static TelegraphShape Circle(WorldVector origin, double radius) =>
         new(TelegraphShapeKind.Circle, origin, radius);
 
-    // True iff a continuous position is inside the shape. Circle: Euclidean distance <= Radius (INCLUSIVE — a body
+    // True iff a continuous position is inside the shape. Circle: Euclidean distance <= Radius (INCLUSIVE — a
     // centre exactly on the rim is hit), compared squared to skip the sqrt. An unknown kind contains nothing (safe
     // default: a malformed shape can never damage anyone).
+    //
+    // MEMBERSHIP IS CENTER-POINT — DECIDED (user, 2026-07-03): you are hit iff your character's CENTER is inside
+    // the drawn circle. A body CLIPPING the rim (center outside, body radius overlapping the circle) NEVER counts —
+    // the fair-and-responsive pillar: the drawn circle IS the rule, and ambiguity errs player-favorable (being hit
+    // while your center looks out of the zone is exactly the unfairness we refuse). This is DELIBERATELY divergent
+    // from the melee/free-aim body-clip hit tests and stays so: a telegraph is a dodge-the-zone rule (legibility
+    // first), free-aim is a did-my-swing-connect rule. Corollary for renderers (T2): draw the TRUE radius — no
+    // visual padding or shrink (the honest-telegraph rule). Pinned by TelegraphSchedulerTests (a body-overlap,
+    // center-outside victim takes no damage), so callers must not "helpfully" add a body-radius allowance here.
     public bool Contains(WorldVector position) => Kind switch
     {
         TelegraphShapeKind.Circle => (position - Origin).LengthSquared <= Radius * Radius,

@@ -158,7 +158,8 @@ public sealed class BasicRoamerBehaviorTests
         BasicRoamerBehavior.FindTargetDelegate? findTarget = null,
         BasicRoamerBehavior.TryResolveTargetDelegate? tryResolve = null,
         BasicRoamerBehavior.AttackDelegate? attack = null,
-        Func<TileGrid, ServerActionExecutor, IMonsterLocomotion>? locomotionFactory = null)
+        Func<TileGrid, ServerActionExecutor, IMonsterLocomotion>? locomotionFactory = null,
+        BasicRoamerBehavior.TrySlamDelegate? trySlam = null)
     {
         var executor = CreateExecutor(grid, world);
         var locomotion = (locomotionFactory ?? ((g, e) => CreateLocomotion(g, e)))(grid, executor);
@@ -177,7 +178,10 @@ public sealed class BasicRoamerBehaviorTests
                 alive = false;
                 return false;
             }),
-            attack ?? ((WorldEntity _, ulong _, int _) => { }));
+            attack ?? ((WorldEntity _, ulong _, int _) => { }),
+            // TELEGRAPH T1: the optional slam trigger (null = never slam, exactly like GameServer for a
+            // non-slammer type); the slam-cadence test records + accepts casts through it.
+            trySlam: trySlam);
         return new AiHarness(ai, locomotion, executor, world);
     }
 
@@ -408,20 +412,29 @@ public sealed class BasicRoamerBehaviorTests
         double attackRangeUnits = 1.5d,
         int attackDamage = 10,
         uint attackCooldownTicks = 20,
-        uint aggroScanInterval = 1)
+        uint aggroScanInterval = 1,
+        bool slamEnabled = false,
+        uint slamCooldownTicks = 0)
         => new(
             roamRadius, pauseMin, pauseMax,
             aggroRadius, deaggroRadius, chaseLeash,
-            attackRangeUnits, attackDamage, attackCooldownTicks, aggroScanInterval);
+            attackRangeUnits, attackDamage, attackCooldownTicks, aggroScanInterval)
+        {
+            // TELEGRAPH T1: slam config defaults to inert (the pre-T1 brain); the slam-cadence test opts in.
+            SlamEnabled = slamEnabled,
+            SlamCooldownTicks = slamCooldownTicks,
+        };
 
     // Wires the AI's aggro/resolve/attack callbacks to a real player WorldEntity, mirroring GameServer's continuous
     // path: findTarget — nearest alive player by Euclidean Position within the COARSE gather radius (the AI re-tests
     // the Euclidean aggro disc); tryResolve — the target's live Position + alive; attack — face + ApplyDamage.
     private static AiHarness CreateCombatAi(
-        int seed, TileGrid grid, WorldState world, WorldEntity player, int[] hitCounter)
+        int seed, TileGrid grid, WorldState world, WorldEntity player, int[] hitCounter,
+        BasicRoamerBehavior.TrySlamDelegate? trySlam = null)
     {
         return CreateAi(
             seed, grid, world,
+            trySlam: trySlam,
             findTarget: (WorldEntity monster, int gatherRadius, out ulong id, out WorldVector pos) =>
             {
                 if (!world.TryGet(player.Id, out var p) || p.Stats.Health <= 0)
@@ -559,6 +572,47 @@ public sealed class BasicRoamerBehaviorTests
         Assert.Equal(5, hits[0]);
         Assert.Equal(startHp - 5 * attackDamage, world.TryGet(player.Id, out var p) ? p.Stats.Health : -1);
         Assert.Equal(Direction8.E, monster.Facing);
+    }
+
+    [Fact]
+    public void SlamCadence_AdjacentTarget_CastsExactlyOncePerCooldownWindow()
+    {
+        // TELEGRAPH T1 review followup: the brain-level slam-CADENCE pin. A slam-enabled monster with an adjacent
+        // (in-attack-range) target must cast exactly ⌈N/cooldown⌉ slams over N ticks — spaced by the per-monster
+        // NextSlamTick re-arm in BasicRoamerBehavior.StepChase (the brain OWNS this clock; a slam is a scheduled
+        // world event, so there is no executor cooldown behind it the way the charge has). Delete that re-arm and
+        // an in-range slammer casts EVERY tick (live: 20 casts/s, 15 dmg at every T, the scheduler's _pending
+        // ballooning) while the rest of the suite stays green — the exact-tick assert below is what catches it.
+        const uint slamCooldown = 20;
+        const uint ticks = 100;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(33, 32), Direction8.S);
+        var hits = new int[1];
+        var slamCastTicks = new List<uint>();
+        var ai = CreateCombatAi(
+            seed: 7, grid, world, player, hits,
+            trySlam: (WorldEntity _, ulong targetId, WorldVector _, uint tick) =>
+            {
+                Assert.Equal(player.Id, targetId);
+                slamCastTicks.Add(tick);
+                return true; // cast accepted — GameServer's TryBeginMonsterSlam would schedule the telegraph here.
+            });
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+
+        // attackDamage 0 keeps the interleaved melee (its own independent timer) from ever downing the target.
+        var tunables = CombatTunables(attackDamage: 0, slamEnabled: true, slamCooldownTicks: slamCooldown);
+        for (uint tick = 1; tick <= ticks; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+        }
+
+        // Adjacent (Euclidean 1.0 <= 1.5) for the whole run and registered with NextSlamTick = 0, so the first cast
+        // fires on tick 1 and each subsequent one exactly one cooldown later: ticks 1,21,41,61,81 — ⌈100/20⌉ = 5
+        // casts, the same cadence arithmetic as the melee test above. Any extra entry means the re-arm is gone.
+        Assert.Equal(new uint[] { 1, 21, 41, 61, 81 }, slamCastTicks);
+        Assert.Equal((int)Math.Ceiling(ticks / (double)slamCooldown), slamCastTicks.Count);
     }
 
     [Fact]

@@ -19,7 +19,11 @@ namespace Mmo.Server.Tests;
 //       same startTick, same resolveTick — because the per-recipient known-id diff has no "already announced"
 //       memory for a fresh session (the SpawnerMarker pattern). Identical ticks are what let the late joiner
 //       render the correct REMAINING fill and land on the shared deadline T;
-//   (3) NO DUPLICATES: the diff pass never re-sends a known id to either viewer while the telegraph stays pending.
+//   (3) NO DUPLICATES: the diff pass never re-sends a known id to either viewer while the telegraph stays pending;
+//   (4) RESOLVE WIRING (T1-review followup): a scheduled telegraph actually RESOLVES through the real tick loop —
+//       the `_telegraphs.ResolveDue(_serverTick)` call in GameServer.TickCore — landing damage on a victim standing
+//       at the locked origin. The scheduler suite drives ResolveDue directly, so this end-to-end pin is what fails
+//       if that one TickCore line is deleted (feature dead: telegraphs schedule + announce but never resolve).
 public sealed class TelegraphWireIntegrationTests
 {
     private const int TickRate = 20;
@@ -70,6 +74,52 @@ public sealed class TelegraphWireIntegrationTests
             await PollForAsync(TimeSpan.FromMilliseconds(500), admin, late);
             Assert.Equal(1, admin.Telegraphs.Count(t => t.TelegraphId == cast.TelegraphId));
             Assert.Equal(1, late.Telegraphs.Count(t => t.TelegraphId == cast.TelegraphId));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledTelegraphResolvesThroughTheLiveTickLoop_LandingDamageOnce()
+    {
+        // The ResolveDue WIRING pin (T1-review followup, todo item 2): /slam with a SHORT windup, caster standing
+        // still at the locked origin. The 15 damage can ONLY arrive via a real GameServer tick running
+        // _telegraphs.ResolveDue(_serverTick) (resolve → origin gather → PlayerDamageGate → OnPlayerDamageLanded →
+        // DamageEventMessage to the victim's viewers, victim included — no client-side path fabricates the event
+        // and nothing else in this world deals damage). Delete that TickCore call and the telegraph stays pending
+        // forever: the announcement in step 1 still arrives, but the damage wait below times out.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Admin"]);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var admin = new TelegraphClient("Admin");
+            admin.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => admin.IsLoggedIn, admin);
+
+            // Short windup (~200 ms = 4 ticks @ 20 Hz) so the resolve happens well inside the wait budget.
+            admin.SendChat("/slam 2 200 15");
+
+            // Scheduled + announced (the T2 wire proves the schedule happened)…
+            await WaitUntilAsync(() => admin.Telegraphs.Count >= 1, admin);
+
+            // …then RESOLVED through a live tick: the standing caster eats its own slam. (No pre-resolve
+            // "still undamaged" assert here — it would race the 4-tick windup on a stalled test thread, and the
+            // regression under guard is "never resolves", which the wait below already catches as a timeout.)
+            await WaitUntilAsync(() => admin.DamageEvents.Count >= 1, admin);
+            Assert.Equal(15, admin.DamageEvents[0].Amount);
+
+            // Resolved ONCE: a due telegraph leaves _pending, so continued polling shows no second hit.
+            await PollForAsync(TimeSpan.FromMilliseconds(500), admin);
+            Assert.Equal(1, admin.DamageEvents.Count);
         }
         finally
         {
@@ -165,6 +215,11 @@ public sealed class TelegraphWireIntegrationTests
         }
 
         public List<TelegraphMessage> Telegraphs { get; } = [];
+
+        // T1-review followup (the ResolveDue wiring pin): the DamageEventMessage stream — a telegraph that RESOLVED
+        // through the live tick loop lands damage, and the landed tail broadcasts this event to the victim's viewers
+        // (including the victim itself). Every arrival kept, like Telegraphs, so a double resolve is visible.
+        public List<DamageEventMessage> DamageEvents { get; } = [];
         public bool IsLoggedIn { get; private set; }
 
         public void Connect(int port, string key)
@@ -209,6 +264,9 @@ public sealed class TelegraphWireIntegrationTests
                         break;
                     case TelegraphMessage telegraph:
                         Telegraphs.Add(telegraph);
+                        break;
+                    case DamageEventMessage damage:
+                        DamageEvents.Add(damage);
                         break;
                     case WorldSnapshotMessage snapshot:
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
