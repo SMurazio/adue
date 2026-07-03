@@ -1,4 +1,5 @@
 using Godot;
+using Mmo.Client.Core;
 using Mmo.Shared.Domain;
 
 namespace Mmo.Client.Godot.UI;
@@ -12,10 +13,23 @@ namespace Mmo.Client.Godot.UI;
 // squares sized to their footprint, and adds live +/- zoom buttons that change the pixels-per-tile scale without a
 // restart.
 //
+// N (todo/N-minimap-384-bake-cost.md): two build-time fixes once the 384-tile authored world went live.
+//   1. The base layer used to re-bake (a full tile scan, per-pixel SetPixel calls) on EVERY zoom click — up to
+//      ~5M interop calls at 384x384. It now bakes ONCE per zone at a FIXED internal resolution (BakeScale,
+//      independent of the live zoom) into a raw RGBA8 byte buffer (batched array writes, no per-pixel interop),
+//      and a zoom click just resizes the TextureRect's display rect — Godot's GPU stretches the SAME texture
+//      (StretchMode.Scale + TextureFilter.Nearest keeps tile edges crisp). Safe because every tile is a flat
+//      color: up/down-scaling never loses fidelity, it only changes how many screen pixels a tile occupies.
+//   2. The base layer used to always read the legacy terrain.png design bitmap — meaningless (and actively
+//      misleading) on an AUTHORED (genVersion 2+) zone, whose real road/terrain layout can be tiles away from
+//      the bitmap's fictional one. An authored zone now bakes from the SAME per-tile SurfaceCategory palette
+//      the 3D floor is painted with (AuthoredSurfaceVisuals.Albedo via MinimapAuthoredPalette, both Godot-free
+//      and headlessly tested); genVersion 1 (HudState.Map.Authored is null) keeps the terrain.png path.
+//
 // Data sources (all REAL, read-only — see HudState):
-//   - Static map: HudState.Map (width/height + blocked-tile set), regenerated client-side from the seed (S42).
-//     We rasterise it ONCE into an ImageTexture and only re-bake when the map's Generation OR the current zoom
-//     scale changes — never per frame. Only the player marker + map offset move each frame.
+//   - Static map: HudState.Map (width/height + blocked-tile set + Authored map when genVersion 2+), regenerated
+//     client-side from the seed (S42). We rasterise it ONCE into an ImageTexture per Generation — never per
+//     frame, never per zoom. Only the player marker + map offset + display size move on a zoom/frame.
 //   - Player position/facing: HudState.LocalX/LocalY (continuous render position, X=east, Y=south in tile space)
 //     and HudState.LocalFacing (Direction8). Both already client-side; the minimap never touches the snapshot/AOI
 //     pipeline or any movement logic.
@@ -37,24 +51,39 @@ public partial class Minimap : Control
     // How much of the frame art is decorative border; the live map shows inside this inset (tuned to the art).
     private const float FrameInset = 14f;
 
-    // Pixels per world tile on the baked map. Larger = more zoomed-in / more detail per wall. The baked texture
-    // is (Width*_mapScale) x (Height*_mapScale); a tile is _mapScale px. This is the SINGLE source of truth for
-    // scale: the baked walls, the object squares, and the player offset all multiply tile coords by it, so they
-    // stay aligned. S110 makes it live-tunable via the +/- buttons (was a const in S109).
+    // Pixels per world tile the map is currently DISPLAYED at. Larger = more zoomed-in / more detail per wall.
+    // This is the SINGLE source of truth for on-screen scale: the displayed map rect, the object squares, and
+    // the player offset all multiply tile coords by it, so they stay aligned. S110 makes it live-tunable via the
+    // +/- buttons (was a const in S109). N: this no longer drives the BAKE resolution (see BakeScale) — changing
+    // it only resizes the TextureRect's display rect (GPU-stretches the cached texture), never re-bakes.
     private const int DefaultMapScale = 6;
     private const int MinMapScale = 3;
     private const int MaxMapScale = 16;
     private const int ZoomStep = 2;
     private int _mapScale = DefaultMapScale;
 
-    // Wall + border colours for the simplified raster (contrasting, readable — not a 1:1 terrain texture).
+    // N: the FIXED pixels-per-tile the base layer is baked at, independent of _mapScale. Baking happens ONCE per
+    // zone (see EnsureBaked), so this only has to be "good enough" at every live zoom (3..16) via GPU stretch —
+    // and since every tile is a flat color, up/down-scaling from ANY resolution is lossless (no gradients to
+    // blur), so a small fixed value keeps the baked buffer small (384x384 tiles * 4 px/tile = a 1536x1536 RGBA8
+    // image, ~9 MB) without sacrificing visual fidelity at MaxMapScale.
+    private const int BakeScale = 4;
+
+    // Wall + border colours for the simplified raster (contrasting, readable — not a 1:1 terrain texture). Also
+    // the "blocked tile" color on AUTHORED zones (N item 2 — "existing wall color").
     private static readonly Color MapWall = new(0.62f, 0.66f, 0.72f, 1f);
     private static readonly Color MapBorder = new(0.30f, 0.34f, 0.40f, 1f);
 
     // Terrain overview colours from the design bitmap (TerrainPainter.LoadTerrainGrid): tan for terrain, green for
-    // grass — a simplified read of the painted floor so the minimap conveys the terrain layout.
+    // grass — a simplified read of the painted floor so the minimap conveys the terrain layout. genVersion 1 ONLY
+    // (HudState.Map.Authored is null) — see BakeLegacyBaseLayer. Authored zones use AuthoredSurfaceVisuals.Albedo
+    // instead (via MinimapAuthoredPalette), the SAME palette the 3D floor is painted with.
     private static readonly Color MapTerrain = new(0.80f, 0.73f, 0.55f, 0.92f);
     private static readonly Color MapGrass = new(0.42f, 0.55f, 0.32f, 0.92f);
+
+    // N: opacity applied to authored floor tiles when baking — matches MapTerrain/MapGrass's existing 0.92 alpha
+    // so an authored zone's minimap keeps the same translucent-overlay look a genVersion 1 zone has.
+    private const byte AuthoredFloorAlphaByte = 234; // round(0.92 * 255)
 
     // S110: object square colours. Available resource = warm amber (reads against the cool grey walls); depleted
     // = dim grey-green so a harvested node is still visible but clearly spent. The depleted/available bit is
@@ -69,9 +98,8 @@ public partial class Minimap : Control
 
     private ImageTexture? _bakedMap;
     private int _bakedGeneration = -1; // which HudState.Map.Generation the current _bakedMap was rasterised from.
-    private int _bakedScale = -1;      // S110: which _mapScale the current _bakedMap was rasterised at (re-bake on change).
 
-    // S110: the last HudState pushed in, retained so a zoom button can re-apply (re-bake + reposition) immediately.
+    // S110: the last HudState pushed in, retained so a zoom button can re-apply (reposition + resize) immediately.
     private HudState? _lastState;
 
     public override void _Ready()
@@ -104,11 +132,16 @@ public partial class Minimap : Control
         };
         AddChild(_viewport);
 
+        // N: StretchMode.Scale (was .Keep) so the control's OffsetRight/OffsetBottom (set to Width*_mapScale x
+        // Height*_mapScale in ApplyDisplaySize) stretch the SAME baked-once texture on the GPU when the live zoom
+        // changes — no re-bake. TextureFilter.Nearest keeps tile edges crisp at any stretch factor (every tile is
+        // a flat color, so nearest-neighbor loses nothing and avoids the blur a Linear filter would add).
         _mapView = new TextureRect
         {
             Name = "MapImage",
             ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-            StretchMode = TextureRect.StretchModeEnum.Keep,
+            StretchMode = TextureRect.StretchModeEnum.Scale,
+            TextureFilter = CanvasItem.TextureFilterEnum.Nearest,
             MouseFilter = MouseFilterEnum.Ignore,
         };
         _viewport.AddChild(_mapView);
@@ -201,9 +234,10 @@ public partial class Minimap : Control
         };
     }
 
-    // S110: apply a zoom delta, clamp to [Min,Max], and (if it actually changed) re-bake the static map ONCE at the
-    // new scale and reposition everything via the retained last state. EnsureBaked's scale guard makes the re-bake
-    // a no-op when the scale is unchanged, so a clamped-out click costs nothing.
+    // S110/N: apply a zoom delta, clamp to [Min,Max], and (if it actually changed) reposition everything via the
+    // retained last state. N: this NEVER re-bakes — the baked texture is fixed-resolution (BakeScale) and only
+    // the display rect (ApplyDisplaySize) + object/player offsets change, so a zoom click is O(1), not another
+    // tile scan.
     private void ChangeZoom(int delta)
     {
         var next = Mathf.Clamp(_mapScale + delta, MinMapScale, MaxMapScale);
@@ -215,24 +249,32 @@ public partial class Minimap : Control
         _mapScale = next;
         if (_lastState is not null)
         {
-            Apply(_lastState); // re-bakes (scale changed) + rescales objects/offset; keeps the player centred.
+            Apply(_lastState); // resizes the display rect + rescales objects/offset; keeps the player centred.
         }
     }
 
     // Called from Hud.Refresh once per refresh with the current view-model. Re-bakes the static map only when the
-    // map generation OR the zoom scale changes; otherwise just repositions the (already baked) map + objects under
-    // the centred arrow.
+    // map GENERATION changes (a new zone); the live zoom scale never triggers a re-bake (N — see BakeScale).
+    // ApplyDisplaySize then (cheaply, every call) resizes the already-baked texture's display rect to the
+    // current zoom, and the player/objects reposition under the centred arrow as before.
     public void Apply(HudState state)
     {
         _lastState = state;
         EnsureBaked(state.Map);
+        if (state.Map is not null)
+        {
+            ApplyDisplaySize(state.Map);
+        }
+
         UpdatePlayer(state);
         UpdateObjects(state);
     }
 
-    // Rasterise the static map (walls + bounds) into an ImageTexture ONCE per map+scale. No-op if the same
-    // generation AND scale are already baked, so this does NOT run per frame — only the player marker / objects
-    // move on a normal frame, and the re-bake only fires on a zone change or a zoom click.
+    // Rasterise the static map (walls + bounds) into an ImageTexture ONCE per zone (keyed by Generation only).
+    // Builds a raw RGBA8 byte buffer via batched array writes (MinimapRasterBytes / MinimapAuthoredPalette —
+    // Godot-free, headlessly tested) instead of per-pixel SetPixel calls, then creates the Image in ONE
+    // Image.CreateFromData call. Baked at the FIXED BakeScale resolution, independent of _mapScale — see the
+    // class-level N comment and ApplyDisplaySize for how the live zoom is applied without re-baking.
     private void EnsureBaked(HudState.MinimapMap? map)
     {
         if (map is null || _mapView is null)
@@ -240,55 +282,60 @@ public partial class Minimap : Control
             return;
         }
 
-        if (_bakedMap is not null && _bakedGeneration == map.Generation && _bakedScale == _mapScale)
+        if (_bakedMap is not null && _bakedGeneration == map.Generation)
         {
             return;
         }
 
-        var w = Mathf.Max(1, map.Width) * _mapScale;
-        var h = Mathf.Max(1, map.Height) * _mapScale;
-        var image = Image.CreateEmpty(w, h, false, Image.Format.Rgba8);
+        var w = Mathf.Max(1, map.Width) * BakeScale;
+        var h = Mathf.Max(1, map.Height) * BakeScale;
 
-        // Base layer = the terrain design (tan terrain over green grass) so the minimap conveys the terrain layout.
-        // Grass dominates, so fill grass then stamp the (sparser) terrain cells. Same axes as the world/walls below.
-        image.Fill(MapGrass);
+        // N item 2: an AUTHORED zone (genVersion 2+) bakes from the SAME SurfaceCategory palette the 3D floor
+        // is painted with, so the minimap shows the real ground truth instead of the legacy terrain.png bitmap.
+        // genVersion 1 (Authored is null) keeps the pre-N terrain.png read, unchanged.
+        var bytes = map.Authored is { } authored
+            ? MinimapAuthoredPalette.BakeBaseLayer(authored, BakeScale, ToRgba(MapWall), AuthoredFloorAlphaByte)
+            : BakeLegacyBaseLayer(map, BakeScale);
+
+        var (br, bg, bb, ba) = ToRgba(MapBorder);
+        MinimapRasterBytes.StampBorder(bytes, w, h, br, bg, bb, ba);
+
+        var image = Image.CreateFromData(w, h, false, Image.Format.Rgba8, bytes);
+        _bakedMap = ImageTexture.CreateFromImage(image);
+        _bakedGeneration = map.Generation;
+        _mapView.Texture = _bakedMap;
+    }
+
+    // genVersion 1 (no authored map): the pre-N terrain design (tan terrain over green grass, from the design
+    // bitmap TerrainPainter.LoadTerrainGrid) plus walls — identical colors/layout to the old per-pixel version,
+    // just batched into a raw byte buffer instead of SetPixel/GetPixel interop calls.
+    private static byte[] BakeLegacyBaseLayer(HudState.MinimapMap map, int scale)
+    {
+        var pxWidth = Mathf.Max(1, map.Width) * scale;
+        var pxHeight = Mathf.Max(1, map.Height) * scale;
+        var bytes = new byte[pxWidth * pxHeight * 4];
+
+        // Grass dominates, so fill grass then stamp the (sparser) terrain cells over it — same as the old
+        // image.Fill(MapGrass) + per-cell SetPixel loop, now array writes. Same axes as the walls below.
+        var (gr, gg, gb, ga) = ToRgba(MapGrass);
+        MinimapRasterBytes.FillAll(bytes, gr, gg, gb, ga);
+
         var terrain = Mmo.Client.Godot.Visuals.TerrainPainter.LoadTerrainGrid(map.Width, map.Height);
+        var (tr, tg, tb, ta) = ToRgba(MapTerrain);
         for (var ty = 0; ty < map.Height; ty++)
         {
             for (var tx = 0; tx < map.Width; tx++)
             {
-                if (!terrain[tx, ty])
+                if (terrain[tx, ty])
                 {
-                    continue;
-                }
-
-                var bx = tx * _mapScale;
-                var by = ty * _mapScale;
-                for (var dy = 0; dy < _mapScale; dy++)
-                {
-                    for (var dx = 0; dx < _mapScale; dx++)
-                    {
-                        image.SetPixel(bx + dx, by + dy, MapTerrain);
-                    }
+                    MinimapRasterBytes.StampBlock(bytes, pxWidth, tx * scale, ty * scale, scale, tr, tg, tb, ta);
                 }
             }
         }
 
-        // World bounds: a 1px inner border so the edge of the world reads on the minimap.
-        for (var x = 0; x < w; x++)
-        {
-            image.SetPixel(x, 0, MapBorder);
-            image.SetPixel(x, h - 1, MapBorder);
-        }
-
-        for (var y = 0; y < h; y++)
-        {
-            image.SetPixel(0, y, MapBorder);
-            image.SetPixel(w - 1, y, MapBorder);
-        }
-
-        // Walls: fill each blocked tile as a _mapScale x _mapScale cell. +X = east (right), tile Y = south (down) —
-        // the same axes as the world, so the baked image is a direct top-down view (north is up).
+        // Walls: fill each blocked tile as a scale x scale cell. +X = east (right), tile Y = south (down) — the
+        // same axes as the world, so the baked image is a direct top-down view (north is up).
+        var (wr, wg, wb, wa) = ToRgba(MapWall);
         foreach (var tile in map.Blocked)
         {
             if (tile.X < 0 || tile.Y < 0 || tile.X >= map.Width || tile.Y >= map.Height)
@@ -296,23 +343,34 @@ public partial class Minimap : Control
                 continue;
             }
 
-            var px0 = tile.X * _mapScale;
-            var py0 = tile.Y * _mapScale;
-            for (var dy = 0; dy < _mapScale; dy++)
-            {
-                for (var dx = 0; dx < _mapScale; dx++)
-                {
-                    image.SetPixel(px0 + dx, py0 + dy, MapWall);
-                }
-            }
+            MinimapRasterBytes.StampBlock(bytes, pxWidth, tile.X * scale, tile.Y * scale, scale, wr, wg, wb, wa);
         }
 
-        _bakedMap = ImageTexture.CreateFromImage(image);
-        _bakedGeneration = map.Generation;
-        _bakedScale = _mapScale;
-        _mapView.Texture = _bakedMap;
-        _mapView.OffsetRight = w;
-        _mapView.OffsetBottom = h;
+        return bytes;
+    }
+
+    // N: the display rect the baked texture is stretched into (StretchMode.Scale) — the live-zoom half of the
+    // world->minimap transform. Runs every Apply() call (cheap: two field writes), independent of EnsureBaked's
+    // generation-gated re-bake, so a zoom click resizes the SAME cached texture instead of rebuilding it.
+    private void ApplyDisplaySize(HudState.MinimapMap map)
+    {
+        if (_mapView is null)
+        {
+            return;
+        }
+
+        _mapView.OffsetRight = Mathf.Max(1, map.Width) * _mapScale;
+        _mapView.OffsetBottom = Mathf.Max(1, map.Height) * _mapScale;
+    }
+
+    private static (byte R, byte G, byte B, byte A) ToRgba(Color c)
+    {
+        return (Quantize(c.R), Quantize(c.G), Quantize(c.B), Quantize(c.A));
+    }
+
+    private static byte Quantize(float channel)
+    {
+        return (byte)Mathf.Clamp(Mathf.RoundToInt(channel * 255f), 0, 255);
     }
 
     // Per-frame: translate the baked map so the live player tile sits under the centred arrow, and rotate the arrow

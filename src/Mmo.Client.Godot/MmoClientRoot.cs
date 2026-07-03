@@ -1942,9 +1942,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its
 		// simplified top-down raster ONCE. This is the same seed-regenerated ZoneModel the 3D world is built from
 		// (read-only — no movement/world state is mutated). The Generation bumps per zone so the minimap re-bakes.
+		// N: also pass zone.Authored — the SAME authored map the floor above was just painted from — so an
+		// authored (genVersion 2+) zone's minimap base layer reads the real ground truth, not terrain.png.
 		_minimapGeneration++;
 		_hudState.Map = new Mmo.Client.Godot.UI.HudState.MinimapMap(
-			zone.Width, zone.Height, zone.BlockedTiles, _minimapGeneration);
+			zone.Width, zone.Height, zone.BlockedTiles, zone.Authored, _minimapGeneration);
 	}
 
 	private void SampleRenderStates(TimeSpan now)

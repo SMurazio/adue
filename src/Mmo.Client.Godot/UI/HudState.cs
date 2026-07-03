@@ -116,8 +116,11 @@ public sealed class HudState
     public MinimapMap? Map { get; set; }
 
     // An immutable description of the static map for the minimap to bake from. Width/Height are the tile grid
-    // extents; Blocked is the wall set (tile coords). Generation lets the minimap cheaply detect a new map.
-    public sealed record MinimapMap(int Width, int Height, IReadOnlySet<TileCoord> Blocked, int Generation);
+    // extents; Blocked is the wall set (tile coords). Authored is the SAME ZoneModel.Authored the 3D floor was
+    // painted from — non-null only on authored (genVersion 2+) zones — so the minimap can bake its base layer
+    // from the real per-tile SurfaceCategory instead of the legacy terrain.png bitmap (null keeps the
+    // genVersion 1 terrain.png path unchanged). Generation lets the minimap cheaply detect a new map.
+    public sealed record MinimapMap(int Width, int Height, IReadOnlySet<TileCoord> Blocked, AuthoredMap? Authored, int Generation);
 
     // --- Inventory ----------------------------------------------------------------------------------------
     // TODO(server): placeholder reference only. The inventory grid (S-HUD-4) reads the EXISTING client item
