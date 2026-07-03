@@ -237,16 +237,28 @@ public static class TerrainGenerator
         return ordered;
     }
 
-    // genVersion 2 (AUTHORED): the layout IS the shared ASCII grid — parse it and wrap it as a layout.
-    // The seed is intentionally unused (an authored map has no randomness to seed) and the caller's
-    // (width, height) MUST match the authored grid's intrinsic dimensions: ZoneInfo carries dimensions
-    // on the wire, so a server configured with the wrong size would otherwise generate a world that
-    // disagrees with its own content — fail loudly at generation (boot/test) instead. Parsing a
-    // compiled-in constant is pure and platform-independent, so determinism holds trivially; the parse
-    // cost (one linear scan of the grid) is negligible even per-join, so no caching.
-    private static TerrainLayout GenerateVersion2(int width, int height)
+    // M3-REVIEW-FOLLOWUPS item 4: the authored map is a single COMPILED-IN constant — parsing + hashing it is
+    // pure and produces the IDENTICAL result every call, so cache it ONCE per process instead of re-parsing all
+    // ~147,456 tiles on every call (GameServer.CreateZoneInfoMessage → TerrainGenerator.ContentHash →
+    // GenerateLayout → here, on EVERY login — single-digit ms per call, fine at today's traffic, but pointless
+    // repeated work). Lazy<T> is thread-safe by default (ExecutionAndPublication), so concurrent first-callers
+    // (e.g. two logins racing the very first call) still only parse once.
+    private static readonly Lazy<TerrainLayout> AuthoredLayoutCache = new(() =>
     {
         var map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
+        return new TerrainLayout(map.BlockedTiles, ContentHash(map), map);
+    });
+
+    // genVersion 2 (AUTHORED): the layout IS the shared ASCII grid — served from AuthoredLayoutCache. The seed is
+    // intentionally unused (an authored map has no randomness to seed) and the caller's (width, height) MUST
+    // match the authored grid's intrinsic dimensions: ZoneInfo carries dimensions on the wire, so a server
+    // configured with the wrong size would otherwise generate a world that disagrees with its own content — fail
+    // loudly here (boot/test), same as before caching; only the source of the dimensions to check against
+    // (the cached parse's own Width/Height, instead of a fresh one) changed.
+    private static TerrainLayout GenerateVersion2(int width, int height)
+    {
+        var layout = AuthoredLayoutCache.Value;
+        var map = layout.Authored!; // always populated by the cache factory above.
         if (width != map.Width || height != map.Height)
         {
             throw new ArgumentOutOfRangeException(
@@ -255,7 +267,7 @@ public static class TerrainGenerator
                 $"requested {width}x{height}. Configure the world size to match the authored content.");
         }
 
-        return new TerrainLayout(map.BlockedTiles, ContentHash(map), map);
+        return layout;
     }
 
     private static void AddVerticalSegment(HashSet<TileCoord> blocked, int width, int height, int x, int yStart, int yEnd)

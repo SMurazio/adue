@@ -149,8 +149,13 @@ public sealed class Zone
 
     public TileCoord NextSpawnTile()
     {
-        var index = _nextSpawnTileIndex++ % _spawnTiles.Length;
-        return _spawnTiles[index];
+        // M3-REVIEW-FOLLOWUPS item 5 (nit): (uint) both sides before the modulo. _nextSpawnTileIndex is an int
+        // that only ever increments — at ~2^31 logins it wraps to int.MinValue, and C#'s % on a negative dividend
+        // returns a NEGATIVE remainder, which would index _spawnTiles with a negative index and crash
+        // (IndexOutOfRangeException). Casting to uint first reinterprets the wrapped bit pattern as a large
+        // unsigned value instead, so the modulo — and therefore the index — is always in [0, spawnTiles.Length).
+        var index = (uint)_nextSpawnTileIndex++ % (uint)_spawnTiles.Length;
+        return _spawnTiles[(int)index];
     }
 
     // CONTINUOUS MIGRATION (Phase 2): the PLAYER continuous-integrator wrapper — WITH swept-circle WALL COLLISION

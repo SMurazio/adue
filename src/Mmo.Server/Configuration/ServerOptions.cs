@@ -1,3 +1,4 @@
+using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
 
 namespace Mmo.Server.Configuration;
@@ -272,14 +273,27 @@ public sealed record ServerOptions(
             return fallback;
         }
 
-        return value.Trim().ToLowerInvariant() switch
+        var normalized = value.Trim().ToLowerInvariant();
+        SpawnDistribution? parsed = normalized switch
         {
             "distributed" => SpawnDistribution.Distributed,
             "clustered" or "cluster" => SpawnDistribution.Clustered,
             "scattered" or "scatter" => SpawnDistribution.Scattered,
             "authored" => SpawnDistribution.Authored,
-            _ => fallback
+            _ => null
         };
+
+        if (parsed is null)
+        {
+            // M3-REVIEW-FOLLOWUPS item 5 (nit): an unrecognized value silently fell back here — a typo (e.g.
+            // "distirbuted") would move a stress run's 120 bots from the intended spread to whatever
+            // `fallback` (today Authored — the 6 plaza tiles) ends up meaning, with no signal anything went
+            // wrong. Log it loudly so a bad env var is visible at boot instead of only showing up as "why
+            // are they all stacked on the plaza".
+            Log.Warn($"{key}='{value}' is not a recognized spawn distribution; falling back to {fallback}.");
+        }
+
+        return parsed ?? fallback;
     }
 
     private static string ResolveConnectionString(string connectionString)
