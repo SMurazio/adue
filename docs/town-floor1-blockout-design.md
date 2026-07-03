@@ -106,7 +106,14 @@ pockets, ever).
   determinism + round-trip tests. A 12×12 TEST map, not the real one.
 - **M2 — client painter categories:** `TerrainPainter` consumes AuthoredMap categories (genVersion 2)
   instead of terrain.png (which stays for genVersion 1); category→color material table; walls unchanged.
-  Headless test on the category→material mapping.
+  Headless test on the category→material mapping. **384-SCALE PERF CRITERIA (user flag, 2026-07-03):**
+  chunked culling is already in place (32-tile MultiMesh chunks) and stays; the new risk is one-time
+  BUILD cost — 147k instances set per-instance through C#→Godot marshaling is a login hitch. Required:
+  per-chunk BULK instance upload (MultiMesh.Buffer as one packed array per chunk, not per-instance
+  Set*), and measure zone-build wall time at 384×384 (budget: <250 ms on the dev machine; if over,
+  greedy-merge same-category tile runs into larger quads before instancing — a flat-color map is
+  mostly grass, ~10-50× instance reduction). Also AUDIT the minimap at 384 (flagged as possibly
+  whole-grid-iterating) and chunk/decimate it if it scales with tile count.
 - **M3 — the map content:** the stamp expander (D2a: ops → string[], deterministic, shared) + the real
   384×384 stamped map per §4 + authored spawn (D4) + prop spawning at boot from markers (existing
   archetype hook) + scatter-on-grass-only (D6) + ecology.json rect update (D7). Server boots
