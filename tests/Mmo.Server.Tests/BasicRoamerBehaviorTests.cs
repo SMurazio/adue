@@ -959,6 +959,101 @@ public sealed class BasicRoamerBehaviorTests
         Assert.True(resumed, "monster never returned home + resumed Idle after de-aggro.");
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // LEASH-RETURN-HEAL (todo/N-monster-reset-heal-on-leash-return.md): regen to full during the return walk.
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void RegensToFullHealthDuringLeashReturn_AndStaysFullAtHome()
+    {
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded(), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(36, 32), Direction8.S);
+        var hits = new int[1];
+        var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 5, pauseMaxTicks: 5, aggroScanIntervalTicks: 1);
+
+        for (uint tick = 1; tick <= 12; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
+        }
+
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
+
+        // Wound the monster mid-fight — regen must not touch this while still Chasing (checked below).
+        Assert.True(monster.ApplyDamage(70));
+        Assert.Equal(30, monster.Stats.Health);
+
+        world.Remove(player.Id, out _);
+
+        var sawHealthClimb = false;
+        var sawReturning = false;
+        var lastHealth = monster.Stats.Health;
+        var returned = false;
+        for (uint tick = 13; tick <= 400; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(pauseMin: 5, pauseMax: 5));
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase));
+            Assert.NotEqual(BasicRoamerBehavior.State.Chasing, phase);
+            if (phase == BasicRoamerBehavior.State.Returning)
+            {
+                sawReturning = true;
+            }
+
+            // HP must be monotonically non-decreasing throughout the return (never claws back healed HP).
+            Assert.True(monster.Stats.Health >= lastHealth,
+                $"HP regressed during return at tick {tick} ({monster.Stats.Health} < {lastHealth}).");
+            if (monster.Stats.Health > lastHealth)
+            {
+                sawHealthClimb = true;
+            }
+
+            lastHealth = monster.Stats.Health;
+
+            if (Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits && phase == BasicRoamerBehavior.State.Idle)
+            {
+                returned = true;
+                break;
+            }
+        }
+
+        Assert.True(sawReturning, "test setup: monster never entered Returning.");
+        Assert.True(returned, "monster never returned home.");
+        Assert.True(sawHealthClimb, "monster HP never visibly climbed during the return walk.");
+        Assert.Equal(100, monster.Stats.Health); // full by arrival — the decided design's guarantee.
+    }
+
+    [Fact]
+    public void DoesNotRegenHealthWhileChasing_OnlyWhileReturning()
+    {
+        // The DECIDE in the todo: healing must be scoped to the Returning state ONLY — a wounded monster that
+        // keeps re-fighting (never triggers a return) must NOT climb back to full while it presses the attack.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(34, 32), Direction8.S);
+        var hits = new int[1];
+        var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+
+        ai.StepMonster(monster, serverTick: 1, StepCooldownTicks, CombatTunables());
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
+
+        Assert.True(monster.ApplyDamage(50));
+        Assert.Equal(50, monster.Stats.Health);
+
+        // Player stays put, well within aggro/de-aggro/leash — the monster closes + attacks (0 damage, so the
+        // player never dies and the monster never stops chasing) for the whole run. Regen must never fire.
+        for (uint tick = 2; tick <= 200; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, CombatTunables(attackDamage: 0));
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.Chasing);
+            Assert.Equal(50, monster.Stats.Health);
+        }
+    }
+
     [Fact]
     public void DeaggrosWhenTargetLeavesEuclideanDeaggroRange()
     {

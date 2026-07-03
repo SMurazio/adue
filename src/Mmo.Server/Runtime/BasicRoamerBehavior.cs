@@ -122,6 +122,25 @@ public class BasicRoamerBehavior : IMonsterBehavior
         public bool SlamLeapStarted;
         public uint NextAggroScanTick;
 
+        // LEASH-RETURN-HEAL (todo/N-monster-reset-heal-on-leash-return.md): snapshotted the instant Returning
+        // begins (BeginReturnHome) — the Euclidean distance to home and the monster's Health AT THAT MOMENT. The
+        // regen helper (RegenWhileReturning) uses these as the 0%/100% anchors of a DISTANCE-progress ramp (not an
+        // elapsed-tick timer), so it self-corrects against watchdog stalls/hop jitter: progress = 1 −
+        // (remaining/ReturnStartDistance) reaches exactly 1 the instant Position reaches Home, guaranteeing full HP
+        // on arrival by construction rather than by tuning a rate against the typical return length.
+        public double ReturnStartDistance;
+        public int HealthAtReturnStart;
+
+        // LEASH-RETURN-HEAL: true only for a return that gave up the fight for real (target lost/dead, or pulled
+        // beyond de-aggro/chase-leash — StepChase's own checks) — NOT for a return the no-progress WATCHDOG forces
+        // (StepMoveTowardWithWatchdog's Stuck-timeout bail, shared by the chase approach AND a fleeing skirmisher).
+        // BeginReturnHome is the single entry to Returning either way, but a watchdog bail is an anti-freeze
+        // escape-hatch, not "the monster conceded and is walking home" — and it can fire with home only a HOP away
+        // (e.g. a wounded skirmisher fleeing into a dead-end near its own spawn), where a distance-progress ramp
+        // would reach ~full HP in one tick. That reads as a wall-bump insta-heal-and-counterattack exploit, not the
+        // decided "visible recovery, real decision" flavor — so the watchdog path skips the heal entirely.
+        public bool HealOnReturn;
+
         // The last tick this monster actually advanced (HopResult.Moved) or entered a moving phase — the watchdog base.
         public uint LastProgressTick;
     }
@@ -407,7 +426,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // chaseLeash from home → drop aggro and walk home. All Euclidean on Position.
         if (!_tryResolveTarget(state.TargetId, out var targetPos, out var alive) || !alive)
         {
-            BeginReturnHome(locomotion, monster, ref state, serverTick);
+            BeginReturnHome(locomotion, monster, ref state, serverTick, healOnReturn: true);
             return false;
         }
 
@@ -415,7 +434,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
         var distFromHome = Distance(monster.Position, state.Home);
         if (distToTarget > t.DeaggroRadius || distFromHome > t.ChaseLeash)
         {
-            BeginReturnHome(locomotion, monster, ref state, serverTick);
+            BeginReturnHome(locomotion, monster, ref state, serverTick, healOnReturn: true);
             return false;
         }
 
@@ -518,9 +537,11 @@ public class BasicRoamerBehavior : IMonsterBehavior
             case HopResult.Stuck:
                 // Wedged (a slide fixpoint the fan can't escape). The watchdog bails to Returning so a monster can
                 // never freeze against a wall — it walks home, re-roams, and can re-aggro on the next scan.
+                // LEASH-RETURN-HEAL: healOnReturn: false — see MonsterState.HealOnReturn's field doc (an anti-freeze
+                // escape, not a real concede-the-fight return; skips the heal-on-return ramp).
                 if (NoProgressTimedOut(state.LastProgressTick, serverTick, stepCooldownTicks))
                 {
-                    BeginReturnHome(locomotion, monster, ref state, serverTick);
+                    BeginReturnHome(locomotion, monster, ref state, serverTick, healOnReturn: false);
                 }
 
                 return false;
@@ -591,8 +612,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
         return false;
     }
 
-    // Drop aggro and head home. Destination = home; Returning hops there and resumes Idle on arrival.
-    private void BeginReturnHome(IMonsterLocomotion locomotion, WorldEntity monster, ref MonsterState state, uint serverTick)
+    // Drop aggro and head home. Destination = home; Returning hops there and resumes Idle on arrival. `healOnReturn`
+    // — see MonsterState.HealOnReturn's field doc — is true for a real concede-the-fight return (StepChase's own
+    // de-aggro/leash checks) and false for the no-progress watchdog's anti-freeze bail.
+    private void BeginReturnHome(IMonsterLocomotion locomotion, WorldEntity monster, ref MonsterState state, uint serverTick, bool healOnReturn)
     {
         // MONSTER-BEHAVIOR P2: zero a velocity-based body's Velocity at the chase→return TURN edge so a glider's
         // replicated velocity (pointing at the abandoned target, or into the wall it wedged on) doesn't extrapolate
@@ -605,6 +628,53 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // Re-scan for aggro promptly once we start returning (don't wait a full interval) so a player who steps back
         // into range mid-return re-aggros quickly; staggered scan still applies on subsequent ticks.
         state.NextAggroScanTick = serverTick;
+        // LEASH-RETURN-HEAL: anchor the regen ramp at the moment the return begins — see MonsterState's field docs.
+        state.HealOnReturn = healOnReturn;
+        state.ReturnStartDistance = Distance(monster.Position, state.Home);
+        state.HealthAtReturnStart = monster.Stats.Health;
+    }
+
+    // LEASH-RETURN-HEAL (todo/N-monster-reset-heal-on-leash-return.md, decided design): regen the monster toward
+    // full HP while it walks home so arrival ≈ full — anti-cheese (chip damage across repeated leash pulls should
+    // not kill a monster risk-free) and legible (the HP bar visibly climbing tells the "conceded reset" story).
+    // Healing tracks DISTANCE PROGRESS toward home, not elapsed ticks (see the MonsterState field docs): target
+    // Health interpolates linearly from HealthAtReturnStart to MaxHealth as the monster closes the distance it had
+    // to cover, so it reaches (within one rounding point) exactly full the tick it arrives, and self-corrects if a
+    // hop slides sideways or the watchdog stalls it (progress is recomputed fresh from the CURRENT distance every
+    // tick, never accumulated). The `delta > 0` guard means a transient distance regression (a slide away from
+    // home) can only WITHHOLD healing this tick, never claw back HP already granted — Health is monotonically
+    // non-decreasing here, same guarantee ApplyDamage/TryRegenHealth already give the stat.
+    //
+    // Called ONLY from the Returning branch of StepTowardDestination — NOT PlayerDamageGate, not ApplyDamage; this
+    // is healing, not damage, and it is physically unreachable outside Phase == Returning: a re-aggro (were the
+    // state machine ever to allow one mid-return) exits Returning before the next call, so regen stops that same
+    // tick with no separate "stop" to forget.
+    private static void RegenWhileReturning(WorldEntity monster, in MonsterState state)
+    {
+        var maxHealth = monster.Stats.MaxHealth;
+        if (maxHealth <= 0 || monster.Stats.Health >= maxHealth)
+        {
+            return;
+        }
+
+        double progress;
+        if (state.ReturnStartDistance <= HopLocomotion.ProgressEpsilonUnits)
+        {
+            // Already (near) home when the return began — heal immediately rather than divide by ~0.
+            progress = 1d;
+        }
+        else
+        {
+            var remaining = Distance(monster.Position, state.Home);
+            progress = Math.Clamp(1d - (remaining / state.ReturnStartDistance), 0d, 1d);
+        }
+
+        var target = state.HealthAtReturnStart + ((maxHealth - state.HealthAtReturnStart) * progress);
+        var delta = (int)Math.Ceiling(target) - monster.Stats.Health;
+        if (delta > 0)
+        {
+            monster.TryRegenHealth(delta);
+        }
     }
 
     // One hop toward the destination (the roam target while Roaming, or the home anchor while Returning — both held in
@@ -619,6 +689,15 @@ public class BasicRoamerBehavior : IMonsterBehavior
         uint stepCooldownTicks,
         in MonsterAiTunables t)
     {
+        // LEASH-RETURN-HEAL: regen ONLY while Returning (this method also serves Roaming, which never heals) AND
+        // only for a real concede-the-fight return (HealOnReturn — see MonsterState's field doc; a watchdog
+        // anti-freeze bail does not heal). Runs every tick regardless of hop cadence — smooth per-tick HP climb,
+        // not a per-hop jump.
+        if (state.Phase == State.Returning && state.HealOnReturn)
+        {
+            RegenWhileReturning(monster, state);
+        }
+
         // Arrival: within the progress epsilon of the destination — close enough; the hop can't meaningfully advance.
         if (Distance(monster.Position, state.Destination) <= HopLocomotion.ProgressEpsilonUnits)
         {
