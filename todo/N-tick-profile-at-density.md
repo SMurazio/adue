@@ -1,37 +1,38 @@
-# N — profile the tick's superlinear cost at 150–200 clients (measure BEFORE any scaling work)
+# N — density tick-profile: MEASURED (2026-07-03). AOI gather is the superlinear pass. Levers documented, deferred.
 
-**DEFERRED by the user (2026-07-02): "don't invest on tradeoffs for now — just document them and document the
-solution."** This file IS that documentation: the measurement below is the evidence, the levers section is the
-tradeoff catalogue, and the profile is the agreed first step WHEN density work resumes. Two mitigations already
-shipped meanwhile: the remote-render correction smoothing (`daa71fd`, the perception half) and the AOI radius
-30 → 18 (`0d980dc`, ~2.8× less per-viewer AOI/snapshot load — likely pushes one-core saturation well past 200).
+**User directive (2026-07-02): "don't invest on tradeoffs for now — just document them and document the
+solution."** The profile itself is now DONE (below); what remains deferred is choosing/building a lever.
 
-Measured (2026-07-02, live PID sampling during /stress, at the OLD radius 30): server CPU 68% of one core @120 bots → ~107% @200 —
-superlinear, and the single-threaded tick loop nearing one-core saturation is what made snapshot cadence bursty
-(the load half of the crowd-shimmer finding; the render half shipped in `daa71fd`). We do NOT yet know which pass
-is superlinear. Per the project rule, measure first — this task is ONLY the profile + writeup, no optimization.
+## The profile (2026-07-03, review-stress @ radius 18, Debug, 20 Hz, 60s runs, mid-run /metrics)
 
-## How — the instrumentation ALREADY EXISTS (verified 2026-07-03); running the profile is trivial
+| metric (steady state) | 120 clients | 200 clients | growth for 1.67× clients |
+|---|---|---|---|
+| tickMs avg / max(60s) | 2.80 / 19.4 | 10.60 / 94.1 | 3.8× / 4.8× |
+| driftMs avg (steady 5s window max) | 0.03 (0.17) | 0.33 (0.36) | clean both |
+| budget **aoi** avg | **0.80** | **5.22** | **6.5× ← THE superlinear pass** |
+| budget serialize avg | 0.82 | 2.19 | 2.7× |
+| budget network avg | 0.29 | 0.79 | 2.7× |
+| budget move avg | 0.03 | 0.06 | 2× (negligible) |
+| snap/s | 2087 | 3411 | 1.63× (linear) |
+| visible avg/max | 44.3 / 64 | 51.0 / 75 | +15% |
+| errors / auth | 0, 120/120 | 0, 200/200 | — |
 
-The tick loop has always-on per-phase budget recording (`TickBudgetRecorder`: Movement / Aoi / Serialize /
-Network / Persistence / Other) fed into `ServerMetrics.RecordTick` together with the tick SCHEDULE DRIFT, and
-`/metrics` (admin, live) prints per 5s/60s window:
-- `budgetMs move/aoi/ser/net/persist/other` (avg AND max) — the per-phase attribution;
-- `driftMs avg/max` — the schedule-jitter signal that made snapshot cadence bursty at 200.
+**Read:**
+- **AOI gather dominates and is the only badly-superlinear pass** (6.5× for 1.67× clients — worse than
+  clients×entities). Serialize/net grow ≈ clients×visible (mildly superlinear via density). Movement is nothing.
+- **At radius 18, 200 clients is comfortably healthy**: steady tick ~10.6 ms of the 50 ms budget (~21% of a
+  core), drift ~0 in steady state, 0 errors, ping ≤10 ms. The 94 ms tick / 58 ms drift maxima live in the
+  200-connection login storm (ramp), not steady state (steady 5s window: max 17.3 / 0.36).
+- The old alarm (107% of a core @200) was at radius 30 — `0d980dc` (30→18) retired the immediate pressure,
+  matching the πr² prediction. The remote-shimmer render fix (`daa71fd`) covers the perception side.
 
-So the profile = `/stress start N` at 120 / 170 / 200 → `/metrics` → read the budget line; whichever of
-aoi/ser/net grows superlinearly vs 120 is the culprit. Re-baseline at the NEW radius 18 first (`0d980dc` cut the
-per-viewer load ~2.8×, so the old 107%-of-core @200 number is stale).
+**Prime suspect inside the AOI number:** `ResolveEntityGridCellSize = ceil(interestRadius)` → the spatial-grid
+cell is as big as the radius itself, so a neighborhood query sweeps a 3×3-cell area ≈ (3r)² — ~7× the actual
+interest disc, and every candidate in it pays the distance test. This is exactly the docs/tile-audit.md
+"spatial-grid cell size" DECISION item. A smaller cell (e.g. r/2 or a fixed 8) shrinks the over-gather; cheap,
+contained, measurable with this same profile. RECOMMENDED first lever when density work resumes.
 
-**Tooling gap (why the 2026-07-02 live session used crude PID CPU sampling instead):** the orchestrator can send
-`/metrics` via client_chat but CANNOT read the reply (system chat renders only in the client window). Cheap fix
-when wanted: relay system-chat replies through the control channel (or a `client_metrics` command), so agent-side
-profiling doesn't need the human to read chat. Belongs with [[N-remote-smoothness-tooling]].
-
-- Deliverable: a short docs/ note ranking the phases' growth (linear vs superlinear in clients × visible-density),
-  with the numbers. THEN decide the lever (see below) as a follow-up decision with the user.
-
-## Candidate levers (context for the decision, NOT scope)
+## Candidate levers beyond that (context for the decision, NOT scope)
 
 How comparable games run hundreds+ (user asked, 2026-07-02):
 - **WoW-class**: movement replicated as EVENTS (start/heading-change/stop + client-side simulation; NPC splines) —
@@ -39,16 +40,21 @@ How comparable games run hundreds+ (user asked, 2026-07-02):
   no-added-lag principle up close, fine at distance).
 - **Planetside-class**: SEND-RATE LOD — full rate near the viewer, lower Hz tiers further out + dead-reckoning.
   Our correction smoothing + velocity dead-reckoning already tolerate sparse samples (the harness's bursty
-  scenario is exactly this), so LOD is the most compatible lever.
+  scenario is exactly this), so LOD is the most compatible lever. Targets serialize/net, which are NOT the
+  bottleneck at current scale.
 - **Skip-unchanged-velocity re-sends**: a half-step toward event-driven for steady movers (velocity already
   replicated); careful — reintroduces the staleness class the per-tick force-include retired.
-- **Threading/split**: the guardrail says single process until metrics justify — this profile IS those metrics.
+- **Threading/split**: the guardrail says single process until metrics justify — at ~21% of a core @200 (radius
+  18) the metrics do NOT justify it.
 - **Albion-class (the closest comparable — also a C# server)**: one process per ZONE scaled horizontally, hot
-  zones live-migrated to dedicated hardware, zone population CAPPED + queued (the "smart cluster queue" exists
-  because uncapped ZvZ lag was chronic), remotes rendered with ~100-200ms interpolation delay at ~10Hz-class
-  update rates, plus years of hot-loop optimization. Existence proof that a C# single-process zone hosts ~300 in
-  combat — but note every piece trades something (remote latency, zone caps) we currently don't. Our unprofiled
-  tick at ~107%/core with 200 all-moving bots is roughly their starting point, not their ceiling.
+  zones live-migrated to dedicated hardware, zone population CAPPED + queued, remotes rendered with ~100-200ms
+  interpolation delay at ~10Hz-class update rates, plus years of hot-loop optimization. Existence proof a C#
+  single-process zone hosts ~300 in combat; every piece trades something (remote latency, caps) we don't yet.
 
-Design target remains 120–150 visible (holds with headroom); 200 all-moving bots in one small map is a worst
-case. Relates to [[N-remote-smoothness-tooling]] (#4 tick-schedule jitter metric would ride along nicely).
+Measurement machinery (for the record): `TickBudgetRecorder` per-phase budgets + schedule drift are ALWAYS-ON and
+printed by `/metrics` (`budgetMs move/aoi/ser/net/persist/other`, `driftMs`); `review-stress.cmd -Clients N`
+captures them mid-run headlessly via its MetricsClient (no human chat-reading needed — the gap noted on
+2026-07-02 was already solved by that script).
+
+Design target remains 120–150 visible (holds with big headroom); 200 all-moving bots in one small map is a worst
+case. Relates to [[N-remote-smoothness-tooling]].
