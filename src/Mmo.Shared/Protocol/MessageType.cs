@@ -81,5 +81,13 @@ public enum MessageType : ushort
     // on login (initial truth) + broadcast on every change so every client's obstacle gather gates on the SAME value the
     // server integrator does (prediction parity). Monster collision is unaffected — this gates ONLY whether OTHER PLAYERS
     // are obstacles. Reliable-ordered, global (not AOI-scoped). See PlayerCollisionSettingMessage.
-    PlayerCollisionSetting = 117
+    PlayerCollisionSetting = 117,
+    // TELEGRAPH T2 (v44, docs/ability-telegraph-sync-design.md): server->client announcement of a SCHEDULED ground
+    // telegraph — {telegraph id, shape (kind + Q12.4 origin + Q12.4 radius), startTick, resolveTick}. The DEADLINE form:
+    // clients render the fill as (now − start)/(T − start) against their estimated server clock and self-resolve at T,
+    // so caster-long/observer-short latency compensation falls out for free and NO resolve/cancel message exists (a
+    // telegraph outlives its caster by the T1 decision, so there is nothing to cancel). Sent reliable-ordered, AOI-scoped
+    // per recipient by the SAME known-id diff pass the spawner markers use — which is also what delivers still-active
+    // telegraphs to a viewer that enters AOI mid-windup (the late-join case). See TelegraphMessage.
+    Telegraph = 118
 }

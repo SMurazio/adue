@@ -76,7 +76,14 @@ public static class ProtocolCodec
     // replicates the authoritative flag on login + on every change so the client predictor's obstacle gather and the
     // server integrator's gather gate on the SAME value (prediction parity). No existing wire layout changes; monster
     // collision is unaffected. Server + every in-repo client flip together.
-    public const byte Version = 43;
+    // v44 — TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): one additive server->client TelegraphMessage — the
+    // deadline-form telegraph announcement {ulong telegraphId, shape kind byte + Q12.4 origin (two shorts, the same
+    // PositionEncoding as snapshot positions) + Q12.4 ushort radius, uint startTick, uint resolveTick}. Clients render
+    // the fill against their cosmetic server-clock estimate and self-resolve at T; there is deliberately NO
+    // resolve/cancel counterpart (T1: a telegraph outlives its caster). Reliable-ordered, AOI-scoped via the
+    // known-id diff (the SpawnerMarker pattern), which also delivers active telegraphs to mid-windup AOI joiners.
+    // Server + every in-repo client flip together.
+    public const byte Version = 44;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -250,6 +257,9 @@ public static class ProtocolCodec
                 WriteTile(writer, value.Tile);
                 writer.Write(value.Active);
                 break;
+            case TelegraphMessage value:
+                WriteTelegraph(writer, value);
+                break;
             case CorpseContentsMessage value:
                 WriteCorpseContents(writer, value);
                 break;
@@ -391,6 +401,7 @@ public static class ProtocolCodec
             MessageType.DamageEvent => new DamageEventMessage(reader.ReadUInt32(), reader.ReadInt32(), reader.ReadUInt16()),
             MessageType.MonsterTuning => new MonsterTuningMessage(ReadMonsterTuning(reader)),
             MessageType.SpawnerMarker => new SpawnerMarkerMessage(reader.ReadUInt32(), ReadTile(reader), reader.ReadBoolean()),
+            MessageType.Telegraph => ReadTelegraph(reader),
             MessageType.CorpseContents => ReadCorpseContents(reader),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
@@ -545,6 +556,66 @@ public static class ProtocolCodec
         var quantized = System.Math.Round(component * VelocityScale, System.MidpointRounding.AwayFromZero);
         var clamped = System.Math.Clamp(quantized, short.MinValue, short.MaxValue);
         return (short)clamped;
+    }
+
+    // TELEGRAPH T2 (v44): the deadline-form telegraph announcement. Wire order: telegraph id (ulong), shape kind
+    // (byte), origin as Q12.4 fixed-point (two shorts via the SAME PositionEncoding the snapshot positions use — the
+    // decal lands exactly where the wire says entities stand), radius as a Q12.4 ushort (sixteenths of a unit, the
+    // same fixed-point the airborne VerticalOffset uses — 1/16-unit precision up to ~4096 units, ample for any ground
+    // shape), then startTick + resolveTick (uint each). Quantize on SEND only — the server's authoritative double
+    // shape is never rounded back. The kind byte is the shape-generic seam: a future cone/line appends its extra
+    // params after the radius under a new kind value (+ a codec case), without reshaping this envelope. Mirrored
+    // byte-for-byte by ReadTelegraph.
+    private static void WriteTelegraph(BinaryWriter writer, TelegraphMessage value)
+    {
+        writer.Write(value.TelegraphId);
+        writer.Write((byte)value.Shape.Kind);
+        var (qx, qy) = PositionEncoding.Encode(value.Shape.Origin);
+        writer.Write(qx);
+        writer.Write(qy);
+        writer.Write(QuantizeTelegraphRadius(value.Shape.Radius));
+        writer.Write(value.StartTick);
+        writer.Write(value.ResolveTick);
+    }
+
+    private static TelegraphMessage ReadTelegraph(BinaryReader reader)
+    {
+        var telegraphId = reader.ReadUInt64();
+        var kind = ReadTelegraphShapeKind(reader);
+        var origin = PositionEncoding.Decode(reader.ReadInt16(), reader.ReadInt16());
+        var radius = reader.ReadUInt16() / PositionEncoding.Scale;
+        var startTick = reader.ReadUInt32();
+        var resolveTick = reader.ReadUInt32();
+        return new TelegraphMessage(telegraphId, new TelegraphShape(kind, origin, radius), startTick, resolveTick);
+    }
+
+    // TELEGRAPH T2 (v44): quantize the shape radius to a Q12.4 ushort. A non-finite/negative radius encodes as 0 and
+    // an absurd one clamps at the ushort ceiling (defensive — radii are server-authored and small), mirroring the
+    // VerticalOffset clamp so a bad value can never wrap into a wrong-but-plausible radius.
+    private static ushort QuantizeTelegraphRadius(double radius)
+    {
+        if (!double.IsFinite(radius) || radius <= 0d)
+        {
+            return 0;
+        }
+
+        var sixteenths = System.Math.Round(radius * PositionEncoding.Scale, System.MidpointRounding.AwayFromZero);
+        var clamped = System.Math.Clamp(sixteenths, 0d, ushort.MaxValue);
+        return (ushort)clamped;
+    }
+
+    // TELEGRAPH T2 (v44): range-validate the shape-kind byte (mirroring ReadAttackKind) so a hostile/corrupt packet
+    // can't smuggle an unknown kind into the client's decal renderer — an unknown kind is a ProtocolException, not a
+    // shape that Contains() nothing but still draws something.
+    private static TelegraphShapeKind ReadTelegraphShapeKind(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value != (byte)TelegraphShapeKind.Circle)
+        {
+            throw new ProtocolException($"Invalid TelegraphShapeKind value: {value}.");
+        }
+
+        return (TelegraphShapeKind)value;
     }
 
     private static void WriteHeader(BinaryWriter writer, MessageType type)

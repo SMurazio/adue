@@ -16,9 +16,11 @@ namespace Mmo.Server.Runtime;
 // (and resolve never dereferences the caster, so a despawn cannot dangle). CasterId is carried for attribution +
 // the T2 wire event only.
 //
-// NO wire, NO rendering this phase: T2 replicates {shape, resolveTick} to AOI viewers; this class already carries
-// everything that event needs. Server-tick uint arithmetic throughout (a plain >= — the tick counter would take
-// ~6.8 years @ 20 Hz to wrap).
+// WIRE (T2): the per-recipient AOI diff pass in GameServer replicates each pending telegraph as a TelegraphMessage
+// {id, shape, startTick, resolveTick} via CopyActiveTo/IsPending below — clients render the fill against the shared
+// deadline and self-resolve at T, so this engine still never sends anything itself and NO resolve/cancel message
+// exists. Server-tick uint arithmetic throughout (a plain >= — the tick counter would take ~6.8 years @ 20 Hz to
+// wrap).
 public sealed class TelegraphScheduler
 {
     // The spatial superset gather (WorldState.GatherInterestCandidates) — the SAME index AOI/combat/aggro use, so
@@ -32,10 +34,17 @@ public sealed class TelegraphScheduler
     public delegate bool TryDamagePlayerDelegate(WorldEntity victim, int amount, uint serverTick, string source);
 
     // A scheduled, not-yet-resolved telegraph. The shape (with its LOCKED cast-time origin) and the damage are
-    // captured at schedule time; ResolveTick is the absolute deadline. Source is the attribution string the damage
+    // captured at schedule time; StartTick is the tick it was scheduled on (T2: rides the wire so every viewer —
+    // including a late AOI joiner — computes the SAME fill fraction (now − start)/(T − start), not one restarted at
+    // its own receive time); ResolveTick is the absolute deadline. Source is the attribution string the damage
     // log/display carries ("Slime slam", "/slam by Admin").
     private readonly record struct PendingTelegraph(
-        ulong Id, ulong CasterId, TelegraphShape Shape, uint ResolveTick, int Damage, string Source);
+        ulong Id, ulong CasterId, TelegraphShape Shape, uint StartTick, uint ResolveTick, int Damage, string Source);
+
+    // TELEGRAPH T2: the read-only projection of a pending telegraph the wire sync needs — exactly the TelegraphMessage
+    // payload (id + locked shape + the two absolute ticks), no damage/source/caster (those never replicate; damage is
+    // resolved server-side and attribution rides the damage log).
+    public readonly record struct ActiveTelegraph(ulong Id, TelegraphShape Shape, uint StartTick, uint ResolveTick);
 
     private readonly GatherCandidatesDelegate _gatherCandidates;
     private readonly TryDamagePlayerDelegate _tryDamagePlayer;
@@ -59,13 +68,44 @@ public sealed class TelegraphScheduler
     // The not-yet-resolved count — the leak sentinel the tests assert on (a resolved telegraph must always leave).
     public int PendingCount => _pending.Count;
 
-    // Schedule a telegraph: `shape` (origin LOCKED at the caller's cast-time choice) resolving at the absolute
-    // `resolveTick`, dealing `damage` to every alive player inside it AT that tick. Returns the telegraph id.
-    public ulong Schedule(ulong casterId, TelegraphShape shape, uint resolveTick, int damage, string source)
+    // Schedule a telegraph: `shape` (origin LOCKED at the caller's cast-time choice) scheduled AT `startTick` (the
+    // caller's current server tick — T2 replicates it so every viewer computes the same fill fraction) and resolving
+    // at the absolute `resolveTick`, dealing `damage` to every alive player inside it AT that tick. Returns the
+    // telegraph id.
+    public ulong Schedule(ulong casterId, TelegraphShape shape, uint startTick, uint resolveTick, int damage, string source)
     {
         var id = _nextTelegraphId++;
-        _pending.Add(new PendingTelegraph(id, casterId, shape, resolveTick, damage, source));
+        _pending.Add(new PendingTelegraph(id, casterId, shape, startTick, resolveTick, damage, source));
         return id;
+    }
+
+    // TELEGRAPH T2: copy the wire projection of every still-pending telegraph into `destination` (cleared first; the
+    // caller reuses its scratch — the set is tiny, telegraphs live ~1.5 s). The per-recipient AOI diff pass iterates
+    // this to send TelegraphMessage to viewers that don't yet know an id (schedule-time send and mid-windup AOI-enter
+    // are the SAME diff — the SpawnerMarker pattern).
+    public void CopyActiveTo(List<ActiveTelegraph> destination)
+    {
+        destination.Clear();
+        foreach (var telegraph in _pending)
+        {
+            destination.Add(new ActiveTelegraph(telegraph.Id, telegraph.Shape, telegraph.StartTick, telegraph.ResolveTick));
+        }
+    }
+
+    // TELEGRAPH T2: whether `id` is still pending — the wire sync's forget test (a session's known-telegraph id is
+    // dropped once its telegraph resolved, so the known set can never grow past the live set). Linear scan on purpose:
+    // _pending is a handful of entries at most, so a lookup structure would cost more than it saves.
+    public bool IsPending(ulong id)
+    {
+        foreach (var telegraph in _pending)
+        {
+            if (telegraph.Id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Resolve every telegraph whose resolve tick has arrived (>= is belt-and-braces; the tick loop calls this every

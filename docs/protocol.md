@@ -15,13 +15,13 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `43` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `44` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
 The transport is LiteNetLib:
 
-- reliable ordered delivery for login, chat, entity spawn/despawn metadata, admin verbs, attacks/actions/loot, and the tuning/settings replication messages
+- reliable ordered delivery for login, chat, entity spawn/despawn metadata, admin verbs, attacks/actions/loot, telegraph announcements, and the tuning/settings replication messages
 - unreliable delivery for `MoveIntent` (one per render frame — a dropped input is superseded by the next frame's; freshness is gated by `InputSeq`), `WorldSnapshot`, and the cosmetic `DamageEvent`
 - sequenced delivery for `SnapshotAck`
 
@@ -60,6 +60,7 @@ World snapshots should fit in a single UDP packet for the current channel target
 - v41 (MONSTER-BEHAVIOR P6): placeholder per-type visual on `EntitySpawn` — `TintRgb` (uint 0xRRGGBB) + `ScaleMilli` (ushort, scale×1000).
 - v42 (MONSTER-TUNING-SAVE): parameterless, admin-gated `SaveMonsterTuningMessage` — F1 Save persists live monster tuning to `Content/monsters.json`.
 - v43 (PLAYER-COLLISION-TOGGLE): admin-gated client→server `AdminSetPlayerCollisionMessage` + server→client `PlayerCollisionSettingMessage` (sent on login + broadcast on change) — live server-authoritative player↔player collision toggle, default ON; monster collision unaffected.
+- v44 (TELEGRAPH T2): server→client `TelegraphMessage` — the deadline-form ground-telegraph announcement (`ulong` telegraph id, shape kind byte + Q12.4 origin + Q12.4 `ushort` radius, `uint` startTick + resolveTick). Clients fill `(now − start)/(T − start)` against a cosmetic server-clock estimate and self-resolve at T; deliberately NO resolve/cancel counterpart (a telegraph outlives its caster). Reliable, AOI-scoped via a known-id diff (the SpawnerMarker pattern) that also delivers active telegraphs to mid-windup AOI joiners.
 
 ## Client Messages
 
@@ -98,6 +99,7 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
 - `SpawnerMarker` / `SpawnerMarkerMessage` (v34): a SPAWNER's red-tile marker — the persistent leash/respawn anchor, keyed by a stable spawner id with an `Active` flag (true on AOI-entry, false on AOI-exit); survives monster death/respawn. Reliable.
 - `CorpseContents` / `CorpseContentsMessage` (v35): server→owner contents of an OPEN corpse (template key + quantity + rarity per stack), re-sent after each take/loot-all; `Open=false` closes the window. Owner-only + reliable-ordered.
 - `PlayerCollisionSetting` (v43): the authoritative player↔player collision flag (`bool`). Sent on login + broadcast on every change (global, not AOI-scoped) so every client's obstacle gather matches the server integrator's. Reliable-ordered.
+- `Telegraph` / `TelegraphMessage` (v44): a scheduled ground telegraph — `ulong` telegraph id, the LOCKED cast-time shape (`byte` kind — circle only at v44; origin as Q12.4 fixed-point like snapshot positions; radius as a Q12.4 `ushort`), and the two absolute server ticks `startTick`/`resolveTick`. The client renders the fill as `(estimatedNow − start)/(resolve − start)` clamped [0,1] against its **cosmetic** server-clock estimate (EMA of the snapshot-header tick — presentation only, never simulation) and self-resolves at T, so every viewer's fill completes at the same wall-clock instant and a late AOI joiner shows the correct remaining fill. Membership is **center-point at tick T, server-side** (the drawn circle IS the hit rule — the decal renders the exact wire radius). No resolve/cancel message exists. Reliable-ordered, AOI-scoped per recipient by the known-id diff pass (schedule-time send and mid-windup AOI-enter are the same path).
 - `ServerError`: code and message.
 
 ## Rules

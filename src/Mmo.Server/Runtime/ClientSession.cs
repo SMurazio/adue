@@ -14,6 +14,12 @@ public sealed class ClientSession
     // diff cheaply against the live spawner set without re-sending a known marker each tick.
     private readonly HashSet<uint> _knownSpawnerIds = [];
 
+    // TELEGRAPH T2: the set of TELEGRAPH ids this viewer has been sent (mirrors _knownSpawnerIds for the non-entity
+    // telegraph announcements). An id is added when the AOI diff pass sends the TelegraphMessage and removed only when
+    // the telegraph RESOLVES server-side (never on AOI-exit: there is no cancel message, the client renders to T
+    // regardless, and keeping the id known means an exit-and-re-enter mid-windup can't trigger a duplicate send).
+    private readonly HashSet<ulong> _knownTelegraphIds = [];
+
     // Acked baseline (S46): the entity revision the CLIENT has acknowledged receiving, per visible
     // entity. Snapshot selection sends an entity iff its current revision differs from this acked
     // revision — so a dropped (never-acked) snapshot's changes stay "unacked" and are re-sent next tick
@@ -181,6 +187,16 @@ public sealed class ClientSession
     public bool ForgetKnownSpawner(uint spawnerId) => _knownSpawnerIds.Remove(spawnerId);
 
     public IReadOnlyCollection<uint> KnownSpawnerIds => _knownSpawnerIds;
+
+    // TELEGRAPH T2: telegraph-announcement bookkeeping (mirrors the spawner-marker trio above; ulong ids — the
+    // scheduler's monotonic id space, not a network id).
+    public bool KnowsTelegraph(ulong telegraphId) => _knownTelegraphIds.Contains(telegraphId);
+
+    public void RememberKnownTelegraph(ulong telegraphId) => _knownTelegraphIds.Add(telegraphId);
+
+    public bool ForgetKnownTelegraph(ulong telegraphId) => _knownTelegraphIds.Remove(telegraphId);
+
+    public IReadOnlyCollection<ulong> KnownTelegraphIds => _knownTelegraphIds;
 
     public void Authenticate(uint networkId, Guid characterId, string displayName, ClientRole role, string zoneId)
     {

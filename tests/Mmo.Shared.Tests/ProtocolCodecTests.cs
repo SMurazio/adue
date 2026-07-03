@@ -509,12 +509,54 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyThree()
+    public void ProtocolVersionIsFortyFour()
     {
-        // PLAYER-COLLISION-TOGGLE (v43): added the admin-gated AdminSetPlayerCollisionMessage + the server->client
-        // PlayerCollisionSettingMessage (replicate the live player↔player collision flag). Two additive messages + tags;
-        // bump on top of v42 (monster-tuning save). Pin it so a change is caught.
-        Assert.Equal(43, ProtocolCodec.Version);
+        // TELEGRAPH T2 (v44): added the server->client TelegraphMessage (deadline-form ground-telegraph announcement:
+        // id + shape + startTick/resolveTick). One additive message + tag; bump on top of v43 (player-collision
+        // toggle). Pin it so a change is caught.
+        Assert.Equal(44, ProtocolCodec.Version);
+    }
+
+    // TELEGRAPH T2 (v44): the telegraph announcement round-trips — the ulong id, the shape (kind + Q12.4 origin +
+    // Q12.4 ushort radius), and the two absolute ticks. Origin/radius here land on exact sixteenths so the equality
+    // is exact (the quantization itself is pinned separately below).
+    [Fact]
+    public void TelegraphMessageRoundTrips()
+    {
+        var original = new TelegraphMessage(
+            TelegraphId: 987654321098UL,
+            new TelegraphShape(TelegraphShapeKind.Circle, new WorldVector(32.5d, -7.25d), 2.5d),
+            StartTick: 1000,
+            ResolveTick: 1030);
+
+        var decoded = Assert.IsType<TelegraphMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(987654321098UL, decoded.TelegraphId);
+        Assert.Equal(TelegraphShapeKind.Circle, decoded.Shape.Kind);
+        Assert.Equal(new WorldVector(32.5d, -7.25d), decoded.Shape.Origin);
+        Assert.Equal(2.5d, decoded.Shape.Radius, 6);
+        Assert.Equal(1000u, decoded.StartTick);
+        Assert.Equal(1030u, decoded.ResolveTick);
+        Assert.Equal(MessageType.Telegraph, decoded.Type);
+    }
+
+    // TELEGRAPH T2 (v44): the shape params are Q12.4 fixed-point on the wire — an off-grid origin/radius decodes to
+    // the nearest sixteenth (round-away-from-zero, matching PositionEncoding), NOT the full double. HONEST-TELEGRAPH
+    // note: server content should author radii in sixteenth steps so the drawn edge equals the resolve edge exactly.
+    [Fact]
+    public void TelegraphShapeQuantizesToSixteenths()
+    {
+        var original = new TelegraphMessage(
+            1UL,
+            new TelegraphShape(TelegraphShapeKind.Circle, new WorldVector(10.04d, -10.04d), 2.04d),
+            StartTick: 5,
+            ResolveTick: 35);
+
+        var decoded = Assert.IsType<TelegraphMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(10.0625d, decoded.Shape.Origin.X, 6);   // round(10.04·16 = 160.64) = 161 → 10.0625
+        Assert.Equal(-10.0625d, decoded.Shape.Origin.Y, 6);  // symmetric away-from-zero
+        Assert.Equal(2.0625d, decoded.Shape.Radius, 6);      // round(2.04·16 = 32.64) = 33 → 2.0625
     }
 
     // PLAYER-COLLISION-TOGGLE (v43): both the admin toggle and the replication message round-trip their single bool

@@ -993,6 +993,16 @@ public sealed class GameServer
                     SyncSpawnerMarkers(session, viewerEntity);
                 }
             }
+
+            // TELEGRAPH T2: sync pending telegraph announcements for this viewer (AOI-driven, the same known-id diff
+            // shape as the spawner markers). Guarded to a no-op in the common case (nothing pending, nothing known).
+            if (_telegraphs.PendingCount > 0 || session.KnownTelegraphIds.Count > 0)
+            {
+                if (TryGetSessionEntity(session, out var telegraphViewer))
+                {
+                    SyncTelegraphs(session, telegraphViewer);
+                }
+            }
         }
 
         SendSnapshotPackets(session, _visibleEntityScratch, tickBudget, out var visibleCount, out var chunkCount, out var sentBytes, out var sentPackets);
@@ -1360,6 +1370,67 @@ public sealed class GameServer
         {
             TrySend(recipient.Peer, new SpawnerMarkerMessage(spawnerId, default, false), DeliveryMethod.ReliableOrdered);
             recipient.ForgetKnownSpawner(spawnerId);
+        }
+    }
+
+    // TELEGRAPH T2: per-recipient AOI sync of the PENDING telegraph announcements — the same known-id diff shape as
+    // SyncSpawnerMarkers, for the other non-entity replicated object. For each pending telegraph whose shape is within
+    // the viewer's interest radius and that the viewer doesn't yet know, send the TelegraphMessage (reliable — a
+    // dropped telegraph is a hit with no warning) and remember the id. Because the diff runs every broadcast tick,
+    // ONE code path covers both required sends: the schedule-time announcement (the telegraph is new to everyone in
+    // AOI on the tick it was scheduled) and the mid-windup AOI-enter delivery (a late joiner is missing the id, so the
+    // next pass sends it — the deadline form then renders the correct REMAINING fill from the replicated startTick).
+    //
+    // The forget pass drops known ids whose telegraph is no longer pending (it resolved — ResolveDue ran earlier this
+    // same tick), with NO wire message: clients self-resolve at T (the whole point), and T1 decided a telegraph
+    // outlives its caster so a cancel cannot exist. An id is deliberately NOT forgotten on AOI-exit: the client keeps
+    // rendering to T anyway (harmless — the decal is off-screen), and keeping it known means exit-and-re-enter
+    // mid-windup can't send a duplicate. Cost: the active set is tiny (telegraphs live ~1.5 s) and the whole pass is
+    // gated behind PendingCount/KnownTelegraphIds at the call site, so the steady state pays nothing.
+    private readonly List<TelegraphScheduler.ActiveTelegraph> _telegraphSyncScratch = [];
+    private readonly List<ulong> _telegraphForgetScratch = [];
+
+    private void SyncTelegraphs(ClientSession recipient, WorldEntity recipientEntity)
+    {
+        // Announce pending telegraphs that are in AOI and unknown to this viewer. The radius test includes the shape's
+        // BoundingRadius (the same superset idea the resolve gather uses) so a large shape OVERLAPPING the viewer's
+        // interest disc is announced even when its centre sits just outside — a viewer standing inside a circle must
+        // never be hit by a telegraph it was never shown.
+        _telegraphs.CopyActiveTo(_telegraphSyncScratch);
+        foreach (var telegraph in _telegraphSyncScratch)
+        {
+            if (recipient.KnowsTelegraph(telegraph.Id))
+            {
+                continue;
+            }
+
+            var delta = telegraph.Shape.Origin - recipientEntity.Position;
+            var reach = _tuning.InterestRadius + telegraph.Shape.BoundingRadius;
+            if (delta.LengthSquared > reach * reach)
+            {
+                continue;
+            }
+
+            TrySend(
+                recipient.Peer,
+                new TelegraphMessage(telegraph.Id, telegraph.Shape, telegraph.StartTick, telegraph.ResolveTick),
+                DeliveryMethod.ReliableOrdered);
+            recipient.RememberKnownTelegraph(telegraph.Id);
+        }
+
+        // Forget known ids whose telegraph resolved (left the pending set). Bookkeeping only — nothing is sent.
+        _telegraphForgetScratch.Clear();
+        foreach (var telegraphId in recipient.KnownTelegraphIds)
+        {
+            if (!_telegraphs.IsPending(telegraphId))
+            {
+                _telegraphForgetScratch.Add(telegraphId);
+            }
+        }
+
+        foreach (var telegraphId in _telegraphForgetScratch)
+        {
+            recipient.ForgetKnownTelegraph(telegraphId);
         }
     }
 
@@ -2234,6 +2305,7 @@ public sealed class GameServer
         var telegraphId = _telegraphs.Schedule(
             actor.Id,
             TelegraphShape.Circle(actor.Position, radius),
+            _serverTick,
             resolveTick,
             damage,
             $"/slam by {sender.DisplayName}");
@@ -3754,6 +3826,7 @@ public sealed class GameServer
         var telegraphId = _telegraphs.Schedule(
             monster.Id,
             TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits),
+            serverTick,
             resolveTick,
             type.SlamDamage,
             $"{type.DisplayName} slam");

@@ -355,6 +355,25 @@ public sealed record EntityDespawnMessage(uint ServerTick, uint NetworkId) : IPr
     public MessageType Type => MessageType.EntityDespawn;
 }
 
+// TELEGRAPH T2 (protocol v44, docs/ability-telegraph-sync-design.md): server->client announcement of a SCHEDULED
+// ground telegraph — the wire half of the deadline-form sync. TelegraphId is the scheduler's monotonic id (keys the
+// client decal and dedupes a re-send); Shape is the LOCKED cast-time shape (kind + origin + radius — the codec ships
+// the origin as Q12.4 fixed-point exactly like snapshot positions, and the radius as a Q12.4 ushort, so the drawn
+// decal matches the server's danger area to 1/16 unit); StartTick/ResolveTick are ABSOLUTE server ticks. Every client
+// renders the fill as progress = (estimatedNow − StartTick)/(ResolveTick − StartTick) clamped [0,1] against its
+// COSMETIC server-clock estimate and self-resolves at T — so all viewers land on T at the same wall-clock instant and
+// a late AOI joiner (who receives this mid-windup) renders the correct REMAINING fill from the same two ticks.
+//
+// Deliberately MINIMAL: no resolve/cancel/despawn counterpart exists. Resolution is client-local at T (the whole point
+// of the deadline form — the authoritative outcome rides the normal damage/HP replication), and T1 decided a telegraph
+// OUTLIVES its caster, so nothing can cancel one mid-windup. Sent RELIABLE-ORDERED (a dropped telegraph is a hit with
+// no warning — never acceptable), AOI-scoped per recipient at schedule time + on AOI-enter via the known-id diff pass
+// (the SpawnerMarker pattern; the active set is tiny because telegraphs live ~1.5 s).
+public sealed record TelegraphMessage(ulong TelegraphId, TelegraphShape Shape, uint StartTick, uint ResolveTick) : IProtocolMessage
+{
+    public MessageType Type => MessageType.Telegraph;
+}
+
 // Terrain is procedural content, not state: instead of shipping the blocked-tile list, ZoneInfo carries
 // a tiny descriptor — dimensions plus the generator (Seed, GenVersion) — and a ContentHash of the
 // generated blocked set. The client regenerates the identical map locally via the shared

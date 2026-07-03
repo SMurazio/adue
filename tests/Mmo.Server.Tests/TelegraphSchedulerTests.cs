@@ -93,7 +93,7 @@ public sealed class TelegraphSchedulerTests
         var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
 
         // Scheduled at tick 20, resolving at tick 50 — the deadline form.
-        scheduler.Schedule(999, TelegraphShape.Circle(player.Position, 2d), resolveTick: 50, damage: 15, source: "test slam");
+        scheduler.Schedule(999, TelegraphShape.Circle(player.Position, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "test slam");
         Assert.Equal(1, scheduler.PendingCount);
 
         // Every tick strictly BEFORE T: nothing resolves, nothing lands, the entry stays pending.
@@ -129,7 +129,7 @@ public sealed class TelegraphSchedulerTests
 
         // Locked at the player's CAST-TIME position — the player then walks 5 units east during the windup.
         var origin = player.Position;
-        scheduler.Schedule(999, TelegraphShape.Circle(origin, 2d), resolveTick: 50, damage: 15, source: "test slam");
+        scheduler.Schedule(999, TelegraphShape.Circle(origin, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "test slam");
         MoveTo(world, player, origin + new WorldVector(5d, 0d));
 
         scheduler.ResolveDue(50);
@@ -149,7 +149,7 @@ public sealed class TelegraphSchedulerTests
 
         // Locked 8 units away from the player at cast — the player then walks INTO it during the windup.
         var origin = new WorldVector(32d, 32d);
-        scheduler.Schedule(999, TelegraphShape.Circle(origin, 2d), resolveTick: 50, damage: 15, source: "test slam");
+        scheduler.Schedule(999, TelegraphShape.Circle(origin, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "test slam");
         MoveTo(world, player, origin + new WorldVector(0.5d, 0d));
 
         scheduler.ResolveDue(50);
@@ -184,7 +184,7 @@ public sealed class TelegraphSchedulerTests
 
         // Circle radius 3 centred between them — big enough that the roll's short dash cannot leave it by T (the
         // in-shape assertion below keeps the test honest about that).
-        scheduler.Schedule(999, TelegraphShape.Circle(new WorldVector(32.5d, 32d), 3d), resolveTick, damage: 15, source: "test slam");
+        scheduler.Schedule(999, TelegraphShape.Circle(new WorldVector(32.5d, 32d), 3d), startTick: resolveTick - 30, resolveTick: resolveTick, damage: 15, source: "test slam");
 
         // Drive the ticks in TickCore's order: actions step, then due telegraphs resolve.
         for (var tick = rollStart; tick <= resolveTick; tick++)
@@ -268,7 +268,7 @@ public sealed class TelegraphSchedulerTests
         var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(32, 32), Direction8.S);
         var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
 
-        scheduler.Schedule(caster.Id, TelegraphShape.Circle(player.Position, 2d), resolveTick: 50, damage: 15, source: "Slime slam");
+        scheduler.Schedule(caster.Id, TelegraphShape.Circle(player.Position, 2d), startTick: 20, resolveTick: 50, damage: 15, source: "Slime slam");
         Assert.True(world.Remove(caster.Id, out _)); // the caster dies mid-windup
 
         scheduler.ResolveDue(50);
@@ -290,7 +290,7 @@ public sealed class TelegraphSchedulerTests
         downed.ApplyDamage(100); // already at 0 HP — not a re-hit target
         var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
 
-        scheduler.Schedule(999, TelegraphShape.Circle(new WorldVector(32d, 32d), 2d), resolveTick: 50, damage: 15, source: "test slam");
+        scheduler.Schedule(999, TelegraphShape.Circle(new WorldVector(32d, 32d), 2d), startTick: 20, resolveTick: 50, damage: 15, source: "test slam");
         scheduler.ResolveDue(50);
 
         var hit = Assert.Single(landed);
@@ -310,9 +310,9 @@ public sealed class TelegraphSchedulerTests
         var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
 
         var shape = TelegraphShape.Circle(player.Position, 2d);
-        scheduler.Schedule(999, shape, resolveTick: 30, damage: 1, source: "a");
-        scheduler.Schedule(999, shape, resolveTick: 40, damage: 2, source: "b");
-        scheduler.Schedule(999, shape, resolveTick: 40, damage: 3, source: "c");
+        scheduler.Schedule(999, shape, startTick: 10, resolveTick: 30, damage: 1, source: "a");
+        scheduler.Schedule(999, shape, startTick: 10, resolveTick: 40, damage: 2, source: "b");
+        scheduler.Schedule(999, shape, startTick: 10, resolveTick: 40, damage: 3, source: "c");
         Assert.Equal(3, scheduler.PendingCount);
 
         for (uint tick = 1; tick <= 100; tick++)

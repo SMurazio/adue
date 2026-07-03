@@ -312,6 +312,24 @@ public sealed class MmoClient : IDisposable
 
     public IReadOnlyDictionary<uint, TileCoord> SpawnerMarkers => _spawnerMarkers;
 
+    // TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): the ACTIVE ground telegraphs, from TelegraphMessage
+    // (keyed by the scheduler's telegraph id — the upsert dedupes a hypothetical re-send). Each entry stores the
+    // LOCKED wire shape + the two absolute server ticks of the deadline form; the client SELF-RESOLVES — there is no
+    // resolve/cancel message — so entries are pruned locally once the estimated server clock passes resolveTick plus
+    // a brief flash window (CopyTelegraphDecalsTo). The Godot layer reads the projected TelegraphDecalState list each
+    // frame to drive the ground decals; nothing here feeds simulation (who is hit stays 100% server-authoritative).
+    private readonly Dictionary<ulong, ActiveClientTelegraph> _activeTelegraphs = [];
+
+    private readonly record struct ActiveClientTelegraph(TelegraphShape Shape, uint StartTick, uint ResolveTick);
+
+    // TELEGRAPH T2: the COSMETIC server-clock estimate (EMA over the serverTick riding every applied snapshot
+    // header). Drives ONLY the telegraph fill — never simulation/prediction (see CosmeticServerClock's header).
+    private readonly CosmeticServerClock _cosmeticServerClock = new();
+
+    // How long a completed telegraph keeps its decal for the resolve FLASH before despawning, in seconds. Long enough
+    // to read as an impact at game zoom, short enough that the ground clears before the next cast.
+    private const double TelegraphFlashSeconds = 0.35d;
+
     // COMBAT-TUNING (radial cooldown): the client clock time of the most recent attack we SENT, and the cooldown
     // duration in effect when we sent it (snapshotted so a mid-cooldown tuning change doesn't retroactively rescale
     // the in-flight sweep). AttackCooldownRemainingFraction reads these against the live clock. This is a LOCAL
@@ -352,6 +370,64 @@ public sealed class MmoClient : IDisposable
             destination.Add(entity.ToRenderState(now, LocalRenderOverride(entity)));
         }
     }
+
+    // TELEGRAPH T2: project the active telegraphs into render-ready decal states at local time `now` — the per-frame
+    // read the Godot ground-decal pass consumes (mirrors CopyRenderStatesTo's clear-and-fill shape, no steady-state
+    // allocation). Fill progress comes from the cosmetic server clock ((now − start)/(T − start), clamped); Resolved
+    // flips at estimated T for the flash; an entry whose flash window has passed is pruned HERE (the client
+    // self-resolves — no despawn message exists). Before the first snapshot lands (no clock estimate — only possible
+    // in a contrived ordering, the login snapshot precedes any cast) a telegraph renders at progress 0 rather than
+    // guessing.
+    public void CopyTelegraphDecalsTo(List<TelegraphDecalState> destination, TimeSpan now)
+    {
+        destination.Clear();
+        if (_activeTelegraphs.Count == 0)
+        {
+            return;
+        }
+
+        var estimatedTick = _cosmeticServerClock.EstimateServerTick(now);
+        var tickRate = Server?.TickRate ?? 20;
+
+        _expiredTelegraphScratch.Clear();
+        foreach (var (telegraphId, telegraph) in _activeTelegraphs)
+        {
+            if (estimatedTick is not { } estimate)
+            {
+                destination.Add(new TelegraphDecalState(
+                    telegraphId, telegraph.Shape.Kind, telegraph.Shape.Origin, telegraph.Shape.Radius, Progress: 0d, Resolved: false));
+                continue;
+            }
+
+            if (estimate >= telegraph.ResolveTick + (TelegraphFlashSeconds * tickRate))
+            {
+                _expiredTelegraphScratch.Add(telegraphId);
+                continue;
+            }
+
+            var progress = TelegraphFill.Progress(estimate, telegraph.StartTick, telegraph.ResolveTick);
+            destination.Add(new TelegraphDecalState(
+                telegraphId,
+                telegraph.Shape.Kind,
+                telegraph.Shape.Origin,
+                telegraph.Shape.Radius,
+                progress,
+                Resolved: estimate >= telegraph.ResolveTick));
+        }
+
+        foreach (var telegraphId in _expiredTelegraphScratch)
+        {
+            _activeTelegraphs.Remove(telegraphId);
+        }
+    }
+
+    // TELEGRAPH T2: the production convenience — project at the client's current poll clock (like GetRenderStates()).
+    public void CopyTelegraphDecalsTo(List<TelegraphDecalState> destination)
+    {
+        CopyTelegraphDecalsTo(destination, _currentTime);
+    }
+
+    private readonly List<ulong> _expiredTelegraphScratch = [];
 
     // CONTINUOUS MIGRATION (Phase 4): the predicted RENDER position for the LOCAL player when a predictor is attached,
     // else null (raw render). The predictor lives on this outer class, so the render-state builders inject its smooth
@@ -991,6 +1067,15 @@ public sealed class MmoClient : IDisposable
                 }
 
                 break;
+            case TelegraphMessage telegraph:
+                // TELEGRAPH T2: an active ground telegraph entered replication (fresh cast in AOI, or this client
+                // entered AOI mid-windup — the wire carries the SAME startTick/resolveTick either way, so the
+                // deadline-form fill lands on the shared T regardless of when this arrived). Upsert keyed by the
+                // telegraph id: idempotent against a duplicate send. Pure presentation state — the decal pass reads
+                // it via CopyTelegraphDecalsTo; who is actually hit stays server-authoritative at T.
+                _activeTelegraphs[telegraph.TelegraphId] =
+                    new ActiveClientTelegraph(telegraph.Shape, telegraph.StartTick, telegraph.ResolveTick);
+                break;
             case DamageEventMessage damage:
                 // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the
                 // OLDEST if the buffer is somehow full (renderer stalled / flood) so it can never grow unbounded.
@@ -1103,6 +1188,14 @@ public sealed class MmoClient : IDisposable
         HandleMessage(message);
     }
 
+    // TELEGRAPH T2 test hook: stamp the poll clock without driving a live NetManager poll (mirrors
+    // HandleMessageForTests). The headless suite sets an arrival time, hands a snapshot in, and the cosmetic server
+    // clock observes exactly the (serverTick, localNow) pair a real poll would have produced.
+    internal void SetCurrentTimeForTests(TimeSpan now)
+    {
+        _currentTime = now;
+    }
+
     private void HandleServerHello(ServerHelloMessage hello)
     {
         Server = new ServerInfo(hello.ServerName, hello.ProtocolVersion, hello.TickRate, hello.StepCooldownMs, hello.InterestRadiusUnits, hello.BodyRadiusUnits);
@@ -1211,6 +1304,11 @@ public sealed class MmoClient : IDisposable
         // DIAG1: tally this fully-applied snapshot for the `recv/s` confirm-channel-rate read-out (once per applied
         // snapshot — a chunked snapshot is assembled before this is reached). Measurement only.
         NoteSnapshotReceived();
+
+        // TELEGRAPH T2: feed the COSMETIC server clock from the header tick + the local poll clock (every applied
+        // snapshot, real-delta and keep-alive alike, carries serverTick). Presentation only — drives the telegraph
+        // fill via CopyTelegraphDecalsTo and nothing else; the predictor/reconcile below never read it.
+        _cosmeticServerClock.ObserveSnapshot(serverTick, _currentTime, Server?.TickRate ?? 20);
 
         _snapshotVisibleScratch.Clear();
         foreach (var state in entities)

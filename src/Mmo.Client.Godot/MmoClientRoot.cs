@@ -500,6 +500,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateCamera();
 		UpdateMonsterHomeMarkers();
 		UpdateServerPositionMarkers();
+		UpdateTelegraphDecals();
 		UpdateAimWedge();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
@@ -3888,6 +3889,121 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			{
 				_serverPositionMarkers[id].QueueFree();
 				_serverPositionMarkers.Remove(id);
+			}
+		}
+	}
+
+	// TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): the ground-telegraph decals — a flat disc pair per active
+	// telegraph, ALWAYS ON (this is pillar-2 gameplay legibility like the aim wedge, not a debug overlay like the
+	// spawner/server-position markers). The ZONE disc is the full danger area at the EXACT wire radius; the FILL disc
+	// grows from the centre with the deadline-form progress and reaches the zone edge precisely at resolve tick T; on
+	// resolve the fill flashes bright for the core's brief flash window, then the entry is pruned and the nodes free.
+	//
+	// HONEST TELEGRAPH (user decision, 2026-07-03): the drawn circle IS the hit rule. The zone disc is scaled to
+	// exactly the replicated radius — no padding, shrink, or edge bias — because membership is deliberately
+	// CENTER-POINT (a player is hit iff its centre is inside; a body clipping the rim does NOT count, divergent from
+	// melee body-clip by decision), so the true edge must stay crisp and truthful. The unit disc is a flattened
+	// cylinder (Godot has no disc primitive); scaling it by (radius, 1, radius) puts the mesh edge AT the radius.
+	private static readonly CylinderMesh TelegraphDiscMesh = new() { TopRadius = 1f, BottomRadius = 1f, Height = 0.02f, RadialSegments = 48 };
+	private static readonly StandardMaterial3D TelegraphZoneMaterial = MarkerMaterial(new Color(1.00f, 0.35f, 0.10f, 0.24f));
+	private static readonly StandardMaterial3D TelegraphFillMaterial = MarkerMaterial(new Color(0.95f, 0.16f, 0.08f, 0.45f));
+	private static readonly StandardMaterial3D TelegraphFlashMaterial = MarkerMaterial(new Color(1.00f, 0.93f, 0.65f, 0.85f));
+
+	// The two pooled nodes of one decal (created together, freed together, keyed by telegraph id).
+	private sealed record TelegraphDecalNodes(MeshInstance3D Zone, MeshInstance3D Fill);
+
+	private readonly Dictionary<ulong, TelegraphDecalNodes> _telegraphDecals = [];
+	private readonly List<TelegraphDecalState> _telegraphDecalScratch = [];
+	private readonly List<ulong> _telegraphDecalStaleScratch = [];
+
+	// Sync the decals to the client's active-telegraph projection each frame (mirrors UpdateMonsterHomeMarkers'
+	// pooled create/position/free shape, keyed by telegraph id). CopyTelegraphDecalsTo computes the fill progress off
+	// the cosmetic server clock and prunes entries whose resolve flash has passed, so "gone from the list" IS the
+	// despawn signal — there is no telegraph-end message (clients self-resolve at the shared deadline T). Cheap: the
+	// active set is tiny (telegraphs live ~1.5 s) and empty almost always. No-op until the world root exists.
+	private void UpdateTelegraphDecals()
+	{
+		if (_worldRoot is null || _client is null)
+		{
+			return;
+		}
+
+		_client.CopyTelegraphDecalsTo(_telegraphDecalScratch);
+
+		foreach (var decal in _telegraphDecalScratch)
+		{
+			if (!_telegraphDecals.TryGetValue(decal.TelegraphId, out var nodes))
+			{
+				// The decal seam is shape-generic (Kind rides the state), but this phase renders CIRCLE only — the
+				// only kind the codec admits at v44. A future cone/line adds its own mesh path here.
+				nodes = new TelegraphDecalNodes(
+					new MeshInstance3D
+					{
+						Name = $"TelegraphZone_{decal.TelegraphId}",
+						Mesh = TelegraphDiscMesh,
+						MaterialOverride = TelegraphZoneMaterial,
+					},
+					new MeshInstance3D
+					{
+						Name = $"TelegraphFill_{decal.TelegraphId}",
+						Mesh = TelegraphDiscMesh,
+						MaterialOverride = TelegraphFillMaterial,
+					});
+				_worldRoot.AddChild(nodes.Zone);
+				_worldRoot.AddChild(nodes.Fill);
+				_telegraphDecals[decal.TelegraphId] = nodes;
+
+				// The origin is LOCKED at cast and the zone radius never changes — position + scale once on create.
+				// Heights: zone at 0.02, fill a hair above (0.035) so the growing fill always wins their z-overlap;
+				// both sit under the debug server-position markers (0.06) so diagnostics stay readable on top.
+				nodes.Zone.Position = new Vector3((float)decal.Origin.X, 0.02f, (float)decal.Origin.Y);
+				nodes.Zone.Scale = new Vector3((float)decal.Radius, 1f, (float)decal.Radius);
+				nodes.Fill.Position = new Vector3((float)decal.Origin.X, 0.035f, (float)decal.Origin.Y);
+			}
+
+			// The fill disc is the per-frame animated half: radius × progress while winding up (reaching the TRUE
+			// edge exactly at T), then the full-radius resolve flash. The tiny floor keeps the scale non-singular at
+			// progress 0 without ever reading as a visible disc.
+			if (decal.Resolved)
+			{
+				nodes.Fill.MaterialOverride = TelegraphFlashMaterial;
+				nodes.Fill.Scale = new Vector3((float)decal.Radius, 1f, (float)decal.Radius);
+			}
+			else
+			{
+				var fillRadius = Mathf.Max((float)(decal.Radius * decal.Progress), 0.01f);
+				nodes.Fill.Scale = new Vector3(fillRadius, 1f, fillRadius);
+			}
+		}
+
+		// Free decals whose telegraph left the projection (flash window over — the core pruned it).
+		if (_telegraphDecals.Count > 0)
+		{
+			_telegraphDecalStaleScratch.Clear();
+			foreach (var id in _telegraphDecals.Keys)
+			{
+				var seen = false;
+				foreach (var decal in _telegraphDecalScratch)
+				{
+					if (decal.TelegraphId == id)
+					{
+						seen = true;
+						break;
+					}
+				}
+
+				if (!seen)
+				{
+					_telegraphDecalStaleScratch.Add(id);
+				}
+			}
+
+			foreach (var id in _telegraphDecalStaleScratch)
+			{
+				var nodes = _telegraphDecals[id];
+				nodes.Zone.QueueFree();
+				nodes.Fill.QueueFree();
+				_telegraphDecals.Remove(id);
 			}
 		}
 	}
