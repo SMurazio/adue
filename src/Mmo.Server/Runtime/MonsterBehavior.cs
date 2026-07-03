@@ -61,4 +61,13 @@ public readonly record struct MonsterAiTunables(
     bool ChargeEnabled = false,
     double ChargeDistanceUnits = 0d,
     double ChargeTriggerRangeUnits = 0d,
-    uint ChargeCooldownTicks = 0u);
+    uint ChargeCooldownTicks = 0u,
+    // TELEGRAPH T1: the SLAM ability config consumed by the brain's slam trigger (a SHARED ability, config-gated like
+    // the charge). SlamEnabled = the type composed "slam" AND a positive cooldown (BuildTunables computes it; false
+    // for every non-slammer -> the trigger block is inert -> byte-identical). SlamCooldownTicks is the tick-quantised
+    // re-cast gate the brain's OWN per-monster NextSlamTick enforces (a slam is a scheduled world event, not an
+    // executor action, so there is no executor cooldown clock to lean on the way the charge does). The shape/windup/
+    // damage stay on the TYPE — GameServer's TryBeginMonsterSlam reads them at cast; the brain only owns the WHEN.
+    // Defaults keep slam inert for positional/older constructions, matching the charge fields' convention.
+    bool SlamEnabled = false,
+    uint SlamCooldownTicks = 0u);

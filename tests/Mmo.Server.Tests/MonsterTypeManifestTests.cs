@@ -323,9 +323,14 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.LocomotionId, d.LocomotionId); // MONSTER-BEHAVIOR P1: the locomotion selector must not drift.
         Assert.Equal(c.BehaviorId, d.BehaviorId); // MONSTER-BEHAVIOR P3: the behavior selector must not drift.
         Assert.Equal(c.FleeHealthPct, d.FleeHealthPct, 6); // MONSTER-BEHAVIOR P4: the slime never flees (0) in both.
-        // MONSTER-BEHAVIOR P5: the slime composes NO abilities + a 0 charge in both the data file and the code seed.
+        // TELEGRAPH T1: the slime composes exactly the SLAM ability (its first real attack pattern) + a 0 charge in
+        // both the data file and the code seed — and the slam knobs must not drift either.
         Assert.Equal(c.AbilityIds, d.AbilityIds);
-        Assert.Empty(d.AbilityIds);
+        Assert.Equal(new[] { "slam" }, d.AbilityIds);
+        Assert.Equal(c.SlamRadiusUnits, d.SlamRadiusUnits, 6);
+        Assert.Equal(c.SlamWindupMs, d.SlamWindupMs);
+        Assert.Equal(c.SlamDamage, d.SlamDamage);
+        Assert.Equal(c.SlamCooldownMs, d.SlamCooldownMs);
         Assert.Equal(c.ChargeCooldownMs, d.ChargeCooldownMs);
         Assert.Equal(c.ChargeDistanceUnits, d.ChargeDistanceUnits, 6);
         Assert.Equal(c.ChargeTriggerRangeUnits, d.ChargeTriggerRangeUnits, 6);

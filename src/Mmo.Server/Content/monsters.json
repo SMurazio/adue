@@ -9,18 +9,30 @@
   // SCHEMA = the MonsterType fields (stats + AI tuning + hop feel + loot) plus the composition selectors
   // `locomotionId` (P1, the id of this type's locomotion "body"; "hop"/"glide" registered today) and
   // `behaviorId` (P3, the id of this type's "brain"; "basicRoamer"/"skirmisher" registered today) — an
-  // unknown id falls back loud-but-safe to the default — plus `abilityIds` (P5, the action-executor abilities
-  // this type composes; "charge" is the one primitive today) + its charge* tuning. The remaining selector
+  // unknown id falls back loud-but-safe to the default — plus `abilityIds` (P5/T1, the abilities this type
+  // composes; "charge" + "slam" are the primitives today) + their charge*/slam* tuning. The remaining selector
   // (visualId) arrives in a later phase and will extend this schema; do not add it yet. Optional fields may
   // be omitted and fall back to the field default; every tunable is clamped to the same bounds the F1 live
   // tuning uses.
   "types": [
     {
+      // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): the slime composes the "slam" ability — its FIRST real
+      // attack pattern. When its target is within attack range and the slam is off cooldown, it schedules a CIRCLE
+      // telegraph of slamRadiusUnits LOCKED at the target's position at cast time, resolving slamWindupMs later
+      // against positions AT the resolve tick (step out during the windup = dodged) for slamDamage, no more often
+      // than every slamCooldownMs. Its instant melee (attackDamage/attackCooldownMs) is unchanged and runs between
+      // slams. Server-only this phase (no telegraph rendering until T2); the values here mirror the code seed
+      // byte-for-byte (the parity test pins them).
       "id": "slime",
       "displayName": "Slime",
       "lootTableId": "slime_loot",
       "locomotionId": "hop",
       "behaviorId": "basicRoamer",
+      "abilityIds": ["slam"],
+      "slamRadiusUnits": 2.0,
+      "slamWindupMs": 1500,
+      "slamDamage": 15,
+      "slamCooldownMs": 4000,
       "maxHealth": 100,
       "moveSpeedMultiplier": 0.6,
       "roamRadius": 4,

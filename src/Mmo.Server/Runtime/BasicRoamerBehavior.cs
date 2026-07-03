@@ -96,6 +96,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
         public ulong TargetId;
         public bool TargetPresent;
         public uint NextAttackTick;
+        // TELEGRAPH T1: the monster's OWN slam-cast cooldown gate (mirrors NextAttackTick — a per-monster timer,
+        // independent of the move cadence). A slam is a scheduled world event, not an executor action, so the brain
+        // owns this clock (the charge instead leans on the executor's CanStart cooldown).
+        public uint NextSlamTick;
         public uint NextAggroScanTick;
 
         // The last tick this monster actually advanced (HopResult.Moved) or entered a moving phase — the watchdog base.
@@ -127,6 +131,10 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // TryChargeDelegate. Resolved to a non-null delegate in the ctor so the StepChase trigger can call it unguarded.
     private readonly TryChargeDelegate _tryCharge;
 
+    // TELEGRAPH T1: the slam-ability trigger (default a no-op that returns false → never slam). See TrySlamDelegate.
+    // Resolved to a non-null delegate in the ctor so the StepChase trigger can call it unguarded.
+    private readonly TrySlamDelegate _trySlam;
+
     // Finds the nearest alive player within `gatherRadius` (a tile/Chebyshev coarse pre-filter — pass ⌈aggro⌉(+1)) of
     // `monster`. On success returns true and outputs the target id + its current continuous Position; false when none.
     public delegate bool FindTargetDelegate(WorldEntity monster, int gatherRadius, out ulong targetId, out WorldVector targetPosition);
@@ -147,6 +155,16 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // "never charge", so a behavior built without it (or for a non-charger type) is byte-identical to the pre-P5 brain.
     public delegate bool TryChargeDelegate(WorldEntity monster, WorldVector heading, double distanceToTarget, uint serverTick);
 
+    // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): CAST a SLAM from `monster` on the chased target — schedule
+    // a circle telegraph LOCKED at `targetPosition` (the target's position AT CAST TIME) that resolves after the
+    // type's windup against positions AT the resolve tick (locked origin + resolve-time membership = dodgeable).
+    // Owned by GameServer (TryBeginMonsterSlam, which resolves the type's radius/windup/damage and schedules on the
+    // telegraph engine); the brain only decides WHEN (target within attack range + its OWN per-monster slam cooldown,
+    // see MonsterState.NextSlamTick). Returns whether the slam was actually cast (false ⇒ the brain falls through to
+    // its normal melee). Null (the default dep) = "never slam", so a behavior built without it — or one whose type's
+    // MonsterAiTunables.SlamEnabled is false — is byte-identical to the pre-T1 brain.
+    public delegate bool TrySlamDelegate(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick);
+
     // MONSTER-BEHAVIOR P1 (docs/monster-behavior-design.md): the locomotion is no longer injected ONCE into the AI;
     // it is now passed PER STEP (StepMonster), resolved per-TYPE by GameServer from its locomotion registry. The AI is
     // locomotion-AGNOSTIC — told its "body" each tick — so a per-type body (P2 GlideLocomotion) needs no change here.
@@ -159,7 +177,8 @@ public class BasicRoamerBehavior : IMonsterBehavior
         FindTargetDelegate findTarget,
         TryResolveTargetDelegate tryResolveTarget,
         AttackDelegate attack,
-        TryChargeDelegate? tryCharge = null)
+        TryChargeDelegate? tryCharge = null,
+        TrySlamDelegate? trySlam = null)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
@@ -167,6 +186,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
         _tryResolveTarget = tryResolveTarget;
         _attack = attack;
         _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, double _, uint _) => false);
+        _trySlam = trySlam ?? ((WorldEntity _, ulong _, WorldVector _, uint _) => false);
     }
 
     public int TrackedCount => _states.Count;
@@ -186,6 +206,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
             TargetId = 0,
             TargetPresent = false,
             NextAttackTick = serverTick,
+            NextSlamTick = serverTick, // TELEGRAPH T1: like the attack, the first slam may cast immediately.
             NextAggroScanTick = serverTick + stagger,
             LastProgressTick = serverTick,
         };
@@ -385,6 +406,21 @@ public class BasicRoamerBehavior : IMonsterBehavior
             // for the hop; idempotent — a second Stop on an already-stopped body does nothing).
             locomotion.Stop(monster);
             monster.SetFacingFromUnit((targetPos - monster.Position).Normalized());
+
+            // (2.1) SLAM trigger (TELEGRAPH T1). A SHARED, config-gated ability like the charge: when the type
+            // composed it (SlamEnabled) and this monster's OWN slam cooldown elapsed, CAST the telegraph — GameServer
+            // schedules a circle LOCKED at the target's CURRENT position, resolving after the windup — INSTEAD of
+            // swinging this tick (checked before the melee gate so a due slam takes the tick; the melee resumes on
+            // its own timer next tick). Casting counts as progress (in range + acting, not wedged). When SlamEnabled
+            // is false (every non-slammer) this block is INERT → byte-identical to the pre-T1 brain.
+            if (t.SlamEnabled && serverTick >= state.NextSlamTick
+                && _trySlam(monster, state.TargetId, targetPos, serverTick))
+            {
+                state.NextSlamTick = serverTick + Math.Max(1u, t.SlamCooldownTicks);
+                state.LastProgressTick = serverTick;
+                return false;
+            }
+
             if (serverTick >= state.NextAttackTick)
             {
                 _attack(monster, state.TargetId, t.AttackDamage);

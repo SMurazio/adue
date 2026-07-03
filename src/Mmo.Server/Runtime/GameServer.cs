@@ -179,6 +179,20 @@ public sealed class GameServer
     // executor is exercised headlessly and is ready to wire.
     private readonly ServerActionExecutor _actionExecutor;
 
+    // TELEGRAPH T1 (closes todo/N-iframe-gate-choke-point.md): THE single player-damage choke point — dead-guard +
+    // dodge-roll i-frame gate + ApplyDamage live inside it; the landed tail (damage-event broadcast + the death edge)
+    // is this class's OnPlayerDamageLanded. BOTH player-damage paths (ApplyMonsterAttack's melee + the telegraph
+    // resolve) route through TryDamagePlayer, so no current or future path can bypass the gate. Constructed after
+    // _actionExecutor (it closes over HasActiveIFrames).
+    private readonly PlayerDamageGate _playerDamage;
+
+    // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): the scheduled-telegraph engine — pending {shape locked at
+    // cast, resolveTick, damage} entries resolved each tick by TickCore (a sibling pass to StepMonsterAi/StepAll)
+    // against positions AT the resolve tick, damaging players through the choke point above. Server-only this phase
+    // (NO wire, NO rendering — T2 replicates the telegraph event). Constructed after _zone + _playerDamage (it closes
+    // over the world's spatial gather + the gate).
+    private readonly TelegraphScheduler _telegraphs;
+
     // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): the server-authoritative monster↔monster
     // de-penetration pass, run each tick AFTER all movement is resolved and BEFORE the snapshot (SeparateMonsters in
     // TickCore). Constructed after _zone since it closes over the SAME shared seams the hop/glide use — the spatial
@@ -320,6 +334,11 @@ public sealed class GameServer
             _zone.World.GatherInterestCandidates,
             _zone.QueryNearbyWalls,
             _zone.ApplyMonsterLanding);
+        // TELEGRAPH T1: the player-damage choke point (the REAL executor i-frame oracle + this class's landed tail)
+        // and the telegraph engine wired through it — the SAME spatial gather AOI/aggro use for the resolve-time
+        // superset query, and the SAME gate the monster melee routes through (one gate, two callers).
+        _playerDamage = new PlayerDamageGate(_actionExecutor.HasActiveIFrames, OnPlayerDamageLanded);
+        _telegraphs = new TelegraphScheduler(_zone.World.GatherInterestCandidates, _playerDamage.TryDamagePlayer);
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
         // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
         // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop
@@ -373,7 +392,10 @@ public sealed class GameServer
             ApplyMonsterAttack,
             // MONSTER-BEHAVIOR P5: the charge dep (both brains get it; the per-type ChargeEnabled tunable gates whether
             // a charge ever actually fires — only the gnoll composes "charge", so basicRoamer/slime is byte-identical).
-            TryBeginMonsterCharge);
+            TryBeginMonsterCharge,
+            // TELEGRAPH T1: the slam dep — same shape (both brains get it; the per-type SlamEnabled tunable gates
+            // whether a slam ever actually casts — only the slime composes "slam" today).
+            TryBeginMonsterSlam);
         _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
         {
             ["basicRoamer"] = _defaultBehavior,
@@ -383,7 +405,8 @@ public sealed class GameServer
                 FindMonsterAggroTarget,
                 TryResolveMonsterTarget,
                 ApplyMonsterAttack,
-                TryBeginMonsterCharge),
+                TryBeginMonsterCharge,
+                TryBeginMonsterSlam),
         };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
@@ -880,6 +903,11 @@ public sealed class GameServer
             // so the corrected positions replicate this same tick. Bounded by the spatial grid (no O(n²) scan); a no-op
             // when nothing overlaps.
             SeparateMonsters();
+            // TELEGRAPH T1: resolve every telegraph whose resolve tick arrived — placed AFTER all movement for this
+            // tick (player input rides the receive path; AI/actions/separation just ran), so shape membership is
+            // judged against positions AT tick T, and BEFORE BroadcastSnapshot so the damage/HP change replicates
+            // this same tick. ~free while nothing is pending (the common case).
+            _telegraphs.ResolveDue(_serverTick);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -2025,7 +2053,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /clearspawners, /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -2067,6 +2095,9 @@ public sealed class GameServer
                 break;
             case "monster":
                 HandleMonsterCommand(sender, parts);
+                break;
+            case "slam":
+                HandleSlamCommand(sender, parts);
                 break;
             case "clearspawners":
                 HandleClearSpawnersCommand(sender);
@@ -2156,6 +2187,62 @@ public sealed class GameServer
             $"speed: multiplier={entity.SpeedMultiplier:0.###}, effective step cooldown={effectiveMs}ms"
                 + (changed ? "." : " (unchanged)."));
         Log.Info($"{sender.DisplayName} set speed multiplier {entity.SpeedMultiplier:0.###} (cooldown={effectiveMs}ms).");
+    }
+
+    // TELEGRAPH T1: admin dev command /slam [radius] [windupMs] [damage] — force-schedule a circle telegraph at the
+    // CALLER's own current position (caster = the caller's entity) so the schedule→resolve engine can be exercised
+    // live without a monster. Defaults mirror the slime's authored slam (r=2, 1500 ms, 15). The caller is a player
+    // standing at the locked origin, so standing still eats the hit at the resolve tick and stepping/dodge-rolling
+    // out escapes it — exactly the dodgeability the tool exists to demonstrate. NO rendering this phase (T2): the
+    // confirmation message + the resolve-time damage number are how the result is observed.
+    private void HandleSlamCommand(ClientSession sender, string[] parts)
+    {
+        const string usage = "usage: /slam [radius] [windupMs] [damage] (e.g. /slam 2 1500 15).";
+        if (!TryGetSessionEntity(sender, out var actor))
+        {
+            SendSystem(sender, "slam: no controllable entity.");
+            return;
+        }
+
+        var radius = 2.0d;
+        if (parts.Length >= 2
+            && (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out radius)
+                || !double.IsFinite(radius) || radius <= 0))
+        {
+            SendSystem(sender, usage);
+            return;
+        }
+
+        var windupMs = 1500;
+        if (parts.Length >= 3 && (!int.TryParse(parts[2], out windupMs) || windupMs < 0))
+        {
+            SendSystem(sender, usage);
+            return;
+        }
+
+        var damage = 15;
+        if (parts.Length >= 4 && (!int.TryParse(parts[3], out damage) || damage <= 0))
+        {
+            SendSystem(sender, usage);
+            return;
+        }
+
+        // Tick-quantised windup (Ceiling, >= 1 — the cooldown convention, so even /slam 2 0 resolves NEXT tick, never
+        // the same one it was scheduled on).
+        var windupTicks = (uint)Math.Max(1, (int)Math.Ceiling(windupMs / (1000d / _options.TickRate)));
+        var resolveTick = _serverTick + windupTicks;
+        var telegraphId = _telegraphs.Schedule(
+            actor.Id,
+            TelegraphShape.Circle(actor.Position, radius),
+            resolveTick,
+            damage,
+            $"/slam by {sender.DisplayName}");
+
+        SendSystem(
+            sender,
+            $"slam: telegraph #{telegraphId} at {actor.Position.X:0.##},{actor.Position.Y:0.##} r={radius}, "
+                + $"resolves at tick {resolveTick} (~{windupMs}ms), damage={damage}.");
+        Log.Info($"{sender.DisplayName} scheduled /slam #{telegraphId} r={radius} windup={windupMs}ms damage={damage} (resolve tick {resolveTick}).");
     }
 
     // LIVING-ENEMIES P1: admin dev command /monster — spawns an EntityKind.Monster at the CALLER's current tile
@@ -3643,6 +3730,40 @@ public sealed class GameServer
         return started;
     }
 
+    // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): the brain's TrySlamDelegate — CAST the monster's slam by
+    // SCHEDULING a circle telegraph LOCKED at the target's position AT CAST TIME (`targetPosition`, the position the
+    // brain just resolved), resolving after the type's windup against positions AT that tick — locked origin +
+    // resolve-time membership is exactly what makes it dodgeable. Resolves the monster's TYPE for the radius/windup/
+    // damage (read fresh so a live retune applies to the next cast) and hands the schedule to the telegraph engine;
+    // the brain owns the WHEN (in attack range + its own per-monster slam cooldown). The caster is NOT rooted/held
+    // during the windup this phase (T3 polish) and the telegraph outlives a caster that dies mid-windup (the
+    // scheduler's documented decision). Only called for SlamEnabled types, but resolves defensively like the charge.
+    private bool TryBeginMonsterSlam(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick)
+    {
+        if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
+        {
+            type = _monsterTypes.Default;
+        }
+
+        if (!MonsterTypeRegistry.SlamEnabled(type))
+        {
+            return false;
+        }
+
+        var resolveTick = serverTick + _monsterTypes.SlamWindupTicks(type);
+        var telegraphId = _telegraphs.Schedule(
+            monster.Id,
+            TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits),
+            resolveTick,
+            type.SlamDamage,
+            $"{type.DisplayName} slam");
+        // Logged (cooldown-paced, cannot spam) — T1 has no rendering, so the log is how a live test SEES the cast.
+        Log.Info(
+            $"Monster {monster.NetworkId} ({type.Id}) cast slam #{telegraphId} at "
+                + $"{targetPosition.X:F2},{targetPosition.Y:F2} r={type.SlamRadiusUnits} resolving at tick {resolveTick} (target #{targetId}).");
+        return true;
+    }
+
     // LIVING-ENEMIES P2: the AI's aggro-scan callback — find the NEAREST ALIVE PLAYER within `aggroRadius` (Chebyshev)
     // of `monster`, via the SAME spatial index the combat resolver uses (GatherInterestCandidates), so occupancy can
     // never diverge from AOI/replication. Players only (never another monster/dummy/resource), and only alive ones
@@ -3730,41 +3851,31 @@ public sealed class GameServer
             monster.TrySetFacing(facing);
         }
 
-        // LIVING-ENEMIES P3: a DEAD (downed) player takes no further hits while waiting to respawn — guard before
-        // applying damage so a monster adjacent at the moment of death can't keep hammering the 0-HP body or re-trigger
-        // death. (The AI also de-aggros a 0-HP target, but a hit resolved the same tick as death must still be guarded.)
-        if (target.OwnerSession is { IsDead: true })
-        {
-            return;
-        }
+        // TELEGRAPH T1 (closes todo/N-iframe-gate-choke-point.md): the dead-guard + the dodge-roll i-frame gate +
+        // ApplyDamage + the landed tail (damage broadcast + the death edge) now live in the SINGLE player-damage
+        // choke point (PlayerDamageGate.TryDamagePlayer) this call routes through — the SAME seam the telegraph
+        // resolve uses, so every current and future player-damage path shares ONE gate. Behaviourally identical to
+        // the former inline sequence (same order, same log lines — the source string reproduces "Monster <netId>").
+        _playerDamage.TryDamagePlayer(target, attackDamage, _serverTick, $"Monster {monster.NetworkId}");
+    }
 
-        // MOVEMENT-ACTIONS Phase D (i-frame authority, design §2.7): a victim INSIDE its dodge-roll's i-frame window
-        // takes NO damage — decided HERE, server-side only, off the executor's OWN action instance + the def's window
-        // (anchored at the SERVER-side start tick). The wire carries only (actionId, heading), so a client can neither
-        // claim nor extend a window — a forged/late intent changes nothing at this gate. The client's roll visual is
-        // cosmetic; the negation (and its timing under latency) is authoritatively this check. Logged so a live
-        // feel-test can count negated hits (monster attacks are cooldown-paced, so this cannot spam).
-        if (_actionExecutor.HasActiveIFrames(target.Id, _serverTick))
-        {
-            Log.Info($"Monster {monster.NetworkId} hit {target.DisplayName} NEGATED by dodge-roll i-frames.");
-            return;
-        }
+    // TELEGRAPH T1: the landed-damage tail of the choke point (PlayerDamageGate) — broadcast the damage number / HP
+    // drop and handle the death edge. Extracted VERBATIM from ApplyMonsterAttack so the melee path is unchanged and
+    // the telegraph resolve gets identical replication + death handling for free.
+    private void OnPlayerDamageLanded(WorldEntity target, int amount, string source)
+    {
+        // Authoritative damage rides the snapshot HP field (the HUD bar falls); the event floats the number.
+        // Broadcast to ALL viewers incl. the victim (it has no client-side prediction of incoming damage).
+        BroadcastDamageEvent(target, amount);
+        Log.Info($"{source} hit {target.DisplayName} for {amount} (hp now {target.Stats.Health}).");
 
-        // Authoritative damage rides the snapshot HP field (the HUD bar falls). A real change floats a number; a hit
-        // on an already-0-HP player is a no-op (no number, no spam). Broadcast to ALL viewers incl. the victim.
-        if (target.ApplyDamage(attackDamage))
+        // LIVING-ENEMIES P3: HP hit 0 → the player DIES. Mark the session dead + schedule the respawn (a global
+        // delay). The actual teleport-to-spawn + HP refill happens in the per-tick RespawnPlayers pass once the
+        // delay elapses, so the gate's dead-guard window is honoured. MarkDead is a no-op if already dead.
+        if (target.Stats.Health <= 0 && target.OwnerSession is { } session && session.MarkDead(_serverTick, _tuning.PlayerRespawnTicks))
         {
-            BroadcastDamageEvent(target, attackDamage);
-            Log.Info($"Monster {monster.NetworkId} hit {target.DisplayName} for {attackDamage} (hp now {target.Stats.Health}).");
-
-            // LIVING-ENEMIES P3: HP hit 0 → the player DIES. Mark the session dead + schedule the respawn (a global
-            // delay). The actual teleport-to-spawn + HP refill happens in the per-tick RespawnPlayers pass once the
-            // delay elapses, so the dead-guard window above is honoured. MarkDead is a no-op if already dead.
-            if (target.Stats.Health <= 0 && target.OwnerSession is { } session && session.MarkDead(_serverTick, _tuning.PlayerRespawnTicks))
-            {
-                SendSystem(session, "You died.");
-                Log.Info($"{target.DisplayName} died; respawn in {_tuning.PlayerRespawnTicks} ticks.");
-            }
+            SendSystem(session, "You died.");
+            Log.Info($"{target.DisplayName} died; respawn in {_tuning.PlayerRespawnTicks} ticks.");
         }
     }
 

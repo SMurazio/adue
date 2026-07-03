@@ -78,6 +78,19 @@ public sealed class MonsterType
     public double ChargeDistanceUnits { get; set; }
     public double ChargeTriggerRangeUnits { get; set; }
 
+    // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): the SLAM ability tuning — the first TELEGRAPHED attack.
+    // On cast the brain schedules a CIRCLE of SlamRadiusUnits LOCKED at the target's position AT CAST TIME, resolving
+    // SlamWindupMs later against positions AT the resolve tick (locked origin + resolve-time membership = dodgeable),
+    // dealing SlamDamage to every alive player inside. SlamCooldownMs 0 = NO slam (combined with AbilityIds not
+    // containing "slam" the brain's SlamEnabled is false → the trigger is inert). Exposed as contextual F1 knobs on
+    // "slam"-composing types (like the charge trio, category ability=slam); clamped by the registry on load + on
+    // TryApply. Defaults 0 so an omitted/non-slammer type never slams; the SLIME authors the real values (its first
+    // real attack pattern).
+    public int SlamCooldownMs { get; set; }
+    public double SlamRadiusUnits { get; set; }
+    public int SlamWindupMs { get; set; }
+    public int SlamDamage { get; set; }
+
     // INTERNAL-ONLY (no longer user-tunable / shown on the F1 Monster tab — the confusing "move speed (x)" knob was
     // retired in favour of the intuitive RANGE / HEIGHT / AIRBORNE / DELAY hop knobs). This is still the multiplier of
     // the player's base cadence (< 1 = slower) that the entity's replicated SpeedMultiplier is seeded from AT SPAWN —

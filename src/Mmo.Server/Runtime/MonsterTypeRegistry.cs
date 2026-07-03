@@ -67,6 +67,19 @@ public sealed class MonsterTypeRegistry
     private const double MaxChargeDistanceUnits = 16d;
     private const double MinChargeTriggerRangeUnits = 0d;
     private const double MaxChargeTriggerRangeUnits = 64d;
+    // TELEGRAPH T1 slam bounds (ability data, clamped on load + via TryApply like the charge trio). Cooldown 0 (no
+    // slam) .. 60 s; radius 0 (disabled) .. 16 units; windup 0 .. 10 s (the ~1.5-3 s fairness floor of the design is
+    // content tuning, T3 — a short windup stays legal for dev testing); damage 0 .. 10000 (the attack-damage bounds).
+    // MIN 0 throughout for the same round-trip reason as the charge: 0 is the legitimate value every NON-slammer
+    // carries, so a positive floor would corrupt it on manifest load.
+    private const int MinSlamCooldownMs = 0;
+    private const int MaxSlamCooldownMs = 60000;
+    private const double MinSlamRadiusUnits = 0d;
+    private const double MaxSlamRadiusUnits = 16d;
+    private const int MinSlamWindupMs = 0;
+    private const int MaxSlamWindupMs = 10000;
+    private const int MinSlamDamage = 0;
+    private const int MaxSlamDamage = 10000;
     // MONSTER-BEHAVIOR P6 render-scale bounds: 0.25× (a quarter size) .. 4× (clearly large). A nonsense author value
     // is clamped, never honoured, so the data file cannot author an invisible or world-filling placeholder visual.
     private const double MinRenderScale = 0.25d;
@@ -103,6 +116,11 @@ public sealed class MonsterTypeRegistry
     public const string ChargeCooldownMsField = "chargeCooldownMs";
     public const string ChargeDistanceUnitsField = "chargeDistanceUnits";
     public const string ChargeTriggerRangeUnitsField = "chargeTriggerRangeUnits";
+    // TELEGRAPH T1: the slam ability quartet — exposed only on types whose AbilityIds compose "slam" (see HasSlam).
+    public const string SlamRadiusUnitsField = "slamRadiusUnits";
+    public const string SlamWindupMsField = "slamWindupMs";
+    public const string SlamDamageField = "slamDamage";
+    public const string SlamCooldownMsField = "slamCooldownMs";
 
     // CONTEXTUAL-KNOBS: composition-applicability predicates a descriptor's AppliesTo points at. A type's
     // LocomotionId / BehaviorId / AbilityIds decide which knobs its F1 tab shows — so a glider never shows hop knobs and
@@ -117,6 +135,8 @@ public sealed class MonsterTypeRegistry
         static t => string.Equals(t.BehaviorId, "skirmisher", StringComparison.OrdinalIgnoreCase);
     private static readonly Func<MonsterType, bool> HasCharge =
         static t => t.AbilityIds.Contains("charge", StringComparer.OrdinalIgnoreCase);
+    private static readonly Func<MonsterType, bool> HasSlam =
+        static t => t.AbilityIds.Contains("slam", StringComparer.OrdinalIgnoreCase);
 
     // DATA-DRIVEN tuning (v40): the SINGLE source of the per-type tunable knobs. Each descriptor names a field's wire
     // Key (the "<typeId>." suffix), its human Label (the F1 caption), a Getter that reads the CURRENT value off a
@@ -164,6 +184,11 @@ public sealed class MonsterTypeRegistry
         new(ChargeCooldownMsField, "charge cooldown (ms)", t => t.ChargeCooldownMs, MinChargeCooldownMs, MaxChargeCooldownMs, true, HasCharge),
         new(ChargeDistanceUnitsField, "charge distance", t => t.ChargeDistanceUnits, MinChargeDistanceUnits, MaxChargeDistanceUnits, false, HasCharge),
         new(ChargeTriggerRangeUnitsField, "charge trigger range", t => t.ChargeTriggerRangeUnits, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits, false, HasCharge),
+        // ABILITY — the slam quartet (TELEGRAPH T1), "slam"-composing types only.
+        new(SlamRadiusUnitsField, "slam radius", t => t.SlamRadiusUnits, MinSlamRadiusUnits, MaxSlamRadiusUnits, false, HasSlam),
+        new(SlamWindupMsField, "slam windup (ms)", t => t.SlamWindupMs, MinSlamWindupMs, MaxSlamWindupMs, true, HasSlam),
+        new(SlamDamageField, "slam damage", t => t.SlamDamage, MinSlamDamage, MaxSlamDamage, true, HasSlam),
+        new(SlamCooldownMsField, "slam cooldown (ms)", t => t.SlamCooldownMs, MinSlamCooldownMs, MaxSlamCooldownMs, true, HasSlam),
     };
 
     // The recognized per-type field suffixes, derived ONCE from the descriptor list so IsMonsterTypeKey never drifts
@@ -194,7 +219,18 @@ public sealed class MonsterTypeRegistry
             // Seed the one type today. A new type is one Add() + its non-default values.
             // LOOT P4a: the slime rolls the "slime_loot" table on death (gel floor + the shared rare tail +
             // its signature core). Static content; the LootTableRegistry owns the table definition.
-            Add(new MonsterType(DefaultTypeId, "Slime") { LootTableId = "slime_loot" });
+            // TELEGRAPH T1: the slime composes the "slam" ability — its first real attack pattern (a circle
+            // telegraph locked at the target's cast-time position, resolving after the windup). Values mirror the
+            // shipped manifest byte-for-byte (the parity test pins that the two can never drift).
+            Add(new MonsterType(DefaultTypeId, "Slime")
+            {
+                LootTableId = "slime_loot",
+                AbilityIds = ["slam"],
+                SlamRadiusUnits = 2.0,
+                SlamWindupMs = 1500,
+                SlamDamage = 15,
+                SlamCooldownMs = 4000,
+            });
         }
     }
 
@@ -318,6 +354,28 @@ public sealed class MonsterTypeRegistry
                     Math.Clamp(dto.ChargeTriggerRangeUnits.Value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits);
             }
 
+            // TELEGRAPH T1: the slam ability tuning — set directly + clamped like the charge trio above (behavior/
+            // ability-specific data with contextual F1 exposure); omitted -> 0 (no slam), the field default.
+            if (dto.SlamCooldownMs.HasValue)
+            {
+                type.SlamCooldownMs = Math.Clamp(dto.SlamCooldownMs.Value, MinSlamCooldownMs, MaxSlamCooldownMs);
+            }
+
+            if (dto.SlamRadiusUnits.HasValue)
+            {
+                type.SlamRadiusUnits = Math.Clamp(dto.SlamRadiusUnits.Value, MinSlamRadiusUnits, MaxSlamRadiusUnits);
+            }
+
+            if (dto.SlamWindupMs.HasValue)
+            {
+                type.SlamWindupMs = Math.Clamp(dto.SlamWindupMs.Value, MinSlamWindupMs, MaxSlamWindupMs);
+            }
+
+            if (dto.SlamDamage.HasValue)
+            {
+                type.SlamDamage = Math.Clamp(dto.SlamDamage.Value, MinSlamDamage, MaxSlamDamage);
+            }
+
             // MONSTER-BEHAVIOR P6: the placeholder per-type VISUAL. RenderTint is authored as a friendly "#RRGGBB" hex
             // string, parsed to a packed 0xRRGGBB uint (an omitted/blank/malformed value → white 0xFFFFFF = no tint, so
             // a type that authors nothing is visually unchanged). RenderScale is set directly + clamped to [0.25, 4.0]
@@ -390,6 +448,10 @@ public sealed class MonsterTypeRegistry
         ChargeCooldownMs: t.ChargeCooldownMs,
         ChargeDistanceUnits: t.ChargeDistanceUnits,
         ChargeTriggerRangeUnits: t.ChargeTriggerRangeUnits,
+        SlamCooldownMs: t.SlamCooldownMs,
+        SlamRadiusUnits: t.SlamRadiusUnits,
+        SlamWindupMs: t.SlamWindupMs,
+        SlamDamage: t.SlamDamage,
         MaxHealth: t.MaxHealth,
         FleeHealthPct: t.FleeHealthPct,
         MoveSpeedMultiplier: t.MoveSpeedMultiplier,
@@ -483,6 +545,11 @@ public sealed class MonsterTypeRegistry
         int? ChargeCooldownMs,
         double? ChargeDistanceUnits,
         double? ChargeTriggerRangeUnits,
+        // TELEGRAPH T1: the slam ability tuning (ability-specific data like the charge trio; omitted -> 0 = no slam).
+        int? SlamCooldownMs,
+        double? SlamRadiusUnits,
+        int? SlamWindupMs,
+        int? SlamDamage,
         int? MaxHealth,
         double? FleeHealthPct,
         double? MoveSpeedMultiplier,
@@ -551,7 +618,13 @@ public sealed class MonsterTypeRegistry
         ChargeEnabled: ChargeEnabled(type),
         ChargeDistanceUnits: type.ChargeDistanceUnits,
         ChargeTriggerRangeUnits: type.ChargeTriggerRangeUnits,
-        ChargeCooldownTicks: ChargeCooldownTicks(type));
+        ChargeCooldownTicks: ChargeCooldownTicks(type),
+        // TELEGRAPH T1: the slam config the brain's trigger reads. SlamEnabled iff the type COMPOSED "slam" AND a
+        // positive cooldown (mirroring ChargeEnabled); the cooldown is tick-quantised (the brain's own NextSlamTick
+        // enforces it — a scheduled world event has no executor cooldown clock). Radius/windup/damage stay on the
+        // TYPE (GameServer's TryBeginMonsterSlam reads them at cast) — the brain only needs the WHEN.
+        SlamEnabled: SlamEnabled(type),
+        SlamCooldownTicks: SlamCooldownTicks(type));
 
     // ~0.5 s aggro-scan cadence in ticks (floored at 1) — tick-rate-only, throttling the spatial scan.
     public uint AggroScanIntervalTicks =>
@@ -673,6 +746,21 @@ public sealed class MonsterTypeRegistry
             case ChargeTriggerRangeUnitsField:
                 type.ChargeTriggerRangeUnits = ClampDouble(value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits, out applied);
                 return true;
+            // TELEGRAPH T1: the slam quartet — same contextual-knob treatment as the charge trio (type-independent
+            // apply; the per-composition VISIBILITY is BuildSnapshot's AppliesTo filter). Windup/cooldown flow into
+            // the brain/schedule via SlamWindupTicks/BuildTunables, read fresh — a retune takes effect next cast.
+            case SlamRadiusUnitsField:
+                type.SlamRadiusUnits = ClampDouble(value, MinSlamRadiusUnits, MaxSlamRadiusUnits, out applied);
+                return true;
+            case SlamWindupMsField:
+                type.SlamWindupMs = ClampInt(value, MinSlamWindupMs, MaxSlamWindupMs, out applied);
+                return true;
+            case SlamDamageField:
+                type.SlamDamage = ClampInt(value, MinSlamDamage, MaxSlamDamage, out applied);
+                return true;
+            case SlamCooldownMsField:
+                type.SlamCooldownMs = ClampInt(value, MinSlamCooldownMs, MaxSlamCooldownMs, out applied);
+                return true;
             default:
                 return false;
         }
@@ -725,6 +813,19 @@ public sealed class MonsterTypeRegistry
     // tick — same convention as the attack cooldown). Fed onto the charge def's CooldownTicks so the EXECUTOR's CanStart
     // enforces the re-charge gate (unlike the hop, whose cadence is the locomotion's TryBeginHop, not an executor clock).
     public uint ChargeCooldownTicks(MonsterType type) => CooldownMsToTicks(type.ChargeCooldownMs);
+
+    // TELEGRAPH T1: true iff this type can SLAM — it composed the "slam" ability (case-insensitive) AND authored a
+    // positive cooldown. Both are required (mirroring ChargeEnabled) so tuning without the ability id — or the id
+    // without tuning — is inert; the brain reads the derived MonsterAiTunables.SlamEnabled, never these directly.
+    public static bool SlamEnabled(MonsterType type) =>
+        type.SlamCooldownMs > 0 && type.AbilityIds.Contains("slam", StringComparer.OrdinalIgnoreCase);
+
+    // TELEGRAPH T1: this type's slam WINDUP (cast → resolve deadline) and re-cast cooldown in TICKS (Ceiling, >= 1 —
+    // the cooldown convention, so even a tiny authored ms yields at least one telegraphed tick before resolve). Read
+    // fresh at each cast (TryBeginMonsterSlam / the brain's re-arm) so a live retune applies to the NEXT cast.
+    public uint SlamWindupTicks(MonsterType type) => CooldownMsToTicks(type.SlamWindupMs);
+
+    public uint SlamCooldownTicks(MonsterType type) => CooldownMsToTicks(type.SlamCooldownMs);
 
     // The current per-type tuning as the wire snapshot the server replicates (login + on change). DATA-DRIVEN: each
     // type ships the GENERIC field list built from the descriptor table (current value via the getter, bounds from the
