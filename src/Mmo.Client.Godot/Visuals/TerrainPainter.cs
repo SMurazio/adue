@@ -1,5 +1,6 @@
 using System;
 using Godot;
+using Mmo.Client.Core;
 using Mmo.Shared.Domain;
 
 namespace Mmo.Client.Godot.Visuals;
@@ -18,6 +19,9 @@ namespace Mmo.Client.Godot.Visuals;
 // tile's chosen texture/orientation still depends on its true neighbours across chunk seams), only the
 // per-instance partition differs. Every tile belongs to exactly one chunk (chunkX = tileX / CHUNK_TILES), so
 // there are no gaps or double-draws at chunk boundaries.
+//
+// M2 (town-blockout): AUTHORED zones (genVersion 2+) bypass the bitmap/autotiling entirely — BuildAuthoredFloor
+// paints flat per-category colors from the shared AuthoredMap instead. genVersion 1 keeps this path unchanged.
 public static class TerrainPainter
 {
     // Square chunk size in tiles. A W×H map yields ceil(W/CHUNK_TILES)×ceil(H/CHUNK_TILES) chunks. Chosen at 32:
@@ -198,6 +202,90 @@ public static class TerrainPainter
         }
 
         return chunk;
+    }
+
+    // M2 (docs/town-floor1-blockout-design.md): the AUTHORED-map floor, used when the zone is genVersion 2+ and
+    // therefore carries per-tile surface categories. Instead of the terrain.png autotiling above, every in-world
+    // tile becomes a flat 1×1 plane tinted by its category's albedo (AuthoredSurfaceVisuals.Albedo — graybox
+    // aesthetic, one unshaded material per category shared across all chunks). Same CHUNK_TILES chunk grid as
+    // BuildFloor so per-chunk frustum culling is unchanged. Out-of-world padding tiles get NO floor at all.
+    //
+    // PERF (the 384-scale criteria): a 384×384 map is ~147k instances, and per-instance SetInstanceTransform is
+    // one C#→Godot interop call each — a login hitch. So each chunk's per-category instance data is packed in
+    // managed code (MultiMeshTileBuffer) and uploaded with ONE MultiMesh.Buffer assignment per MultiMesh
+    // (12 floats/instance, identity basis — the planes are flat-colored, so no per-tile rotation is needed).
+    // Never fails (no textures to load), so callers always hide the procedural grid plane.
+    public static Node3D BuildAuthoredFloor(Node parent, AuthoredMap map)
+    {
+        // PlaneMesh faces +Y natively, so instances use an identity basis (unlike BuildFloor's tipped QuadMesh).
+        var plane = new PlaneMesh { Size = new Vector2(1f, 1f) };
+
+        // One flat unshaded material per surface category, shared by every chunk (palette in Client.Core so the
+        // mapping is headlessly tested; this loop is the only Godot-side wrap).
+        var materials = new StandardMaterial3D[AuthoredSurfaceVisuals.CategoryCount];
+        for (var i = 0; i < materials.Length; i++)
+        {
+            var (r, g, b) = AuthoredSurfaceVisuals.Albedo((SurfaceCategory)i);
+            materials[i] = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(r, g, b),
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            };
+        }
+
+        var root = new Node3D { Name = "FloorChunks" };
+
+        var chunksX = (map.Width + ChunkTiles - 1) / ChunkTiles;   // ceil(W / CHUNK_TILES)
+        var chunksZ = (map.Height + ChunkTiles - 1) / ChunkTiles;  // ceil(H / CHUNK_TILES)
+        for (var cz = 0; cz < chunksZ; cz++)
+        {
+            for (var cx = 0; cx < chunksX; cx++)
+            {
+                var x0 = cx * ChunkTiles;
+                var y0 = cz * ChunkTiles;
+                var x1 = Math.Min(x0 + ChunkTiles, map.Width);   // exclusive
+                var y1 = Math.Min(y0 + ChunkTiles, map.Height);  // exclusive
+
+                // Group this chunk's paintable tiles by category (row-major, out-of-world skipped), then one
+                // MultiMesh per category present — count first, then ONE bulk Buffer upload.
+                var perCategory = AuthoredSurfaceVisuals.CollectChunkTiles(map, x0, y0, x1, y1);
+                Node3D? chunk = null;
+                for (var cat = 0; cat < perCategory.Length; cat++)
+                {
+                    var tiles = perCategory[cat];
+                    if (tiles.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var mm = new MultiMesh
+                    {
+                        Mesh = plane,
+                        TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
+                        InstanceCount = tiles.Count, // allocates the buffer; MUST precede the Buffer assignment
+                    };
+                    mm.Buffer = MultiMeshTileBuffer.PackUprightTileTransforms(tiles, FloorY);
+
+                    chunk ??= new Node3D { Name = $"FloorChunk_{cx}_{cz}" };
+                    chunk.AddChild(new MultiMeshInstance3D
+                    {
+                        Name = "AuthoredFloor_" + cat,
+                        Multimesh = mm,
+                        MaterialOverride = materials[cat],
+                    });
+                }
+
+                // A chunk that is ALL out-of-world padding creates no node at all (nothing exists there).
+                if (chunk is not null)
+                {
+                    root.AddChild(chunk);
+                }
+            }
+        }
+
+        parent.AddChild(root);
+        return root;
     }
 
     // Public classification for the minimap: true where the design bitmap says TERRAIN, false for grass. Reuses

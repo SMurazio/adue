@@ -1837,6 +1837,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// M2 perf gate (docs/town-floor1-blockout-design.md): wall-clock the whole static zone build
+		// (floor + walls) so the <250 ms @ 384x384 budget is checkable straight from the log line below.
+		var buildTimer = System.Diagnostics.Stopwatch.StartNew();
+
 		var ground = new MeshInstance3D
 		{
 			Name = "Ground",
@@ -1860,7 +1864,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// TerrainPainter.BuildFloor) so each chunk frustum-culls independently. When it builds, the painted tiles
 		// are the new look so the procedural grid plane is hidden; if textures can't load, BuildFloor returns null
 		// and we keep the grid visible as a graceful fallback.
-		var paintedFloor = Mmo.Client.Godot.Visuals.TerrainPainter.BuildFloor(_worldRoot, zone.Width, zone.Height);
+		// M2 (town-blockout): an AUTHORED zone (genVersion 2+) carries per-tile surface categories — paint those
+		// as flat graybox colors instead of the terrain.png path (which genVersion 1 keeps unchanged).
+		var paintedFloor = zone.Authored is { } authoredMap
+			? Mmo.Client.Godot.Visuals.TerrainPainter.BuildAuthoredFloor(_worldRoot, authoredMap)
+			: Mmo.Client.Godot.Visuals.TerrainPainter.BuildFloor(_worldRoot, zone.Width, zone.Height);
 		if (paintedFloor is not null)
 		{
 			grid.Visible = false;
@@ -1877,6 +1885,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		foreach (var tile in zone.BlockedTiles)
 		{
 			if (!_renderedBlockedTiles.Add(tile))
+			{
+				continue;
+			}
+
+			// M2 water decision: authored Water tiles are blocked but paint as a flat blue floor — a gray box
+			// standing on a pond reads wrong, so they get NO wall box (still impassable, server-authoritative).
+			// Authored out-of-world padding likewise draws nothing at all. genVersion 1 is unaffected (always true).
+			if (!AuthoredSurfaceVisuals.ShouldDrawWallBox(zone.Authored, tile))
 			{
 				continue;
 			}
@@ -1902,12 +1918,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			{
 				Mesh = _wallMesh,
 				TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
-				InstanceCount = wallTiles.Count
+				InstanceCount = wallTiles.Count // allocates the buffer; MUST precede the Buffer assignment
 			};
-			for (var i = 0; i < wallTiles.Count; i++)
-			{
-				wallMultiMesh.SetInstanceTransform(i, new Transform3D(Basis.Identity, TileToWorld(wallTiles[i], 0.4f)));
-			}
+			// M2 perf: ONE bulk Buffer upload per chunk (12 floats/instance, identity basis at TileToWorld) instead
+			// of a per-instance SetInstanceTransform interop call each — same transforms, one marshal.
+			wallMultiMesh.Buffer = MultiMeshTileBuffer.PackUprightTileTransforms(wallTiles, 0.4f);
 
 			var wallChunk = new Node3D { Name = $"WallChunk_{cx}_{cz}" };
 			wallChunk.AddChild(new MultiMeshInstance3D
@@ -1918,6 +1933,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			});
 			_wallRoot.AddChild(wallChunk);
 		}
+
+		// M2 perf gate: the one-line budget check (target <250 ms at 384x384; see docs/town-floor1-blockout-design.md).
+		GD.Print("M2 zone build (floor+walls): " +
+			$"{buildTimer.Elapsed.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture)} ms " +
+			$"({zone.Width}x{zone.Height}, genVersion {zone.GenVersion})");
 
 		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its
 		// simplified top-down raster ONCE. This is the same seed-regenerated ZoneModel the 3D world is built from
