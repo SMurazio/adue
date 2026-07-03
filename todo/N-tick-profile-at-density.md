@@ -11,12 +11,23 @@ superlinear, and the single-threaded tick loop nearing one-core saturation is wh
 (the load half of the crowd-shimmer finding; the render half shipped in `daa71fd`). We do NOT yet know which pass
 is superlinear. Per the project rule, measure first — this task is ONLY the profile + writeup, no optimization.
 
-## How
+## How — the instrumentation ALREADY EXISTS (verified 2026-07-03); running the profile is trivial
 
-- Instrument or sample the tick's phases at 120 vs 170 vs 200 bots: AOI gather, snapshot BUILD (per-viewer entity
-  selection + encode), SEND (syscalls/packets), movement integration, monster AI, collision. The `/metrics` tick
-  summaries + a per-phase stopwatch (behind a live toggle, per the diagnostics guardrail) or dotnet-trace on the
-  server process.
+The tick loop has always-on per-phase budget recording (`TickBudgetRecorder`: Movement / Aoi / Serialize /
+Network / Persistence / Other) fed into `ServerMetrics.RecordTick` together with the tick SCHEDULE DRIFT, and
+`/metrics` (admin, live) prints per 5s/60s window:
+- `budgetMs move/aoi/ser/net/persist/other` (avg AND max) — the per-phase attribution;
+- `driftMs avg/max` — the schedule-jitter signal that made snapshot cadence bursty at 200.
+
+So the profile = `/stress start N` at 120 / 170 / 200 → `/metrics` → read the budget line; whichever of
+aoi/ser/net grows superlinearly vs 120 is the culprit. Re-baseline at the NEW radius 18 first (`0d980dc` cut the
+per-viewer load ~2.8×, so the old 107%-of-core @200 number is stale).
+
+**Tooling gap (why the 2026-07-02 live session used crude PID CPU sampling instead):** the orchestrator can send
+`/metrics` via client_chat but CANNOT read the reply (system chat renders only in the client window). Cheap fix
+when wanted: relay system-chat replies through the control channel (or a `client_metrics` command), so agent-side
+profiling doesn't need the human to read chat. Belongs with [[N-remote-smoothness-tooling]].
+
 - Deliverable: a short docs/ note ranking the phases' growth (linear vs superlinear in clients × visible-density),
   with the numbers. THEN decide the lever (see below) as a follow-up decision with the user.
 
