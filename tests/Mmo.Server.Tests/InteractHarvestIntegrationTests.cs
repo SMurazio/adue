@@ -451,7 +451,7 @@ public sealed class InteractHarvestIntegrationTests
             options.WorldWidthTiles,
             options.WorldHeightTiles,
             options.MapSeed,
-            TerrainGenerator.CurrentGenVersion,
+            options.GenVersion,
             options.SpawnDistribution);
         var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
 

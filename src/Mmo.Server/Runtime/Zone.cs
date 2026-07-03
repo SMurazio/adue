@@ -34,8 +34,11 @@ public sealed class Zone
     // perf bound — correctness is the resolver's distance test (the grid returns a superset).
     private const int ObstacleQueryRadiusTiles = 2;
 
+    // AUTHORED-MAP M3: the hand-built-grid overload describes itself as genVersion 1 (procedural) —
+    // a hand-assembled TileGrid is by definition NOT the authored map, and CurrentGenVersion now
+    // points at the authored version whose descriptor only regenerates at the authored dims.
     public Zone(string id, TileGrid tileGrid, IEnumerable<TileCoord> spawnTiles)
-        : this(id, tileGrid, spawnTiles, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion)
+        : this(id, tileGrid, spawnTiles, TileGrid.DefaultSeed, genVersion: 1)
     {
     }
 
@@ -93,9 +96,12 @@ public sealed class Zone
     // A plain bool read per gather (no per-tick cost). Single-threaded tick loop, so no synchronisation is needed.
     public bool PlayerCollisionEnabled { get; set; } = true;
 
+    // AUTHORED-MAP M3: pinned to genVersion 1 — "the default map at an arbitrary (width, height)"
+    // can only ever mean the procedural layout (the authored map has intrinsic dims). The live
+    // server selects its genVersion via ServerOptions and CreateGenerated, not this helper.
     public static Zone CreateDefault(int width, int height, SpawnDistribution spawnDistribution = SpawnDistribution.Distributed)
     {
-        return CreateGenerated(width, height, TileGrid.DefaultSeed, TerrainGenerator.CurrentGenVersion, spawnDistribution);
+        return CreateGenerated(width, height, TileGrid.DefaultSeed, genVersion: 1, spawnDistribution);
     }
 
     public static Zone CreateGenerated(
@@ -372,6 +378,18 @@ public sealed class Zone
         var minSpacing = Math.Max(1, (densityTilesPerNode * 7) / 10);
 
         var used = new HashSet<TileCoord>();
+
+        // AUTHORED-MAP M3 (D6): pre-seed the used set with the authored marker tiles so the scatter
+        // can never stack a node onto a pinned `T`/`R` node or under an `H`/`P` prop anchor. (Marker
+        // tiles are walkable grass, so nothing else excludes them.)
+        var authoredMap = _tileGrid.Authored;
+        if (authoredMap is not null)
+        {
+            foreach (var marker in authoredMap.Markers)
+            {
+                used.Add(marker.Tile);
+            }
+        }
         // Attempt budget: generous multiple of the target so a reachable target fills, but bounded so an
         // impossible target (too dense for the walkable area) terminates with a partial, deterministic set.
         var maxAttempts = targetCount * 64L + 1024L;
@@ -386,7 +404,20 @@ public sealed class Zone
             var y = minY + (int)(Mix(state) % (ulong)spanY);
             var tile = new TileCoord(x, y);
 
-            if (!IsWalkable(tile) || !HasClearApproachRoom(tile) || !used.Add(tile))
+            if (!IsWalkable(tile) || !HasClearApproachRoom(tile))
+            {
+                continue;
+            }
+
+            // AUTHORED-MAP M3 (D6): scatter only ever lands on GRASS — never cobble/road/stone/water
+            // (no junk nodes inside town streets or dungeon floors). A procedural map has no authored
+            // data and is all-grass by definition, so its draw sequence is untouched.
+            if (authoredMap is not null && authoredMap.CategoryAt(tile) != SurfaceCategory.Grass)
+            {
+                continue;
+            }
+
+            if (!used.Add(tile))
             {
                 continue;
             }
@@ -490,6 +521,16 @@ public sealed class Zone
 
     private static IReadOnlyList<TileCoord> CreateSpawnTiles(TileGrid tileGrid, SpawnDistribution spawnDistribution)
     {
+        // AUTHORED-MAP M3 (D4): Authored = wake on the map's `S` plaza anchors, round-robin via
+        // NextSpawnTile — 30 concurrents in a small plaza reads as a crowd. Only an authored grid HAS
+        // anchors; a procedural map falls through to the historical Distributed grid below, so a
+        // genVersion-1 world booted with the new default distribution behaves exactly as before. An
+        // explicit distributed/clustered/scattered choice overrides the anchors entirely (stress/dev).
+        if (spawnDistribution == SpawnDistribution.Authored && tileGrid.Authored is { SpawnTiles.Count: > 0 } authored)
+        {
+            return authored.SpawnTiles;
+        }
+
         var center = new TileCoord(tileGrid.Width / 2, tileGrid.Height / 2);
         if (spawnDistribution == SpawnDistribution.Clustered)
         {

@@ -149,9 +149,9 @@ public sealed class AuthoredMapTests
     public void FloodFillCoversAllWalkableFromSpawn()
     {
         // The no-orphan-pockets invariant (town-blockout §4): from any S, EVERY walkable tile is
-        // reachable. Checked on both the alphabet grid and the embedded genVersion 2 map — the same
-        // reusable helper M3's real 192x192 map test will use.
-        foreach (var rows in new[] { AlphabetRows, AuthoredMaps.TownAndFloor1 })
+        // reachable. Checked on the two alphabet grids AND the real genVersion 2 map (M3) — house
+        // footprints are blocked tiles (F4), so on the real map this invariant has teeth.
+        foreach (var rows in new[] { AlphabetRows, AuthoredMaps.AlphabetTestMap, AuthoredMaps.TownAndFloor1 })
         {
             var map = AuthoredMap.Parse(rows);
             Assert.NotEmpty(map.SpawnTiles);
@@ -219,11 +219,12 @@ public sealed class AuthoredMapTests
     }
 
     [Fact]
-    public void EmbeddedTownAndFloor1ExercisesEveryAlphabetChar()
+    public void AlphabetTestMapExercisesEveryAlphabetChar()
     {
-        // M1's contract: the placeholder genVersion 2 map keeps EVERY alphabet char under test until
-        // M3 replaces the rows with the real content (which then re-satisfies its own invariants).
-        var used = new HashSet<char>(string.Concat(AuthoredMaps.TownAndFloor1));
+        // M1's contract, kept after M3 swapped the real map in: the 12x12 test grid keeps EVERY
+        // alphabet char under parser test — the real map deliberately has no dungeon stone or
+        // out-of-world padding yet, so it cannot carry this coverage.
+        var used = new HashSet<char>(string.Concat(AuthoredMaps.AlphabetTestMap));
         foreach (var required in "#.,:-~SHPTR ")
         {
             Assert.Contains(required, used);

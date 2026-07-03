@@ -12,8 +12,10 @@ public sealed class TerrainGeneratorTests
     [InlineData(2048, 2048, 42)]
     public void GenerateIsDeterministicAcrossCalls(int width, int height, int seed)
     {
-        var first = TerrainGenerator.Generate(width, height, seed, TerrainGenerator.CurrentGenVersion);
-        var second = TerrainGenerator.Generate(width, height, seed, TerrainGenerator.CurrentGenVersion);
+        // Pinned to genVersion 1: this exercises the PROCEDURAL path at arbitrary sizes (the authored
+        // CurrentGenVersion only generates at its intrinsic dims; its determinism is pinned below).
+        var first = TerrainGenerator.Generate(width, height, seed, 1);
+        var second = TerrainGenerator.Generate(width, height, seed, 1);
 
         // Same inputs MUST yield the identical sequence (same order, same tiles).
         Assert.Equal(first, second);
@@ -25,7 +27,7 @@ public sealed class TerrainGeneratorTests
     [Fact]
     public void GenerateEmitsCanonicalRowMajorOrder()
     {
-        var blocked = TerrainGenerator.Generate(128, 128, 0, TerrainGenerator.CurrentGenVersion);
+        var blocked = TerrainGenerator.Generate(128, 128, 0, 1);
 
         for (var i = 1; i < blocked.Count; i++)
         {
@@ -39,7 +41,7 @@ public sealed class TerrainGeneratorTests
     [Fact]
     public void GenerateReproducesLegacyDefaultMap()
     {
-        var blocked = TerrainGenerator.Generate(128, 128, 0, TerrainGenerator.CurrentGenVersion);
+        var blocked = TerrainGenerator.Generate(128, 128, 0, 1);
         var set = new HashSet<TileCoord>(blocked);
 
         // Perimeter border present on all four edges.

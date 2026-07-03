@@ -212,10 +212,13 @@ public sealed class AoiIntegrationTests
             Assert.Equal(64, zone.Height);
             // ZoneInfo no longer ships the tile payload — it ships the seed descriptor. Regenerate the
             // map locally via the shared generator and confirm both the content and the server's hash.
-            var blocked = TerrainGenerator.Generate(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
-            Assert.Contains(new TileCoord(16, 8), blocked);
-            Assert.DoesNotContain(TileGrid.DefaultSpawnTile, blocked);
-            Assert.Equal(TerrainGenerator.ContentHash(blocked), zone.ContentHash);
+            // AUTHORED-MAP M3 (M1 review F3): compare the LAYOUT's ContentHash, never a re-hash of the
+            // blocked list — on an authored genVersion the layout hash also covers categories/spawns/
+            // markers, so a blocked-only re-hash would false-fail (and would hide category-only drift).
+            var layout = TerrainGenerator.GenerateLayout(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+            Assert.Contains(new TileCoord(16, 8), layout.BlockedTiles);
+            Assert.DoesNotContain(TileGrid.DefaultSpawnTile, layout.BlockedTiles);
+            Assert.Equal(layout.ContentHash, zone.ContentHash);
         }
         finally
         {

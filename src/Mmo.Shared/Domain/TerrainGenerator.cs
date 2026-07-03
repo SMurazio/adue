@@ -26,13 +26,15 @@ namespace Mmo.Shared.Domain;
 /// </summary>
 public static class TerrainGenerator
 {
-    /// <summary>The algorithm version the server currently generates with.</summary>
-    public const int CurrentGenVersion = 1;
-
     /// <summary>
-    /// The authored-map version (town+floor-1 blockout). NOT the server default yet — M3 flips the
-    /// server to it once the real 192x192 content replaces the M1 placeholder rows.
+    /// The algorithm version the server boots with by default. M3 flipped this to the authored
+    /// town+floor-1 map (<see cref="AuthoredGenVersion"/>); genVersion 1 — the procedural
+    /// border+segments layout — remains fully generatable for old tests and the MMO_GEN_VERSION=1
+    /// escape hatch (an authored genVersion requires the world dims to match the authored grid).
     /// </summary>
+    public const int CurrentGenVersion = 2;
+
+    /// <summary>The authored-map version (town+floor-1 blockout) — the server default as of M3.</summary>
     public const int AuthoredGenVersion = 2;
 
     // genVersion 1 reproduces the historical hand-authored map exactly: a 1-tile blocked border around
@@ -87,7 +89,7 @@ public static class TerrainGenerator
 
         throw new ArgumentOutOfRangeException(
             nameof(genVersion),
-            $"Unsupported terrain genVersion {genVersion}. This build generates versions {CurrentGenVersion} and {AuthoredGenVersion}.");
+            $"Unsupported terrain genVersion {genVersion}. This build generates versions 1 (procedural) and {AuthoredGenVersion} (authored).");
     }
 
     /// <summary>

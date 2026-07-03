@@ -68,7 +68,7 @@ public sealed class MmoClientReattachSeqTests
 
         var characterId = System.Guid.NewGuid();
         var localNetworkId = 9u;
-        var zone = Zone.CreateGenerated(64, 64, 0, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        var zone = Zone.CreateGenerated(64, 64, 0, 1, SpawnDistribution.Clustered);
         var serverHash = TerrainGenerator.ContentHash(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
 
         // Hello + zone + login land, but the local EntitySpawn has NOT — so no predictor is attached yet and sends go
@@ -108,7 +108,7 @@ public sealed class MmoClientReattachSeqTests
         localNetworkId = 9u;
 
         // A real generated zone so EnsurePredictor's blocked-map / hash gate is satisfied exactly as in production.
-        var zone = Zone.CreateGenerated(64, 64, 0, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        var zone = Zone.CreateGenerated(64, 64, 0, 1, SpawnDistribution.Clustered);
         var serverHash = TerrainGenerator.ContentHash(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
 
         // 50ms cooldown is tick-aligned at 20Hz → a clean derived predictor speed; body radius 0.5 like production.

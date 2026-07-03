@@ -125,7 +125,7 @@ public sealed class EntityRenderStateMovingTests
         var characterId = Guid.NewGuid();
         localNetworkId = 9u;
 
-        var zone = Zone.CreateGenerated(64, 64, 0, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        var zone = Zone.CreateGenerated(64, 64, 0, 1, SpawnDistribution.Clustered);
         var serverHash = TerrainGenerator.ContentHash(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
 
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 50, 30, 0.5f));

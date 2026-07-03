@@ -159,8 +159,8 @@ public sealed class ZoneTests
     public void PlanResourceNodeScatterIsDeterministicForSameSeed()
     {
         var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
-        var a = Zone.CreateGenerated(256, 256, seed: 1234, TerrainGenerator.CurrentGenVersion);
-        var b = Zone.CreateGenerated(256, 256, seed: 1234, TerrainGenerator.CurrentGenVersion);
+        var a = Zone.CreateGenerated(256, 256, seed: 1234, genVersion: 1);
+        var b = Zone.CreateGenerated(256, 256, seed: 1234, genVersion: 1);
 
         var first = a.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
         var second = b.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
@@ -177,8 +177,8 @@ public sealed class ZoneTests
     public void PlanResourceNodeScatterDiffersForDifferentSeed()
     {
         var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
-        var a = Zone.CreateGenerated(256, 256, seed: 1, TerrainGenerator.CurrentGenVersion);
-        var b = Zone.CreateGenerated(256, 256, seed: 2, TerrainGenerator.CurrentGenVersion);
+        var a = Zone.CreateGenerated(256, 256, seed: 1, genVersion: 1);
+        var b = Zone.CreateGenerated(256, 256, seed: 2, genVersion: 1);
 
         var first = a.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
         var second = b.PlanResourceNodeScatter(registry, densityTilesPerNode: 24);
@@ -192,7 +192,7 @@ public sealed class ZoneTests
     [Fact]
     public void PlanResourceNodeScatterRespectsMinSpacing()
     {
-        var zone = Zone.CreateGenerated(256, 256, seed: 7, TerrainGenerator.CurrentGenVersion);
+        var zone = Zone.CreateGenerated(256, 256, seed: 7, genVersion: 1);
         var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
 
         const int density = 24;
@@ -214,7 +214,7 @@ public sealed class ZoneTests
     [Fact]
     public void PlanResourceNodeScatterDisabledByZeroDensity()
     {
-        var zone = Zone.CreateGenerated(128, 128, seed: 0, TerrainGenerator.CurrentGenVersion);
+        var zone = Zone.CreateGenerated(128, 128, seed: 0, genVersion: 1);
         var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
 
         Assert.Empty(zone.PlanResourceNodeScatter(registry, densityTilesPerNode: 0));

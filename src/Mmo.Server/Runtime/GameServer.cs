@@ -100,6 +100,10 @@ public sealed class GameServer
     private readonly ServerCadenceTrace _cadenceTrace = ServerCadenceTrace.FromEnvironment();
     private readonly NetworkIdPool _networkIds = new();
     private readonly Zone _zone;
+
+    // AUTHORED-MAP M3: test seam — lets the boot-wiring tests (authored prop spawning, spawn-anchor
+    // login) inspect the constructed world without a network round-trip. Never used by product code.
+    internal Zone ZoneForTests => _zone;
     private readonly List<ClientSession> _authenticatedScratch = [];
     private readonly List<WorldEntity> _entityScratch = [];
     private readonly List<WorldEntity> _aoiCandidateScratch = [];
@@ -300,11 +304,14 @@ public sealed class GameServer
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
         _movementTrace = new ServerMovementTrace(options);
         _resourceNodes = ResourceNodeRegistry.CreateDefault(_itemRegistry);
+        // AUTHORED-MAP M3: the genVersion comes from options (FromEnvironment defaults to the authored
+        // town+floor-1 map and derives the matching 384x384 world-size defaults; MMO_GEN_VERSION=1 is
+        // the procedural escape hatch, and hand-constructed test options default procedural too).
         _zone = Zone.CreateGenerated(
             options.WorldWidthTiles,
             options.WorldHeightTiles,
             options.MapSeed,
-            TerrainGenerator.CurrentGenVersion,
+            options.GenVersion,
             options.SpawnDistribution,
             ResolveEntityGridCellSize(options.InterestRadius));
         // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
@@ -415,6 +422,7 @@ public sealed class GameServer
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         ScatterResourceNodes();
+        SpawnAuthoredProps();
         SpawnDummies();
         _netManager = new NetManager(_listener)
         {
@@ -1685,6 +1693,44 @@ public sealed class GameServer
             _zone.PlanResourceNodeScatter(_resourceNodes, _options.ResourceNodeDensityTilesPerNode))
         {
             _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
+        }
+    }
+
+    // AUTHORED-MAP M3: spawn the authored map's prop MARKERS at boot. `H`/`P` become inert
+    // EntityKind.Resource transients whose DisplayName drives the existing client archetype hook
+    // ("House" -> casa sprite, "Portal" -> portal mesh; EntityVisualFactory) — Resource because that
+    // is the only kind the factory name-routes, and a Resource entity WITHOUT a ResourceNode is
+    // already an inert, non-interactable shape (interact answers not_resource). House COLLISION is
+    // the blocked `#` footprint stamped into the map itself (M1 review F4 — the flood-fill
+    // reachability test sees it); the marker tile is just the walkable sprite anchor south of the
+    // footprint. `T`/`R` pin REAL harvestable nodes (the town oak / quarry rock) on top of the D6
+    // scatter, which pre-excludes marker tiles so nothing ever stacks here. No-op on a procedural
+    // map (no authored data).
+    private void SpawnAuthoredProps()
+    {
+        var authored = _zone.Authored;
+        if (authored is null)
+        {
+            return;
+        }
+
+        foreach (var marker in authored.Markers)
+        {
+            switch (marker.Kind)
+            {
+                case AuthoredMarkerKind.House:
+                    _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, "House", marker.Tile, Direction8.S);
+                    break;
+                case AuthoredMarkerKind.Portal:
+                    _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, "Portal", marker.Tile, Direction8.S);
+                    break;
+                case AuthoredMarkerKind.TreePin:
+                    _zone.SpawnResourceNode(_networkIds.Rent(), _resourceNodes.Get("tree"), marker.Tile);
+                    break;
+                case AuthoredMarkerKind.RockPin:
+                    _zone.SpawnResourceNode(_networkIds.Rent(), _resourceNodes.Get("rock"), marker.Tile);
+                    break;
+            }
         }
     }
 

@@ -12,12 +12,14 @@ namespace Mmo.Client.Core.Tests;
 public sealed class TerrainParityTests
 {
     [Theory]
-    [InlineData(64, 64, 0)]
-    [InlineData(128, 128, 0)]
-    [InlineData(256, 256, 99)]
-    public void ServerZoneAndClientZoneModelAgree(int width, int height, int seed)
+    [InlineData(64, 64, 0, 1)]
+    [InlineData(128, 128, 0, 1)]
+    [InlineData(256, 256, 99, 1)]
+    // AUTHORED-MAP M3: the live default — the authored map at its intrinsic dims (seed unused).
+    [InlineData(AuthoredMaps.TownAndFloor1Width, AuthoredMaps.TownAndFloor1Height, 0, TerrainGenerator.AuthoredGenVersion)]
+    public void ServerZoneAndClientZoneModelAgree(int width, int height, int seed, int genVersion)
     {
-        var zone = Zone.CreateGenerated(width, height, seed, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        var zone = Zone.CreateGenerated(width, height, seed, genVersion, SpawnDistribution.Clustered);
 
         var model = new ZoneModel(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion);
 
@@ -25,7 +27,7 @@ public sealed class TerrainParityTests
         Assert.True(zone.BlockedTiles.SetEquals(model.BlockedTiles));
 
         // Same content hash, computed independently on each side.
-        var serverHash = TerrainGenerator.ContentHash(width, height, seed, TerrainGenerator.CurrentGenVersion);
+        var serverHash = TerrainGenerator.ContentHash(width, height, seed, genVersion);
         Assert.Equal(serverHash, model.ContentHash);
     }
 
@@ -33,8 +35,9 @@ public sealed class TerrainParityTests
     public void ZoneInfoMessageHashMatchesClientRegeneration()
     {
         // Build the descriptor the server would put on the wire, then regenerate on the client and
-        // confirm the hash matches (the drift/tamper gate).
-        var zone = Zone.CreateGenerated(128, 128, 7, TerrainGenerator.CurrentGenVersion, SpawnDistribution.Clustered);
+        // confirm the hash matches (the drift/tamper gate). genVersion 1: the procedural path at an
+        // arbitrary size (the authored path is covered by the theory case above).
+        var zone = Zone.CreateGenerated(128, 128, 7, 1, SpawnDistribution.Clustered);
         var serverHash = TerrainGenerator.ContentHash(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
         var message = new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash);
 

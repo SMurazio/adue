@@ -11,7 +11,8 @@ param(
     [switch]$KeepServer,
     [string]$SpawnDistribution = '',
     [int]$WorldWidth = 0,
-    [int]$WorldHeight = 0
+    [int]$WorldHeight = 0,
+    [int]$GenVersion = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,9 +22,13 @@ if ($Release) {
 
 # Optional world/spawn overrides, set as env so the server (launched via start-server) inherits them.
 # Lets the reviewer run e.g. a scattered-spawn 1000^2 stress without hand-rolling env-prefixed launchers.
+# AUTHORED-MAP M3: the default world is now the authored 384x384 town+floor-1 map (genVersion 2), which
+# only boots at its intrinsic dims — a custom -WorldWidth/-WorldHeight stress needs -GenVersion 1 (the
+# procedural map) or the server refuses to start (loudly, naming the env vars).
 if (-not [string]::IsNullOrWhiteSpace($SpawnDistribution)) { $env:MMO_SPAWN_DISTRIBUTION = $SpawnDistribution }
 if ($WorldWidth -gt 0) { $env:MMO_WORLD_WIDTH_TILES = "$WorldWidth" }
 if ($WorldHeight -gt 0) { $env:MMO_WORLD_HEIGHT_TILES = "$WorldHeight" }
+if ($GenVersion -gt 0) { $env:MMO_GEN_VERSION = "$GenVersion" }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
 $localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'

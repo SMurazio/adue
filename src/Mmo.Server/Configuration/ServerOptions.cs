@@ -1,3 +1,5 @@
+using Mmo.Shared.Domain;
+
 namespace Mmo.Server.Configuration;
 
 public sealed record ServerOptions(
@@ -16,9 +18,20 @@ public sealed record ServerOptions(
     SpawnDistribution SpawnDistribution,
     IReadOnlySet<string> AdminNames)
 {
+    // AUTHORED-MAP M3: which terrain genVersion this server generates. The REAL boot path
+    // (FromEnvironment) defaults to TerrainGenerator.CurrentGenVersion — the authored 384x384
+    // town+floor-1 map — and derives the world-size defaults from the authored grid; MMO_GEN_VERSION=1
+    // restores the legacy procedural layout (128x128 defaults). This init-only property itself
+    // DEFAULTS TO 1 (procedural) so the many hand-constructed test ServerOptions — which pick
+    // arbitrary small world sizes — keep meaning "procedural at my stated size": an authored
+    // genVersion only accepts width/height equal to the authored grid's dims (the shared generator
+    // fails loudly otherwise; Validate pre-empts that with the env-var names on the boot path).
+    public int GenVersion { get; init; } = 1;
+
     // Procedural map seed. Default 0 (TileGrid.DefaultSeed) keeps the generated map — and therefore
     // persisted tile positions — stable across restarts. Init-only (not a positional ctor arg) so the
-    // many test constructions of ServerOptions don't all have to thread it.
+    // many test constructions of ServerOptions don't all have to thread it. (Unused — but harmless —
+    // under an authored genVersion: an authored layout has no randomness to seed.)
     public int MapSeed { get; init; }
 
     // Resource-node placement density: roughly one harvestable node per
@@ -49,6 +62,16 @@ public sealed record ServerOptions(
 
     public static ServerOptions FromEnvironment()
     {
+        // AUTHORED-MAP M3: resolve the genVersion FIRST — the world-size defaults follow from it. An
+        // authored map's dims are content, not config, so the defaults come FROM the authored grid
+        // and the two can never drift; an explicit MMO_WORLD_*_TILES still applies but must match the
+        // grid (Validate fails loudly with the env-var names). MMO_GEN_VERSION=1 = the legacy
+        // procedural map with the historical 128x128 defaults.
+        var genVersion = ReadInt("MMO_GEN_VERSION", TerrainGenerator.CurrentGenVersion);
+        var authored = genVersion == TerrainGenerator.AuthoredGenVersion;
+        var defaultWorldWidth = authored ? AuthoredMaps.TownAndFloor1Width : 128;
+        var defaultWorldHeight = authored ? AuthoredMaps.TownAndFloor1Height : 128;
+
         var options = new ServerOptions(
             ReadInt("MMO_PORT", 7777),
             ReadInt("MMO_TICK_RATE", 20),
@@ -56,8 +79,8 @@ public sealed record ServerOptions(
             ReadDatabaseProvider("MMO_DB_PROVIDER", DatabaseProvider.Sqlite),
             ResolveConnectionString(ReadString("MMO_DB", "Data Source=data/mmo.db")),
             ResolveMigrationsPath(ReadString("MMO_MIGRATIONS_PATH", "db/sqlite")),
-            ReadInt("MMO_WORLD_WIDTH_TILES", 128),
-            ReadInt("MMO_WORLD_HEIGHT_TILES", 128),
+            ReadInt("MMO_WORLD_WIDTH_TILES", defaultWorldWidth),
+            ReadInt("MMO_WORLD_HEIGHT_TILES", defaultWorldHeight),
             // Base walk cadence. Default 250ms (the "0.6x" / 4.0-tiles-per-sec feel) — the speed everyone starts at;
             // the F1 Movement /speed dropdown brackets faster/slower around it. Override with MMO_STEP_COOLDOWN_MS.
             ReadInt("MMO_STEP_COOLDOWN_MS", 250),
@@ -67,9 +90,13 @@ public sealed record ServerOptions(
             // comfortably beyond a screen at the default camera. Live-tunable via aoi.interestRadius (F1) anytime.
             ReadFloat("MMO_INTEREST_RADIUS", 18f),
             ReadInt("MMO_MAX_VISIBLE_ENTITIES", 150),
-            ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Distributed),
+            // AUTHORED-MAP M3 (D4): default Authored — wake on the map's `S` plaza anchors. Explicit
+            // env values (distributed/clustered/scattered) keep overriding for stress/dev; on a
+            // procedural (genVersion 1) map Authored falls back to the historical Distributed grid.
+            ReadSpawnDistribution("MMO_SPAWN_DISTRIBUTION", SpawnDistribution.Authored),
             ReadSet("MMO_ADMIN_NAMES", "Admin"))
         {
+            GenVersion = genVersion,
             MapSeed = ReadInt("MMO_MAP_SEED", 0),
             ResourceNodeDensityTilesPerNode = ReadInt("MMO_RESOURCE_NODE_DENSITY_TILES", 28),
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
@@ -107,6 +134,23 @@ public sealed record ServerOptions(
         if (WorldHeightTiles < 16 || WorldHeightTiles > short.MaxValue)
         {
             throw new InvalidOperationException($"MMO_WORLD_HEIGHT_TILES must be between 16 and {short.MaxValue}.");
+        }
+
+        // AUTHORED-MAP M3: the shared generator would throw the same complaint at zone creation, but
+        // failing here names the env vars the operator actually holds.
+        if (GenVersion != 1 && GenVersion != TerrainGenerator.AuthoredGenVersion)
+        {
+            throw new InvalidOperationException(
+                $"MMO_GEN_VERSION must be 1 (procedural) or {TerrainGenerator.AuthoredGenVersion} (authored).");
+        }
+
+        if (GenVersion == TerrainGenerator.AuthoredGenVersion
+            && (WorldWidthTiles != AuthoredMaps.TownAndFloor1Width || WorldHeightTiles != AuthoredMaps.TownAndFloor1Height))
+        {
+            throw new InvalidOperationException(
+                $"MMO_WORLD_WIDTH_TILES/MMO_WORLD_HEIGHT_TILES must be {AuthoredMaps.TownAndFloor1Width}x" +
+                $"{AuthoredMaps.TownAndFloor1Height} under genVersion {TerrainGenerator.AuthoredGenVersion} " +
+                "(the authored map's intrinsic dims) — unset them, or set MMO_GEN_VERSION=1 for a procedural world.");
         }
 
         if (StepCooldownMs < 50 || StepCooldownMs > 5000)
@@ -233,6 +277,7 @@ public sealed record ServerOptions(
             "distributed" => SpawnDistribution.Distributed,
             "clustered" or "cluster" => SpawnDistribution.Clustered,
             "scattered" or "scatter" => SpawnDistribution.Scattered,
+            "authored" => SpawnDistribution.Authored,
             _ => fallback
         };
     }

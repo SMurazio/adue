@@ -41,10 +41,12 @@ public sealed class TileGrid
 
     // The map is content, not state: the server builds its authoritative TileGrid from the same shared
     // deterministic generator the clients use, so it never has to ship the blocked-tile list. The
-    // historical "default" map is genVersion 1 with a fixed default seed (overload below).
+    // historical "default" map is genVersion 1 with a fixed default seed — pinned (AUTHORED-MAP M3),
+    // because "the default map at an arbitrary (width, height)" can only mean the procedural layout;
+    // the authored map has intrinsic dims and is selected explicitly via CreateGenerated(genVersion 2).
     public static TileGrid CreateDefault(int width, int height)
     {
-        return CreateGenerated(width, height, DefaultSeed, TerrainGenerator.CurrentGenVersion);
+        return CreateGenerated(width, height, DefaultSeed, genVersion: 1);
     }
 
     public static TileGrid CreateGenerated(int width, int height, int seed, int genVersion)
