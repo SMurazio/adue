@@ -104,6 +104,16 @@ public sealed class GameServer
     // AUTHORED-MAP M3: test seam — lets the boot-wiring tests (authored prop spawning, spawn-anchor
     // login) inspect the constructed world without a network round-trip. Never used by product code.
     internal Zone ZoneForTests => _zone;
+
+    // TELEGRAPH T2 REVIEW FOLLOWUP (item 4b, the forget-on-resolve pin): test seams — let a HEADLESS test (no
+    // RunAsync, so no live tick thread — same single-threaded "boot wiring" pattern as ZoneForTests) drive the
+    // REAL per-recipient telegraph AOI diff (SyncTelegraphs) and the real scheduler directly, so the assertion
+    // exercises production code, not a re-implementation of the forget rule in a test-local lambda. Never used by
+    // product code.
+    internal TelegraphScheduler TelegraphsForTests => _telegraphs;
+
+    internal void SyncTelegraphsForTests(ClientSession recipient, WorldEntity recipientEntity) =>
+        SyncTelegraphs(recipient, recipientEntity);
     private readonly List<ClientSession> _authenticatedScratch = [];
     private readonly List<WorldEntity> _entityScratch = [];
     private readonly List<WorldEntity> _aoiCandidateScratch = [];
@@ -1359,9 +1369,13 @@ public sealed class GameServer
         foreach (var spawner in _spawners.Values)
         {
             var inAoi = IsTileInInterest(recipientEntity.Position, spawner.Tile, _tuning.InterestRadius);
-            if (inAoi && !recipient.KnowsSpawner(spawner.SpawnerId))
+            // TELEGRAPH T2 REVIEW FOLLOWUP (mirrors the telegraph fix below): remember-known only on a SUCCESSFUL
+            // send. A failed send on a surviving session (transient socket hiccup, not a disconnect) must not mark
+            // the viewer as knowing a marker it never received — that would permanently skip the retry and the
+            // spawner tile silently never renders for that viewer. The diff naturally retries next AOI pass.
+            if (inAoi && !recipient.KnowsSpawner(spawner.SpawnerId)
+                && TrySend(recipient.Peer, new SpawnerMarkerMessage(spawner.SpawnerId, spawner.Tile, true), DeliveryMethod.ReliableOrdered))
             {
-                TrySend(recipient.Peer, new SpawnerMarkerMessage(spawner.SpawnerId, spawner.Tile, true), DeliveryMethod.ReliableOrdered);
                 recipient.RememberKnownSpawner(spawner.SpawnerId);
             }
         }
@@ -1423,11 +1437,17 @@ public sealed class GameServer
                 continue;
             }
 
-            TrySend(
+            // TELEGRAPH T2 REVIEW FOLLOWUP (fairness): remember-known only on a SUCCESSFUL send. A failed send on a
+            // surviving session (a transient socket hiccup, not a disconnect) must never permanently mark the
+            // viewer as knowing a telegraph it never received — that would be a hit with no warning. Leaving it
+            // unknown means this same diff naturally retries the send next AOI pass.
+            if (TrySend(
                 recipient.Peer,
                 new TelegraphMessage(telegraph.Id, telegraph.Shape, telegraph.StartTick, telegraph.ResolveTick),
-                DeliveryMethod.ReliableOrdered);
-            recipient.RememberKnownTelegraph(telegraph.Id);
+                DeliveryMethod.ReliableOrdered))
+            {
+                recipient.RememberKnownTelegraph(telegraph.Id);
+            }
         }
 
         // Forget known ids whose telegraph resolved (left the pending set). Bookkeeping only — nothing is sent.

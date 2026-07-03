@@ -70,4 +70,18 @@ public sealed class CosmeticServerClock
 
         return (localNow.TotalSeconds * _tickRate) + _offsetTicks;
     }
+
+    // TELEGRAPH T2 REVIEW FOLLOWUP (ghost-decal-after-reconnect, latent): forget the estimate entirely — the next
+    // ObserveSnapshot after a reconnect then SNAPS (the !_hasEstimate branch) instead of treating the new server's
+    // tick counter as jitter around the old (now-meaningless) offset. Without this, reconnecting to a RESTARTED
+    // server (tick ~0) leaves the old high offset in place; a sample that far away IS already a snap by
+    // SnapThresholdSeconds, so in practice a bare reconnect self-heals within one snapshot — but Reset makes the
+    // "no stale estimate survives a disconnect" invariant explicit rather than relying on the snap-threshold's
+    // side effect, and it's what MmoClient.Disconnect calls alongside clearing _activeTelegraphs.
+    public void Reset()
+    {
+        _offsetTicks = 0d;
+        _tickRate = 0;
+        _hasEstimate = false;
+    }
 }

@@ -532,6 +532,18 @@ public sealed class MmoClient : IDisposable
         _netManager.Stop();
         State = ClientConnectionState.Disconnected;
         _serverPeer = null;
+
+        // TELEGRAPH T2 REVIEW FOLLOWUP (ghost-decal-after-reconnect, latent): drop every locally-tracked telegraph
+        // + the clock estimate that timed its fill. Without this, reconnecting to a RESTARTED server (tick ~0)
+        // leaves stale entries whose resolveTick is from the OLD session (far in the future by the new server's
+        // count) — CopyTelegraphDecalsTo would keep rendering their ground decal indefinitely (never resolves,
+        // never prunes) until the estimated clock happens to climb past the old absolute tick. Latent for the
+        // Godot client today (one MmoClient per process, rarely reconnects mid-session) but real for any
+        // headless/tooling client that connects more than once. _cosmeticServerClock.Reset() means the FIRST
+        // snapshot of the new session re-anchors from scratch instead of treating the new server's tick counter
+        // as jitter around a now-meaningless offset.
+        _activeTelegraphs.Clear();
+        _cosmeticServerClock.Reset();
     }
 
     // CONTINUOUS MIGRATION (Phase 4): the predictor MINTS the seq (PredictAndBuffer) then we Send the MoveIntent with

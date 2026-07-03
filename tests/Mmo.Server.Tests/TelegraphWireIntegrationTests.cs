@@ -269,6 +269,132 @@ public sealed class TelegraphWireIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task ViewerOutOfInterestRadius_NeverReceivesTheTelegraph()
+    {
+        // TELEGRAPH T2 REVIEW FOLLOWUP item 4a: every OTHER test in this file uses a small map + a generous
+        // interest radius (30) with Clustered spawns specifically so BOTH clients stay in mutual AOI — which means
+        // a scoping regression (SyncTelegraphs broadcasting to every session instead of diffing by AOI) would pass
+        // this whole file silently. This test uses a NARROW interest radius and walks the caster genuinely OUT of
+        // a stationary viewer's range (real MoveIntent traffic, real per-tick AOI) before casting, so a viewer who
+        // never entered AOI must receive ZERO TelegraphMessages for it.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateNarrowAoiOptions(port, database.ConnectionString, admins: ["Caster"]);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var caster = new TelegraphClient("Caster");
+            using var far = new TelegraphClient("Far");
+            caster.Connect(port, options.ConnectionKey);
+            far.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(
+                () => caster.IsLoggedIn && caster.OwnNetworkId != 0 && far.IsLoggedIn, caster, far);
+
+            // Both spawn Clustered (near each other). Let the caster's own first sample land so we have a start
+            // tile to walk from.
+            await WaitUntilAsync(() => caster.SamplesFor(caster.OwnNetworkId).Count > 0, caster, far);
+            var startTile = caster.SamplesFor(caster.OwnNetworkId)[^1].Position.ToTileRounded();
+
+            // Walk the caster well past the narrow interest radius (6) + the cast's own bounding radius (1) — a
+            // 12-tile move leaves a clear margin (reach = 6+1 = 7) even allowing for a scatter-obstacle detour.
+            var targetX = startTile.X + 12;
+            var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(8);
+            while (DateTimeOffset.UtcNow < deadline
+                && caster.SamplesFor(caster.OwnNetworkId)[^1].Position.ToTileRounded().X < targetX)
+            {
+                caster.SendMove(Direction8.E);
+                await PollForAsync(TimeSpan.FromMilliseconds(75), caster, far);
+            }
+
+            caster.StopMove();
+            await PollForAsync(TimeSpan.FromMilliseconds(150), caster, far);
+            Assert.True(
+                caster.SamplesFor(caster.OwnNetworkId)[^1].Position.ToTileRounded().X >= targetX,
+                "test setup: the caster never walked far enough out of the viewer's interest radius.");
+
+            // A small-radius self-cast — the caster is always in AOI of its own telegraph.
+            caster.SendChat("/slam 1 500 5");
+            await WaitUntilAsync(() => caster.Telegraphs.Count >= 1, caster, far);
+
+            // The far, stationary viewer never entered AOI of the cast — poll well past the (short) windup and
+            // resolve and assert it received NOTHING.
+            await PollForAsync(TimeSpan.FromMilliseconds(800), caster, far);
+            Assert.Empty(far.Telegraphs);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task KnownTelegraphIdsShrinkAfterResolve_ForgetOnResolvePin()
+    {
+        // TELEGRAPH T2 REVIEW FOLLOWUP item 4b: nothing previously pinned that a session's known-telegraph set
+        // actually SHRINKS once a telegraph leaves the pending set — a never-forgets regression is a silent
+        // per-session memory leak with no other test coverage (the leaked id has no OTHER observable wire effect,
+        // since telegraph ids never repeat). Headless (no RunAsync — no live tick thread, so touching ClientSession
+        // state directly from the test thread is safe, mirroring AuthoredWorldTests' "boot wiring" pattern), driven
+        // through the REAL SyncTelegraphs diff (GameServer.SyncTelegraphsForTests) and the REAL TelegraphScheduler
+        // (GameServer.TelegraphsForTests) — not a re-implementation of the forget rule.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var options = CreateNarrowAoiOptions(GetFreeUdpPort(), database.ConnectionString, admins: []);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+
+        var recipient = new ClientSession(null!);
+        var recipientEntity = server.ZoneForTests.World.AddTransient(
+            1, EntityKind.Player, "Recipient", new TileCoord(32, 32), Direction8.S);
+
+        var telegraphs = server.TelegraphsForTests;
+        var id = telegraphs.Schedule(
+            999, TelegraphShape.Circle(recipientEntity.Position, 2d), startTick: 0, resolveTick: 5, damage: 0, source: "forget-pin");
+        Assert.True(telegraphs.IsPending(id));
+
+        // Pre-seed known-ness through the REAL ClientSession method (isolates the FORGET half; the SEND half that
+        // would normally set this is already pinned by the other wire tests in this file).
+        recipient.RememberKnownTelegraph(id);
+        Assert.Single(recipient.KnownTelegraphIds);
+
+        // Still pending: the real diff must NOT forget a known id whose telegraph is still active.
+        server.SyncTelegraphsForTests(recipient, recipientEntity);
+        Assert.Single(recipient.KnownTelegraphIds);
+
+        telegraphs.ResolveDue(5);
+        Assert.False(telegraphs.IsPending(id));
+
+        // Resolved: the SAME real diff pass must now forget it — the known set SHRINKS back to empty.
+        server.SyncTelegraphsForTests(recipient, recipientEntity);
+        Assert.Empty(recipient.KnownTelegraphIds);
+    }
+
+    private static ServerOptions CreateNarrowAoiOptions(int port, string connectionString, string[] admins)
+    {
+        return new ServerOptions(
+            port,
+            TickRate,
+            "telegraph-wire-narrow-aoi-test",
+            DatabaseProvider.Sqlite,
+            connectionString,
+            TestSqliteDatabase.MigrationsPath,
+            96,
+            64,
+            BaseStepCooldownMs,
+            15,
+            6f, // narrow interest radius — a short walk suffices to leave AOI (item 4a).
+            150,
+            SpawnDistribution.Clustered,
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
+        {
+            ResourceNodeDensityTilesPerNode = 0,
+        };
+    }
+
     private static ServerOptions CreateAuthoredOptions(int port, string connectionString, string[] admins)
     {
         return new ServerOptions(
@@ -364,6 +490,7 @@ public sealed class TelegraphWireIntegrationTests
         private readonly string _name;
         private NetPeer? _serverPeer;
         private bool _disposed;
+        private uint _moveSequence;
 
         public TelegraphClient(string name)
         {
@@ -419,6 +546,19 @@ public sealed class TelegraphWireIntegrationTests
 
         public void SendAdminSetTuning(string key, double value) =>
             Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+
+        // TELEGRAPH T2 REVIEW FOLLOWUP item 4a (the AOI-exclusion negative-test gap): a real continuous MoveIntent,
+        // mirroring AoiIntegrationTests.IntegrationClient.SendMove — used to walk THIS client (the caster) out of a
+        // stationary viewer's interest radius before casting, so the out-of-range assertion exercises real movement
+        // + the real per-tick AOI diff, not a contrived position.
+        public void SendMove(Direction8 direction)
+        {
+            var dir = direction.ToUnitVector();
+            Send(new MoveIntentMessage(++_moveSequence, (float)dir.X, (float)dir.Y, 1f / 20f), DeliveryMethod.Unreliable);
+        }
+
+        public void StopMove() =>
+            Send(new MoveIntentMessage(++_moveSequence, 0f, 0f, 1f / 20f), DeliveryMethod.Unreliable);
 
         // The initial login sends a PlayerStatsMessage too (full HP, the "initial truth" per COMBAT-S1) — a test
         // waiting on "HP refilled" must clear this first, or the wait is satisfied instantly by the LOGIN message

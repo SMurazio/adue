@@ -1,29 +1,24 @@
 # N — Telegraph T2 review followups (independent review of fb08bb1: APPROVE-WITH-FOLLOWUPS)
 
 No blockers/majors; codec symmetry, deadline-form sync, presentation-only clock, AOI diff, and Godot node
-hygiene all verified sound. Surviving findings, priority order — (1) matters to the honest-telegraph
-pillar and should land BEFORE/with the feel-test:
+hygiene all verified sound.
 
-1. ~~Quantize the shape AT SCHEDULE~~ **DONE** — TelegraphScheduler.Schedule now quantizes origin+radius
-   to the wire's Q12.4 grid (QuantizeToWire), pinned by a discriminating resolve test (victim inside the
-   quantized circle, outside the raw one).
+1. ~~Quantize the shape AT SCHEDULE~~ **DONE**.
+2. ~~Remember-known only on successful send~~ **DONE** (queue-sweep-1) — GameServer's telegraph AOI diff
+   (SyncTelegraphs) and the SpawnerMarker AOI diff (SyncSpawnerMarkers, fixed the same way while there) now
+   only call RememberKnownTelegraph/RememberKnownSpawner when TrySend returns true; a failed send on a
+   surviving session leaves the id unknown so the diff retries next tick.
+3. ~~Clear client telegraph state + clock on disconnect~~ **DONE** (queue-sweep-1) — MmoClient.Disconnect now
+   clears `_activeTelegraphs` and calls the new `CosmeticServerClock.Reset()`.
+4. ~~Two negative-test gaps~~ **DONE** (queue-sweep-1) — TelegraphWireIntegrationTests gained
+   `ViewerOutOfInterestRadius_NeverReceivesTheTelegraph` (a genuinely out-of-AOI viewer, driven via real
+   MoveIntent traffic on a narrow-interest-radius server, gets zero TelegraphMessages) and
+   `KnownTelegraphIdsShrinkAfterResolve_ForgetOnResolvePin` (a headless test driven through two new internal
+   test seams — `GameServer.TelegraphsForTests` / `GameServer.SyncTelegraphsForTests` — pinning that a
+   session's `_knownTelegraphIds` actually shrinks once a telegraph resolves, not just grows).
 
-2. **Remember-known only on successful send (MINOR — fairness).** GameServer ~1414: the telegraph AOI
-   diff calls RememberKnownTelegraph unconditionally, ignoring TrySend's bool. A failed send on a
-   surviving session permanently marks the viewer as knowing a telegraph it never saw = hit with no
-   warning. Remember only on TrySend == true (the diff naturally retries next tick). (Mirrors the
-   SpawnerMarker pattern — consider fixing that one the same way while there.)
-
-3. **Clear client telegraph state + clock on disconnect (MINOR — latent).** MmoClient.Disconnect leaves
-   _activeTelegraphs + the cosmetic clock populated. Reconnect to a RESTARTED server (tick ~0): stale
-   entries have resolveTick far in the future → never pruned → permanent ghost decal + dict entry.
-   Latent for the Godot client (one MmoClient per process) but real for headless/tooling clients.
-
-4. **Two negative-test gaps (MINOR).** (a) AOI exclusion: the wire test's small map puts everyone in
-   AOI, so a scoping regression (telegraph broadcast to ALL) passes — add an out-of-range viewer
-   asserting NO TelegraphMessage. (b) Server forget-on-resolve: nothing pins _knownTelegraphIds
-   shrinking after resolve — a never-forgets regression is a slow per-session leak with no test.
-
-NITs (batch opportunistically): one >2s latency spike snap-then-snap-backs the cosmetic clock (require
-two consecutive out-of-band samples before re-anchoring); the flash re-assigns MaterialOverride every
-frame of the 0.35s window (guard the redundant interop write).
+NITs (still open, batch opportunistically next time these files are touched): one >2s latency spike
+snap-then-snap-backs the cosmetic clock (require two consecutive out-of-band samples before re-anchoring);
+the flash re-assigns MaterialOverride every frame of the 0.35s window (guard the redundant interop write).
+Both skipped this batch — neither was trivial enough to fit alongside the four numbered items above without
+its own verification pass.
