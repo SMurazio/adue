@@ -564,11 +564,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				return;
 			}
 
-			// COMBAT (LMB attack): LEFT-mouse-down triggers the free-aim melee swing — the same TryAttack path as
-			// Space (server-authoritative; the aim is the player→cursor bearing). This handler is _UnhandledInput, so
-			// any HUD/panel control the cursor is over has already consumed the click (it never reaches here) — the
-			// swing only fires on a click into the 3D world. RIGHT mouse stays the hold-to-move poll (untouched);
-			// LEFT was previously free. Consumed so it doesn't fall through to anything else.
+			// COMBAT (LMB attack — the PRIMARY attack binding since the 2026-07-03 combat-keys decision; Space is
+			// now the dodge-roll): LEFT-mouse-down triggers the free-aim melee swing (server-authoritative; the aim
+			// is the player→cursor bearing). This handler is _UnhandledInput, so any HUD/panel control the cursor is
+			// over has already consumed the click (it never reaches here) — the swing only fires on a click into the
+			// 3D world. RIGHT mouse stays the hold-to-move poll (untouched). Consumed so it doesn't fall through.
 			if (mouseButton.ButtonIndex == MouseButton.Left)
 			{
 				TryAttack();
@@ -633,7 +633,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		// LIVESPEED-DESYNC P2: F loots all while the corpse loot window is open (and chat isn't focused) — the same
 		// intent as the "Loot All [F]" footer button. F is otherwise unbound (F1/F3/F11 are distinct keycodes; E
-		// harvests, Space attacks), so this only acts when a corpse window is up and never disturbs other bindings.
+		// harvests, Space dodges), so this only acts when a corpse window is up and never disturbs other bindings.
 		if (key.Keycode == Key.F && _chatInput?.HasFocus() != true && _hud?.Loot is { IsOpen: true } lootAllWindow)
 		{
 			lootAllWindow.RaiseLootAllRequested();
@@ -650,14 +650,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// COMBAT-S2B: Space = melee attack. A clear, free key (no collision with WASD movement, F3-F7/F11 panels,
-		// E harvest, Tab inventory, Alt+R resync, or Enter/T chat). Not while typing in chat (so Space types a space
-		// in a message instead of swinging). Sends the attack on its own cursor (MmoClient.SendAttack) and shows an
-		// immediate cosmetic swing cue; the server authoritatively resolves the cone + damage (the target's overhead
-		// HP bar drops via the snapshot — no client-side damage prediction).
+		// COMBAT KEYS (user decision 2026-07-03, the genre-standard action mapping): LMB = attack (see the
+		// mouse handler — it was already bound and is now the PRIMARY attack), Space = DODGE-ROLL (was L, "a bit
+		// far" for the most reflex-critical action; Space was attack's original S2B key and is freed by LMB).
+		// Not while typing in chat (Space types a space in a message instead of rolling).
 		if (key.Keycode == Key.Space && _chatInput?.HasFocus() != true)
 		{
-			TryAttack();
+			TryMovementAction(ActionId.DodgeRoll, "Roll!");
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -665,7 +664,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// MOVEMENT-ACTIONS Phase B1 — TEMPORARY DEV TRIGGER: J fires a ballistic jump along the local player's current
 		// facing. This is a runtime, in-client trigger (no launch flag, no restart — the project's live-toggle
 		// discipline); B1 has no skill bar yet. Phase E REPLACES this with real skill-input binding. J is otherwise
-		// unbound (distinct from WASD movement, E harvest, F loot-all, Space attack, F1/F3/F11 panels, Tab/Enter/T
+		// unbound (distinct from WASD movement, E harvest, F loot-all, Space dodge, F1/F3/F11 panels, Tab/Enter/T
 		// chat). Not while typing in chat (so 'j' types a letter instead of jumping). The action is server-confirmed
 		// in B1 (no client prediction) — a brief delay before the avatar rises is expected and correct for B1.
 		if (key.Keycode == Key.J && _chatInput?.HasFocus() != true)
@@ -675,21 +674,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// MOVEMENT-ACTIONS Phase D — TEMPORARY DEV TRIGGERS (Phase E replaces these with real skill-input binding,
+		// MOVEMENT-ACTIONS Phase D — TEMPORARY DEV TRIGGER (Phase E replaces these with real skill-input binding,
 		// exactly like J): K fires a CHARGE (a fast forward dash along the aim/facing heading, early-stopping at
-		// walls/bodies) and L a DODGE-ROLL (a short dash with SERVER-authoritative i-frames — the client only renders
-		// the roll; the damage negation is decided server-side). Both ride the SAME client-predicted action stream the
-		// jump uses (MmoClient.SendAction → BeginAction; one-at-a-time + the mirrored cooldown decline locally). K/L
-		// are otherwise unbound (no collision with WASD, E/F, Space, J, panels, chat keys). Not while typing in chat.
+		// walls/bodies). The DODGE-ROLL moved to Space (see the combat-keys block above). Both ride the SAME
+		// client-predicted action stream the jump uses (MmoClient.SendAction → BeginAction; one-at-a-time + the
+		// mirrored cooldown decline locally). Not while typing in chat.
 		if (key.Keycode == Key.K && _chatInput?.HasFocus() != true)
 		{
 			TryMovementAction(ActionId.Charge, "Charge!");
-			GetViewport().SetInputAsHandled();
-			return;
-		}
-		if (key.Keycode == Key.L && _chatInput?.HasFocus() != true)
-		{
-			TryMovementAction(ActionId.DodgeRoll, "Roll!");
 			GetViewport().SetInputAsHandled();
 			return;
 		}
