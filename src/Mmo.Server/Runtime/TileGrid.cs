@@ -6,7 +6,11 @@ public sealed class TileGrid
 {
     private readonly HashSet<TileCoord> _blockedTiles;
 
-    public TileGrid(int width, int height, IEnumerable<TileCoord> blockedTiles)
+    // AUTHORED-MAP M1: `authored` carries the parsed authored map (surface categories, spawn anchors,
+    // prop markers) alongside the blocked set when the grid comes from an authored genVersion; null —
+    // the default, so every existing hand-built-grid caller (tests) compiles unchanged — means "not
+    // authored": category Grass everywhere, no anchors, no markers (the historical assumptions).
+    public TileGrid(int width, int height, IEnumerable<TileCoord> blockedTiles, AuthoredMap? authored = null)
     {
         if (width < 1)
         {
@@ -20,6 +24,7 @@ public sealed class TileGrid
 
         Width = width;
         Height = height;
+        Authored = authored;
         _blockedTiles = blockedTiles
             .Where(IsInBounds)
             .ToHashSet();
@@ -31,6 +36,9 @@ public sealed class TileGrid
     public int Height { get; }
     public IReadOnlySet<TileCoord> BlockedTiles => _blockedTiles;
 
+    /// <summary>The parsed authored map (categories/spawn anchors/markers), or null when not authored.</summary>
+    public AuthoredMap? Authored { get; }
+
     // The map is content, not state: the server builds its authoritative TileGrid from the same shared
     // deterministic generator the clients use, so it never has to ship the blocked-tile list. The
     // historical "default" map is genVersion 1 with a fixed default seed (overload below).
@@ -41,8 +49,10 @@ public sealed class TileGrid
 
     public static TileGrid CreateGenerated(int width, int height, int seed, int genVersion)
     {
-        var blocked = TerrainGenerator.Generate(width, height, seed, genVersion);
-        return new TileGrid(width, height, blocked);
+        // AUTHORED-MAP M1: take the FULL layout (not just the blocked view) so an authored genVersion's
+        // categories/spawn anchors/markers ride along to Zone and its consumers (spawning, painter data).
+        var layout = TerrainGenerator.GenerateLayout(width, height, seed, genVersion);
+        return new TileGrid(width, height, layout.BlockedTiles, layout.Authored);
     }
 
     /// <summary>Stable default seed so the generated map (and persisted tile positions) survive restarts.</summary>

@@ -75,6 +75,14 @@ public sealed class Zone
     public int GenVersion { get; }
     public IReadOnlySet<TileCoord> BlockedTiles => _tileGrid.BlockedTiles;
     public IReadOnlyList<TileCoord> SpawnTiles => _spawnTiles;
+
+    /// <summary>
+    /// AUTHORED-MAP M1: the parsed authored map (surface categories, `S` spawn anchors, prop markers)
+    /// when this zone's terrain came from an authored genVersion; null for procedural maps (genVersion
+    /// 1 — category Grass everywhere, nothing authored). M3 consumes it for authored spawns (D4) and
+    /// boot-time prop spawning; exposed now so the server reaches the full generator output.
+    /// </summary>
+    public AuthoredMap? Authored => _tileGrid.Authored;
     public WorldState World { get; }
 
     // PLAYER-COLLISION-TOGGLE: the live, server-authoritative flag gating whether OTHER PLAYERS are collision obstacles

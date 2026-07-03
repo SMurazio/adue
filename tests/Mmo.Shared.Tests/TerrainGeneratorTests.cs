@@ -74,6 +74,74 @@ public sealed class TerrainGeneratorTests
         Assert.Equal(ExpectedHash64x64Seed0(), hash);
     }
 
+    [Theory]
+    [InlineData(64, 64, 0x3975429411B4ED3CUL)]
+    [InlineData(128, 128, 0x4B7B8207799D7249UL)]
+    public void GenVersion1HashIsPinnedToHistoricalLiteral(int width, int height, ulong expected)
+    {
+        // AUTHORED-MAP M1 regression pin: LITERAL genVersion-1 hash values, computed by an independent
+        // out-of-process replication of the documented algorithm BEFORE the generator was refactored to
+        // the layout result shape. If either moves, genVersion 1 output moved — every deployed client
+        // would hard-fail the ZoneInfo drift check against an updated server. Never "fix" this test by
+        // updating the literals; fix the generator (or ship the change as a NEW genVersion).
+        Assert.Equal(expected, TerrainGenerator.ContentHash(width, height, 0, 1));
+        // The seed is unused by the fixed v1 layout, so the hash is seed-independent too.
+        Assert.Equal(expected, TerrainGenerator.ContentHash(width, height, 12345, 1));
+    }
+
+    [Fact]
+    public void GenVersion1LayoutHasNoAuthoredDataAndDefaultsToGrass()
+    {
+        // The layout result shape must be a pure superset for genVersion 1: same blocked tiles, the
+        // SAME blocked-only hash, no authored payload, and the historical defaults everywhere.
+        var layout = TerrainGenerator.GenerateLayout(64, 64, 0, 1);
+
+        Assert.Null(layout.Authored);
+        Assert.Equal(TerrainGenerator.Generate(64, 64, 0, 1), layout.BlockedTiles);
+        Assert.Equal(TerrainGenerator.ContentHash(layout.BlockedTiles), layout.ContentHash);
+        Assert.Empty(layout.SpawnTiles);
+        Assert.Empty(layout.Markers);
+        Assert.Equal(SurfaceCategory.Grass, layout.CategoryAt(new TileCoord(5, 5)));
+    }
+
+    [Fact]
+    public void GenVersion2ReturnsTheEmbeddedAuthoredMap()
+    {
+        var map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
+        var layout = TerrainGenerator.GenerateLayout(map.Width, map.Height, 0, TerrainGenerator.AuthoredGenVersion);
+
+        Assert.NotNull(layout.Authored);
+        Assert.Equal(map.BlockedTiles, layout.BlockedTiles);
+        Assert.Equal(map.SpawnTiles, layout.SpawnTiles);
+        Assert.Equal(map.Markers, layout.Markers);
+        Assert.Equal(TerrainGenerator.ContentHash(map), layout.ContentHash);
+
+        // The seed is intentionally unused by an authored layout: any seed, identical output.
+        Assert.Equal(
+            layout.ContentHash,
+            TerrainGenerator.ContentHash(map.Width, map.Height, 999, TerrainGenerator.AuthoredGenVersion));
+    }
+
+    [Fact]
+    public void GenVersion2HashCoversMoreThanTheBlockedSet()
+    {
+        // The authored ContentHash must NOT equal a blocked-only re-hash — that inequality is what
+        // guarantees category/marker/spawn drift hard-fails instead of hiding behind identical walls.
+        // Dimensions come from the embedded grid itself so this survives M3 swapping in the real map.
+        var map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
+        var layout = TerrainGenerator.GenerateLayout(map.Width, map.Height, 0, TerrainGenerator.AuthoredGenVersion);
+        Assert.NotEqual(TerrainGenerator.ContentHash(layout.BlockedTiles), layout.ContentHash);
+    }
+
+    [Fact]
+    public void GenVersion2DimensionMismatchThrows()
+    {
+        // ZoneInfo carries dimensions on the wire; a server configured with a size that disagrees with
+        // the authored grid must fail loudly at generation, not produce a world unlike its content.
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TerrainGenerator.GenerateLayout(64, 64, 0, TerrainGenerator.AuthoredGenVersion));
+    }
+
     [Fact]
     public void DifferentDimensionsProduceDifferentHashes()
     {

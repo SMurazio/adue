@@ -15,11 +15,25 @@ namespace Mmo.Shared.Domain;
 /// <paramref name="genVersion"/> selects the algorithm. Bumping it lets the layout change later
 /// without a silent client/server mismatch — old and new clients simply disagree on the hash and log
 /// loudly. <see cref="CurrentGenVersion"/> is what the server emits today.
+///
+/// genVersion 2 (AUTHORED, town-blockout D1): the layout is not procedural at all — it is the shared
+/// hand-authored ASCII grid <see cref="AuthoredMaps.TownAndFloor1"/>, parsed by <see cref="AuthoredMap"/>
+/// into blocked set + surface categories + spawn anchors + prop markers. Determinism is trivially the
+/// parse of a compiled-in constant (the seed is intentionally UNUSED), and the ContentHash covers the
+/// ENTIRE authored layout — categories/spawns/markers too, not just walls — so a category-only edit
+/// still hard-fails a stale peer. Callers that need more than the blocked set use
+/// <see cref="GenerateLayout"/>; the older <see cref="Generate"/> stays as a blocked-only view.
 /// </summary>
 public static class TerrainGenerator
 {
     /// <summary>The algorithm version the server currently generates with.</summary>
     public const int CurrentGenVersion = 1;
+
+    /// <summary>
+    /// The authored-map version (town+floor-1 blockout). NOT the server default yet — M3 flips the
+    /// server to it once the real 192x192 content replaces the M1 placeholder rows.
+    /// </summary>
+    public const int AuthoredGenVersion = 2;
 
     // genVersion 1 reproduces the historical hand-authored map exactly: a 1-tile blocked border around
     // the whole world plus three short interior wall segments, with the legacy default spawn tile
@@ -31,8 +45,22 @@ public static class TerrainGenerator
     /// <summary>
     /// Generates the blocked-tile set for a zone. Returns tiles in a fixed (row-major, then sorted)
     /// order so callers that hash or compare the sequence get identical results everywhere.
+    /// Blocked-only view of <see cref="GenerateLayout"/> — collision-only callers keep using this.
     /// </summary>
     public static IReadOnlyList<TileCoord> Generate(int width, int height, int seed, int genVersion)
+    {
+        return GenerateLayout(width, height, seed, genVersion).BlockedTiles;
+    }
+
+    /// <summary>
+    /// Generates the FULL layout for a zone: blocked tiles, the layout's canonical ContentHash, and —
+    /// for authored genVersions — the parsed <see cref="AuthoredMap"/> (surface categories, spawn
+    /// anchors, prop markers; null for genVersion 1, where every accessor falls back to the historical
+    /// defaults). The one generation entry point; <see cref="Generate"/> and the (width, height, seed,
+    /// genVersion) ContentHash overload are thin views over it, so every caller — server Zone, client
+    /// ZoneModel, web bridge — derives blocked set AND hash from the same computation.
+    /// </summary>
+    public static TerrainLayout GenerateLayout(int width, int height, int seed, int genVersion)
     {
         if (width < 1)
         {
@@ -44,30 +72,40 @@ public static class TerrainGenerator
             throw new ArgumentOutOfRangeException(nameof(height), "Height must be positive.");
         }
 
-        if (genVersion != 1)
+        if (genVersion == 1)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(genVersion),
-                $"Unsupported terrain genVersion {genVersion}. This build generates version {CurrentGenVersion}.");
+            var blocked = GenerateVersion1(width, height, seed);
+            // genVersion 1 hash = the historical blocked-only hash, byte-identical to every build that
+            // shipped before authored maps existed (pinned by test). No authored data.
+            return new TerrainLayout(blocked, ContentHash(blocked), authored: null);
         }
 
-        return GenerateVersion1(width, height, seed);
+        if (genVersion == AuthoredGenVersion)
+        {
+            return GenerateVersion2(width, height);
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(genVersion),
+            $"Unsupported terrain genVersion {genVersion}. This build generates versions {CurrentGenVersion} and {AuthoredGenVersion}.");
     }
 
     /// <summary>
-    /// Stable 64-bit FNV-1a hash of the generated blocked set. Order-independent inputs are made stable
-    /// by hashing the canonically-ordered tile list produced by <see cref="Generate"/>. Used as a
-    /// drift/tamper check: server and client compare hashes and the server stays authoritative either way.
+    /// Stable 64-bit FNV-1a hash of the generated layout — THE drift/tamper check value: server and
+    /// client compare hashes and the server stays authoritative either way. For genVersion 1 this is
+    /// the historical blocked-only hash; for authored versions it covers the whole authored layout.
     /// </summary>
     public static ulong ContentHash(int width, int height, int seed, int genVersion)
     {
-        return ContentHash(Generate(width, height, seed, genVersion));
+        return GenerateLayout(width, height, seed, genVersion).ContentHash;
     }
 
     /// <summary>
     /// Stable 64-bit FNV-1a hash over an ordered tile sequence. Includes the count and each tile's
     /// (X, Y) so two different layouts cannot collide trivially. Callers must pass tiles in the
-    /// canonical order <see cref="Generate"/> emits.
+    /// canonical order <see cref="Generate"/> emits. NOTE: for an AUTHORED layout this blocked-only
+    /// hash is NOT the layout's ContentHash (which also covers categories/spawns/markers) — compare
+    /// <see cref="TerrainLayout.ContentHash"/>, never a re-hash of the blocked list.
     /// </summary>
     public static ulong ContentHash(IReadOnlyList<TileCoord> blockedTiles)
     {
@@ -87,6 +125,65 @@ public static class TerrainGenerator
         return hash;
     }
 
+    /// <summary>
+    /// Stable 64-bit FNV-1a hash of a FULL authored map — the genVersion 2+ ContentHash. One FNV-1a
+    /// chain over, in this fixed canonical order:
+    ///   1. the blocked set exactly as <see cref="ContentHash(IReadOnlyList{TileCoord})"/> hashes it
+    ///      (count, then each tile's X, Y — the historical wall-geometry chain),
+    ///   2. Width, Height,
+    ///   3. every tile's <see cref="SurfaceCategory"/> byte in row-major order,
+    ///   4. spawn-anchor count, then each anchor's X, Y (row-major),
+    ///   5. marker count, then each marker's kind byte, X, Y (row-major),
+    ///   6. out-of-world count, then each tile's X, Y (row-major).
+    /// Covering 2-6 (not just walls) is the point: an authored edit that ONLY recolors a tile or moves
+    /// a marker leaves the blocked set untouched, and a blocked-only hash would let a stale client
+    /// render the wrong world silently. Every list is emitted row-major by the parser, so the chain is
+    /// platform/culture-independent like everything else here. This order is a compatibility contract:
+    /// changing it invalidates every shipped authored map's hash.
+    /// </summary>
+    public static ulong ContentHash(AuthoredMap map)
+    {
+        ArgumentNullException.ThrowIfNull(map);
+
+        const ulong fnvPrime = 1099511628211UL;
+
+        var hash = ContentHash(map.BlockedTiles);
+        hash = MixInt32(hash, fnvPrime, map.Width);
+        hash = MixInt32(hash, fnvPrime, map.Height);
+
+        for (var y = 0; y < map.Height; y++)
+        {
+            for (var x = 0; x < map.Width; x++)
+            {
+                hash = MixByte(hash, fnvPrime, (byte)map.CategoryAt(x, y));
+            }
+        }
+
+        hash = MixInt32(hash, fnvPrime, map.SpawnTiles.Count);
+        foreach (var tile in map.SpawnTiles)
+        {
+            hash = MixInt32(hash, fnvPrime, tile.X);
+            hash = MixInt32(hash, fnvPrime, tile.Y);
+        }
+
+        hash = MixInt32(hash, fnvPrime, map.Markers.Count);
+        foreach (var marker in map.Markers)
+        {
+            hash = MixByte(hash, fnvPrime, (byte)marker.Kind);
+            hash = MixInt32(hash, fnvPrime, marker.Tile.X);
+            hash = MixInt32(hash, fnvPrime, marker.Tile.Y);
+        }
+
+        hash = MixInt32(hash, fnvPrime, map.OutOfWorldTiles.Count);
+        foreach (var tile in map.OutOfWorldTiles)
+        {
+            hash = MixInt32(hash, fnvPrime, tile.X);
+            hash = MixInt32(hash, fnvPrime, tile.Y);
+        }
+
+        return hash;
+    }
+
     private static ulong MixInt32(ulong hash, ulong prime, int value)
     {
         var unsigned = (uint)value;
@@ -96,6 +193,13 @@ public static class TerrainGenerator
             hash *= prime;
         }
 
+        return hash;
+    }
+
+    private static ulong MixByte(ulong hash, ulong prime, byte value)
+    {
+        hash ^= value;
+        hash *= prime;
         return hash;
     }
 
@@ -129,6 +233,27 @@ public static class TerrainGenerator
         ordered.AddRange(blocked);
         ordered.Sort(static (a, b) => a.Y != b.Y ? a.Y.CompareTo(b.Y) : a.X.CompareTo(b.X));
         return ordered;
+    }
+
+    // genVersion 2 (AUTHORED): the layout IS the shared ASCII grid — parse it and wrap it as a layout.
+    // The seed is intentionally unused (an authored map has no randomness to seed) and the caller's
+    // (width, height) MUST match the authored grid's intrinsic dimensions: ZoneInfo carries dimensions
+    // on the wire, so a server configured with the wrong size would otherwise generate a world that
+    // disagrees with its own content — fail loudly at generation (boot/test) instead. Parsing a
+    // compiled-in constant is pure and platform-independent, so determinism holds trivially; the parse
+    // cost (one linear scan of the grid) is negligible even per-join, so no caching.
+    private static TerrainLayout GenerateVersion2(int width, int height)
+    {
+        var map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
+        if (width != map.Width || height != map.Height)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(width),
+                $"genVersion {AuthoredGenVersion} is the authored {map.Width}x{map.Height} map; " +
+                $"requested {width}x{height}. Configure the world size to match the authored content.");
+        }
+
+        return new TerrainLayout(map.BlockedTiles, ContentHash(map), map);
     }
 
     private static void AddVerticalSegment(HashSet<TileCoord> blocked, int width, int height, int x, int yStart, int yEnd)

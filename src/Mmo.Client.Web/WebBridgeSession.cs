@@ -255,10 +255,13 @@ public sealed class WebBridgeSession
                 // receiving a tile payload. Verify the local hash matches the server's (drift/tamper
                 // check); the server stays authoritative regardless. The browser keeps consuming a flat
                 // blockedTiles list, so the bridge does the regeneration on its behalf.
-                IReadOnlyList<TileCoord> regenerated;
+                // AUTHORED-MAP M1: regenerate the FULL layout and compare ITS ContentHash — for an
+                // authored genVersion the canonical hash covers categories/markers too, so re-hashing
+                // only the blocked list here would false-fail against the server's layout hash.
+                TerrainLayout regeneratedLayout;
                 try
                 {
-                    regenerated = TerrainGenerator.Generate(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
+                    regeneratedLayout = TerrainGenerator.GenerateLayout(zone.Width, zone.Height, zone.Seed, zone.GenVersion);
                 }
                 catch (Exception exception)
                 {
@@ -271,7 +274,7 @@ public sealed class WebBridgeSession
                     break;
                 }
 
-                var localHash = TerrainGenerator.ContentHash(regenerated);
+                var localHash = regeneratedLayout.ContentHash;
                 if (localHash != zone.ContentHash)
                 {
                     EnqueueBrowser(new
@@ -288,7 +291,7 @@ public sealed class WebBridgeSession
                     zone.ZoneId,
                     zone.Width,
                     zone.Height,
-                    blockedTiles = regenerated.Select(tile => new { tile.X, tile.Y })
+                    blockedTiles = regeneratedLayout.BlockedTiles.Select(tile => new { tile.X, tile.Y })
                 });
                 break;
             case ChatBroadcastMessage chat:
