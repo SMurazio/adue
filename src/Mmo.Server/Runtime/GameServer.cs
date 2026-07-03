@@ -4127,7 +4127,12 @@ public sealed class GameServer
                 continue;
             }
 
-            var spawnTile = _zone.ResolveSpawnTile(Zone.DefaultSpawnTile);
+            // AUTHORED-MAP M3 review fix: death respawn goes to the zone's SPAWN ANCHORS (the town plaza on the
+            // authored map; the historical distribution grid on genVersion 1) — NOT the legacy DefaultSpawnTile,
+            // which on the 384x384 world resolves to bare wilderness in the far southwest (it is walkable, so
+            // ResolveSpawnTile returned it verbatim). Same round-robin the login path uses, so death and login
+            // land players in the same place.
+            var spawnTile = _zone.NextSpawnTile();
             _zone.Teleport(entity, spawnTile);
             entity.RestoreFullHealth();
             session.MarkAlive();
