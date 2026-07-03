@@ -36,24 +36,32 @@ interest disc, and every candidate in it pays the distance test. This is exactly
 "spatial-grid cell size" DECISION item. A smaller cell (e.g. r/2 or a fixed 8) shrinks the over-gather; cheap,
 contained, measurable with this same profile. RECOMMENDED first lever when density work resumes.
 
-## Candidate levers beyond that (context for the decision, NOT scope)
+## Next levers, RANKED for THIS game's topology (documented per the user; build nothing until density demands)
 
-How comparable games run hundreds+ (user asked, 2026-07-02):
-- **WoW-class**: movement replicated as EVENTS (start/heading-change/stop + client-side simulation; NPC splines) —
-  ~zero per-tick cost per steady mover; hides jitter by accepting remote latency (conflicts with our
-  no-added-lag principle up close, fine at distance).
-- **Planetside-class**: SEND-RATE LOD — full rate near the viewer, lower Hz tiers further out + dead-reckoning.
-  Our correction smoothing + velocity dead-reckoning already tolerate sparse samples (the harness's bursty
-  scenario is exactly this), so LOD is the most compatible lever. Targets serialize/net, which are NOT the
-  bottleneck at current scale.
-- **Skip-unchanged-velocity re-sends**: a half-step toward event-driven for steady movers (velocity already
-  replicated); careful — reintroduces the staleness class the per-tick force-include retired.
-- **Threading/split**: the guardrail says single process until metrics justify — at ~21% of a core @200 (radius
-  18) the metrics do NOT justify it.
-- **Albion-class (the closest comparable — also a C# server)**: one process per ZONE scaled horizontally, hot
-  zones live-migrated to dedicated hardware, zone population CAPPED + queued, remotes rendered with ~100-200ms
-  interpolation delay at ~10Hz-class update rates, plus years of hot-loop optimization. Existence proof a C#
-  single-process zone hosts ~300 in combat; every piece trades something (remote latency, caps) we don't yet.
+**User insight (2026-07-03) that re-ranks everything:** the game is TOP-DOWN with the camera ≈ the AOI disc (the
+zoom clamp ties them, `0dbc5c7`) — there is NO "far away but on screen" tier, so DISTANCE-BASED send-rate LOD
+(the Planetside lever) optimizes a tier that doesn't exist here. Crossed off. What applies instead:
+
+- **A. Uniform snapshot rate ≠ sim rate (20Hz sim → 10Hz send). FIRST lever when wanted.** Halves aoi+ser+net
+  AND per-client bandwidth (~108 → ~54 kbps) in one global knob, no tiers. De-risked BY the shipped correction
+  smoothing + dead-reckoning (`daa71fd` — the harness's bursty scenario proves 100ms sample gaps render clean);
+  extrapolate-to-now means zero added render latency, just larger (smoothed) corrections. Small change: decouple
+  the snapshot cadence from the tick in the broadcast pass; keep reliable events (spawn/despawn/actions) per-tick.
+- **B. Subscription-based incremental AOI (temporal coherence). The deep fix.** Today every tick re-gathers +
+  re-tests ~90 candidates × N viewers though the in-AOI set barely changes. Viewers subscribe to grid cells;
+  entity cell-crossings update only affected viewers' sets → O(changes) not O(viewers × candidates). Kills the
+  dominant remaining term (aoi 3.58ms @200). The classic MMO interest-management endgame; a real design task.
+- **C. Shared per-tick entity encoding.** Serialize re-encodes the SAME global entity state per viewer. Encode
+  once per tick, memcpy slices into per-viewer packets — in crowds (200 viewers × the same ~50 entities) that is
+  most of the 1.48ms serialize term. Contained; pairs well with A.
+- **D. One Release-build profile run** (`review-stress -Release`): all numbers here are Debug; true capacity is
+  likely 1.5–3× better. Run before any future capacity worry.
+- **WoW-class event-driven movement** (start/heading-change/stop + client sim): the far end of the spectrum —
+  ~zero per-mover cost, but remote latency up close conflicts with the no-added-lag principle. Only if targets
+  go far past ~500.
+- **Threading/split (Albion zone-per-process)**: the guardrail says single process until metrics justify — at
+  ~14% of a core @200 post-fix, they do not. Albion context: one C# process per zone, hot zones migrated to
+  dedicated hardware, zone caps + queue, ~10Hz-class updates with 100-200ms remote interp delay.
 
 Measurement machinery (for the record): `TickBudgetRecorder` per-phase budgets + schedule drift are ALWAYS-ON and
 printed by `/metrics` (`budgetMs move/aoi/ser/net/persist/other`, `driftMs`); `review-stress.cmd -Clients N`
