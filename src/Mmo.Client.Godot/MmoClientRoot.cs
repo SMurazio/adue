@@ -53,6 +53,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// entity mesh + the spawn-at-exactly-r case). Re-derived if the hello radius changes; an admin can still widen
 	// the clamp live via the F1 zoom-range knobs (deliberate override).
 	private const float AoiEdgeHideMarginUnits = 2f;
+	// MAX ZOOM-OUT FLOOR (user, 2026-07-03): the AOI-derived clamp at the 18u interest radius lands at ~13.5 —
+	// too tight in play. The user set the max zoom-out to 15: the derived clamp can allow MORE (if the AOI radius
+	// ever grows) but never LESS than this, trading a ~1.5u worst-case screen-corner AOI-edge peek (entity pop-in)
+	// for the wider view. The F1 zoom-range knobs still override live.
+	private const float UserZoomOutFloor = 15f;
 	private float _appliedAoiZoomClampRadius = -1f;
 	// The fixed camera rig offset (also the pitch source for the AOI zoom clamp) — one definition for both the
 	// per-frame follow and the clamp math.
@@ -2112,7 +2117,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var usableRadius = server.InterestRadiusUnits - AoiEdgeHideMarginUnits;
 		var maxSize = usableRadius > 0f ? usableRadius / cornerFactor : _cameraSizeMin;
 
-		_cameraSizeMax = Mathf.Max(_cameraSizeMin, maxSize);
+		_cameraSizeMax = Mathf.Max(_cameraSizeMin, Mathf.Max(maxSize, UserZoomOutFloor));
 		if (_cameraSize > _cameraSizeMax)
 		{
 			_cameraSize = _cameraSizeMax;
