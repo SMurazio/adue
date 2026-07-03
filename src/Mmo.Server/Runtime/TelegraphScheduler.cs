@@ -1,4 +1,5 @@
 using Mmo.Shared.Domain;
+using Mmo.Shared.Protocol;
 
 namespace Mmo.Server.Runtime;
 
@@ -75,8 +76,21 @@ public sealed class TelegraphScheduler
     public ulong Schedule(ulong casterId, TelegraphShape shape, uint startTick, uint resolveTick, int damage, string source)
     {
         var id = _nextTelegraphId++;
-        _pending.Add(new PendingTelegraph(id, casterId, shape, startTick, resolveTick, damage, source));
+        _pending.Add(new PendingTelegraph(id, casterId, QuantizeToWire(shape), startTick, resolveTick, damage, source));
         return id;
+    }
+
+    // HONEST-EDGE (T2 review followup 1): resolve the EXACT shape the wire ships. The codec quantizes origin+radius
+    // to Q12.4 on send; resolving the raw double shape here would let the drawn rim and the damage boundary disagree
+    // by up to ~1/32 unit per axis (cast origins are arbitrary continuous positions, never on the 1/16 grid). The
+    // fair-and-responsive pillar demands the drawn edge IS the rule EXACTLY, so quantize ONCE at schedule time — the
+    // same rounding the codec applies (PositionEncoding round-trip for the origin, round-away-from-zero sixteenths
+    // for the radius) — and server resolve, wire, and client decal all see one identical shape.
+    private static TelegraphShape QuantizeToWire(TelegraphShape shape)
+    {
+        var (qx, qy) = PositionEncoding.Encode(shape.Origin);
+        var radius = Math.Round(shape.Radius * PositionEncoding.Scale, MidpointRounding.AwayFromZero) / PositionEncoding.Scale;
+        return shape with { Origin = PositionEncoding.Decode(qx, qy), Radius = radius };
     }
 
     // TELEGRAPH T2: copy the wire projection of every still-pending telegraph into `destination` (cleared first; the

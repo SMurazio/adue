@@ -4,13 +4,9 @@ No blockers/majors; codec symmetry, deadline-form sync, presentation-only clock,
 hygiene all verified sound. Surviving findings, priority order — (1) matters to the honest-telegraph
 pillar and should land BEFORE/with the feel-test:
 
-1. **Quantize the shape AT SCHEDULE, not just on send (MINOR — edge honesty).** ProtocolCodec quantizes
-   origin+radius Q12.4 on send only; TelegraphScheduler resolves against the UNQUANTIZED double shape,
-   and cast origins (actor/target positions) never sit on the 1/16 grid — so the drawn rim and the
-   damage boundary can disagree by up to ~1/32 unit per axis (~0.05 combined worst case): a center just
-   outside the drawn rim can be hit, or just inside and missed. Fix: quantize origin+radius once in
-   TelegraphScheduler.Schedule (same rounding as PositionEncoding) so the server resolves the exact
-   shape it ships. The drawn edge then IS the rule, exactly — the fair-and-responsive pillar's demand.
+1. ~~Quantize the shape AT SCHEDULE~~ **DONE** — TelegraphScheduler.Schedule now quantizes origin+radius
+   to the wire's Q12.4 grid (QuantizeToWire), pinned by a discriminating resolve test (victim inside the
+   quantized circle, outside the raw one).
 
 2. **Remember-known only on successful send (MINOR — fairness).** GameServer ~1414: the telegraph AOI
    diff calls RememberKnownTelegraph unconditionally, ignoring TrySend's bool. A failed send on a

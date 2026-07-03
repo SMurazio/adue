@@ -88,6 +88,32 @@ public sealed class TelegraphSchedulerTests
         Assert.Equal(2d, shape.BoundingRadius);
     }
 
+    // HONEST-EDGE (T2 review followup 1): Schedule quantizes the shape to the SAME Q12.4 grid the wire ships, so the
+    // server resolves EXACTLY the circle every client draws. The victim discriminates: its distance from the
+    // QUANTIZED circle (origin 10.0625, radius 2.0625) is 2.0375 — inside — but from the RAW schedule args
+    // (10.04, 2.04) it is 2.06 — outside. Resolving the unquantized shape fails this test.
+    [Fact]
+    public void ScheduleQuantizesShapeToWireGrid_ResolveAndWireSeeTheSameCircle()
+    {
+        var world = new WorldState();
+        var victim = world.AddTransient(1, EntityKind.Player, "Rim", new TileCoord(12, 10), Direction8.S);
+        MoveTo(world, victim, new WorldVector(12.1d, 10d));
+        var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
+
+        scheduler.Schedule(999, TelegraphShape.Circle(new WorldVector(10.04d, 10d), 2.04d), startTick: 10, resolveTick: 30, damage: 15, source: "quantize pin");
+
+        // The wire projection carries the quantized shape — what the client draws IS what resolves below.
+        var active = new List<TelegraphScheduler.ActiveTelegraph>();
+        scheduler.CopyActiveTo(active);
+        Assert.Equal(10.0625d, active[0].Shape.Origin.X, 6); // round(10.04·16 = 160.64) = 161 → 10.0625
+        Assert.Equal(10d, active[0].Shape.Origin.Y, 6);      // on-grid axis unchanged
+        Assert.Equal(2.0625d, active[0].Shape.Radius, 6);    // round(2.04·16 = 32.64) = 33 → 2.0625
+
+        scheduler.ResolveDue(30);
+        var hit = Assert.Single(landed);
+        Assert.Same(victim, hit.Victim); // 12.1 − 10.0625 = 2.0375 ≤ 2.0625 — inside the QUANTIZED circle only
+    }
+
     [Fact]
     public void ResolvesAtExactlyTickT_PlayerInsideAtT_IsHitOnce()
     {
