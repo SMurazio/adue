@@ -2284,6 +2284,12 @@ public sealed class GameServer
             return;
         }
 
+        // T1-review followup: clamp to the SAME ceiling the manifest/F1 path enforces. Unclamped, a fat-fingered
+        // /slam 100000 makes the resolve-tick spatial gather iterate ~(2R/cell)^2 cells inside the tick loop (a
+        // multi-second single-thread stall), and an absurd radius overflows the gather's (int)Ceiling into a
+        // 1-tile query that silently MISSES — the admin dev tool must not be the one unbounded radius source.
+        radius = Math.Min(radius, MonsterTypeRegistry.MaxSlamRadiusUnits);
+
         var windupMs = 1500;
         if (parts.Length >= 3 && (!int.TryParse(parts[2], out windupMs) || windupMs < 0))
         {

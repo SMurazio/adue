@@ -75,7 +75,9 @@ public sealed class MonsterTypeRegistry
     private const int MinSlamCooldownMs = 0;
     private const int MaxSlamCooldownMs = 60000;
     private const double MinSlamRadiusUnits = 0d;
-    private const double MaxSlamRadiusUnits = 16d;
+    // internal: /slam (the admin force-cast) clamps to the SAME ceiling as manifest/F1 tuning — the T1 review showed
+    // an unclamped dev radius stalls the resolve-tick gather (cells ~ (2R/cell)^2) or int-overflows it into a miss.
+    internal const double MaxSlamRadiusUnits = 16d;
     private const int MinSlamWindupMs = 0;
     private const int MaxSlamWindupMs = 10000;
     private const int MinSlamDamage = 0;
