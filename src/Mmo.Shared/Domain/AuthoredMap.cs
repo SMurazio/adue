@@ -272,4 +272,86 @@ public sealed class AuthoredMap
             frontier.Push(tile);
         }
     }
+
+    /// <summary>
+    /// The pure INVERSE of <see cref="Parse"/> (town-blockout D2a, "dump-to-ASCII"): renders this map
+    /// back to the same row-major ASCII grid format Parse consumes, so any stamped map — generated or
+    /// hand-edited — can be eyeballed or diffed outside the live client. Round-trips exactly: for any
+    /// well-formed `rows`, <c>AuthoredMap.Parse(rows).ToAsciiRows()</c> is char-for-char identical to
+    /// `rows`. The underlying (blocked, category, spawn?, marker?) state does not uniquely determine a
+    /// char on its own — 'S' and ':' share (walkable, Cobble), and 'H'/'P'/'T'/'R' share (walkable,
+    /// Grass) with '.' — so this picks the SAME precedence Parse's switch effectively encodes:
+    /// out-of-world, then blocked-water/-wall, then a prop marker, then a spawn anchor, then the plain
+    /// surface category. A tile can never be BOTH a spawn and a marker (Parse's switch sets exactly one
+    /// per char), so that ordering is never actually contested — it only matters that markers/spawns are
+    /// checked before falling back to the plain category, since both paint over a Grass/Cobble tile that
+    /// would otherwise look unmarked.
+    /// </summary>
+    public string[] ToAsciiRows()
+    {
+        var spawnSet = new HashSet<TileCoord>(SpawnTiles);
+        var markerByTile = new Dictionary<TileCoord, AuthoredMarkerKind>();
+        foreach (var marker in Markers)
+        {
+            markerByTile[marker.Tile] = marker.Kind;
+        }
+
+        var rows = new string[Height];
+        var row = new char[Width];
+        for (var y = 0; y < Height; y++)
+        {
+            for (var x = 0; x < Width; x++)
+            {
+                row[x] = ToChar(new TileCoord(x, y), spawnSet, markerByTile);
+            }
+
+            rows[y] = new string(row);
+        }
+
+        return rows;
+    }
+
+    private char ToChar(TileCoord tile, HashSet<TileCoord> spawnSet, Dictionary<TileCoord, AuthoredMarkerKind> markerByTile)
+    {
+        if (IsOutOfWorld(tile))
+        {
+            return ' ';
+        }
+
+        if (IsBlocked(tile))
+        {
+            // Every blocked tile is either a wall (default Grass category, never painted) or water (the
+            // one blocked category Parse actually assigns) — see the '#'/'~'/' ' cases in Parse.
+            return CategoryAt(tile) == SurfaceCategory.Water ? '~' : '#';
+        }
+
+        if (markerByTile.TryGetValue(tile, out var kind))
+        {
+            return kind switch
+            {
+                AuthoredMarkerKind.House => 'H',
+                AuthoredMarkerKind.Portal => 'P',
+                AuthoredMarkerKind.TreePin => 'T',
+                AuthoredMarkerKind.RockPin => 'R',
+                _ => throw new InvalidOperationException($"ToAsciiRows: unknown marker kind {kind} at {tile}."),
+            };
+        }
+
+        if (spawnSet.Contains(tile))
+        {
+            return 'S';
+        }
+
+        return CategoryAt(tile) switch
+        {
+            SurfaceCategory.Grass => '.',
+            SurfaceCategory.Dirt => ',',
+            SurfaceCategory.Cobble => ':',
+            SurfaceCategory.DungeonStone => '-',
+            // A walkable tile can never be Water (Parse only assigns Water to the blocked '~' case) — an
+            // authored-content invariant broken only by a future bug, so fail loudly like Parse does.
+            _ => throw new InvalidOperationException(
+                $"ToAsciiRows: walkable tile {tile} has non-paintable category {CategoryAt(tile)}."),
+        };
+    }
 }

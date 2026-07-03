@@ -219,6 +219,34 @@ public sealed class AuthoredMapTests
     }
 
     [Fact]
+    public void ToAsciiRowsRoundTripsExactlyForEveryAlphabetChar()
+    {
+        // town-blockout D2a ("dump-to-ASCII", M3-REVIEW-FOLLOWUPS item 3): ToAsciiRows is the pure
+        // INVERSE of Parse — parsing AlphabetRows (which already exercises every alphabet char, see
+        // ParseClassifiesEveryAlphabetChar above) and dumping it straight back must reproduce the EXACT
+        // original rows, char-for-char. This is what fails if a future edit to ToAsciiRows' precedence
+        // (e.g. checking the plain category before a marker/spawn, so a stamped 'H' or 'S' silently
+        // degrades to '.'/'.'  or ':') stops it from being a true inverse of Parse's switch.
+        var map = AuthoredMap.Parse(AlphabetRows);
+        Assert.Equal(AlphabetRows, map.ToAsciiRows());
+    }
+
+    [Fact]
+    public void ToAsciiRowsRoundTripsForTheRealShippedMaps()
+    {
+        // The same round-trip proven above per-char, now at REAL scale: M1's small alphabet test grid
+        // and the actual 384x384 M3 town/floor-1 layout (every landmark: the wall+gate, all 7 houses, 2
+        // portals, 2 pins, 6 spawns, the pond/tarn, the north pass). A precedence bug that only shows up
+        // with certain neighbor combinations (not exercised by the small alphabet grid alone) would still
+        // be caught here.
+        foreach (var rows in new[] { AuthoredMaps.AlphabetTestMap, AuthoredMaps.TownAndFloor1 })
+        {
+            var map = AuthoredMap.Parse(rows);
+            Assert.Equal(rows, map.ToAsciiRows());
+        }
+    }
+
+    [Fact]
     public void AlphabetTestMapExercisesEveryAlphabetChar()
     {
         // M1's contract, kept after M3 swapped the real map in: the 12x12 test grid keeps EVERY

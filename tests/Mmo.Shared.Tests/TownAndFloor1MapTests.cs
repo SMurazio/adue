@@ -170,4 +170,25 @@ public sealed class TownAndFloor1MapTests
         // No out-of-world padding on this map (fully rectangular world).
         Assert.Empty(Map.OutOfWorldTiles);
     }
+
+    [Fact]
+    public void GateRowHasExactlyFourWalkableTiles()
+    {
+        // M3-REVIEW-FOLLOWUPS item 2: the "only-one-gate" structural invariant. StructuralLandmarksAre-
+        // WhereTheBriefPutsThem above only SAMPLES row 111 (walls at x50/x350, the 4-wide gate walkable,
+        // the two shoulder tiles blocked) — it would stay green even if a FUTURE map edit accidentally
+        // punched a SECOND hole elsewhere on that row, since none of those sampled points touch it. A
+        // deliberate map edit is expected to re-pin ContentHashIsPinnedToShippedLiteral (M1 review F1's
+        // documented process), but nothing forces a human to also re-examine the wall's exact shape — so
+        // THIS test counts every walkable tile on the ENTIRE row instead of sampling a few: exactly the
+        // 4-wide gate (x191-194), independent of the hash. An accidental second gap anywhere else on
+        // y=111 fails this even though the hash literal, the sampled wall/gate points, AND the
+        // reachability test (a second hole only adds MORE paths — it can never orphan a pocket) would
+        // all stay green.
+        var walkableXs = Enumerable.Range(0, Map.Width)
+            .Where(x => Map.IsWalkable(new TileCoord(x, 111)))
+            .ToArray();
+
+        Assert.Equal(new[] { 191, 192, 193, 194 }, walkableXs);
+    }
 }

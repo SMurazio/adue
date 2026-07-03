@@ -29,6 +29,11 @@ public sealed class TelegraphWireIntegrationTests
     private const int TickRate = 20;
     private const int BaseStepCooldownMs = 140;
 
+    // M3-REVIEW-FOLLOWUPS item 1 (the death-respawn-anchor pin): the REAL genVersion 2 town map, parsed the same
+    // way TownAndFloor1MapTests/AuthoredWorldTests do, so the expected respawn anchors are the SHIPPED `S` tiles —
+    // not a hand-copied literal that could silently drift from the map.
+    private static readonly AuthoredMap AuthoredWorldMap = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
+
     [Fact]
     public async Task ScheduleTimeViewersAndLateJoinersReceiveTheSameTelegraphOnce()
     {
@@ -128,6 +133,165 @@ public sealed class TelegraphWireIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task RealMonsterSlamCast_RootsThenLandsAtTheLockedOriginByTheWireResolveTick()
+    {
+        // SLAM-REVIEW-FOLLOWUPS item 1 (the important one): BasicRoamerBehaviorTests' SlamChannel_*/SlamLeap_*
+        // tests drive a FAKE trySlam/beginSlamLeap pair (PlanSlam/CreateSlamLeap) that RE-IMPLEMENTS GameServer's
+        // timing formula — a sign/min error in the REAL derivation (leapDurationTicks =
+        // min(HopAirborneTicks, windupTicks); LeapStartTick = resolveTick − leapDurationTicks + 1, both inside
+        // GameServer.TryBeginMonsterSlam/BeginMonsterSlamLeap) would ship green through that suite alone. This
+        // test drives the REAL methods end-to-end: `/monster` spawns a live slime ON the admin's own tile — so it
+        // is instantly within BOTH aggro range and the slam trigger range (min(AttackRangeUnits, HopDistanceUnits)
+        // = 1.5 for the shipped slime, so this is the earliest/only way to reach the cast live) — and its brain's
+        // REAL TrySlamDelegate call schedules the telegraph, then the REAL BeginSlamLeapDelegate executes the leap
+        // through the REAL tick loop. Everything below is observed PURELY over the wire (TelegraphMessage +
+        // WorldSnapshotMessage), with no test-side reimplementation of the timing math beyond the ONE fact the
+        // manifest states directly (slime slamWindupMs=1500 @ 20 Hz Ceiling-quantizes to exactly 30 ticks).
+        //
+        // DECLINED sub-pins (documented per the todo's own "if impractical, don't force it" guidance — see the
+        // review-request briefing for the full reasoning): (b) the reachability-decline case and (c) the
+        // airborne-caster-decline case are UNREACHABLE live with the shipped slime numbers (AttackRangeUnits ==
+        // HopDistanceUnits == 1.5, so the two gates can never diverge through the real AI trigger; the channel's
+        // own root + GameServer's grounded gate mean the brain never even ATTEMPTS a cast while airborne) — this
+        // batch is test-only (no manifest edits to author a divergent type, no reflection into the private method).
+        // (d) "aims at the QUANTIZED origin, not the raw target" is unobservable over the wire: TelegraphScheduler's
+        // quantization and the WorldSnapshot position codec use the IDENTICAL ~1/16-unit PositionEncoding grid, so
+        // a raw-vs-quantized landing difference is smaller than the wire can even represent.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Admin"]);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var admin = new TelegraphClient("Admin");
+            admin.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => admin.IsLoggedIn, admin);
+
+            admin.SendChat("/monster");
+            await WaitUntilAsync(() => admin.Spawns.Any(s => s.Kind == EntityKind.Monster), admin);
+            var monsterId = admin.Spawns.First(s => s.Kind == EntityKind.Monster).NetworkId;
+
+            // The real cast: a TelegraphMessage the slime's own AI scheduled through the real TryBeginMonsterSlam
+            // (NextSlamTick is seeded at registration, so the very first eligible tick — once aggro acquires,
+            // ~0.5s scan cadence — casts immediately; nothing else in this test schedules a telegraph).
+            await WaitUntilAsync(() => admin.Telegraphs.Count >= 1, admin);
+            var cast = admin.Telegraphs[0];
+
+            // THE WINDUP-TICK MATH: 1500ms @ 20Hz Ceiling-quantizes to EXACTLY 30 ticks (CooldownMsToTicks) — the
+            // first half of the real derivation (resolveTick = serverTick + windupTicks).
+            Assert.Equal(30u, cast.ResolveTick - cast.StartTick);
+
+            // NOT EARLY: some sample strictly before the resolve tick (but within the 6-tick airborne window —
+            // HopAirborneMs=300 @ 20Hz=6 ticks — the leap is force-included every tick it is in flight) must show
+            // the slime still AIRBORNE. A sign/min error that starts (or lands) the leap much too early would fail
+            // this by having already grounded well before the resolve tick.
+            await WaitUntilAsync(
+                () => admin.SamplesFor(monsterId).Any(s => s.Tick < cast.ResolveTick && s.Tick >= cast.ResolveTick - 6 && s.VerticalOffset > 0d),
+                admin);
+
+            // LANDS AT THE LOCKED ORIGIN BY THE RESOLVE TICK, GROUNDED: poll until a grounded sample at/after the
+            // resolve tick arrives, then confirm it put the slime AT the telegraph's own locked origin — the SAME
+            // quantized center the client draws and the resolver tests — not off in the weeds from a derivation bug.
+            await WaitUntilAsync(
+                () => admin.SamplesFor(monsterId).Any(s => s.Tick >= cast.ResolveTick && s.Tick <= cast.ResolveTick + 3 && s.VerticalOffset == 0d),
+                admin);
+            var landed = admin.SamplesFor(monsterId)
+                .First(s => s.Tick >= cast.ResolveTick && s.Tick <= cast.ResolveTick + 3 && s.VerticalOffset == 0d);
+            Assert.True(
+                (landed.Position - cast.Shape.Origin).Length <= 0.15d,
+                $"landed at {landed.Position} (tick {landed.Tick}), expected the locked origin {cast.Shape.Origin} (cast at tick {cast.StartTick}, resolve {cast.ResolveTick}).");
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task DeathRespawnLandsOnAnAuthoredSpawnAnchor_NotLegacyWilderness()
+    {
+        // M3-REVIEW-FOLLOWUPS item 1 (MEDIUM-HIGH review finding, already FIXED by the orchestrator:
+        // RespawnPlayers now calls Zone.NextSpawnTile instead of the legacy Zone.DefaultSpawnTile). This is the
+        // regression pin the review required: on the REAL 384x384 authored town map (this file's other tests use
+        // a small 64x64 procedural world, which has no authored anchors to test against), kill the admin's own
+        // character with a lethal /slam, let the (shortened, for test speed) respawn delay elapse, and assert the
+        // respawned tile is one of the map's authored `S` anchors — never TileGrid.DefaultSpawnTile (8,8), which
+        // is walkable on the 384x384 world (the bug shipped SILENTLY: no crash, just a player waking up alone in
+        // the far southwest instead of the plaza). Reverting RespawnPlayers' NextSpawnTile call back to
+        // DefaultSpawnTile is exactly what this test catches.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateAuthoredOptions(port, database.ConnectionString, admins: ["Admin"]);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var admin = new TelegraphClient("Admin");
+            admin.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => admin.IsLoggedIn && admin.OwnNetworkId != 0, admin);
+
+            // Shrink the respawn delay (live default 2000ms) so the test doesn't wait on it.
+            admin.SendAdminSetTuning("player.respawnMs", 100d);
+            await PollForAsync(TimeSpan.FromMilliseconds(150), admin); // let the tuning change land before the kill
+
+            // Login already sent a "full HP" PlayerStatsMessage (the initial truth) — clear it so the wait below
+            // for a refilled-HP message can only be satisfied by the POST-RESPAWN one, not this stale login one.
+            admin.ClearStats();
+
+            // A lethal self-slam: short windup, damage well past the 100 HP default so ONE hit kills.
+            admin.SendChat("/slam 2 200 500");
+            await WaitUntilAsync(() => admin.DamageEvents.Count >= 1, admin);
+
+            // Respawn confirmed by the refilled-vitals broadcast: RespawnPlayers -> RestoreFullHealth ->
+            // SendPlayerStats fires strictly AFTER the teleport in the same per-tick pass.
+            await WaitUntilAsync(() => admin.Stats.Any(s => s.Stats.Health == s.Stats.MaxHealth && s.Stats.MaxHealth > 0), admin);
+            await PollForAsync(TimeSpan.FromMilliseconds(200), admin); // let the post-teleport snapshot land too
+
+            Assert.True(admin.SamplesFor(admin.OwnNetworkId).Count > 0, "never observed a WorldSnapshot sample for the admin's own entity.");
+            var respawnedTile = admin.SamplesFor(admin.OwnNetworkId)[^1].Position.ToTileRounded();
+
+            Assert.Contains(respawnedTile, AuthoredWorldMap.SpawnTiles);
+            Assert.NotEqual(new TileCoord(8, 8), respawnedTile); // TileGrid.DefaultSpawnTile — the legacy fallback, named explicitly
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    private static ServerOptions CreateAuthoredOptions(int port, string connectionString, string[] admins)
+    {
+        return new ServerOptions(
+            port,
+            TickRate,
+            "telegraph-wire-authored-test",
+            DatabaseProvider.Sqlite,
+            connectionString,
+            TestSqliteDatabase.MigrationsPath,
+            AuthoredMaps.TownAndFloor1Width,
+            AuthoredMaps.TownAndFloor1Height,
+            BaseStepCooldownMs,
+            15,
+            30f,
+            150,
+            SpawnDistribution.Authored,
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
+        {
+            GenVersion = TerrainGenerator.AuthoredGenVersion,
+            ResourceNodeDensityTilesPerNode = 0,
+        };
+    }
+
     private static ServerOptions CreateOptions(int port, string connectionString, string[] admins)
     {
         return new ServerOptions(
@@ -222,6 +386,20 @@ public sealed class TelegraphWireIntegrationTests
         public List<DamageEventMessage> DamageEvents { get; } = [];
         public bool IsLoggedIn { get; private set; }
 
+        // SLAM-REVIEW-FOLLOWUPS item 1 (the real-TryBeginMonsterSlam integration pin) + M3-REVIEW-FOLLOWUPS item 1
+        // (the death-respawn-anchor pin): both need to identify a spawned entity (the /monster slime; the admin's
+        // own player) by NetworkId and read its WorldSnapshot position/VerticalOffset OVER TIME (per-tick samples,
+        // not just the latest) — the leap-landing pin specifically needs to see BOTH an airborne sample before the
+        // resolve tick AND a grounded-at-the-origin sample at/after it, so only the newest sample is not enough.
+        public List<EntitySpawnMessage> Spawns { get; } = [];
+        public List<PlayerStatsMessage> Stats { get; } = [];
+        public uint OwnNetworkId { get; private set; }
+
+        private readonly Dictionary<uint, List<(uint Tick, WorldVector Position, double VerticalOffset)>> _samples = [];
+
+        public IReadOnlyList<(uint Tick, WorldVector Position, double VerticalOffset)> SamplesFor(uint networkId) =>
+            _samples.TryGetValue(networkId, out var list) ? list : [];
+
         public void Connect(int port, string key)
         {
             _client.Start();
@@ -238,6 +416,14 @@ public sealed class TelegraphWireIntegrationTests
 
         public void SendChat(string text) =>
             Send(new ChatSendMessage(text), DeliveryMethod.ReliableOrdered);
+
+        public void SendAdminSetTuning(string key, double value) =>
+            Send(new AdminSetTuningMessage(key, value), DeliveryMethod.ReliableOrdered);
+
+        // The initial login sends a PlayerStatsMessage too (full HP, the "initial truth" per COMBAT-S1) — a test
+        // waiting on "HP refilled" must clear this first, or the wait is satisfied instantly by the LOGIN message
+        // and never actually observes the post-respawn refill.
+        public void ClearStats() => Stats.Clear();
 
         public void Dispose()
         {
@@ -268,7 +454,29 @@ public sealed class TelegraphWireIntegrationTests
                     case DamageEventMessage damage:
                         DamageEvents.Add(damage);
                         break;
+                    case EntitySpawnMessage spawn:
+                        Spawns.Add(spawn);
+                        if (spawn.DisplayName == _name && spawn.Kind == EntityKind.Player)
+                        {
+                            OwnNetworkId = spawn.NetworkId;
+                        }
+
+                        break;
+                    case PlayerStatsMessage stats:
+                        Stats.Add(stats);
+                        break;
                     case WorldSnapshotMessage snapshot:
+                        foreach (var entity in snapshot.Entities)
+                        {
+                            if (!_samples.TryGetValue(entity.NetworkId, out var list))
+                            {
+                                list = [];
+                                _samples[entity.NetworkId] = list;
+                            }
+
+                            list.Add((snapshot.ServerTick, entity.Position, entity.VerticalOffset));
+                        }
+
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         break;
                 }

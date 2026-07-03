@@ -52,6 +52,12 @@ public sealed class BasicRoamerBehaviorTests
 
         public int TrackedCount => _ai.TrackedCount;
 
+        // SLAM-REVIEW-FOLLOWUPS item 3 (the deferred-start retry pin): exposes the harness's real executor so a
+        // test can manually occupy it with an unrelated in-flight action BEFORE driving any AI ticks — the
+        // "contrived def" the todo calls for, which forces BeginSlamLeapDelegate's own TryStart to decline on
+        // every retry until the blocker frees. A plain read-only passthrough; nothing else about the harness changes.
+        public ServerActionExecutor Executor => _executor;
+
         public void Register(WorldEntity monster, uint serverTick, uint pauseMinTicks, uint pauseMaxTicks, uint aggroScanIntervalTicks)
             => _ai.Register(monster, serverTick, pauseMinTicks, pauseMaxTicks, aggroScanIntervalTicks);
 
@@ -781,6 +787,139 @@ public sealed class BasicRoamerBehaviorTests
         Assert.True(Distance(monster.Position, player.Position) > 3d,
             "the slime ended up at the dodged target — the leap must aim at the locked origin, not track the target.");
         Assert.Equal(0, hits[0]); // and no melee ever fired inside the channel.
+    }
+
+    [Fact]
+    public void SlamLeap_StillAirborneOneTickBeforeResolve_ThenGroundedExactlyOnResolveTick()
+    {
+        // SLAM-REVIEW-FOLLOWUPS item 2 (the two-sided leap-landing pin). SlamChannel_RootsFromCastToResolve_...
+        // above only checks the LATE side — its assertions on the landed position all run AT OR AFTER the resolve
+        // tick, so an off-by-one that lands the arc a tick EARLY (e.g. flipping `leapStartTick = resolveTick −
+        // leapDurationTicks + 1` to `... - leapDurationTicks` — dropping the "+1") would already show a grounded,
+        // on-origin slime by the time that test's loop reaches the resolve tick, and it would stay GREEN. This
+        // test adds the missing EARLY-side check: one tick before the resolve tick, the slime must STILL be
+        // mid-arc (VerticalOffset > 0, not yet at the origin) — an early landing zeroes VerticalOffset (and is
+        // already at/near the origin) a tick sooner than this, which is exactly what fails here.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(33, 32), Direction8.S);
+        var hits = new int[1];
+        var castTick = new uint[1];
+        var origin = new WorldVector[1];
+        var ai = CreateCombatAi(
+            seed: 7, grid, world, player, hits,
+            trySlam: PlanSlam(castTick, origin),
+            beginSlamLeapFactory: CreateSlamLeap);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+        var tunables = CombatTunables(attackDamage: 10, slamEnabled: true, slamCooldownTicks: 500);
+
+        ai.StepMonster(monster, 1, StepCooldownTicks, tunables);
+        Assert.Equal(1u, castTick[0]);
+        var resolveTick = castTick[0] + SlamWindupTicks; // 21 — same shipped-shape numbers as the headline test.
+
+        for (uint tick = 2; tick < resolveTick; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+        }
+
+        // ONE TICK BEFORE resolve (tick 20): still mid-arc, not yet at the locked origin. An EARLY-landing
+        // regression would already show VerticalOffset == 0 and Position == origin here.
+        Assert.True(monster.VerticalOffset > 0d,
+            $"expected the slime still airborne at tick {resolveTick - 1} (one tick before resolve); " +
+                "VerticalOffset was 0 — the leap landed EARLY.");
+        Assert.True(Distance(monster.Position, origin[0]) > 1e-3,
+            "expected the slime NOT yet at the locked origin one tick before resolve — the leap landed EARLY.");
+
+        ai.StepMonster(monster, resolveTick, StepCooldownTicks, tunables);
+
+        // ON the resolve tick: grounded, exactly at the locked origin — the LATE side, re-confirmed here so this
+        // test is a complete, self-contained two-sided pin (not dependent on the headline test also passing).
+        Assert.Equal(0d, monster.VerticalOffset, 1e-9);
+        Assert.True(Distance(monster.Position, origin[0]) <= 1e-3,
+            $"leap landed {monster.Position}, expected the locked origin {origin[0]} exactly on the resolve tick.");
+    }
+
+    [Fact]
+    public void SlamLeap_DeferredStart_ExecutorBusyPastThePlannedLeapStartTick_StillLandsExactlyOnResolveTick()
+    {
+        // SLAM-REVIEW-FOLLOWUPS item 3 (the deferred-start retry pin). StepSlamChannel retries _beginSlamLeap
+        // every tick from LeapStartTick until the executor accepts (GameServer's own comment: "an in-flight hop
+        // arc from just before the cast, or a pre-armed longer movement cadence the root's max-floor could not
+        // shorten, can defer the accept"). That retry path is UNREACHABLE with the live slime numbers (the
+        // GROUNDED gate in GameServer.TryBeginMonsterSlam refuses to even CAST while an action is active, and the
+        // channel's own root blocks the AI from starting a competing hop mid-windup) — so nothing in the live game
+        // currently drives the executor busy at the planned leap-start tick. Pin it directly: manually occupy the
+        // executor with an unrelated in-place "stall" jump (the "contrived def" the todo calls for) that outlives
+        // the planned LeapStartTick by one tick, so BeginSlamLeapDelegate's TryStart declines on every retry until
+        // the blocker frees — and assert the EVENTUAL (1-tick-late-starting) leap recomputes its duration from the
+        // ticks REMAINING (`resolveTick - serverTick + 1`, per GameServer.BeginMonsterSlamLeap's own doc comment)
+        // and still lands EXACTLY on the resolve tick. Hard-coding the original (undeferred) leap duration instead
+        // of recomputing it from the deferred start would land this test ONE TICK LATE.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(33, 32), Direction8.S);
+        var hits = new int[1];
+        var castTick = new uint[1];
+        var origin = new WorldVector[1];
+        var ai = CreateCombatAi(
+            seed: 7, grid, world, player, hits,
+            trySlam: PlanSlam(castTick, origin),
+            beginSlamLeapFactory: CreateSlamLeap);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+        var tunables = CombatTunables(attackDamage: 10, slamEnabled: true, slamCooldownTicks: 500);
+
+        // Occupy the executor BEFORE any AI tick runs, with a zero-forward-distance "stall" jump (isolates this
+        // pin to the retry/duration math, not a position side effect) active through harness tick 18 (frees at
+        // 19) — one tick PAST the plan's own LeapStartTick (18 = resolveTick(21) - SlamLeapTicks(4) + 1). PlanSlam
+        // doesn't gate on executor state (that's GameServer.TryBeginMonsterSlam's separate grounded gate, pinned
+        // elsewhere), so the cast itself still fires on schedule — only the LEAP's own TryStart is affected.
+        var blocker = MovementActionRegistry.BuildForwardArcJump(
+            ActionId.Jump, durationTicks: 18, jumpHeight: 0d, forwardDistanceUnits: 0d, cooldownTicks: 0, animationId: 1);
+        Assert.True(ai.Executor.TryStart(monster, blocker, WorldVector.Zero, serverTick: 1));
+
+        ai.StepMonster(monster, 1, StepCooldownTicks, tunables);
+        Assert.Equal(1u, castTick[0]);
+        var resolveTick = castTick[0] + SlamWindupTicks;         // 21
+        var plannedLeapStart = resolveTick - SlamLeapTicks + 1;  // 18
+
+        for (uint tick = 2; tick < plannedLeapStart; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.SlamChanneling,
+                $"expected still channeling (blocker occupying the executor) at tick {tick}.");
+        }
+
+        // Confirm the blocker is still active going into the planned leap-start tick — the setup this test relies
+        // on (the retry about to be attempted, and about to be declined).
+        Assert.True(ai.Executor.IsActive(monster.Id), "test setup: the blocker should still be occupying the executor.");
+
+        // Tick 18: the retry is attempted and DECLINED (blocker still active) — still channeling, not yet leaping.
+        ai.StepMonster(monster, plannedLeapStart, StepCooldownTicks, tunables);
+        Assert.True(ai.TryGetPhase(monster.Id, out var stillChanneling) && stillChanneling == BasicRoamerBehavior.State.SlamChanneling);
+
+        // Tick 19: the blocker frees (its 18-tick duration ends during tick 18's step); THIS retry succeeds — the
+        // leap starts ONE TICK LATE. Its duration must recompute from the ticks remaining
+        // (min(SlamLeapTicks, resolveTick - 19 + 1) = min(4, 3) = 3), not the original undeferred 4-tick plan.
+        ai.StepMonster(monster, 19, StepCooldownTicks, tunables);
+        Assert.True(monster.VerticalOffset > 0d, "the deferred leap never actually started (still grounded at tick 19).");
+
+        for (uint tick = 20; tick < resolveTick; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, tunables);
+            Assert.True(Distance(monster.Position, origin[0]) > 1e-3,
+                $"landed EARLY at tick {tick} — the deferred duration was not shortened toward the deadline.");
+        }
+
+        ai.StepMonster(monster, resolveTick, StepCooldownTicks, tunables);
+
+        // Lands exactly on the resolve tick despite the 1-tick-late start — never late, because the duration was
+        // recomputed from the ticks remaining at the ACTUAL (deferred) start, not the original plan.
+        Assert.True(Distance(monster.Position, origin[0]) <= 1e-3,
+            $"deferred leap landed {monster.Position}, expected the locked origin {origin[0]} exactly on the resolve tick.");
+        Assert.Equal(0d, monster.VerticalOffset, 1e-9);
+        Assert.True(ai.TryGetPhase(monster.Id, out var after) && after == BasicRoamerBehavior.State.Chasing);
     }
 
     [Fact]
