@@ -23,13 +23,15 @@ game-design decision to make BEFORE/WITH T2's circle rendering.
    around the CASTER instead of the origin, passes every test but yields live "I was inside and it
    missed" bugs. Add: origin x=32.49, victim x=34.49, radius 2.0 (neighbor-cell rim hit).
 
-4. **DECIDE: center-point vs body-clip membership (NIT, but blocks honest T2 rendering).**
-   TelegraphShape.Contains tests the victim's CENTER; melee/free-aim (FreeAimSectorResolver) widens
-   by EntityHitRadiusTiles so a clipped body hits. A player whose body visibly overlaps the rendered
-   circle edge but whose center is outside takes nothing — player-favorable, common in ARPGs, but an
-   undocumented divergence from the repo's other AoE convention. USER call: keep center-point
-   (forgiving, then document it) or widen by hit radius (consistent, harsher). Decide before/with T2
-   feel-testing; whichever wins, pin it with a rim-overlap test.
+4. **DECIDED (user, 2026-07-03): CENTER-POINT membership — fairness pillar.** The user's combat
+   pillar is "it needs to feel FAIR and RESPONSIVE": the drawn circle must BE the rule, and ambiguity
+   errs player-favorable. You are hit iff your character's CENTER is inside the drawn circle; a body
+   clipping the rim never kills you (the reverse — hit while looking out — is the unfairness we
+   refuse). The divergence from melee/free-aim body-clip is deliberate and stays: telegraphs are a
+   dodge-the-zone rule (legibility first), free-aim is a did-my-swing-connect rule. Remaining WORK:
+   document this on TelegraphShape.Contains, require T2 to render the TRUE radius (no visual
+   padding/shrink — the honest-telegraph rule), and pin center-point with a rim-overlap test (body
+   overlaps, center outside → no damage).
 
 Also noted (no action): the gate's players-only guard is a theoretical behavior change to
 ApplyMonsterAttack (unreachable today); `_monsterTypes.Default` fallback is no longer inert (it's the
