@@ -32,12 +32,26 @@ it; ContentHash covers it (client/server drift still hard-fails). WHY: shared co
 both sides can see (no wire payload today); ASCII is diffable, hand-editable, LLM-editable, and — the
 big win — collision and visuals can never disagree again because they are the same characters.
 
-**D2. One zone; town and floor 1 are areas of one 192×192 map.** (User 2026-07-03: size is free —
-"bigger if needed". 192×192 buys a genuinely WIDE floor 1 and real walking distance to the Verge; the
-engine is indifferent: blocked-set memory is trivial, AOI is 18u so per-client traffic is size-blind,
-wire caps at 32767.) No zone transfer in this arc. The tower fantasy is carried by geography (walls +
-one gate). WHY: transfer tech is real netcode work that would gate a graybox whose entire purpose is
-feel; floors-as-zones arrives with floor 2+, and an authored map relocates into its own zone as data.
+**D2. One zone; town and floor 1 are areas of one 384×384 map** (orchestrator's call — user delegated
+size/layout 2026-07-03 after 192 "still feels small"). Sizing by TILE-TIME, not tiles: town→gate ≈
+30-45 s, wing hearts ≈ 1-2 min, the Verge ≈ 2.5-3 min of committed walking — expedition distance for
+the 45-min session shape, while staying dense enough that a handful of players still cross paths on
+the main road. At the live zoom (~15u) that is ~25 screens across. Engine is indifferent (AOI 18u ⇒
+traffic is size-blind; blocked-set memory trivial; wire caps 32767; client floor = ~147k culled
+MultiMesh quads in 144 chunks — M2 must sanity-check the minimap at this size). No zone transfer in
+this arc. The tower fantasy is carried by geography (walls + one gate). WHY one zone: transfer tech is
+real netcode work that would gate a graybox whose entire purpose is feel; floors-as-zones arrives with
+floor 2+, and an authored map relocates into its own zone as data.
+
+**D2a. The real map is authored as STAMPS that compile to the ASCII grid.** Hand-writing 384 raw
+120-char-plus lines is where character-level authoring stops being reliable (for humans and models
+both). The authored artifact in shared code becomes a small ordered stamp program — fill/rect/border/
+corridor/marker operations with surface categories — deterministically EXPANDED (shared code) into the
+same `string[]` the M1 parser consumes; ContentHash covers the EXPANDED grid, so the drift guard is
+unchanged. ASCII remains the truth format for small test maps, and AuthoredMap gains a dump-to-ASCII
+so any stamped map can be eyeballed/diffed/round-trip-tested. WHY: layout iteration becomes "widen the
+west arena by 4" — one number in one stamp — instead of surgery across 40 text rows; M1's parser and
+tests are untouched (stamps → ASCII → parser).
 
 **D3. Char alphabet (the authoring contract):** `#` wall (blocked) · `.` grass · `,` dirt/road ·
 `:` town cobble · `-` dungeon stone · `~` water (blocked, blue — visual variety, no swim tech) ·
@@ -72,15 +86,18 @@ ecology E4).
 
 ## 4. Layout brief (the map M3 authors; iterate by feel)
 
-192×192. South-center: TOWN (~30×24) — plaza with 4-6 `S` tiles, 6-8 `H` houses on a `:` cobble grid,
-`,` road ring, one pinned oak + rock. One `,` road north through a 3-tile GATE in a full east-west
-wall — the tower threshold (a `P` portal prop flanks it as the future floor-2 stub). North of the wall:
-FLOOR 1, deliberately WIDE (game-direction: low floors split the crowd by geography): three wings
-separated by rock fingers — WEST pocket arenas (slime hollow; open rooms ≥8u across for telegraph
-dodging), EAST scrubland (gnoll skirmish lanes, 4-6u corridors + cover rocks), FAR-NORTH the Verge
-(remote, overgrowth-prone). Wing mouths ≥5u wide (no chokepoint camping); dead ends only in the Verge.
-`~` pond west of town for visual anchor. Every walkable area reachable from the plaza (M1 parser test:
-flood-fill from S covers all walkable tiles — no orphan pockets, ever).
+384×384. South-center: TOWN (~44×36) — plaza with 4-6 `S` tiles, 6-8 `H` houses on a `:` cobble grid,
+`,` road ring, one pinned oak + rock. One `,` road north (~50 tiles, with a meadow shoulder — the
+safe-ish approach where new players watch the wall grow on the horizon) through a 4-tile GATE in a
+full east-west wall — the tower threshold (a `P` portal prop flanks it as the future floor-2 stub).
+North of the wall: FLOOR 1, deliberately WIDE (game-direction: low floors split the crowd by
+geography): three wings off a broad gate commons, separated by rock fingers — WEST pocket arenas
+(slime hollow; chained open rooms 10-16u across for telegraph dodging), EAST scrubland (gnoll skirmish
+lanes, 5-8u corridors + cover rocks), FAR-NORTH the Verge (remote — a further ~90 tiles past the
+commons through a narrowing pass; overgrowth-prone). Wing mouths ≥6u wide (no chokepoint camping);
+dead ends only in the Verge. `~` pond west of town, a second tarn in the Verge. Every walkable area
+reachable from the plaza (M1 parser test: flood-fill from S covers all walkable tiles — no orphan
+pockets, ever).
 
 ## 5. Tasks (each = one todo + one commit; lower-model sized)
 
@@ -90,9 +107,11 @@ flood-fill from S covers all walkable tiles — no orphan pockets, ever).
 - **M2 — client painter categories:** `TerrainPainter` consumes AuthoredMap categories (genVersion 2)
   instead of terrain.png (which stays for genVersion 1); category→color material table; walls unchanged.
   Headless test on the category→material mapping.
-- **M3 — the map content:** the real 192×192 ASCII grid per §4 + authored spawn (D4) + prop spawning at
-  boot from markers (existing archetype hook) + scatter-on-grass-only (D6) + ecology.json rect update
-  (D7). Server boots genVersion 2 by default; genVersion 1 remains reachable (env) for old tests.
+- **M3 — the map content:** the stamp expander (D2a: ops → string[], deterministic, shared) + the real
+  384×384 stamped map per §4 + authored spawn (D4) + prop spawning at boot from markers (existing
+  archetype hook) + scatter-on-grass-only (D6) + ecology.json rect update (D7). Server boots
+  genVersion 2 by default; genVersion 1 remains reachable (env) for old tests. Tests: expansion
+  determinism, dump-to-ASCII round-trip, and the M1 flood-fill invariant on the REAL map.
 - **M4 — feel-test (human):** walk spawn→plaza→gate→each wing. Verdicts: town reads cozy-small? floor 1
   reads WIDE? gate reads like a threshold? arena pockets fit telegraph dodging? Iterate §4 in-place.
 
