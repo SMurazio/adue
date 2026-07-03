@@ -44,6 +44,28 @@ namespace Mmo.Server.Runtime;
 // once every `aggroScanIntervalTicks` (~0.5 s), and the initial scan tick is staggered per entity id so a crowd of
 // monsters doesn't all scan on the same tick.
 //
+// DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): the aggro-throttle scan above is widened (when
+// MonsterAiTunables.DormancyRadius > 0) to ALSO answer "is any player within DormancyRadius" — ONE spatial query
+// serves both the aggro trigger (the existing precise Euclidean test against AggroRadius) and the dormancy signal, so
+// dormancy costs nothing beyond the scan the AI already ran. When that scan finds nobody within DormancyRadius, the
+// monster is marked Dormant and StepMonster skips ALL further work for the tick (no pause-timer check, no roam
+// destination pick, no locomotion/hop call, no obstacle-gather) until the NEXT scheduled scan — the same cadence the
+// aggro throttle already used, so a monster that starts taking damage or is approached wakes with NO added latency
+// versus the pre-E0 brain (the scan itself is never skipped, only the movement/idle bookkeeping after it).
+//
+// DORMANCY IS RESTRICTED TO Idle AND Roaming — NEVER Chasing, Returning, or SlamChanneling. This is the load-bearing
+// correctness carve-out: a monster already committed to an action must run it to completion even if every player
+// steps out of DormancyRadius mid-action, or it would visibly freeze mid-lash / mid-leap / mid-leash-walk. Concretely
+// this guarantees (a) a chasing/slam-channeling monster never freezes mid-attack — Chasing/SlamChanneling ignore
+// Dormant unconditionally; (b) leash-return regen (RegenWhileReturning) always runs to completion — Returning is
+// likewise never dormant, so a monster that gave up the fight still walks home and heals fully even with nobody
+// watching; (c) a damaged monster still reacts on schedule — see the throttle note above, damage never depends on
+// StepMonster having run. On WAKING (Dormant flips true→false) while Idle, PauseUntilTick is RE-ARMED to a fresh
+// randomized pause from the wake tick — without this, a monster frozen Idle for a long stretch would resume with a
+// long-stale PauseUntilTick already in the past and instantly snap into Roaming the moment it becomes observable
+// (the exact "visible pop on wake" this design avoids). Roaming is left un-re-armed on wake: it simply resumes
+// hopping toward its already-chosen Destination, which reads as a walk continuing, not a pop.
+//
 // ATTACK is the monster's OWN per-monster timer (NextAttackTick), independent of its move cadence — exactly like a
 // player's attack cooldown is independent of its step cooldown. The damage application + the cosmetic damage number
 // are an INJECTED callback (so combat stays in GameServer / the real ApplyDamage + DamageEventMessage path — the AI
@@ -143,6 +165,12 @@ public class BasicRoamerBehavior : IMonsterBehavior
 
         // The last tick this monster actually advanced (HopResult.Moved) or entered a moving phase — the watchdog base.
         public uint LastProgressTick;
+
+        // MONSTER-AI-DORMANCY: true when the last aggro/relevance scan found NO player within MonsterAiTunables.
+        // DormancyRadius — refreshed on the SAME throttled cadence as the aggro scan (NextAggroScanTick), never
+        // checked more often. Meaningful ONLY while Phase is Idle or Roaming (see StepMonster's dormancy gate);
+        // defaults false so a freshly Registered monster runs its first tick normally, before it has ever scanned.
+        public bool Dormant;
     }
 
     private readonly Dictionary<ulong, MonsterState> _states = [];
@@ -340,19 +368,61 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // AGGRO (throttled): scan for a player in range and switch to Chasing on a hit — ONLY from Idle/Roaming.
         // NOT while Chasing (already has a target), and NOT while Returning: a leashed/evading monster commits to
         // reaching home before it re-evaluates aggro. Throttled per monster (NextAggroScanTick), staggered at Register.
+        // MONSTER-AI-DORMANCY: this SAME scan also refreshes state.Dormant (see the class header's DORMANCY section)
+        // — the gather radius widens to cover DormancyRadius too (when enabled) so one query answers both questions.
         if ((state.Phase is State.Idle or State.Roaming) && serverTick >= state.NextAggroScanTick)
         {
-            // Pass a COARSE tile-radius pre-filter = ⌈aggro⌉(+1) so the spatial gather drops no in-range Euclidean
-            // target; the precise Euclidean range test happens below on the target's continuous Position.
+            // Pass a COARSE tile-radius pre-filter = ⌈aggro⌉(+1), widened to ⌈dormancy⌉(+1) too when dormancy is
+            // enabled, so the spatial gather drops no in-range Euclidean target for EITHER test below.
             var gatherRadius = GatherRadiusFor(t.AggroRadius);
-            if (gatherRadius > 0
-                && _findTarget(monster, gatherRadius, out var foundId, out var foundPos)
-                && Distance(monster.Position, foundPos) <= t.AggroRadius)
+            if (t.DormancyRadius > 0d)
+            {
+                gatherRadius = Math.Max(gatherRadius, GatherRadiusFor(t.DormancyRadius));
+            }
+
+            // Explicit defaults (not relied on unless `found` is true) so the two checks below never read an
+            // unassigned out-value regardless of which branch of the scan ran.
+            var found = false;
+            var foundId = 0ul;
+            var foundPos = WorldVector.Zero;
+            if (gatherRadius > 0 && _findTarget(monster, gatherRadius, out var scannedId, out var scannedPos))
+            {
+                found = true;
+                foundId = scannedId;
+                foundPos = scannedPos;
+            }
+
+            if (found && Distance(monster.Position, foundPos) <= t.AggroRadius)
             {
                 EnterChase(ref state, foundId, serverTick);
             }
 
+            if (t.DormancyRadius > 0d)
+            {
+                var nearAny = found && Distance(monster.Position, foundPos) <= t.DormancyRadius;
+                if (nearAny && state.Dormant && state.Phase == State.Idle)
+                {
+                    // WAKE edge while Idle: re-arm the pause so the monster doesn't instantly snap Idle->Roaming the
+                    // moment it becomes observable (a long-stale PauseUntilTick would otherwise already be in the
+                    // past). See the class header's DORMANCY section.
+                    state.PauseUntilTick = serverTick + NextPauseTicks(t.PauseMinTicks, t.PauseMaxTicks);
+                }
+
+                state.Dormant = !nearAny;
+            }
+
             state.NextAggroScanTick = serverTick + Math.Max(1u, t.AggroScanIntervalTicks);
+        }
+
+        // MONSTER-AI-DORMANCY: nobody could possibly see this monster right now (state.Dormant, refreshed on the
+        // throttled cadence above) and it is Idle/Roaming (never Chasing/Returning/SlamChanneling — see the class
+        // header) — skip the rest of this tick's work entirely. The next scan (same cadence as the pre-E0 aggro
+        // throttle) re-evaluates; nothing here can leave the monster wedged, since Idle/Roaming carry no committed
+        // action to interrupt.
+        if (t.DormancyRadius > 0d && state.Dormant && (state.Phase is State.Idle or State.Roaming))
+        {
+            _states[monster.Id] = state;
+            return false;
         }
 
         var moved = false;
@@ -816,16 +886,17 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // (see the class-header conversion table). Replaces the old Chebyshev tile metric.
     private static double Distance(WorldVector a, WorldVector b) => (a - b).Length;
 
-    // The coarse tile/Chebyshev gather radius for the aggro pre-filter: ⌈Euclidean aggro⌉ + 1, so the spatial scan's
-    // box is a strict superset of the Euclidean aggro disc and never drops an in-range target before the precise test.
-    private static int GatherRadiusFor(double aggroRadius)
+    // The coarse tile/Chebyshev gather radius for a Euclidean disc test: ⌈radius⌉ + 1, so the spatial scan's box is a
+    // strict superset of the disc and never drops an in-range target before the precise Euclidean test. Shared by the
+    // aggro pre-filter AND (MONSTER-AI-DORMANCY) the dormancy relevance pre-filter — same math, two different radii.
+    private static int GatherRadiusFor(double radius)
     {
-        if (aggroRadius <= 0d)
+        if (radius <= 0d)
         {
             return 0;
         }
 
-        return (int)Math.Ceiling(aggroRadius) + 1;
+        return (int)Math.Ceiling(radius) + 1;
     }
 
     // A random pause length in [min, max] ticks (inclusive). Floored at 1 so a degenerate min/max can never produce

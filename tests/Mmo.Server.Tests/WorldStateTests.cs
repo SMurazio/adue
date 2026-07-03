@@ -63,4 +63,42 @@ public sealed class WorldStateTests
         Assert.Null(entity.CharacterId);
         Assert.Null(entity.OwnerSession);
     }
+
+    // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): the monster-only index
+    // (WorldState.Monsters / CopyMonstersTo) must contain EXACTLY the live monsters — no players/resources/corpses,
+    // and no stale entries after a monster is removed — since GameServer.StepMonsterAi now iterates it directly
+    // instead of scanning + filtering every entity in the zone.
+    [Fact]
+    public void MonstersIndexContainsOnlyLiveMonsters_NotOtherKinds()
+    {
+        var state = new WorldState();
+        var player = state.AddPlayer(1, Guid.NewGuid(), "Hero", new TileCoord(1, 1), new ClientSession(null!), new Inventory(ItemRegistry.Default));
+        var monster = state.AddTransient(2, EntityKind.Monster, "Slime", new TileCoord(2, 2), Direction8.S);
+        var resource = state.AddTransient(3, EntityKind.Resource, "Rock", new TileCoord(3, 3), Direction8.S);
+
+        Assert.Equal([monster], state.Monsters);
+
+        var buffer = new List<WorldEntity>();
+        state.CopyMonstersTo(buffer);
+        Assert.Equal([monster], buffer);
+
+        // Sanity: the other kinds are still in the general index, just not the monster-only one.
+        Assert.Contains(player, state.Entities);
+        Assert.Contains(resource, state.Entities);
+    }
+
+    [Fact]
+    public void MonstersIndexDropsAnEntityOnRemove_NoStaleEntry()
+    {
+        var state = new WorldState();
+        var monster = state.AddTransient(2, EntityKind.Monster, "Slime", new TileCoord(2, 2), Direction8.S);
+        Assert.Equal([monster], state.Monsters);
+
+        Assert.True(state.Remove(monster.Id, out _));
+
+        Assert.Empty(state.Monsters);
+        var buffer = new List<WorldEntity>();
+        state.CopyMonstersTo(buffer);
+        Assert.Empty(buffer);
+    }
 }

@@ -1225,6 +1225,304 @@ public sealed class BasicRoamerBehaviorTests
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): an Idle/Roaming monster with no
+    // player within MonsterAiTunables.DormancyRadius skips its own per-tick work; Chasing/Returning/SlamChanneling
+    // are NEVER dormant (see BasicRoamerBehavior's class-header DORMANCY section for the full contract).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Dormant_NoPlayerAnywhereNear_NeverStepsRoamWork()
+    {
+        // A pause short enough that, WITHOUT dormancy, the monster would leave Idle and start hopping almost
+        // immediately — so any movement at all over a long run proves the gate failed to hold.
+        const double roamRadius = 4d;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded());
+        var scanCalls = 0;
+        var ai = CreateAi(seed: 1234, grid, world, findTarget: (WorldEntity _, int _, out ulong id, out WorldVector pos) =>
+        {
+            scanCalls++; // the cheap spy: proves the relevance scan itself keeps running (carve-out (b) — a
+                         // dormant monster still notices an approaching/attacking player with no added latency).
+            id = 0;
+            pos = default;
+            return false; // no player anywhere, ever.
+        });
+        const uint pause = 2;
+        const uint aggroScanInterval = 5;
+        ai.Register(monster, serverTick: 0, pauseMinTicks: pause, pauseMaxTicks: pause, aggroScanIntervalTicks: aggroScanInterval);
+        var t = RoamTunables(roamRadius, pause, pause) with { DormancyRadius = 40d, AggroScanIntervalTicks = aggroScanInterval };
+
+        for (uint tick = 1; tick <= 500; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, t);
+        }
+
+        Assert.Equal(home, monster.Position); // never hopped — the roam/hop machinery never ran at all.
+        Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.Idle);
+        Assert.True(scanCalls > 0, "the periodic relevance scan itself should keep running while dormant.");
+        Assert.True(scanCalls < 500, "the scan should stay throttled (not run every tick) even while dormant.");
+    }
+
+    [Fact]
+    public void Dormant_WakesWhenPlayerEntersDormancyRadius_ButDoesNotPopStraightIntoRoaming()
+    {
+        // MONSTER-AI-DORMANCY carve-out (d): waking must not look like a snap — a monster frozen Idle for a long
+        // stretch must resume with a FRESH pause, not an instantly-elapsed stale one. aggroScanIntervalTicks: 1 makes
+        // the wake tick deterministic (the scan always runs the tick right after the player teleports in).
+        const double roamRadius = 4d;
+        const double aggroRadius = 6d;
+        const double dormancyRadius = 40d;
+        const uint pause = 5;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded());
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(200, 200), Direction8.S);
+        player.SetMaxHealthFull(100);
+        var ai = CreateAi(seed: 1234, grid, world, findTarget: (WorldEntity m, int gatherRadius, out ulong id, out WorldVector pos) =>
+        {
+            if (!world.TryGet(player.Id, out var p) || p.Stats.Health <= 0 || Distance(m.Position, p.Position) > gatherRadius)
+            {
+                id = 0;
+                pos = default;
+                return false;
+            }
+
+            id = p.Id;
+            pos = p.Position;
+            return true;
+        });
+        ai.Register(monster, serverTick: 0, pauseMinTicks: pause, pauseMaxTicks: pause, aggroScanIntervalTicks: 1);
+        var t = RoamTunables(roamRadius, pause, pause) with
+        {
+            AggroRadius = aggroRadius,
+            DeaggroRadius = aggroRadius * 1.5d,
+            DormancyRadius = dormancyRadius,
+            AggroScanIntervalTicks = 1,
+        };
+
+        // Settle into dormancy — the player starts far beyond even the dormancy radius.
+        for (uint tick = 1; tick <= 20; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, t);
+        }
+
+        Assert.Equal(home, monster.Position);
+
+        // Teleport the player INSIDE the dormancy radius but OUTSIDE aggro range (a "now visible, not yet hostile"
+        // approach — the case dormancy must handle without a pop, distinct from the aggro/EnterChase path).
+        var before = player.TileCoord;
+        var wakeTile = home.ToTileRounded().Offset(20, 0);
+        player.TeleportTo(wakeTile);
+        world.OnEntityMoved(player, before);
+        var gap = Distance(monster.Position, player.Position);
+        Assert.True(gap > aggroRadius && gap <= dormancyRadius, $"test setup: gap {gap} must clear aggro but stay inside dormancy.");
+
+        // Tick 21: the scan detects the player and wakes the monster — it must re-arm a FRESH pause, not roam
+        // this same tick.
+        ai.StepMonster(monster, serverTick: 21, StepCooldownTicks, t);
+        Assert.True(ai.TryGetPhase(monster.Id, out var wakeTickPhase) && wakeTickPhase == BasicRoamerBehavior.State.Idle,
+            "the monster popped straight into Roaming on the very tick it woke — the re-arm did not fire.");
+
+        // Ticks 22..25 (the re-armed pause window): still Idle.
+        for (uint tick = 22; tick <= 25; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, t);
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase) && phase == BasicRoamerBehavior.State.Idle,
+                $"expected Idle during the re-armed pause window (tick {tick}).");
+        }
+
+        // Tick 26 (wake tick 21 + the 5-tick pause): the fresh pause elapses and normal roaming resumes — proving
+        // the monster actually woke, not permanently stuck.
+        ai.StepMonster(monster, serverTick: 26, StepCooldownTicks, t);
+        Assert.True(ai.TryGetPhase(monster.Id, out var afterPause) && afterPause == BasicRoamerBehavior.State.Roaming,
+            "monster never resumed roaming after the re-armed pause elapsed — it looks permanently stuck dormant.");
+    }
+
+    [Fact]
+    public void Dormant_WakesAndAggrosWithNoAddedLatency_WhenPlayerEntersAggroRange()
+    {
+        // MONSTER-AI-DORMANCY carve-out (b): a dormant monster must react to an approaching/attacking player on the
+        // SAME schedule the pre-E0 aggro throttle already used — the scan itself is never skipped while dormant.
+        const double roamRadius = 4d;
+        const double aggroRadius = 6d;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded());
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(200, 200), Direction8.S);
+        player.SetMaxHealthFull(100);
+        // BOTH combat delegates must be wired here (unlike the wake-to-Idle test above, which never aggros): the
+        // scan's EnterChase runs StepChase on the SAME tick, and StepChase's first de-aggro check resolves the
+        // target — CreateAi's default tryResolve ("target never exists") would instantly flip the fresh chase to
+        // Returning and make a correct zero-latency aggro look like a dormancy failure.
+        var ai = CreateAi(
+            seed: 1234, grid, world,
+            findTarget: (WorldEntity m, int gatherRadius, out ulong id, out WorldVector pos) =>
+            {
+                if (!world.TryGet(player.Id, out var p) || p.Stats.Health <= 0 || Distance(m.Position, p.Position) > gatherRadius)
+                {
+                    id = 0;
+                    pos = default;
+                    return false;
+                }
+
+                id = p.Id;
+                pos = p.Position;
+                return true;
+            },
+            tryResolve: (ulong id, out WorldVector pos, out bool alive) =>
+            {
+                if (world.TryGet(id, out var e))
+                {
+                    pos = e.Position;
+                    alive = e.Stats.Health > 0;
+                    return true;
+                }
+
+                pos = default;
+                alive = false;
+                return false;
+            });
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+        var t = RoamTunables(roamRadius, 100, 100) with
+        {
+            AggroRadius = aggroRadius,
+            DeaggroRadius = aggroRadius * 1.5d,
+            // RoamTunables leaves ChaseLeash at 0 (roam-only default) — a real leash so the same-tick StepChase's
+            // distFromHome check can never spuriously break the fresh chase.
+            ChaseLeash = 12d,
+            DormancyRadius = 40d,
+            AggroScanIntervalTicks = 1,
+        };
+
+        for (uint tick = 1; tick <= 10; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, t);
+        }
+
+        Assert.True(ai.TryGetPhase(monster.Id, out var idlePhase) && idlePhase == BasicRoamerBehavior.State.Idle);
+
+        // Drop the player directly into aggro range.
+        var before = player.TileCoord;
+        player.TeleportTo(home.ToTileRounded().Offset(3, 0));
+        world.OnEntityMoved(player, before);
+
+        // The very next scan (one tick later, aggroScanIntervalTicks: 1) must EnterChase — the same one-scan
+        // latency the non-dormant brain has always had.
+        ai.StepMonster(monster, serverTick: 11, StepCooldownTicks, t);
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing,
+            "dormant monster did not aggro on the very next scan — dormancy added latency to the reaction.");
+    }
+
+    [Fact]
+    public void Chasing_IgnoresDormancy_NeverFreezesMidFight_EvenWithATinyDormancyRadius()
+    {
+        // Adversarial: a DormancyRadius far smaller than the live chase/attack distance, so "no player within
+        // DormancyRadius" is true on almost every tick of the fight. Pins that Chasing structurally ignores the
+        // dormancy gate (carve-out (a)) — the attack must still land.
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(34, 32), Direction8.S);
+        var hits = new int[1];
+        var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 100, pauseMaxTicks: 100, aggroScanIntervalTicks: 1);
+
+        MonsterAiTunables T() => CombatTunables(pauseMin: 100, pauseMax: 100) with { DormancyRadius = 0.1d };
+
+        ai.StepMonster(monster, serverTick: 1, StepCooldownTicks, T());
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
+
+        var attacked = false;
+        for (uint tick = 2; tick <= 200; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, T());
+            if (hits[0] > 0)
+            {
+                attacked = true;
+                break;
+            }
+        }
+
+        Assert.True(attacked, "chasing monster froze instead of landing its attack — dormancy must never gate Chasing.");
+    }
+
+    [Fact]
+    public void Returning_IgnoresDormancy_LeashRegenAlwaysCompletes_EvenWithNoPlayerAnywhere()
+    {
+        // MONSTER-AI-DORMANCY carve-out (c): the leash-return regen ramp (RegenWhileReturning) must run to
+        // completion even if a dormancy gate WOULD have applied — pinned by removing the player from the world
+        // ENTIRELY (not just past de-aggro/leash) during the return, so every scan reads "nobody anywhere".
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var home = WorldVector.FromTile(new TileCoord(32, 32));
+        var monster = SpawnMonster(world, home.ToTileRounded(), networkId: 1);
+        var player = world.AddTransient(2, EntityKind.Player, "Hero", new TileCoord(36, 32), Direction8.S);
+        var hits = new int[1];
+        var ai = CreateCombatAi(seed: 7, grid, world, player, hits);
+        ai.Register(monster, serverTick: 0, pauseMinTicks: 5, pauseMaxTicks: 5, aggroScanIntervalTicks: 1);
+
+        MonsterAiTunables T() => CombatTunables(pauseMin: 5, pauseMax: 5) with { DormancyRadius = 40d };
+
+        for (uint tick = 1; tick <= 12; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, T());
+        }
+
+        Assert.True(ai.TryGetPhase(monster.Id, out var chasing) && chasing == BasicRoamerBehavior.State.Chasing);
+
+        Assert.True(monster.ApplyDamage(70));
+        Assert.Equal(30, monster.Stats.Health);
+
+        world.Remove(player.Id, out _); // gone entirely — not just past de-aggro/leash.
+
+        var returned = false;
+        for (uint tick = 13; tick <= 400; tick++)
+        {
+            ai.StepMonster(monster, tick, StepCooldownTicks, T());
+            Assert.True(ai.TryGetPhase(monster.Id, out var phase));
+            Assert.NotEqual(BasicRoamerBehavior.State.Chasing, phase);
+            if (Distance(monster.Position, home) <= HopLocomotion.ProgressEpsilonUnits && phase == BasicRoamerBehavior.State.Idle)
+            {
+                returned = true;
+                break;
+            }
+        }
+
+        Assert.True(returned, "monster never returned home.");
+        Assert.Equal(100, monster.Stats.Health); // full by arrival — a dormancy freeze would leave this at 30.
+    }
+
+    [Fact]
+    public void DormancyDisabledByDefault_ZeroRadiusIsByteIdenticalToThePreE0Brain()
+    {
+        // DormancyRadius defaults to 0d (every existing positional MonsterAiTunables construction) — dormancy must
+        // be completely inert then: the monster roams normally even with nobody ever found nearby.
+        const double roamRadius = 4d;
+        var grid = OpenGrid();
+        var world = new WorldState();
+        var monster = SpawnMonster(world, new TileCoord(32, 32));
+        var ai = CreateAi(seed: 77, grid, world); // default findTarget: never finds anyone.
+        const uint pause = 2;
+        ai.Register(monster, serverTick: 0, pauseMinTicks: pause, pauseMaxTicks: pause, aggroScanIntervalTicks: 10);
+
+        var hopped = false;
+        for (uint tick = 1; tick <= 200; tick++)
+        {
+            if (ai.StepMonster(monster, tick, StepCooldownTicks, RoamTunables(roamRadius, pause, pause)))
+            {
+                hopped = true;
+                break;
+            }
+        }
+
+        Assert.True(hopped, "with dormancy disabled (radius 0), the monster must roam normally regardless of who is nearby.");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // MOVEMENT-ACTIONS (Phase C): the slime hop now goes THROUGH the shared executor as a real ballistic Jump.
     // ---------------------------------------------------------------------------------------------------------
 

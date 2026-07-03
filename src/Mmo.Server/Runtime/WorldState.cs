@@ -12,6 +12,13 @@ public sealed class WorldState
     public const int DefaultGridCellSize = 32;
 
     private readonly Dictionary<ulong, WorldEntity> _entities = [];
+    // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): a MONSTER-ONLY index, kept in
+    // sync at the single Insert/Remove funnel EVERY entity add/removal already goes through (AddPlayer/AddTransient/
+    // AddResourceNode -> Insert; Despawn/logout -> Remove), so it can never desync regardless of which kind of
+    // monster-lifecycle call site GameServer adds later. Replaces the O(all-entities) scan-then-filter both
+    // GameServer.StepMonsterAi and CopyMonstersTo used to do — the per-tick monster pass is now O(monster count),
+    // not O(every entity in the zone including every player/resource/corpse).
+    private readonly Dictionary<ulong, WorldEntity> _monsters = [];
     private readonly SpatialEntityGrid _grid;
     private ulong _nextEntityId = 1;
 
@@ -27,6 +34,10 @@ public sealed class WorldState
 
     public IReadOnlyCollection<WorldEntity> Entities => _entities.Values;
 
+    // MONSTER-AI-DORMANCY: the monster-only index (see the field doc above). Iteration order matches Dictionary's
+    // usual insertion-stable-until-remove order — not depended on by any caller, same as `Entities`.
+    public IReadOnlyCollection<WorldEntity> Monsters => _monsters.Values;
+
     public int Count => _entities.Count;
 
     public int GridCellSize => _grid.CellSize;
@@ -40,17 +51,16 @@ public sealed class WorldState
     }
 
     // MONSTER-SEPARATION: gather the live MONSTER participants for the per-tick separation pass into a reused buffer
-    // (struct-enumerator over _entities.Values → no boxing/alloc, unlike a foreach over the IReadOnlyCollection).
+    // (struct-enumerator over _monsters.Values → no boxing/alloc, unlike a foreach over the IReadOnlyCollection).
+    // MONSTER-AI-DORMANCY: now sourced from the monster-only index (was an O(all-entities) scan-then-filter) — same
+    // resulting set, cheaper to produce as the zone fills with players/resources/corpses alongside monsters.
     // PLAYER SEAM: this is the participant gather — to let players collide with monsters later, also include
     // EntityKind.Player here AND widen MonsterSeparation's candidate filter to match (the two must agree).
     public void CopyMonstersTo(ICollection<WorldEntity> destination)
     {
-        foreach (var entity in _entities.Values)
+        foreach (var entity in _monsters.Values)
         {
-            if (entity.Kind == EntityKind.Monster)
-            {
-                destination.Add(entity);
-            }
+            destination.Add(entity);
         }
     }
 
@@ -149,6 +159,13 @@ public sealed class WorldState
         }
 
         _grid.Remove(entity);
+        // MONSTER-AI-DORMANCY: keep the monster-only index in sync at this single funnel. A no-op Remove call for a
+        // non-monster id (the overwhelmingly common case) costs one dictionary lookup that misses.
+        if (entity.Kind == EntityKind.Monster)
+        {
+            _monsters.Remove(entityId);
+        }
+
         return true;
     }
 
@@ -165,5 +182,12 @@ public sealed class WorldState
     {
         _entities.Add(entity.Id, entity);
         _grid.Add(entity);
+        // MONSTER-AI-DORMANCY: mirror into the monster-only index at the single insertion funnel (AddPlayer/
+        // AddTransient/AddResourceNode all route through here) — every EntityKind.Monster ever created is caught,
+        // including any future monster-producing call site, with no separate bookkeeping for the caller to remember.
+        if (entity.Kind == EntityKind.Monster)
+        {
+            _monsters.Add(entity.Id, entity);
+        }
     }
 }

@@ -81,4 +81,18 @@ public readonly record struct MonsterAiTunables(
     // damage stay on the TYPE — GameServer's TryBeginMonsterSlam reads them at cast; the brain only owns the WHEN.
     // Defaults keep slam inert for positional/older constructions, matching the charge fields' convention.
     bool SlamEnabled = false,
-    uint SlamCooldownTicks = 0u);
+    uint SlamCooldownTicks = 0u,
+    // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): the relevance radius (world
+    // units, Euclidean) beyond which an IDLE or ROAMING monster goes dormant — no player anywhere near enough to
+    // possibly OBSERVE it, so BasicRoamerBehavior.StepMonster skips its pause/roam/hop bookkeeping entirely until a
+    // player is within this radius again. GameServer feeds the LIVE AOI interest radius here (_tuning.InterestRadius,
+    // the same test replication already uses — "can any player currently see this monster") rather than a smaller
+    // aggro-only radius, so a monster that is merely IN VIEW but not yet aggro'd keeps roaming/idling normally (the
+    // "living world" read is unaffected) and only a monster nobody could possibly see goes still. NOT per-type (this
+    // is a server-wide visibility concept, not a monster-authored tuning knob) — GameServer sets it via `with` on the
+    // per-type BuildTunables result. 0 (the default) DISABLES dormancy entirely — byte-identical to the pre-E0 brain
+    // for every existing positional construction (tests, MonsterPerfMeasureTests) that doesn't opt in, matching the
+    // ChargeEnabled/SlamEnabled "0/false = inert" convention above. NEVER gates Chasing/Returning/SlamChanneling (see
+    // BasicRoamerBehavior's dormancy section) — only Idle/Roaming are eligible, so a committed action always runs to
+    // completion regardless of who is or isn't nearby.
+    double DormancyRadius = 0d);

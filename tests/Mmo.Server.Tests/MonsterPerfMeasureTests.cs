@@ -129,6 +129,27 @@ public sealed class MonsterPerfMeasureTests
         RunAndReport("ROAM boxed-in (every neighbor wall)", ai, world, monster, t, ticks: 6000);
     }
 
+    // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): the SAME roam setup as
+    // Measure_SingleRoamingMonster_OpenGrid, but with DormancyRadius enabled and no player ever found (the default
+    // findTarget always returns false) — so the monster goes dormant on its first scan and stays there. Contrast
+    // against the ROAM baseline above: wall-queries/position-changes/StateRevision-bumps should all sit at ~0 for
+    // the WHOLE run (not just "mostly idle" — the roam/hop machinery never runs at all once dormant), which is the
+    // measurable shape of the "off-screen monsters cost ~0 tickMs" claim the stress gate verifies at scale.
+    [Fact]
+    public void Measure_DormantRoamingMonster_NoPlayerNearby()
+    {
+        var grid = new TileGrid(GridSize, GridSize, []);
+        var world = new WorldState();
+        var ai = CreateAi(1234, grid, world);
+        var monster = world.AddTransient(1, EntityKind.Monster, "Monster", new TileCoord(32, 32), Direction8.S);
+        // Same ship-default roam tunables as the baseline ROAM measurement, PLUS a live-sized dormancy radius (the
+        // default AOI interest radius is ~40 units) with no player anywhere near it.
+        var t = RoamTunables(4d, 20, 60) with { DormancyRadius = 40d };
+        ai.Register(monster, 0, t.PauseMinTicks, t.PauseMaxTicks, t.AggroScanIntervalTicks);
+
+        RunAndReport("DORMANT roam (no player ever near)", ai, world, monster, t, ticks: 6000);
+    }
+
     [Fact]
     public void Measure_SingleChasingMonster()
     {

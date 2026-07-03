@@ -3637,13 +3637,11 @@ public sealed class GameServer
         // values so a "<typeId>.*" admin retune takes effect on the next tick), not a single global block. The
         // tick-quantised pause/cooldown/scan + the derived de-aggro hysteresis are computed by the type registry.
         // De-aggro range and the aggro-scan cadence stay DERIVED (coupled to their source values).
-        foreach (var entity in _zone.World.Entities)
+        // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): iterate the MONSTER-ONLY
+        // index (WorldState.Monsters) instead of scanning every entity in the zone and filtering by Kind — the
+        // O(all-entities) sweep the P1 review flagged. Every yielded entity is already Kind == Monster.
+        foreach (var entity in _zone.World.Monsters)
         {
-            if (entity.Kind != EntityKind.Monster)
-            {
-                continue;
-            }
-
             // Resolve the monster's type (falls back to the default if somehow untracked — e.g. a legacy spawn).
             if (!_monsterTypeOf.TryGetValue(entity.Id, out var type))
             {
@@ -3659,11 +3657,14 @@ public sealed class GameServer
             // seeded from MoveSpeedMultiplier at spawn) is intentionally LEFT AS-IS and may differ from this hop cadence
             // — the slime is force-included densely every airborne tick (Phase C) and the interp is sample-driven, so the
             // nominal interp cadence differing from the hop cadence is tolerable.
+            // MONSTER-AI-DORMANCY: DormancyRadius is NOT a per-type authored knob (BuildTunables never sets it) — it is
+            // the live server-wide AOI interest radius (_tuning.InterestRadius, the SAME "can a player currently see
+            // this" test replication already uses), stamped on via `with` after the per-type build.
             ResolveBehavior(type).StepMonster(
                 entity,
                 _serverTick,
                 _monsterTypes.HopAirborneTicks(type) + _monsterTypes.HopDelayTicks(type),
-                _monsterTypes.BuildTunables(type),
+                _monsterTypes.BuildTunables(type) with { DormancyRadius = _tuning.InterestRadius },
                 ResolveLocomotion(type));
         }
     }
