@@ -1,8 +1,10 @@
 # Ability Telegraph Synchronization (design note — for the future combat phase)
 
-Status: **design note, not implemented.** No combat/abilities exist yet. Captured now because it's the
-spine of telegraphed abilities and it slots cleanly into our replication model. Prompted by a play-test
-design discussion (2026-06-19).
+Status: **SCHEDULED (2026-07-03)** — the model below is the spine of the telegraph combat arc
+(`todo/S-telegraph-T1-server-engine` → `T2` → `T3`; direction: `docs/game-direction.md` §4, pillar 2).
+Originally captured 2026-06-19 as a design note before combat existed; re-validated against the current
+codebase 2026-07-03 (the action executor, per-type monster abilities, server tick in every snapshot, and
+dodge-roll i-frames have all since shipped — the pieces this note anticipated).
 
 ## Problem
 A telegraphed ability (boss AoE warning, ground-targeted spell, charged attack) should **resolve at the
