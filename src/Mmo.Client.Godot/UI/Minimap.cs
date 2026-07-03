@@ -132,10 +132,10 @@ public partial class Minimap : Control
         };
         AddChild(_viewport);
 
-        // N: StretchMode.Scale (was .Keep) so the control's OffsetRight/OffsetBottom (set to Width*_mapScale x
-        // Height*_mapScale in ApplyDisplaySize) stretch the SAME baked-once texture on the GPU when the live zoom
-        // changes — no re-bake. TextureFilter.Nearest keeps tile edges crisp at any stretch factor (every tile is
-        // a flat color, so nearest-neighbor loses nothing and avoids the blur a Linear filter would add).
+        // N: StretchMode.Scale (was .Keep) so the control's rect (set to Width*_mapScale x Height*_mapScale in
+        // ApplyDisplayRect) stretches the SAME baked-once texture on the GPU when the live zoom changes — no
+        // re-bake. TextureFilter.Nearest keeps tile edges crisp at any stretch factor (every tile is a flat
+        // color, so nearest-neighbor loses nothing and avoids the blur a Linear filter would add).
         _mapView = new TextureRect
         {
             Name = "MapImage",
@@ -236,7 +236,7 @@ public partial class Minimap : Control
 
     // S110/N: apply a zoom delta, clamp to [Min,Max], and (if it actually changed) reposition everything via the
     // retained last state. N: this NEVER re-bakes — the baked texture is fixed-resolution (BakeScale) and only
-    // the display rect (ApplyDisplaySize) + object/player offsets change, so a zoom click is O(1), not another
+    // the display rect (ApplyDisplayRect) + object/player offsets change, so a zoom click is O(1), not another
     // tile scan.
     private void ChangeZoom(int delta)
     {
@@ -255,15 +255,15 @@ public partial class Minimap : Control
 
     // Called from Hud.Refresh once per refresh with the current view-model. Re-bakes the static map only when the
     // map GENERATION changes (a new zone); the live zoom scale never triggers a re-bake (N — see BakeScale).
-    // ApplyDisplaySize then (cheaply, every call) resizes the already-baked texture's display rect to the
-    // current zoom, and the player/objects reposition under the centred arrow as before.
+    // ApplyDisplayRect then (cheaply, every call) rewrites the already-baked texture's display rect — position
+    // AND size together — for the current zoom, and the objects reposition under the centred arrow as before.
     public void Apply(HudState state)
     {
         _lastState = state;
         EnsureBaked(state.Map);
         if (state.Map is not null)
         {
-            ApplyDisplaySize(state.Map);
+            ApplyDisplayRect(state.Map, state);
         }
 
         UpdatePlayer(state);
@@ -274,7 +274,7 @@ public partial class Minimap : Control
     // Builds a raw RGBA8 byte buffer via batched array writes (MinimapRasterBytes / MinimapAuthoredPalette —
     // Godot-free, headlessly tested) instead of per-pixel SetPixel calls, then creates the Image in ONE
     // Image.CreateFromData call. Baked at the FIXED BakeScale resolution, independent of _mapScale — see the
-    // class-level N comment and ApplyDisplaySize for how the live zoom is applied without re-baking.
+    // class-level N comment and ApplyDisplayRect for how the live zoom is applied without re-baking.
     private void EnsureBaked(HudState.MinimapMap? map)
     {
         if (map is null || _mapView is null)
@@ -350,17 +350,43 @@ public partial class Minimap : Control
     }
 
     // N: the display rect the baked texture is stretched into (StretchMode.Scale) — the live-zoom half of the
-    // world->minimap transform. Runs every Apply() call (cheap: two field writes), independent of EnsureBaked's
-    // generation-gated re-bake, so a zoom click resizes the SAME cached texture instead of rebuilding it.
-    private void ApplyDisplaySize(HudState.MinimapMap map)
+    // world->minimap transform. Runs every Apply() call (cheap: a few field writes), independent of
+    // EnsureBaked's generation-gated re-bake, so a zoom click resizes the SAME cached texture instead of
+    // rebuilding it.
+    //
+    // TRANSFORM FIX (live repro 2026-07-03, review/review-request-minimap-transform-fix.md): Size and Position
+    // are written TOGETHER here, both derived from the ONE pure transform (MinimapTransform.DisplayRect,
+    // headlessly tested). ROOT CAUSE of the shipped bug: the old code wrote the size as ABSOLUTE edge offsets
+    // (OffsetRight/OffsetBottom = Width*_mapScale) while OffsetLeft/OffsetTop still held the PREVIOUS frame's
+    // player-centring translation, and UpdatePlayer then wrote Position — which in Godot 4 PRESERVES the (now
+    // corrupted) size by rewriting all four offsets. From the second frame on the map rendered at
+    // (Width*scale - prevOffset.x, Height*scale - prevOffset.y): an anisotropic, player-position-dependent
+    // stretch (approaching ~2x per axis at far coords) that dragged the viewed window toward the map origin —
+    // mid-world the whole viewport landed ~60 tiles away on featureless grass ("minimap is empty/dark", live
+    // repro A) while the object layer, which has its own correct transform, kept plotting dots. NEVER mix
+    // absolute edge-offset writes with Position writes on the same control: a Control's four offsets are one
+    // coupled rect — set the whole rect, from one formula, in one place.
+    private void ApplyDisplayRect(HudState.MinimapMap map, HudState state)
     {
         if (_mapView is null)
         {
             return;
         }
 
-        _mapView.OffsetRight = Mathf.Max(1, map.Width) * _mapScale;
-        _mapView.OffsetBottom = Mathf.Max(1, map.Height) * _mapScale;
+        var inner = PanelSize - (FrameInset * 2f);
+        var (x, y, w, h) = MinimapTransform.DisplayRect(
+            map.Width, map.Height, _mapScale, state.LocalX, state.LocalY, inner);
+
+        // Size first, then Position: each Godot setter rewrites all four offsets keeping the other property,
+        // so after this pair the rect is EXACTLY (x, y, w, h) regardless of any previous state.
+        _mapView.Size = new Vector2(w, h);
+        if (_bakedMap is not null && state.HasLocalPosition)
+        {
+            // Player-centred translation — the SAME offset UpdateObjects hands the object layer, so walls,
+            // object squares, and the pinned arrow share one transform. No local position yet -> keep the
+            // last translation (the size above stays correct either way).
+            _mapView.Position = new Vector2(x, y);
+        }
     }
 
     private static (byte R, byte G, byte B, byte A) ToRgba(Color c)
@@ -373,8 +399,9 @@ public partial class Minimap : Control
         return (byte)Mathf.Clamp(Mathf.RoundToInt(channel * 255f), 0, 255);
     }
 
-    // Per-frame: translate the baked map so the live player tile sits under the centred arrow, and rotate the arrow
-    // to the player's facing. Cheap (a couple of multiplies + a position/rotation set) — the static raster is reused.
+    // Per-frame: rotate the arrow to the player's facing. The map's player-centred translation is written in
+    // ApplyDisplayRect, TOGETHER with the display size — never here (see the TRANSFORM FIX comment there for
+    // why a lone Position write on the map view is exactly how the live placement bug shipped).
     private void UpdatePlayer(HudState state)
     {
         if (_arrow is null)
@@ -386,15 +413,6 @@ public partial class Minimap : Control
         // from N (N=0, NE=1, E=2, ... NW=7) at 45deg steps, which is exactly Godot's clockwise screen rotation
         // (Y-down). So rotation = ordinal * 45deg. "Facing up in the world" therefore reads as up on the map.
         _arrow.Rotation = (int)state.LocalFacing * Mathf.Pi / 4f;
-
-        if (_mapView is null || _viewport is null || _bakedMap is null || !state.HasLocalPosition)
-        {
-            return;
-        }
-
-        // Player-centred: offset the map so the player's pixel lands at the viewport centre. This SAME offset is
-        // applied to the object layer (see UpdateObjects) so objects and walls share one transform.
-        _mapView.Position = MapOffset(state);
     }
 
     // S110: push the current object set + the map offset onto the object overlay so its squares track the walls.
@@ -410,14 +428,18 @@ public partial class Minimap : Control
         _objects.SetData(state.MinimapObjects, offset, _mapScale);
     }
 
-    // The single world->minimap translation for the baked map AND the object layer: shift everything so the local
-    // player's tile-centre pixel lands at the inner-viewport centre (player-centred). One formula = no drift.
+    // The single world->minimap translation for the baked map AND the object layer: shift everything so the
+    // local player's pixel lands at the inner-viewport centre (player-centred). One formula = no drift — it
+    // lives in the Godot-free MinimapTransform so it is headlessly pinned by MinimapTransformTests.
+    // TRANSFORM FIX (secondary find): LocalX/LocalY are CONTINUOUS coords (a player standing on tile (19,24)
+    // is at (19.5, 24.5)); the old formula added ANOTHER +0.5 — a leftover from the integer-tile era —
+    // displacing the whole map/object plane half a tile against reality. The +0.5 now lives only where tile
+    // INDICES are converted to centres (MinimapTransform.TileCentrePixel).
     private Vector2 MapOffset(HudState state)
     {
-        var inner = PanelSize - (FrameInset * 2f);
-        var playerPx = (state.LocalX + 0.5f) * _mapScale;
-        var playerPy = (state.LocalY + 0.5f) * _mapScale;
-        return new Vector2((inner / 2f) - playerPx, (inner / 2f) - playerPy);
+        var (x, y) = MinimapTransform.MapOffset(
+            _mapScale, state.LocalX, state.LocalY, PanelSize - (FrameInset * 2f));
+        return new Vector2(x, y);
     }
 
     private static Texture2D? Load(string path)
@@ -474,13 +496,15 @@ public partial class Minimap : Control
             for (var i = 0; i < _items.Count; i++)
             {
                 var obj = _items[i];
-                // Object footprint in pixels = footprint tiles * scale. Centre the square on the object's world
-                // position (tile-centre via +0.5), then apply the shared player-centred map offset. Identical math
-                // to the wall/player mapping, so a 2-tile object reads twice the side of a 1-tile one and stays put
-                // relative to the walls.
+                // Object footprint in pixels = footprint tiles * scale. Centre the square on the object's
+                // CONTINUOUS world position, then apply the shared player-centred map offset — the same
+                // WorldPixel math MinimapTransform defines (obj.X is already continuous; the old +0.5 here was
+                // the integer-tile-era convention, removed in lockstep with MapOffset's half-tile fix so the
+                // squares stay glued to the walls). Identical math to the wall/player mapping, so a 2-tile
+                // object reads twice the side of a 1-tile one and stays put relative to the walls.
                 var sidePx = Mathf.Max(2f, obj.FootprintUnits * _scale);
-                var centreX = ((obj.X + 0.5f) * _scale) + _offset.X;
-                var centreY = ((obj.Y + 0.5f) * _scale) + _offset.Y;
+                var centreX = (obj.X * _scale) + _offset.X;
+                var centreY = (obj.Y * _scale) + _offset.Y;
                 var rect = new Rect2(centreX - (sidePx / 2f), centreY - (sidePx / 2f), sidePx, sidePx);
                 DrawRect(rect, obj.Depleted ? ObjectDepleted : ObjectAvailable, filled: true);
             }
