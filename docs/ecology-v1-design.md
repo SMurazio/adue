@@ -32,14 +32,18 @@ monsters materialize from the stock (≤ `maxLive` at once, spawning while `live
 short per-spawn pacing delay). WHY: a 5s timer makes hunting pressure literally invisible — the stock is
 the single number that makes farming *matter*, the core pillar-5 claim.
 
-**D2. Logistic regrowth + decaying pressure.** Per ecology tick (every 10 s): 
-`S += r · S · (1 − S/K)` (per-minute rate `r` authored per region×type, converted internally), and a
-per-region×type pressure counter decays: `pressure *= 0.98` (≈half-life 5.7 min), `pressure += 1` per
-kill at kill time. Overgrowth: while `pressure < pressureIdleThreshold` (default 0.5) growth continues
-past K at `r/3` up to `S_max = 1.5K`. WHY logistic: a hunted-to-the-brink region regrows SLOWLY (small
-S → small growth) — overharvesting *wounds* it, matching "the tower withers"; an unhunted region drifts
-to K and then overgrows, creating the danger+riches destination. WHY a decaying counter: "recently
-hunted" needs a memory with a horizon, not raw tallies.
+**D2. Logistic regrowth + depleted-band suppression + decaying pressure.** Per ecology tick (every
+10 s): `S += r · S · (1 − S/K) · depletedFactor` where `depletedFactor = min(1, S / 0.25K)` (Allee-style
+suppression — REVISED during E1: pure logistic recovery time scales with the LOG of the deficit, capping
+the brink-vs-half recovery ratio at ~2.5× no matter the tuning, which fails the intent below; the E1
+implementer proved the original ≥10× acceptance bar unreachable). Per-minute rate `r` authored per
+region×type; pressure decays `*= 0.98` (≈half-life 5.7 min), `+= 1` per kill. Overgrowth: while
+`pressure < pressureIdleThreshold` (default 0.5) growth continues past K at `r/3` (same depletedFactor
+applies, inert above 0.25K) up to `S_max = 1.5K`. WHY: a hunted-to-the-brink region crawls through the
+DEPLETED band (the wound — overharvesting keeps the region visibly broken for a session) while THIN and
+above recover at normal logistic speed; an unhunted region drifts to K and overgrows into the
+danger+riches destination. WHY a decaying counter: "recently hunted" needs a memory with a horizon, not
+raw tallies.
 
 **D3. No local extinction.** `S_min = max(0.05·K, 0.5)`. WHY: full extinction is dead content with a
 near-permanent recovery (logistic growth from 0 is 0); the brink is punishment enough and the rumor
@@ -113,7 +117,8 @@ no ecology on non-region `/monster` spawners.
 ## 5. Acceptance criteria (arc-level)
 
 1. Headless: logistic math converges (S→K from below without overshoot at authored rates; brink recovery
-   from S_min takes ≥10× longer than from K/2 — the wound is real); pressure decays to idle in ~15 min;
+   from S_min takes ≥5× longer than from K/2 via the D2 depleted-band suppression — REVISED from ≥10×,
+   which is unreachable under any pure logistic; the wound is real); pressure decays to idle in ~15 min;
    state-enum boundaries exact at 0.25/0.6/1.0/1.25.
 2. Headless: killing N monsters in a region drops the stock by exactly N (clamped), and live-count
    convergence follows floor(S) within pacing bounds; no spawn within 6u of a player; the pending/live
