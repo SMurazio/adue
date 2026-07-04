@@ -180,12 +180,11 @@ public sealed class NodeCatalogTests
     // message, and paste it in below -- at that point it becomes a real "never silently update" pin again,
     // exactly like the terrain one. Do NOT guess a value; do NOT delete this test to make the suite green
     // without filling it in.
-    // Filled by the orchestrator from the post-N2 gate run (2026-07-04). NOTE: the value is UNCHANGED from the
-    // pre-approach-rule pin — the >= 1-walkable-4-neighbour requirement rejected ZERO candidates on the shipped
-    // map at seed 0 (grass tiles fully boxed by blocked tiles are already scatter-hostile), so the rule is a
-    // GUARANTEE the catalogue happens to satisfy, not a change to it. NEVER retune this literal to make a change
-    // green: an intentional catalogue change must move it in the SAME commit, stating the intent.
-    private const ulong ShippedRealMapSeedZeroCatalogHash = 2929419402239617837UL;
+    // RE-PINNED 2026-07-04 for the forest densification (user feel-test: "even more forest" — Tree
+    // 3500->6500 @ spacing 2, Plant 500->800; an INTENTIONAL catalogue change, moved in this same commit).
+    // NEVER retune this literal to make an UNINTENTIONAL change green: a silently moved value hard-fails
+    // every deployed client's ZoneInfo catalogue-drift check.
+    private const ulong ShippedRealMapSeedZeroCatalogHash = 3248313660449061649UL;
 
     [Fact]
     public void CatalogHashForRealMapSeedZero_IsPinnedToShippedLiteral()
