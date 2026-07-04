@@ -594,6 +594,23 @@ public sealed class GameServer
 
                 var now = Stopwatch.GetTimestamp();
                 var catchUpTicksThisIteration = PreciseTickScheduler.CountDueTicks(now, nextTickAt, tickIntervalTimestampTicks);
+                // STALL CLAMP (LIVE-DESYNC FIX 2026-07-04): after a long process stall (AV/disk freeze — observed
+                // multi-second on this dev machine) the catch-up loop below would replay EVERY missed tick
+                // back-to-back with NO PollEvents in between — the per-session "ticks since last snapshot ack"
+                // watchdog then ages 160+ ticks in one burst and kicks every live client that was acking fine the
+                // whole time (observed live: five 'no snapshot ack' warns for the SAME peer within 0.3 ms). Past
+                // one second of debt, DROP the lost wall time instead of replaying it: run one tick now and
+                // re-anchor. Simulation time is tick-count-based, so dropped ticks just mean the world simulated
+                // less wall time; the client's cosmetic clock re-anchors on >2s steps by design.
+                if (catchUpTicksThisIteration > _options.TickRate)
+                {
+                    Log.Warn(
+                        $"Tick loop stalled ~{catchUpTicksThisIteration * tickInterval.TotalSeconds:0.0}s "
+                            + $"({catchUpTicksThisIteration} missed ticks) — dropping the debt instead of catch-up-bursting.");
+                    nextTickAt = now;
+                    catchUpTicksThisIteration = 1;
+                }
+
                 while (now >= nextTickAt)
                 {
                     var tickStartedAt = Stopwatch.GetTimestamp();
@@ -1852,6 +1869,14 @@ public sealed class GameServer
     // theoretical torn double on non-x64 platforms). Only the DB write itself is async.
     private Task SaveEcologyPopulationsAsync(CancellationToken cancellationToken)
     {
+        return WriteEcologyRecordsAsync(BuildEcologyRecords(), cancellationToken);
+    }
+
+    // The snapshot + record build, ALWAYS on the caller's thread (the tick thread for checkpoints; the post-loop
+    // shutdown path for the final save) — the cheap, coherent half the M1 review required. The expensive half
+    // (the SQLite write) is what callers route off-thread.
+    private List<RegionPopulationRecord> BuildEcologyRecords()
+    {
         var snapshot = _ecology.SnapshotAll();
         var tick = (long)_serverTick;
         var records = new List<RegionPopulationRecord>(snapshot.Count);
@@ -1860,7 +1885,7 @@ public sealed class GameServer
             records.Add(new RegionPopulationRecord(cell.RegionId, cell.TypeId, cell.Stock, cell.Pressure, tick));
         }
 
-        return WriteEcologyRecordsAsync(records, cancellationToken);
+        return records;
     }
 
     private async Task WriteEcologyRecordsAsync(IReadOnlyList<RegionPopulationRecord> records, CancellationToken cancellationToken)
@@ -1888,7 +1913,13 @@ public sealed class GameServer
 
     private void CheckpointEcologyPopulations()
     {
-        _ecologyCheckpointInFlight = SaveEcologyPopulationsAsync(CancellationToken.None);
+        // LIVE-DESYNC FIX (2026-07-04): the snapshot + record build stay HERE on the tick thread (coherent state —
+        // the M1 review fix), but the DB write MUST hop threads via Task.Run: Microsoft.Data.Sqlite's async APIs
+        // complete SYNCHRONOUSLY on the calling thread, so returning WriteEcologyRecordsAsync's task directly ran
+        // the whole connection-open + transaction + fsync ON the tick thread every checkpoint — multi-second tick
+        // stalls on a slow/AV-intercepted disk, catch-up bursts, and mass no-ack kicks of every live client.
+        var records = BuildEcologyRecords();
+        _ecologyCheckpointInFlight = Task.Run(() => WriteEcologyRecordsAsync(records, CancellationToken.None));
     }
 
     // ECOLOGY E2: builds one RegionSpawner per authored region×type via RegionSpawnPlanner's deterministic
