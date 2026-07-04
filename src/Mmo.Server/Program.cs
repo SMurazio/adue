@@ -33,6 +33,13 @@ try
         _ => throw new InvalidOperationException($"Unsupported database provider {options.DatabaseProvider}.")
     };
 
+    // E3 review L4: silence here would be the exact D8 lie ("a restart that heals the world") discoverable only
+    // by reading source — say it out loud at boot instead.
+    if (ecologyRepository is NullEcologyRepository)
+    {
+        Log.Warn("Ecology persistence is DISABLED for this database provider — region populations reset to their K-seeds on every restart.");
+    }
+
     await databaseInitializer.ApplyAsync(shutdown.Token);
     var server = new GameServer(options, characterRepository, ecologyRepository);
 

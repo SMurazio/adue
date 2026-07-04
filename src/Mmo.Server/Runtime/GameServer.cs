@@ -639,7 +639,10 @@ public sealed class GameServer
             await _persistence.DisposeAsync();
             // ECOLOGY E3 (docs/ecology-v1-design.md D8): graceful-shutdown save — awaited directly (not
             // Task.Run'd) since a restart must not heal the world and this is the LAST chance to persist before
-            // the process exits.
+            // the process exits. The in-flight checkpoint task is awaited FIRST (E3 review M2): its DB write
+            // could otherwise acquire the SQLite write lock AFTER the final commit and overwrite it with a
+            // snapshot from seconds earlier — last-committer-wins staleness at the worst possible moment.
+            await _ecologyCheckpointInFlight;
             await SaveEcologyPopulationsAsync(CancellationToken.None);
             _syntheticLoad.Stop();
             _netManager.Stop();
@@ -1824,25 +1827,30 @@ public sealed class GameServer
                 continue;
             }
 
-            if (_ecology.TrySetStock(row.RegionId, row.TypeId, row.Stock))
+            // WHOLE-row rejection (E3 review L3): validate BOTH values before applying EITHER — checking only the
+            // stock let a finite-stock/non-finite-pressure row half-apply silently, contradicting the stated
+            // policy ("an invalid value means the row can't be trusted").
+            if (double.IsFinite(row.Stock) && double.IsFinite(row.Pressure)
+                && _ecology.TrySetStock(row.RegionId, row.TypeId, row.Stock)
+                && _ecology.TrySetPressure(row.RegionId, row.TypeId, row.Pressure))
             {
-                _ecology.TrySetPressure(row.RegionId, row.TypeId, row.Pressure);
                 applied++;
             }
             else
             {
-                Log.Warn($"Rejected non-finite persisted stock for '{row.RegionId}'/'{row.TypeId}'; kept its K-seed.");
+                Log.Warn($"Rejected corrupt persisted row for '{row.RegionId}'/'{row.TypeId}' (non-finite value); kept its K-seed.");
             }
         }
 
         Log.Info($"Loaded {applied} persisted ecology row(s) from {rows.Count} saved ({orphaned} orphaned/ignored).");
     }
 
-    // ECOLOGY E3: snapshots every region×type's live stock/pressure and saves it — the ONE method both the
-    // checkpoint cadence and the graceful-shutdown path call. Callers on the tick thread (CheckpointEcologyPopulations)
-    // must offload this behind Task.Run themselves; RunAsync's shutdown path is already off the tick thread (it
-    // runs in the async finally block after the loop exits) so it awaits this directly.
-    private async Task SaveEcologyPopulationsAsync(CancellationToken cancellationToken)
+    // ECOLOGY E3: snapshots every region×type's live stock/pressure ON THE CALLER'S THREAD and returns the save
+    // task — the ONE method both the checkpoint cadence and the graceful-shutdown path call. The snapshot MUST
+    // happen before any thread hop (E3 review M1): SnapshotAll enumerates cells the tick thread mutates, so
+    // snapshotting inside a pool thread read stocks and pressures mid-tick (incoherent cross-cell state, and a
+    // theoretical torn double on non-x64 platforms). Only the DB write itself is async.
+    private Task SaveEcologyPopulationsAsync(CancellationToken cancellationToken)
     {
         var snapshot = _ecology.SnapshotAll();
         var tick = (long)_serverTick;
@@ -1852,6 +1860,11 @@ public sealed class GameServer
             records.Add(new RegionPopulationRecord(cell.RegionId, cell.TypeId, cell.Stock, cell.Pressure, tick));
         }
 
+        return WriteEcologyRecordsAsync(records, cancellationToken);
+    }
+
+    private async Task WriteEcologyRecordsAsync(IReadOnlyList<RegionPopulationRecord> records, CancellationToken cancellationToken)
+    {
         try
         {
             await _ecologyRepository.SaveAllAsync(records, cancellationToken);
@@ -1863,15 +1876,19 @@ public sealed class GameServer
     }
 
     // ECOLOGY E3: fires on the SAME cadence CheckpointDirtyDurableState already uses for character state (D8: "on
-    // the existing character-checkpoint cadence") — no separate persistence timer to keep in sync. The snapshot
-    // itself (SnapshotAll) is a cheap in-memory read taken HERE on the tick thread; only the actual DB write is
-    // offloaded via Task.Run (the same "fire off the tick thread, log on failure" shape BeginLogin's async DB
-    // work uses), so the tick budget is never blocked on I/O. No overlap guard: at the checkpoint cadence
-    // (>= 1s, default 15s) a save of this table's tiny row count comfortably completes long before the next one
-    // fires.
+    // the existing character-checkpoint cadence") — no separate persistence timer to keep in sync. The snapshot is
+    // taken synchronously on the tick thread inside SaveEcologyPopulationsAsync (coherent state, E3 review M1);
+    // only the DB write continues asynchronously, so the tick budget never blocks on I/O. The in-flight task is
+    // TRACKED (E3 review M2): the shutdown path awaits it before the final save, so a checkpoint that snapshotted
+    // during the last ticks can never acquire the SQLite write lock AFTER the final-state commit and leave the DB
+    // seconds stale at process exit. No overlap guard beyond that: at the checkpoint cadence (>= 1s, default 15s)
+    // a save of this table's tiny row count completes long before the next one fires, and SaveAllAsync is one
+    // idempotent keyed-upsert transaction either way.
+    private Task _ecologyCheckpointInFlight = Task.CompletedTask;
+
     private void CheckpointEcologyPopulations()
     {
-        _ = Task.Run(() => SaveEcologyPopulationsAsync(CancellationToken.None));
+        _ecologyCheckpointInFlight = SaveEcologyPopulationsAsync(CancellationToken.None);
     }
 
     // ECOLOGY E2: builds one RegionSpawner per authored region×type via RegionSpawnPlanner's deterministic

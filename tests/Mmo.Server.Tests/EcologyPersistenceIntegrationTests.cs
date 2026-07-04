@@ -186,6 +186,32 @@ public sealed class EcologyPersistenceIntegrationTests
         Assert.Equal(0d, ecology.PressureOf("slime_hollow", "slime"));
     }
 
+    // E3 review L3: WHOLE-row rejection must be symmetric — a finite stock with a NON-FINITE PRESSURE previously
+    // half-applied (stock landed, pressure silently kept its seed, no warning), contradicting the stated policy.
+    // This pins: corrupt pressure -> NEITHER value applies, both keep their seeds.
+    [Fact]
+    public async Task Boot_CorruptLoadedPressure_RejectsTheWholeRow()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var repository = new SqliteEcologyRepository(database.ConnectionString);
+
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText =
+                "insert into region_populations (region_id, type_id, stock, pressure, updated_at_tick) " +
+                "values ('slime_hollow', 'slime', 5.0, 9e999, 1);";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var server = CreateServer(repository);
+        var ecology = server.EcologyForTests;
+
+        Assert.Equal(10d, ecology.StockOf("slime_hollow", "slime"));   // K seed, NOT the row's finite 5.0
+        Assert.Equal(0d, ecology.PressureOf("slime_hollow", "slime")); // seed, NOT the corrupt value
+    }
+
     private sealed class NullCharacterRepository : ICharacterRepository
     {
         public Task<CharacterRecord> LoadOrCreateAsync(string accountName, string displayName, CancellationToken cancellationToken)
