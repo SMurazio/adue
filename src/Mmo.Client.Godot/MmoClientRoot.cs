@@ -1934,9 +1934,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_wallRoot.AddChild(wallChunk);
 		}
 
+		// PROCEDURAL-POPULATION P2 (docs/procedural-population-design.md D1 L1): client-only grass/flower/
+		// pebble decor, built from the SAME authored map the floor above was just painted from. D1 gate
+		// ("genVersion 1 zones: NO decor") falls straight out of Authored being null on non-authored zones —
+		// no separate check needed. Timed separately so the decor cost is visible on its own in the print
+		// line below without disturbing the existing floor+walls M2 budget measurement.
+		var decorTimer = System.Diagnostics.Stopwatch.StartNew();
+		var decorInstanceCount = 0;
+		if (zone.Authored is { } authoredMapForDecor)
+		{
+			(_, decorInstanceCount) = Mmo.Client.Godot.Visuals.DecorPainter.BuildDecor(_worldRoot, authoredMapForDecor, zone.Seed);
+		}
+		var decorMs = decorTimer.Elapsed.TotalMilliseconds;
+
 		// M2 perf gate: the one-line budget check (target <250 ms at 384x384; see docs/town-floor1-blockout-design.md).
-		GD.Print("M2 zone build (floor+walls): " +
+		// P2 extends the same line with the decor sub-cost + instance count instead of adding a second print,
+		// so the <250 ms total budget (floor+walls+decor) stays checkable from one log line.
+		GD.Print("M2 zone build (floor+walls+decor): " +
 			$"{buildTimer.Elapsed.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture)} ms " +
+			$"(decor {decorMs.ToString("F1", CultureInfo.InvariantCulture)} ms, {decorInstanceCount} instances) " +
 			$"({zone.Width}x{zone.Height}, genVersion {zone.GenVersion})");
 
 		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its
