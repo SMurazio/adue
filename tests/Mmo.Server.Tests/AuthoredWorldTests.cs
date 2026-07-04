@@ -2,6 +2,7 @@ using Mmo.Server.Configuration;
 using Mmo.Server.Data;
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Population;
 using Xunit;
 
 namespace Mmo.Server.Tests;
@@ -69,32 +70,18 @@ public sealed class AuthoredWorldTests
         Assert.Equal(distributed.SpawnTiles, authored.SpawnTiles);
     }
 
-    [Fact]
-    public void ResourceScatterOnlyLandsOnGrassAndNeverOnMarkerTiles()
-    {
-        // D6: the deterministic scatter must avoid authored surfaces — nodes only on `.` grass, never
-        // cobble/road/water/stone — and never stack onto a marker tile (pins/prop anchors).
-        var zone = CreateAuthoredZone();
-        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
-        var markerTiles = Map.Markers.Select(m => m.Tile).ToHashSet();
-
-        var placements = zone.PlanResourceNodeScatter(registry, densityTilesPerNode: 28);
-
-        Assert.NotEmpty(placements);
-        foreach (var (_, tile) in placements)
-        {
-            Assert.True(zone.IsWalkable(tile));
-            Assert.Equal(SurfaceCategory.Grass, Map.CategoryAt(tile));
-            Assert.DoesNotContain(tile, markerTiles);
-        }
-    }
+    // NODE-FIELD N2: ResourceScatterOnlyLandsOnGrassAndNeverOnMarkerTiles (D6) tested Zone.PlanResourceNodeScatter
+    // directly, now deleted along with the entity scatter path. The equivalent (and stronger — it also covers
+    // the N2 approach-room rule) invariant is pinned in NodeCatalogTests.RealMap_EveryScatterEntryIsGrassWalkableAndOffAnyMarkerTile.
 
     [Fact]
-    public void BootSpawnsThePropsAndPinsFromTheMarkers()
+    public void BootSpawnsThePropsAndTheNodeFieldPinsTheMarkerNodesFirst()
     {
         // The boot wiring end-to-end (GameServer ctor, no network): `H`/`P` markers become the inert
-        // "House"/"Portal" Resource-kind visuals at their anchor tiles, and the `T`/`R` pins become
-        // REAL harvestable nodes at exactly their authored tiles, on top of the D6 scatter.
+        // "House"/"Portal" Resource-kind visuals at their anchor tiles. NODE-FIELD N2: `T`/`R` pins are NO
+        // LONGER entities — they are the shared NodeCatalog's first two indices (NodeCatalog.Build's
+        // pin-stability contract, D1), at exactly their authored tiles, reachable via GameServer's
+        // NodeFieldForTests test seam.
         var options = new ServerOptions(
             Port: 7777,
             TickRate: 20,
@@ -125,17 +112,17 @@ public sealed class AuthoredWorldTests
             Map.Markers.Where(m => m.Kind == AuthoredMarkerKind.House).Select(m => m.Tile).OrderBy(t => (t.Y, t.X)),
             houses.Select(h => h.TileCoord).OrderBy(t => (t.Y, t.X)));
 
-        // House/Portal props are visuals only — NOT harvestable (no ResourceNode component); their
-        // collision is the blocked footprint in the map itself (F4).
-        Assert.All(houses.Concat(portals), prop => Assert.Null(prop.Resource));
+        // The pinned oak and quarry rock are NEVER WorldEntities anymore.
+        Assert.DoesNotContain(entities, e => e.DisplayName is "Tree" or "Rock");
 
-        // The pinned oak and quarry rock ARE harvestable nodes at exactly their authored tiles.
-        var oak = Assert.Single(entities, e =>
-            e.DisplayName == "Tree" && e.TileCoord == new TileCoord(188, 22));
-        var quarryRock = Assert.Single(entities, e =>
-            e.DisplayName == "Rock" && e.TileCoord == new TileCoord(204, 22));
-        Assert.NotNull(oak.Resource);
-        Assert.NotNull(quarryRock.Resource);
+        // They ARE the catalogue's first two indices (D1 pin-stability), at exactly their authored tiles —
+        // mirrors TownAndFloor1MapTests.MarkersAreSevenHousesTwoPortalsAndTheTwoPins' pin tiles.
+        var nodeField = server.NodeFieldForTests;
+        Assert.True(nodeField.Count >= 2, "Expected at least the two authored pins in the catalogue.");
+        Assert.Equal(new TileCoord(188, 22), nodeField.EntryAt(0).Tile);
+        Assert.Equal(NodeType.Tree, nodeField.EntryAt(0).NodeType);
+        Assert.Equal(new TileCoord(204, 22), nodeField.EntryAt(1).Tile);
+        Assert.Equal(NodeType.Rock, nodeField.EntryAt(1).NodeType);
     }
 
     // The boot-wiring test never touches persistence: GameServer's ctor only wires the repository

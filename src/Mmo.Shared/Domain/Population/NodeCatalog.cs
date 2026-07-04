@@ -1,16 +1,17 @@
 namespace Mmo.Shared.Domain.Population;
 
 // One catalogue entry (node-field-design D1): Index is the node's PERMANENT id -- the ushort-sized
-// handle N2's protocol/harvest messages will reference instead of ever putting a position on the wire.
-// Never re-sort or renumber an existing entry's Index once shipped; see NodeCatalog.Build's pin-stability
-// contract below for why Index is stable across class-table edits.
+// handle N2's protocol/harvest messages reference instead of ever putting a position on the wire
+// (NodeCatalog.Build enforces the ushort cap; see MaxCatalogEntries). Never re-sort or renumber an
+// existing entry's Index once shipped; see NodeCatalog.Build's pin-stability contract below for why
+// Index is stable across class-table edits.
 public readonly record struct NodeCatalogEntry(int Index, TileCoord Tile, NodeType NodeType);
 
-// NODE-FIELD N1 (docs/node-field-design.md D1/D2): the shared deterministic node catalogue -- computed
+// NODE-FIELD N1/N2 (docs/node-field-design.md D1/D2): the shared deterministic node catalogue -- computed
 // identically by BOTH sides from (zone seed, authored map) so a harvestable node's position never
-// crosses the wire (only its Index does, starting at N2). This file produces DATA ONLY: nothing consumes
-// NodeCatalog yet (no protocol/server-state/client-rendering changes -- those are N2/N3), so building one
-// is a pure, side-effect-free computation exactly like TerrainGenerator.GenerateLayout.
+// crosses the wire (only its Index does). As of N2 this is consumed by the server's NodeField (per-index
+// depleted/respawn state) and mirrored client-side for the ZoneInfo.CatalogHash drift guard; building one
+// is still a pure, side-effect-free computation exactly like TerrainGenerator.GenerateLayout.
 //
 // Build order (the pin-stability contract, D1 "authored T/R marker pins FIRST (stable low indices)"):
 //   1. Every authored TreePin/RockPin marker, in AuthoredMap.Markers' row-major (y, then x) scan order --
@@ -94,7 +95,16 @@ public sealed class NodeCatalog
                 map.Width,
                 map.Height,
                 scatterSeed,
-                tile => map.IsWalkable(tile) && map.CategoryAt(tile) == nodeClass.Category,
+                // NODE-FIELD N2 (accepted N1 fork, docs/node-field-design.md D1): a scatter candidate ALSO needs
+                // >= 1 walkable 4-neighbour -- the harvest ADJACENCY GUARANTEE. Nodes carry no collision (D3/§3
+                // "no collision change"), so a player can stand on the node's own tile too, but requiring an
+                // orthogonal walkable neighbour keeps a node from ever landing fully sealed by blocked tiles on
+                // every side (e.g. a 1-tile pocket some future authored geometry could produce). Deliberately
+                // SOFTER than the retired Zone.HasClearApproachRoom's all-8-Chebyshev rule: at forest density
+                // (D8 ~5,000 nodes) requiring every neighbour open would starve legitimate thicket clustering,
+                // and one open orthogonal side is all the Euclidean 1.5-unit interaction radius needs. Pins
+                // (Step 1 above) are hand-authored and exempt -- this predicate only gates the scatter classes.
+                tile => map.IsWalkable(tile) && map.CategoryAt(tile) == nodeClass.Category && HasWalkableFourNeighbor(map, tile),
                 tile => Density(field, seed, nodeClass, tile),
                 nodeClass.TargetCount,
                 nodeClass.MinSpacing,
@@ -107,7 +117,38 @@ public sealed class NodeCatalog
             }
         }
 
+        if (entries.Count > MaxCatalogEntries)
+        {
+            // The wire index (NodeStateMessage/NodeStateBatchMessage/HarvestNodeMessage, N2) is a ushort, so
+            // every valid Index must fit -- fail loudly at build time rather than silently truncating/wrapping
+            // a catalogue too large to ever reference correctly over the wire.
+            throw new InvalidOperationException(
+                $"NodeCatalog has {entries.Count} entries, exceeding the ushort wire-index cap of {MaxCatalogEntries}.");
+        }
+
         return new NodeCatalog(entries, ComputeCatalogHash(entries));
+    }
+
+    // The wire node-index cap (N2): NodeStateMessage/NodeStateBatchMessage/HarvestNodeMessage all carry the
+    // catalogue index as a ushort, so a catalogue can never exceed ushort.MaxValue entries. D8 targets ~5,000 --
+    // comfortable headroom below this ceiling.
+    private const int MaxCatalogEntries = ushort.MaxValue;
+
+    // NODE-FIELD N2: the trivial empty catalogue for a non-authored (procedural, genVersion 1) zone -- there is
+    // no authored map to derive pins/categories from, so both the server's NodeField and the client's mirror
+    // fall back to this rather than special-casing "no catalogue" at every call site. Both sides compute the
+    // SAME empty list independently, so CatalogHash still agrees (ComputeCatalogHash([]) is deterministic).
+    public static NodeCatalog Empty() => new([], ComputeCatalogHash([]));
+
+    // NODE-FIELD N2: whether at least one of `tile`'s four orthogonal neighbours is walkable (in-bounds and not
+    // blocked) -- the adjacency guarantee described where this is called. IsWalkable is bounds-safe (false
+    // out-of-bounds), so no separate edge-of-map guard is needed here.
+    private static bool HasWalkableFourNeighbor(AuthoredMap map, TileCoord tile)
+    {
+        return map.IsWalkable(new TileCoord(tile.X - 1, tile.Y))
+            || map.IsWalkable(new TileCoord(tile.X + 1, tile.Y))
+            || map.IsWalkable(new TileCoord(tile.X, tile.Y - 1))
+            || map.IsWalkable(new TileCoord(tile.X, tile.Y + 1));
     }
 
     // D2 density(tile) = base(category) x distanceCurve(distanceToRoad) x patchNoise(seed, tile) --

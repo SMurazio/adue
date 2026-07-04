@@ -389,10 +389,7 @@ public sealed class TelegraphWireIntegrationTests
             6f, // narrow interest radius — a short walk suffices to leave AOI (item 4a).
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
-        {
-            ResourceNodeDensityTilesPerNode = 0,
-        };
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase));
     }
 
     private static ServerOptions CreateAuthoredOptions(int port, string connectionString, string[] admins)
@@ -414,7 +411,6 @@ public sealed class TelegraphWireIntegrationTests
             new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
         {
             GenVersion = TerrainGenerator.AuthoredGenVersion,
-            ResourceNodeDensityTilesPerNode = 0,
         };
     }
 
@@ -434,10 +430,7 @@ public sealed class TelegraphWireIntegrationTests
             30f,
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
-        {
-            ResourceNodeDensityTilesPerNode = 0,
-        };
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase));
     }
 
     private static int GetFreeUdpPort()

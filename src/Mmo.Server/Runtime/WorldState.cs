@@ -13,8 +13,8 @@ public sealed class WorldState
 
     private readonly Dictionary<ulong, WorldEntity> _entities = [];
     // MONSTER-AI-DORMANCY (todo/monster-ai-dormancy.md, ecology-v1-design.md §8 E0): a MONSTER-ONLY index, kept in
-    // sync at the single Insert/Remove funnel EVERY entity add/removal already goes through (AddPlayer/AddTransient/
-    // AddResourceNode -> Insert; Despawn/logout -> Remove), so it can never desync regardless of which kind of
+    // sync at the single Insert/Remove funnel EVERY entity add/removal already goes through (AddPlayer/AddTransient
+    // -> Insert; Despawn/logout -> Remove), so it can never desync regardless of which kind of
     // monster-lifecycle call site GameServer adds later. Replaces the O(all-entities) scan-then-filter both
     // GameServer.StepMonsterAi and CopyMonstersTo used to do — the per-tick monster pass is now O(monster count),
     // not O(every entity in the zone including every player/resource/corpse).
@@ -121,31 +121,6 @@ public sealed class WorldState
         return entity;
     }
 
-    // Server-owned harvestable resource node. Transient (not durable, no owner session) but carries a
-    // ResourceNode for its available/depleted state. Spawned at world setup, not derived from sessions.
-    public WorldEntity AddResourceNode(
-        uint networkId,
-        string displayName,
-        TileCoord tile,
-        ResourceNode resource)
-    {
-        var entity = new WorldEntity(
-            _nextEntityId++,
-            networkId,
-            EntityKind.Resource,
-            tile,
-            Direction8.S,
-            displayName,
-            characterId: null,
-            ownerSession: null,
-            isDurable: false,
-            inventory: null,
-            resource: resource);
-
-        Insert(entity);
-        return entity;
-    }
-
     public bool TryGet(ulong entityId, out WorldEntity entity)
     {
         return _entities.TryGetValue(entityId, out entity!);
@@ -183,7 +158,7 @@ public sealed class WorldState
         _entities.Add(entity.Id, entity);
         _grid.Add(entity);
         // MONSTER-AI-DORMANCY: mirror into the monster-only index at the single insertion funnel (AddPlayer/
-        // AddTransient/AddResourceNode all route through here) — every EntityKind.Monster ever created is caught,
+        // AddTransient both route through here) — every EntityKind.Monster ever created is caught,
         // including any future monster-producing call site, with no separate bookkeeping for the caller to remember.
         if (entity.Kind == EntityKind.Monster)
         {

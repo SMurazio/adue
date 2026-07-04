@@ -140,11 +140,7 @@ public sealed class MovementSpeedCommandIntegrationTests
             30f,
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
-        {
-            // No resource nodes needed for this test; keep the AOI uncluttered.
-            ResourceNodeDensityTilesPerNode = 0,
-        };
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase));
     }
 
     private static int GetFreeUdpPort()

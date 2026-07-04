@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `45` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `46` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -71,6 +71,14 @@ World snapshots should fit in a single UDP packet for the current channel target
   steady-state traffic). Reliable-ordered, global (not AOI-scoped, like `PlayerCollisionSetting`/`MonsterTuning`)
   — pre-walk legibility means every client needs every region regardless of proximity. The client mirrors it for
   the minimap's per-region shading (tinted by the region's WORST type-state) and touches no simulation.
+- v46 (NODE-FIELD N2, docs/node-field-design.md): scattered harvestables stop being entities. `ZoneInfo` gains a
+  trailing `CatalogHash` (`uint64`) — the same drift-guard discipline as `ContentHash`, now over the shared
+  `NodeCatalog` both sides independently build from (zone seed, authored map). Three new messages: server→client
+  `NodeStateMessage` (`ushort nodeIndex`, `bool depleted`) — one node's harvest/respawn flip, reliable, **global**
+  (not AOI-scoped); server→client `NodeStateBatchMessage` (count-prefixed `ushort[]` depleted indices) — sent once
+  on login, the field's current exceptions (typically a handful among thousands); client→server
+  `HarvestNodeMessage` (`ushort nodeIndex`) — the index-keyed harvest request that replaces `InteractRequest`'s
+  former resource-harvest branch (`InteractRequest` still exists, now corpse-open only).
 
 ## Client Messages
 
@@ -81,7 +89,8 @@ World snapshots should fit in a single UDP packet for the current channel target
 - `ActionIntent` / `ActionIntentMessage` (v38): movement-action trigger (jump) on its OWN dedup cursor — `uint ActionSeq`, `byte ActionId` (registry key; Jump=1), `ushort Heading` (same quantization as the aim angle), `uint AuthoredTick`. Heights/distances/durations live in the server-side action def, never on the wire (anti-cheat). Reliable-ordered.
 - `ChatSend`: text chat for the current zone. Slash-prefixed text is interpreted as a server command after authentication.
 - `SnapshotAck`: the highest **contiguously received** `WorldSnapshot` sequence (the gap-free prefix — not simply the latest to arrive). Drives the server's acked-baseline delta selection. Sequenced.
-- `InteractRequest`: network id of the target entity (generic verb; harvest and corpse-open are the resolutions). The server validates authentication, AOI-visibility, and a Euclidean reach of ≤ 1.5 units between the continuous positions (`InteractionTuning.InteractionRadiusUnits` — shared with the client's targeting so reach never drifts).
+- `InteractRequest`: network id of the target entity (generic verb; **corpse-open only** as of v46 — harvestable nodes are catalogue indices now, never entities an `InteractRequest` can target; see `HarvestNode`). The server validates authentication, AOI-visibility, and a Euclidean reach of ≤ 1.5 units between the continuous positions (`InteractionTuning.InteractionRadiusUnits` — shared with the client's targeting so reach never drifts).
+- `HarvestNode` / `HarvestNodeMessage` (v46, docs/node-field-design.md D5): `ushort NodeIndex` — a harvest request targeting a shared `NodeCatalog` index instead of a network id. The server validates the index is in range, the node is available, and the SAME ≤ 1.5-unit reach `InteractRequest` uses (against the catalogue tile centre, not an entity position). Reliable-ordered; replies via the same owner-only `InteractResult` (reason codes unchanged) + `InventoryUpdate` on success.
 - `LootAction` / `LootActionMessage` (v35): loot-window verb on an OPEN corpse — `TakeItem` (one stack by template key), `LootAll`, or `Close`. Opening reuses `InteractRequest`. Reliable-ordered.
 - `AdminSetStat` (v26): admin-gated "set my local player's current vital" (`byte` stat: HP/mana/stamina, `int` value; server clamps to [0, max]). Drives the dev-set window.
 - `AdminSetTuning` (v17): `string key`, `double value` — admin-only live server tuning. The key is looked up in a server-side registry that clamps/validates (e.g. `continuous.baseMoveSpeed`, `aoi.interestRadius`, `combat.*`, `<monsterTypeId>.<field>`); an unknown/invalid key or a non-admin sender is ignored + logged. Nothing is persisted (see `SaveMonsterTuning`).
@@ -94,7 +103,7 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
 
 - `ServerHello`: server name, protocol version, tick rate, base step cooldown in ms (the base-speed anchor: base units/sec = 1000 ÷ this), interest radius in units, and the authoritative player body radius in units (v37, predictor collision parity).
 - `LoginResult`: accepted/rejected, character id, display name, assigned role, spawn tile, reason.
-- `ZoneInfo`: zone id, width, height, and a **procedural-terrain descriptor** — `int32 seed`, `int32 genVersion`, `uint64 contentHash`. The client regenerates the identical map locally via the shared deterministic `TerrainGenerator` and compares hashes as a drift/tamper check; the server remains authoritative for movement.
+- `ZoneInfo`: zone id, width, height, and a **procedural-terrain descriptor** — `int32 seed`, `int32 genVersion`, `uint64 contentHash`, and (v46) a trailing `uint64 catalogHash`. The client regenerates the identical map locally via the shared deterministic `TerrainGenerator` and compares hashes as a drift/tamper check; it also independently builds the shared `NodeCatalog` from the same (seed, regenerated authored map) and compares `catalogHash` the same way (a loud diagnostic on mismatch, not a connection-level hard-fail — the server remains authoritative for movement and for the actual harvest regardless of what the client renders).
 - `EntitySpawn`: durable visible-entity metadata — network id, character id, kind, display name, initial tile, facing, the entity's **effective step cooldown in ms** (`ushort`; the per-entity speed encoding — units/sec = 1000 ÷ cooldown), and the placeholder per-type visual `TintRgb` + `ScaleMilli` (v41).
 - `MovementSpeedChanged`: reliable notice (`uint32 networkId`, `uint16 stepCooldownMs`) that an entity's effective speed changed mid-session (speed multiplier change, monster-type tuning edit, `/speed`). Sent to every viewer whose AOI includes the entity; keeps speed off the hot snapshot path.
 - `EntityDespawn`: server tick plus network id for an entity that left the client's area of interest.
@@ -117,6 +126,13 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
   re-send of just the changed region whenever any of its type-states flips. Reliable-ordered, global (not
   AOI-scoped, like `PlayerCollisionSetting`) — legibility is a pre-walk read, so every client needs every region
   regardless of proximity. The client uses it purely for the minimap's region shading; it drives no simulation.
+- `NodeState` / `NodeStateMessage` (v46, docs/node-field-design.md D3/D4): one catalogue node's availability
+  flip — `ushort nodeIndex`, `bool depleted` (true on harvest, false on respawn). Reliable-ordered, **global**
+  (not AOI-scoped) — D4's rationale: at community scale a harvest event is tiny (~5 bytes) and player-paced, so
+  per-session AOI diffing buys nothing over telling everyone.
+- `NodeStateBatch` / `NodeStateBatchMessage` (v46, D4): sent once on login — a count-prefixed `ushort[]` of the
+  field's currently-DEPLETED indices only (typically a handful among thousands of catalogue entries; untouched
+  nodes need no wire representation at all). Reliable-ordered.
 - `ServerError`: code and message.
 
 ## Rules

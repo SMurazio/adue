@@ -171,17 +171,20 @@ public sealed class NodeCatalogTests
 
     // ==================== THE SHIPPED HASH — NEVER UPDATE THIS WITHOUT A CONSCIOUS RE-PIN ====================
     // FLAG FOR THE ORCHESTRATOR (mirrors the M3 F1 process behind
-    // TownAndFloor1MapTests.ShippedTownAndFloor1ContentHash): the implementer authoring this test has NO
-    // test-runner access and cannot compute this literal independently, so it is left as an OBVIOUS
-    // placeholder. Run this test once via the standard gate, read the ACTUAL computed hash out of the
-    // assertion failure message, and paste it in below -- at that point it becomes a real "never silently
-    // update" pin exactly like the terrain one. Do NOT guess a value; do NOT delete this test to make the
-    // suite green without filling it in.
-    // Filled by the orchestrator from the first gate run's actual computed value (2026-07-04) — the M3 F1
-    // pattern. NEVER retune this literal to make a change green: a moved value means every deployed client
-    // hard-fails the ZoneInfo catalogue-drift check against an updated server (or vice versa). An INTENTIONAL
-    // catalogue change (class-table retune, N2's approach-room rule, new content) must move it — update the
-    // literal in the SAME commit as the change, stating the intent.
+    // TownAndFloor1MapTests.ShippedTownAndFloor1ContentHash): N2 (docs/node-field-design.md, the accepted N1
+    // fork) added the "candidates require >= 1 walkable 4-neighbour" adjacency guarantee to the scatter
+    // predicate (NodeCatalog.Build) -- an INTENTIONAL, conscious change to which tiles the scatter classes can
+    // land on, which moves this hash by construction. The implementer making that change has NO test-runner
+    // access and cannot compute the new literal independently, so it is reset to an OBVIOUS placeholder (0UL).
+    // Run this test once via the standard gate, read the ACTUAL computed hash out of the assertion failure
+    // message, and paste it in below -- at that point it becomes a real "never silently update" pin again,
+    // exactly like the terrain one. Do NOT guess a value; do NOT delete this test to make the suite green
+    // without filling it in.
+    // Filled by the orchestrator from the post-N2 gate run (2026-07-04). NOTE: the value is UNCHANGED from the
+    // pre-approach-rule pin — the >= 1-walkable-4-neighbour requirement rejected ZERO candidates on the shipped
+    // map at seed 0 (grass tiles fully boxed by blocked tiles are already scatter-hostile), so the rule is a
+    // GUARANTEE the catalogue happens to satisfy, not a change to it. NEVER retune this literal to make a change
+    // green: an intentional catalogue change must move it in the SAME commit, stating the intent.
     private const ulong ShippedRealMapSeedZeroCatalogHash = 2929419402239617837UL;
 
     [Fact]

@@ -7,6 +7,7 @@ using Mmo.Server.Configuration;
 using Mmo.Server.Data;
 using Mmo.Shared.Domain;
 using Mmo.Shared.Domain.Actions;
+using Mmo.Shared.Domain.Population;
 using Mmo.Shared.Protocol;
 
 namespace Mmo.Server.Runtime;
@@ -93,6 +94,11 @@ public sealed class GameServer
     private readonly IEcologyRepository _ecologyRepository;
     private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
     private readonly ResourceNodeRegistry _resourceNodes;
+    // NODE-FIELD N1/N2 (docs/node-field-design.md): the shared deterministic catalogue (built once from the
+    // SAME (seed, authored map) the client independently derives) and its per-index mutable state. See the
+    // ctor for the build (right after _zone) and NodeField's own doc for the respawn-sweep design.
+    private readonly NodeCatalog _nodeCatalog;
+    private readonly NodeField _nodeField;
     private readonly PersistenceWriteBehindWorker _persistence;
     private readonly EventBasedNetListener _listener = new();
     private readonly NetManager _netManager;
@@ -109,6 +115,11 @@ public sealed class GameServer
     // AUTHORED-MAP M3: test seam — lets the boot-wiring tests (authored prop spawning, spawn-anchor
     // login) inspect the constructed world without a network round-trip. Never used by product code.
     internal Zone ZoneForTests => _zone;
+
+    // NODE-FIELD N2: test seam — lets tests inspect the live per-index depleted/respawn state (and, via
+    // NodeCatalog, the tile/type each index resolved to) without a network round-trip. Never used by
+    // product code.
+    internal NodeField NodeFieldForTests => _nodeField;
 
     // TELEGRAPH T2 REVIEW FOLLOWUP (item 4b, the forget-on-resolve pin): test seams — let a HEADLESS test (no
     // RunAsync, so no live tick thread — same single-threaded "boot wiring" pattern as ZoneForTests) drive the
@@ -166,11 +177,6 @@ public sealed class GameServer
     private readonly ProtocolEncodeBuffer _messageEncodeBuffer = new();
     private readonly ProtocolEncodeBuffer _snapshotEncodeBuffer = new();
     private readonly Dictionary<Guid, PendingTileSave> _dirtyDurableTiles = [];
-    // Depleted-only respawn schedule: per tick only nodes whose respawn time has arrived are processed,
-    // so respawn work is O(depleted) regardless of how many available nodes the scatter placed. The placed
-    // node entities themselves live in the zone's WorldState (replicated by AOI); only depleted ones are
-    // tracked here.
-    private readonly ResourceRespawnSchedule _resourceRespawns = new();
 
     // LOOT P4b: reusable buffer of corpse entity ids due to decay this tick (collected, then despawned outside the
     // dictionary enumeration so we don't mutate _corpses while iterating it). Cleared each pass; no per-tick alloc.
@@ -398,6 +404,14 @@ public sealed class GameServer
             options.GenVersion,
             options.SpawnDistribution,
             ResolveEntityGridCellSize(options.InterestRadius));
+        // NODE-FIELD N1/N2 (docs/node-field-design.md D1-D3): the shared catalogue, built ONCE right after the
+        // zone from the SAME (seed, authored map) the client independently derives (the CatalogHash drift guard
+        // on ZoneInfo, D2). A non-authored (genVersion 1, procedural) zone has no authored markers/categories to
+        // build a catalogue from -- both sides fall back to the trivial empty one (0 entries, so CatalogHash
+        // still agrees by construction) rather than special-casing "no catalogue" everywhere. NodeField owns the
+        // per-index mutable depleted/respawn state on top of it.
+        _nodeCatalog = _zone.Authored is { } authoredMap ? NodeCatalog.Build(_zone.Seed, authoredMap) : NodeCatalog.Empty();
+        _nodeField = new NodeField(_nodeCatalog);
         // LIVING-ENEMIES P2-POLISH: the monster-type registry (seeds the one "slime" type). Tick rate fixes the
         // pause/cooldown/scan tick-quantisation, mirroring how ServerTuning derived the old global monster.* ticks.
         // CONTINUOUS MIGRATION (Phase 8): built BEFORE the AI so the hop locomotion's live hop-distance provider can
@@ -537,7 +551,6 @@ public sealed class GameServer
         };
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
-        ScatterResourceNodes();
         SpawnAuthoredProps();
         SpawnDummies();
         _netManager = new NetManager(_listener)
@@ -802,6 +815,12 @@ public sealed class GameServer
                     HandleInteract(session, interact.TargetNetworkId);
                 }
                 break;
+            case HarvestNodeMessage harvest:
+                if (session.IsAuthenticated)
+                {
+                    HandleHarvestNode(session, harvest.NodeIndex);
+                }
+                break;
             case AdminSetTuningMessage tuning:
                 if (session.IsAuthenticated)
                 {
@@ -857,7 +876,9 @@ public sealed class GameServer
 			or MessageType.InteractRequest or MessageType.LootAction
 			// MOVEMENT-ACTIONS Phase B1: an action trigger is an action message — suppressed while the player is downed
 			// (like Attack/MoveIntent), so a dead player can't jump.
-			or MessageType.ActionIntent;
+			or MessageType.ActionIntent
+			// NODE-FIELD N2: a harvest is an action message too — suppressed while downed, like InteractRequest.
+			or MessageType.HarvestNode;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -940,6 +961,9 @@ public sealed class GameServer
                         // client's obstacle gather gates on the SAME value the server integrator does (prediction
                         // parity) from the first frame — and the F1 Server-tab checkbox seeds to the live value.
                         SendPlayerCollisionSetting(current);
+                        // NODE-FIELD N2 (D4): replicate the field's current exceptions (only the depleted indices)
+                        // so a joining client's rendered field starts correct.
+                        SendNodeStateBatch(current);
                         // ECOLOGY E4 (D6a/D6c): replicate the full authored region set (minimap legibility) then
                         // announce the single most-extreme region as a login rumor — both read-only off the live
                         // EcologyState, no simulation gated on either.
@@ -1069,7 +1093,7 @@ public sealed class GameServer
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
         {
-            RespawnResourceNodes();
+            RespawnNodes();
             RegenEnemies();
             // LIVING-ENEMIES P3: spawn fresh monsters whose spawner's respawn delay elapsed, and respawn dead players
             // whose downed window elapsed. Both poll tiny sets (spawners / sessions) and no-op when nothing is due.
@@ -1994,8 +2018,11 @@ public sealed class GameServer
         // client can dead-reckon the entity between sparse snapshots (Phase 2). Zero at rest (the codec then pays no
         // velocity bytes — only the combined flags byte); non-zero while walking. WIRE-ONLY this phase: the client
         // buffers it but does not extrapolate yet.
+        // NODE-FIELD N2: the Depleted bit is now ALWAYS false — harvestable nodes replicate their
+        // availability via NodeState/NodeStateBatch (global, index-keyed), never as entity state. No entity
+        // kind sets this anymore (House/Portal props never did either — this only formalizes it).
         return new EntityStateSnapshot(
-            entity.NetworkId, entity.Position, entity.Facing, entity.IsDepleted, health, maxHealth, entity.VerticalOffset, entity.Velocity);
+            entity.NetworkId, entity.Position, entity.Facing, Depleted: false, health, maxHealth, entity.VerticalOffset, entity.Velocity);
     }
 
     // Which entity kinds expose a public HP bar. Players, dummies, and (LIVING-ENEMIES P1) roaming Monsters carry
@@ -2065,29 +2092,16 @@ public sealed class GameServer
         return _zone.ResolvePlayerSpawnTile(tile);
     }
 
-    // Deterministically scatters harvestable nodes of each registered type across the whole walkable map
-    // (Zone owns the placement algorithm + min spacing; see PlanResourceNodeScatter). Server-owned world
-    // entities, not session-derived; their transient state is server-memory only and respawns fresh on
-    // restart — but the placement is deterministic from the map seed, so the same layout regenerates.
-    private void ScatterResourceNodes()
-    {
-        foreach (var (definition, tile) in
-            _zone.PlanResourceNodeScatter(_resourceNodes, _options.ResourceNodeDensityTilesPerNode))
-        {
-            _zone.SpawnResourceNode(_networkIds.Rent(), definition, tile);
-        }
-    }
-
     // AUTHORED-MAP M3: spawn the authored map's prop MARKERS at boot. `H`/`P` become inert
     // EntityKind.Resource transients whose DisplayName drives the existing client archetype hook
     // ("House" -> casa sprite, "Portal" -> portal mesh; EntityVisualFactory) — Resource because that
-    // is the only kind the factory name-routes, and a Resource entity WITHOUT a ResourceNode is
-    // already an inert, non-interactable shape (interact answers not_resource). House COLLISION is
-    // the blocked `#` footprint stamped into the map itself (M1 review F4 — the flood-fill
-    // reachability test sees it); the marker tile is just the walkable sprite anchor south of the
-    // footprint. `T`/`R` pin REAL harvestable nodes (the town oak / quarry rock) on top of the D6
-    // scatter, which pre-excludes marker tiles so nothing ever stacks here. No-op on a procedural
-    // map (no authored data).
+    // is the only kind the factory name-routes. House COLLISION is the blocked `#` footprint stamped
+    // into the map itself (M1 review F4 — the flood-fill reachability test sees it); the marker tile
+    // is just the walkable sprite anchor south of the footprint. No-op on a procedural map (no
+    // authored data).
+    // NODE-FIELD N2: `T`/`R` pins are no longer spawned here — they are catalogue indices [0, pinCount)
+    // now (NodeCatalog.Build's Step 1, D1's pin-stability contract), replicated via NodeState/
+    // NodeStateBatch like every other harvestable, not as entities.
     private void SpawnAuthoredProps()
     {
         var authored = _zone.Authored;
@@ -2105,12 +2119,6 @@ public sealed class GameServer
                     break;
                 case AuthoredMarkerKind.Portal:
                     _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Resource, "Portal", marker.Tile, Direction8.S);
-                    break;
-                case AuthoredMarkerKind.TreePin:
-                    _zone.SpawnResourceNode(_networkIds.Rent(), _resourceNodes.Get("tree"), marker.Tile);
-                    break;
-                case AuthoredMarkerKind.RockPin:
-                    _zone.SpawnResourceNode(_networkIds.Rent(), _resourceNodes.Get("rock"), marker.Tile);
                     break;
             }
         }
@@ -2161,12 +2169,13 @@ public sealed class GameServer
         }
     }
 
-    // O(depleted) respawn: the schedule pops only nodes whose respawn tick has arrived and flips them back
-    // to Available; StateRevision is already bumped by TryRespawnResource so the refreshed availability
-    // re-replicates by AOI (no extra work needed in the callback). Still-available nodes are never visited.
-    private void RespawnResourceNodes()
+    // NODE-FIELD N2: O(depleted) respawn sweep — NodeField.DrainDueRespawns pops only nodes whose respawn
+    // tick has arrived; still-available nodes are never visited. Each flip re-broadcasts NodeState
+    // (depleted=false) to every session (D4 GLOBAL, not AOI — the un-deplete is as tiny and player-paced as
+    // the harvest that caused it).
+    private void RespawnNodes()
     {
-        _resourceRespawns.DrainDue(_serverTick, static _ => { });
+        _nodeField.DrainDueRespawns(_serverTick, index => BroadcastNodeState(index, depleted: false));
     }
 
     // COMBAT-QOL: heal stationary enemy targets (Dummy/Npc) toward MaxHealth at a HEAVY per-tick rate so a hit dummy
@@ -2196,12 +2205,12 @@ public sealed class GameServer
         }
     }
 
-    // Server-authoritative resolution of a generic Interact verb. Harvest is the only dispatch target
-    // for now: validate authentication, that the target is a visible-and-adjacent harvestable resource
-    // node, and that the node is Available; on success grant the yield through the inventory service,
-    // deplete the node, and reply to the owner. Every failure path replies with a reason and changes no
-    // state. Rate-limited like other client input (a node is depleted for its respawn window, so spam
-    // is naturally bounded, but we also guard against per-tick floods).
+    // NODE-FIELD N2: server-authoritative resolution of the generic Interact verb — CORPSE-OPEN ONLY now
+    // (D5: harvestable nodes moved to the dedicated index-keyed HarvestNodeMessage/HandleHarvestNode below;
+    // they are no longer WorldEntities an InteractRequest can target). House/Portal props and any other
+    // visible entity kind fall through to the SAME "not_resource" reply the entity-based harvest path always
+    // gave a non-node target, so a legacy/mis-clicked InteractRequest fails exactly as it always has.
+    // Rate-limited like other client input.
     private void HandleInteract(ClientSession session, uint targetNetworkId)
     {
         if (!session.TryConsumeInteract(_serverTick))
@@ -2223,29 +2232,55 @@ public sealed class GameServer
         }
 
         // LOOT P4c: interacting with a CORPSE OPENS the loot window (eligibility-gated), NOT a resource harvest and
-        // no longer an immediate loot-all (P4b). Route it before the resource check so a corpse isn't rejected as
-        // "not_resource". The window's buttons then drive take-item / loot-all / close via LootActionMessage.
+        // no longer an immediate loot-all (P4b). The window's buttons then drive take-item / loot-all / close via
+        // LootActionMessage.
         if (target.Kind == EntityKind.Corpse)
         {
             HandleCorpseOpen(session, actor, target);
             return;
         }
 
-        if (target.Resource is null)
+        SendInteractResult(session, false, "not_resource");
+    }
+
+    // NODE-FIELD N2 (docs/node-field-design.md D5): harvest a catalogue node by INDEX — the node-field
+    // analogue of HandleInteract's former resource-harvest branch, now keyed by index instead of an entity.
+    // Validates: rate limit (shares the interact cooldown — a harvest is exactly as spammy as the old entity
+    // interact was), a live actor, the index is in range, the node is available, the actor is within the
+    // SAME interaction reach every other harvest/loot verb uses, and the actor has an inventory. On success:
+    // award the per-NodeType yield (the SAME ResourceNodeRegistry content/respawn-ticks the entity path
+    // used), mark depleted + schedule respawn, broadcast the flip to every session (D4 GLOBAL, not AOI), and
+    // reply + push the inventory delta to the owner (unchanged reply shape/reason strings, reused verbatim).
+    private void HandleHarvestNode(ClientSession session, ushort nodeIndex)
+    {
+        if (!session.TryConsumeInteract(_serverTick))
         {
-            SendInteractResult(session, false, "not_resource");
+            SendInteractResult(session, false, "rate_limited");
             return;
         }
 
-        if (!IsInInteractionRange(actor, target))
+        if (!TryGetSessionEntity(session, out var actor))
         {
-            SendInteractResult(session, false, "too_far");
+            SendInteractResult(session, false, "no_actor");
             return;
         }
 
-        if (!target.Resource.IsAvailable)
+        if (!_nodeField.IsValidIndex(nodeIndex))
+        {
+            SendInteractResult(session, false, "no_target");
+            return;
+        }
+
+        if (_nodeField.IsDepleted(nodeIndex))
         {
             SendInteractResult(session, false, "depleted");
+            return;
+        }
+
+        var entry = _nodeField.EntryAt(nodeIndex);
+        if (!IsWithinNodeInteractionRange(actor, entry.Tile))
+        {
+            SendInteractResult(session, false, "too_far");
             return;
         }
 
@@ -2255,7 +2290,7 @@ public sealed class GameServer
             return;
         }
 
-        var definition = target.Resource.Definition;
+        var definition = _resourceNodes.Get(NodeTypeKey(entry.NodeType));
         var added = actor.Inventory.TryAdd(definition.YieldItemKey, definition.YieldQuantity);
         if (added <= 0)
         {
@@ -2264,13 +2299,24 @@ public sealed class GameServer
             return;
         }
 
-        target.DepleteResource(_serverTick);
-        // Schedule the respawn in the depleted-only schedule so RespawnResourceNodes never rescans
-        // available nodes. Keyed by the node's freshly-computed respawn tick.
-        _resourceRespawns.Schedule(target);
+        _nodeField.Deplete(nodeIndex, _serverTick, definition.RespawnTicks);
+        BroadcastNodeState(nodeIndex, depleted: true);
         SendInteractResult(session, true, "");
         SendInventoryUpdate(session, [new ItemStack(definition.YieldItemKey, actor.Inventory.QuantityOf(definition.YieldItemKey))]);
     }
+
+    // NODE-FIELD N2: the harvestable-type key ResourceNodeRegistry was seeded with (ResourceNodeRegistry
+    // .CreateDefault's "tree"/"rock"/"plant" keys, unchanged since S37/S38 — N2 does not invent new node
+    // kinds, only relocates where instances live). Explicit switch (not a cast/ToString), mirroring
+    // EcologyWire.ToWireState: a future reordering of NodeType fails to COMPILE here rather than silently
+    // mis-keying the registry lookup.
+    private static string NodeTypeKey(NodeType type) => type switch
+    {
+        NodeType.Tree => "tree",
+        NodeType.Rock => "rock",
+        NodeType.Plant => "plant",
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown NodeType."),
+    };
 
     // LOOT P4c: OPEN the loot window on a CORPSE the actor walked up to (an InteractRequest on a corpse). Gates:
     // adjacency (like a harvest) + the actor must be in the corpse's eligibleLooters (the contribution ledger's
@@ -2504,13 +2550,23 @@ public sealed class GameServer
         return (actor.Position - target.Position).LengthSquared <= InteractionTuning.InteractionRadiusUnitsSquared;
     }
 
+    // NODE-FIELD N2: the SAME reach gate as IsInInteractionRange, but against a catalogue TILE CENTRE —
+    // harvestable nodes have no WorldEntity/Position anymore, so this compares against
+    // WorldVector.FromTile(nodeTile) instead of another entity's Position.
+    private static bool IsWithinNodeInteractionRange(WorldEntity actor, TileCoord nodeTile)
+    {
+        return (actor.Position - WorldVector.FromTile(nodeTile)).LengthSquared <= InteractionTuning.InteractionRadiusUnitsSquared;
+    }
+
     private ZoneInfoMessage CreateZoneInfoMessage()
     {
         // Ship the seed, not the tiles: the client regenerates the identical map locally via the shared
         // deterministic generator. ContentHash is computed over the same canonically-ordered set the
         // generator emits, so the client can compare against its own regeneration (drift/tamper check).
         var contentHash = TerrainGenerator.ContentHash(_zone.Width, _zone.Height, _zone.Seed, _zone.GenVersion);
-        return new ZoneInfoMessage(_zone.Id, _zone.Width, _zone.Height, _zone.Seed, _zone.GenVersion, contentHash);
+        // NODE-FIELD N2 (D2): CatalogHash rides alongside, the same drift-guard discipline over the shared
+        // NodeCatalog the client independently builds.
+        return new ZoneInfoMessage(_zone.Id, _zone.Width, _zone.Height, _zone.Seed, _zone.GenVersion, contentHash, _nodeCatalog.CatalogHash);
     }
 
     private void HandleChat(ClientSession sender, string text)
@@ -3899,6 +3955,30 @@ public sealed class GameServer
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
         }
+    }
+
+    // NODE-FIELD N2 (docs/node-field-design.md D3/D4): one node's flip, GLOBAL (not AOI-scoped) — the design
+    // doc's rationale: at community scale a harvest event is tiny (~5 bytes) and player-paced, so per-session
+    // AOI diffing buys nothing over telling everyone. Mirrors BroadcastPlayerCollisionSetting's shape exactly.
+    private void BroadcastNodeState(int nodeIndex, bool depleted)
+    {
+        // NodeCatalog.Build enforces the ushort entry cap, so every valid index fits.
+        var message = new NodeStateMessage((ushort)nodeIndex, depleted);
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated)
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // NODE-FIELD N2 (D4): the login snapshot of the field's live exceptions — only the currently-DEPLETED
+    // indices (typically a handful among thousands), so a joining client's rendered field starts correct
+    // without a per-node payload. Mirrors SendRegionEcology's "full truth on login" pattern.
+    private void SendNodeStateBatch(ClientSession session)
+    {
+        TrySend(session.Peer, new NodeStateBatchMessage(_nodeField.DepletedIndices()), DeliveryMethod.ReliableOrdered);
     }
 
     // ECOLOGY E4 (docs/ecology-v1-design.md §3/§8 E4): replicate the FULL authored region set to one client — one

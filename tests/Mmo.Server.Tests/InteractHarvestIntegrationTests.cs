@@ -5,21 +5,22 @@ using Mmo.Server.Configuration;
 using Mmo.Server.Data;
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Population;
 using Mmo.Shared.Protocol;
 using Xunit;
 
 namespace Mmo.Server.Tests;
 
-// End-to-end coverage of the S38 gather loop against a live GameServer: a player adjacent to an
-// Available resource node harvests it (item lands in the S37 inventory, node depletes and replicates as
-// Depleted by AOI, then respawns), invalid interactions are rejected with a reason and no state change,
-// the node-depleted bit never reaches a client that can't see the node, and a mid-session relogin
-// (account takeover) keeps the harvested item.
+// NODE-FIELD N2 (docs/node-field-design.md): end-to-end coverage of the harvest loop against a live
+// GameServer, now that harvestable nodes are catalogue INDICES, not WorldEntities. A player adjacent to an
+// available catalogue node harvests it by index (HarvestNodeMessage): item lands in the S37 inventory, the
+// node depletes and broadcasts NodeState(depleted=true) to EVERY connected client (D4 — global, NOT
+// AOI-scoped, unlike the retired entity path's AOI-gated Depleted bit), then respawns and broadcasts
+// NodeState(depleted=false). Invalid harvests are rejected with a reason and no state change. A late-joining
+// client's login NodeStateBatch reflects an already-depleted node. A mid-session relogin (account takeover)
+// keeps the harvested item.
 public sealed class InteractHarvestIntegrationTests
 {
-    // "tree" is the first scattered node type (yields wood).
-    private const string TreeNodeName = "Tree";
-
     [Fact]
     public async Task AdjacentPlayerHarvestsNodeDepletesItAndRespawns()
     {
@@ -40,9 +41,16 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await ResolveSpawnedNodeAsync(client, placement);
+            // NODE-FIELD determinism (D2): the client independently builds the SAME catalogue the server did
+            // and the ZoneInfo.CatalogHash the server sent agrees with it.
+            await WaitUntilAsync(() => client.ZoneInfo is not null, client);
+            var independentCatalog = BuildCatalogLikeTheServer(options);
+            Assert.Equal(independentCatalog.CatalogHash, client.ZoneInfo!.CatalogHash);
 
-            client.SendInteract(node.NetworkId);
+            // Nothing depleted yet: the login NodeStateBatch was empty.
+            Assert.Empty(client.DepletedNodeIndices);
+
+            client.SendHarvestNode(placement.NodeIndex);
             await WaitUntilAsync(() => client.InteractResults.Any(), client);
 
             var harvest = client.InteractResults.Last();
@@ -53,11 +61,12 @@ public sealed class InteractHarvestIntegrationTests
             var inventory = client.InventoryUpdates.Last();
             Assert.Contains(inventory.ChangedStacks, stack => stack.TemplateKey == "wood" && stack.Quantity == 1);
 
-            // Node-depleted replicates by AOI: the observer (us) sees Depleted=true for this node.
-            await WaitUntilAsync(() => client.LatestDepletedState(node.NetworkId) == true, client);
+            // NodeState(depleted=true) replicates to the harvester (GLOBAL — see the AOI test below for the
+            // stronger "reaches an observer outside AOI too" assertion).
+            await WaitUntilAsync(() => client.DepletedNodeIndices.Contains(placement.NodeIndex), client);
 
             // Respawn restores availability (tree respawns after 100 ticks; at 20Hz that's ~5s).
-            await WaitUntilAsync(() => client.LatestDepletedState(node.NetworkId) == false, TimeSpan.FromSeconds(12), client);
+            await WaitUntilAsync(() => !client.DepletedNodeIndices.Contains(placement.NodeIndex), TimeSpan.FromSeconds(12), client);
         }
         finally
         {
@@ -67,7 +76,7 @@ public sealed class InteractHarvestIntegrationTests
     }
 
     [Fact]
-    public async Task TooFarInteractIsRejectedWithoutDepletingNode()
+    public async Task TooFarHarvestIsRejectedWithoutDepletingNode()
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
@@ -86,21 +95,54 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await ResolveSpawnedNodeAsync(client, placement);
-            // We spawn in reach of the scattered node; step away (in whichever vertical direction has room) until we
-            // are 2+ tiles off — comfortably past the Phase-9 Euclidean interaction radius (1.5 tiles) — so the
-            // interact must be rejected too_far.
-            var away = client.OwnTile.Y <= node.Tile.Y ? Direction8.N : Direction8.S;
-            await StepUntilAsync(client, away, () => Math.Abs(client.OwnTile.Y - node.Tile.Y) > 1);
+            // We spawn in reach of the node; step away (in whichever vertical direction has room) until we
+            // are 2+ tiles off — comfortably past the Phase-9 Euclidean interaction radius (1.5 tiles) — so
+            // the harvest must be rejected too_far.
+            var away = client.OwnTile.Y <= placement.NodeTile.Y ? Direction8.N : Direction8.S;
+            await StepUntilAsync(client, away, () => Math.Abs(client.OwnTile.Y - placement.NodeTile.Y) > 1);
 
-            client.SendInteract(node.NetworkId);
+            client.SendHarvestNode(placement.NodeIndex);
             await WaitUntilAsync(() => client.InteractResults.Any(), client);
 
             var result = client.InteractResults.Last();
             Assert.False(result.Success);
             Assert.Equal("too_far", result.Reason);
             Assert.Empty(client.InventoryUpdates);
-            Assert.NotEqual(true, client.LatestDepletedState(node.NetworkId));
+            Assert.DoesNotContain(placement.NodeIndex, client.DepletedNodeIndices);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task OutOfRangeNodeIndexIsRejectedAsNoTarget()
+    {
+        // NODE-FIELD N2: an index past the end of the catalogue (never valid) must be rejected the same way
+        // a hostile/stale client naming a gone entity used to be — "no_target", no state change.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var client = new IntegrationClient("OutOfRange");
+            client.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
+
+            client.SendHarvestNode(ushort.MaxValue);
+            await WaitUntilAsync(() => client.InteractResults.Any(), client);
+
+            var result = client.InteractResults.Last();
+            Assert.False(result.Success);
+            Assert.Equal("no_target", result.Reason);
+            Assert.Empty(client.InventoryUpdates);
         }
         finally
         {
@@ -112,6 +154,8 @@ public sealed class InteractHarvestIntegrationTests
     [Fact]
     public async Task InteractingWithNonResourceIsRejected()
     {
+        // NODE-FIELD N2: InteractRequest is corpse-open only now — every other visible entity (here, another
+        // player) is "not_resource", exactly as a non-node target always was.
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
         var options = CreateOptions(port, database.ConnectionString);
@@ -168,23 +212,21 @@ public sealed class InteractHarvestIntegrationTests
             client.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => client.IsLoggedIn && client.OwnNetworkId != 0, client);
 
-            var node = await ResolveSpawnedNodeAsync(client, placement);
-
-            client.SendInteract(node.NetworkId);
+            client.SendHarvestNode(placement.NodeIndex);
             await WaitUntilAsync(() => client.InteractResults.Any(r => r.Success), client);
 
             // Harvest the now-depleted node again and assert it's rejected as "depleted". The server applies
-            // a 4-tick interact rate-limit (ClientSession.TryConsumeInteract): under parallel-suite jitter an
-            // immediate retry can land inside that window and come back "rate_limited" instead (todo/N22). So
-            // retry the second interact, ignoring any "rate_limited" replies, until we observe the
-            // rate-limit-independent verdict — which for a depleted node must be "depleted".
+            // a 4-tick interact rate-limit (ClientSession.TryConsumeInteract, shared with HarvestNode): under
+            // parallel-suite jitter an immediate retry can land inside that window and come back
+            // "rate_limited" instead. So retry the second harvest, ignoring any "rate_limited" replies, until
+            // we observe the rate-limit-independent verdict — which for a depleted node must be "depleted".
             var depletedRejection = await PollForInteractAsync(
                 client,
                 r => !r.Success && r.Reason != "rate_limited",
                 () =>
                 {
                     client.ClearInteractResults();
-                    client.SendInteract(node.NetworkId);
+                    client.SendHarvestNode(placement.NodeIndex);
                 });
 
             Assert.False(depletedRejection.Success);
@@ -198,11 +240,14 @@ public sealed class InteractHarvestIntegrationTests
     }
 
     [Fact]
-    public async Task NodeDepletedStateIsNeverSerializedToAClientThatCannotSeeIt()
+    public async Task HarvestBroadcastsNodeStateToBothClientsRegardlessOfAoi()
     {
+        // D4: a node-state flip is GLOBAL, not AOI-scoped — the retired entity path's Depleted bit was
+        // AOI-gated (an out-of-range observer never saw it); NodeStateMessage deliberately is NOT. Use a
+        // small interest radius and walk the observer well outside it, so this would FAIL under the old
+        // AOI-gated behavior and only passes because the new broadcast is unconditional.
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
-        // Small interest radius so a player who steps away genuinely loses sight of the node.
         var options = CreateOptions(port, database.ConnectionString, interestRadius: 4f);
         var repository = new SqliteCharacterRepository(database.ConnectionString);
         var placement = DeterministicTreePlacement(options);
@@ -219,30 +264,64 @@ public sealed class InteractHarvestIntegrationTests
             harvester.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => harvester.IsLoggedIn && harvester.OwnNetworkId != 0, harvester);
 
-            var node = await ResolveSpawnedNodeAsync(harvester, placement);
-
-            // Observer logs in then walks far away so the node is outside its small (radius 4) AOI. Walk
-            // toward the horizontal map edge farthest from the node so we reliably clear the AOI window
-            // wherever the scattered node landed.
+            // Observer logs in then walks far away so the node is outside its small (radius 4) entity AOI —
+            // irrelevant to NodeState now, but proves the broadcast really doesn't gate on it.
             observer.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => observer.IsLoggedIn && observer.OwnNetworkId != 0, observer, harvester);
-            var awayFromNode = node.Tile.X < 32 ? Direction8.E : Direction8.W;
+            var awayFromNode = placement.NodeTile.X < AuthoredMaps.TownAndFloor1Width / 2 ? Direction8.E : Direction8.W;
             await StepUntilAsync(
                 observer,
                 awayFromNode,
-                () => Math.Abs(observer.OwnTile.X - node.Tile.X) > 8,
+                () => Math.Abs(observer.OwnTile.X - placement.NodeTile.X) > 8,
                 harvester);
 
-            observer.ClearMessages();
-            harvester.SendInteract(node.NetworkId);
+            harvester.SendHarvestNode(placement.NodeIndex);
             await WaitUntilAsync(() => harvester.InteractResults.Any(r => r.Success), harvester, observer);
 
-            // Let snapshots flow; the observer must never receive an entity state for this node at all.
-            await PollForAsync(TimeSpan.FromMilliseconds(600), observer, harvester);
+            // BOTH clients see the flip — the harvester (adjacent) AND the far-away observer.
+            await WaitUntilAsync(() => harvester.DepletedNodeIndices.Contains(placement.NodeIndex), harvester, observer);
+            await WaitUntilAsync(() => observer.DepletedNodeIndices.Contains(placement.NodeIndex), harvester, observer);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
 
-            Assert.DoesNotContain(
-                observer.Messages.OfType<WorldSnapshotMessage>().SelectMany(m => m.Entities),
-                entity => entity.NetworkId == node.NetworkId);
+    [Fact]
+    public async Task LateJoinerSeesAnAlreadyDepletedNodeViaTheLoginBatch()
+    {
+        // D4: NodeStateBatchMessage on login carries the field's CURRENT exceptions — a client that never
+        // witnessed the harvest (it wasn't even connected yet) must still see the node as depleted.
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString);
+        var repository = new SqliteCharacterRepository(database.ConnectionString);
+        var placement = DeterministicTreePlacement(options);
+        await SeedSpawnAdjacentToNodeAsync(repository, "FirstHarvester", placement);
+        var server = new GameServer(options, repository);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var first = new IntegrationClient("FirstHarvester");
+            first.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => first.IsLoggedIn && first.OwnNetworkId != 0, first);
+
+            first.SendHarvestNode(placement.NodeIndex);
+            await WaitUntilAsync(() => first.InteractResults.Any(r => r.Success), first);
+            await WaitUntilAsync(() => first.DepletedNodeIndices.Contains(placement.NodeIndex), first);
+
+            // A SECOND, unrelated client logs in AFTER the harvest — never sees the flip live, only the login
+            // batch.
+            using var joiner = new IntegrationClient("LateJoiner");
+            joiner.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => joiner.IsLoggedIn && joiner.OwnNetworkId != 0, joiner, first);
+
+            await WaitUntilAsync(() => joiner.DepletedNodeIndices.Contains(placement.NodeIndex), joiner, first);
         }
         finally
         {
@@ -271,9 +350,7 @@ public sealed class InteractHarvestIntegrationTests
             first.Connect(port, options.ConnectionKey);
             await WaitUntilAsync(() => first.IsLoggedIn && first.OwnNetworkId != 0, first);
 
-            var node = await ResolveSpawnedNodeAsync(first, placement);
-
-            first.SendInteract(node.NetworkId);
+            first.SendHarvestNode(placement.NodeIndex);
             await WaitUntilAsync(() => first.InventoryUpdates.Any(), first);
             Assert.Contains(first.InventoryUpdates.Last().ChangedStacks, s => s.TemplateKey == "wood" && s.Quantity == 1);
 
@@ -286,13 +363,13 @@ public sealed class InteractHarvestIntegrationTests
                 first);
             await WaitUntilAsync(() => first.IsDisconnected, second, first);
 
-            // The taking-over session must carry the harvested wood. Wait for the same tree to respawn,
-            // step adjacent, and harvest it again: the InventoryUpdate now reports a total of 2 wood,
-            // proving the first session's not-yet-flushed harvest was handed off, not lost. (If the
-            // takeover had reloaded the DB-stale inventory, this would report 1.)
-            var node2 = await ResolveSpawnedNodeAsync(second, placement);
-            await WaitUntilAsync(() => second.LatestDepletedState(node2.NetworkId) == false, TimeSpan.FromSeconds(12), second);
-            second.SendInteract(node2.NetworkId);
+            // The taking-over session must carry the harvested wood, AND its login NodeStateBatch must show
+            // the node still depleted (the field's live state, unaffected by the session takeover). Wait for
+            // it to respawn, harvest again: the InventoryUpdate now reports a total of 2 wood, proving the
+            // first session's not-yet-flushed harvest was handed off, not lost.
+            Assert.Contains(placement.NodeIndex, second.DepletedNodeIndices);
+            await WaitUntilAsync(() => !second.DepletedNodeIndices.Contains(placement.NodeIndex), TimeSpan.FromSeconds(12), second);
+            second.SendHarvestNode(placement.NodeIndex);
             // With S49, the takeover session also receives a login snapshot carrying the handed-off
             // wood:1, so we cannot stop at the first wood update — wait for the post-harvest total to
             // actually reach 2 (the handed-off 1 + the re-harvested 1).
@@ -407,6 +484,9 @@ public sealed class InteractHarvestIntegrationTests
         }
     }
 
+    // NODE-FIELD N2: the AUTHORED town+floor-1 map (384x384) so a real NodeCatalog exists — a procedural
+    // (genVersion 1) map has no authored data to scatter from and would carry the trivial empty catalogue,
+    // giving nothing to harvest. Mirrors TelegraphWireIntegrationTests.CreateAuthoredOptions.
     private static ServerOptions CreateOptions(int port, string connectionString, float interestRadius = 30f)
     {
         return new ServerOptions(
@@ -416,8 +496,8 @@ public sealed class InteractHarvestIntegrationTests
             DatabaseProvider.Sqlite,
             connectionString,
             TestSqliteDatabase.MigrationsPath,
-            64,
-            64,
+            AuthoredMaps.TownAndFloor1Width,
+            AuthoredMaps.TownAndFloor1Height,
             50,
             15,
             interestRadius,
@@ -425,67 +505,62 @@ public sealed class InteractHarvestIntegrationTests
             SpawnDistribution.Clustered,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase))
         {
-            // Dense scatter on the small 64² test map so a harvestable node is reliably near the clustered
-            // spawn (and quickly reachable under the small-radius test's moving AOI window). ~64 nodes.
-            ResourceNodeDensityTilesPerNode = 8,
+            GenVersion = TerrainGenerator.AuthoredGenVersion,
         };
     }
 
-    // Where the deterministically-scattered Tree node sits and the walkable tile the player should spawn
-    // on to be in interaction reach of it (no in-sim movement, no wall pathing). The chosen stand tile is a
-    // Chebyshev-1 neighbour, so it is within the Phase-9 Euclidean radius (<= sqrt(2) ≈ 1.414 < 1.5).
-    private readonly record struct TreePlacement(TileCoord NodeTile, TileCoord SpawnTile);
+    // Where a real, deterministic catalogue Tree node sits and the walkable tile the player should spawn on
+    // to be in interaction reach of it (no in-sim movement, no wall pathing). The chosen stand tile is a
+    // Chebyshev-1 neighbour, so it is within the Phase-9 Euclidean radius (<= sqrt(2) ~= 1.414 < 1.5).
+    private readonly record struct TreePlacement(ushort NodeIndex, TileCoord NodeTile, TileCoord SpawnTile);
 
-    // Resource-node placement is deterministic and seeded (S44): identical (seed, size, density, registry)
-    // inputs yield a byte-identical layout. So instead of walking the player across a walled map to find a
-    // node — slow and flaky, because the naive step-toward helper can't path around interior walls — we
-    // reconstruct the exact same Zone the GameServer builds and ask it where the nodes are. We then pick a
-    // Tree whose tile has a walkable Chebyshev-neighbour and pre-seed the player's persisted tile to that
-    // neighbour, so login spawns the player already adjacent to a real, reachable node. This touches no
-    // production placement code; it only reads the public, deterministic PlanResourceNodeScatter.
+    // Node placement is deterministic (docs/node-field-design.md D1/D2): instead of walking the player
+    // across the authored map to find a node — slow and flaky, because the naive step-toward helper can't
+    // path around interior walls — we reconstruct the exact same NodeCatalog the GameServer builds and ask
+    // it where the nodes are. We then pick a Tree whose tile has a walkable Chebyshev-neighbour and pre-seed
+    // the player's persisted tile to that neighbour, so login spawns the player already adjacent to a real,
+    // reachable node. This touches no production placement code; it only reads the public, deterministic
+    // NodeCatalog.Build (the same call GameServer's ctor makes).
     private static TreePlacement DeterministicTreePlacement(ServerOptions options)
     {
-        // Mirror GameServer's world construction exactly (same size, seed, gen version, distribution and
-        // registries) so the computed layout matches the server's spawned nodes tile-for-tile.
+        var catalog = BuildCatalogLikeTheServer(options);
         var zone = Zone.CreateGenerated(
             options.WorldWidthTiles,
             options.WorldHeightTiles,
             options.MapSeed,
             options.GenVersion,
             options.SpawnDistribution);
-        var registry = ResourceNodeRegistry.CreateDefault(ItemRegistry.Default);
 
-        var placements = zone.PlanResourceNodeScatter(registry, options.ResourceNodeDensityTilesPerNode);
-        var spawnCenter = zone.SpawnTiles[0];
-
-        // Among Tree nodes that have a walkable, non-default neighbour to stand on, prefer the one whose
-        // chosen stand-tile is nearest the clustered spawn centre (keeps observers/walks geometrically close
-        // to the original test, and keeps coordinates well away from the blocked border).
-        TreePlacement? best = null;
-        var bestDistance = int.MaxValue;
-        foreach (var (definition, tile) in placements)
+        foreach (var entry in catalog.Entries)
         {
-            if (definition.DisplayName != TreeNodeName)
+            if (entry.NodeType != NodeType.Tree)
             {
                 continue;
             }
 
-            if (!TryFindAdjacentStandTile(zone, tile, out var stand))
+            if (TryFindAdjacentStandTile(zone, entry.Tile, out var stand))
             {
-                continue;
-            }
-
-            var distance = Math.Max(Math.Abs(stand.X - spawnCenter.X), Math.Abs(stand.Y - spawnCenter.Y));
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                best = new TreePlacement(tile, stand);
+                return new TreePlacement(checked((ushort)entry.Index), entry.Tile, stand);
             }
         }
 
-        return best ?? throw new InvalidOperationException(
-            "No Tree node with a walkable adjacent tile was placed for the test map; " +
-            "check the map seed/size/density used by CreateOptions.");
+        throw new InvalidOperationException(
+            "No Tree node with a walkable adjacent tile was found in the catalogue; " +
+            "check the map seed/dims/genVersion used by CreateOptions.");
+    }
+
+    // Mirrors GameServer's own ctor build (_zone.Authored is {} map ? NodeCatalog.Build(_zone.Seed, map) :
+    // NodeCatalog.Empty()) exactly, so the test's placement/hash reasoning matches production byte-for-byte.
+    private static NodeCatalog BuildCatalogLikeTheServer(ServerOptions options)
+    {
+        var zone = Zone.CreateGenerated(
+            options.WorldWidthTiles,
+            options.WorldHeightTiles,
+            options.MapSeed,
+            options.GenVersion,
+            options.SpawnDistribution);
+
+        return zone.Authored is { } authoredMap ? NodeCatalog.Build(zone.Seed, authoredMap) : NodeCatalog.Empty();
     }
 
     // Finds a walkable tile that is Chebyshev-adjacent (<= 1, excluding the node tile itself) to a node and
@@ -516,8 +591,8 @@ public sealed class InteractHarvestIntegrationTests
 
     // Pre-seeds the account's character with a persisted tile adjacent to the chosen node, so that when the
     // client logs in the server's ResolvePlayerSpawnTile honours it and the player spawns already adjacent —
-    // no in-sim walking across the walled map. Uses only the production persistence path (LoadOrCreate +
-    // SaveTile); no production code is modified.
+    // no in-sim walking across the map. Uses only the production persistence path (LoadOrCreate + SaveTile);
+    // no production code is modified.
     private static async Task SeedSpawnAdjacentToNodeAsync(
         SqliteCharacterRepository repository,
         string accountName,
@@ -527,24 +602,10 @@ public sealed class InteractHarvestIntegrationTests
         await repository.SavePositionAsync(character.CharacterId, WorldVector.FromTile(placement.SpawnTile), CancellationToken.None);
     }
 
-    // After login, resolves the network id of the Tree node at the expected (deterministic) tile from the
-    // spawns the client has received. The player was seeded adjacent to it, so it is inside AOI and arrives
-    // as an EntitySpawn promptly.
-    private static async Task<(uint NetworkId, TileCoord Tile)> ResolveSpawnedNodeAsync(
-        IntegrationClient client,
-        TreePlacement placement)
-    {
-        await WaitUntilAsync(
-            () => client.KnownSpawns.Any(s => s.DisplayName == TreeNodeName && s.Tile == placement.NodeTile),
-            client);
-
-        var spawn = client.KnownSpawns.Last(s => s.DisplayName == TreeNodeName && s.Tile == placement.NodeTile);
-        return (spawn.NetworkId, spawn.Tile);
-    }
-
-    // Repeatedly triggers an interact attempt and polls until a result satisfying the predicate arrives,
+    // Repeatedly triggers a harvest attempt and polls until a result satisfying the predicate arrives,
     // re-issuing on each poll cycle. Used to retry past transient "rate_limited" replies (the 4-tick
-    // interact cooldown) so the test asserts the rate-limit-independent verdict deterministically.
+    // interact cooldown, shared by HarvestNode) so the test asserts the rate-limit-independent verdict
+    // deterministically.
     private static async Task<InteractResultMessage> PollForInteractAsync(
         IntegrationClient client,
         Func<InteractResultMessage, bool> predicate,
@@ -641,7 +702,7 @@ public sealed class InteractHarvestIntegrationTests
         private readonly EventBasedNetListener _listener = new();
         private readonly NetManager _client;
         private readonly string _name;
-        private readonly Dictionary<uint, bool> _depletedByNetworkId = new();
+        private readonly HashSet<ushort> _depletedNodeIndices = new();
         private NetPeer? _serverPeer;
         private uint _moveSequence;
         private bool _disposed;
@@ -668,11 +729,16 @@ public sealed class InteractHarvestIntegrationTests
         public List<EntitySpawnMessage> KnownSpawns { get; } = [];
         public List<InteractResultMessage> InteractResults { get; } = [];
         public List<InventoryUpdateMessage> InventoryUpdates { get; } = [];
+        public ZoneInfoMessage? ZoneInfo { get; private set; }
         public bool IsLoggedIn { get; private set; }
         public bool IsDisconnected { get; private set; }
         public Guid CharacterId { get; private set; }
         public uint OwnNetworkId { get; private set; }
         public TileCoord OwnTile { get; private set; } = TileGrid.DefaultSpawnTile;
+
+        // NODE-FIELD N2: the field's live exceptions as replicated to THIS client (upserted by NodeState,
+        // replaced wholesale by NodeStateBatch on login) — the client-side mirror MmoClient itself keeps.
+        public IReadOnlySet<ushort> DepletedNodeIndices => _depletedNodeIndices;
 
         public void Connect(int port, string key)
         {
@@ -705,6 +771,12 @@ public sealed class InteractHarvestIntegrationTests
             Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
         }
 
+        // NODE-FIELD N2: the index-keyed harvest request replacing the old entity-targeted SendInteract for nodes.
+        public void SendHarvestNode(ushort nodeIndex)
+        {
+            Send(new HarvestNodeMessage(nodeIndex), DeliveryMethod.ReliableOrdered);
+        }
+
         public void ClearMessages()
         {
             Messages.Clear();
@@ -713,12 +785,6 @@ public sealed class InteractHarvestIntegrationTests
         public void ClearInteractResults()
         {
             InteractResults.Clear();
-        }
-
-        // null = no state seen yet for this node; true/false = last replicated depleted bit.
-        public bool? LatestDepletedState(uint networkId)
-        {
-            return _depletedByNetworkId.TryGetValue(networkId, out var depleted) ? depleted : null;
         }
 
         public void Dispose()
@@ -746,6 +812,9 @@ public sealed class InteractHarvestIntegrationTests
                         IsLoggedIn = login.Accepted;
                         CharacterId = login.CharacterId;
                         break;
+                    case ZoneInfoMessage zoneInfo:
+                        ZoneInfo = zoneInfo;
+                        break;
                     case EntitySpawnMessage spawn:
                         KnownSpawns.Add(spawn);
                         if (spawn.DisplayName == _name)
@@ -761,11 +830,33 @@ public sealed class InteractHarvestIntegrationTests
                     case InventoryUpdateMessage update:
                         InventoryUpdates.Add(update);
                         break;
+                    case NodeStateMessage nodeState:
+                        // NODE-FIELD N2: one node's flip (harvest or respawn), GLOBAL — mirrors MmoClient's own
+                        // upsert exactly.
+                        if (nodeState.Depleted)
+                        {
+                            _depletedNodeIndices.Add(nodeState.NodeIndex);
+                        }
+                        else
+                        {
+                            _depletedNodeIndices.Remove(nodeState.NodeIndex);
+                        }
+
+                        break;
+                    case NodeStateBatchMessage nodeBatch:
+                        // NODE-FIELD N2: the login snapshot of current exceptions — REPLACES the set (it IS the
+                        // full truth at that instant), mirrors MmoClient's own handling.
+                        _depletedNodeIndices.Clear();
+                        foreach (var index in nodeBatch.DepletedIndices)
+                        {
+                            _depletedNodeIndices.Add(index);
+                        }
+
+                        break;
                     case WorldSnapshotMessage snapshot:
                         Send(new SnapshotAckMessage(snapshot.SnapshotSequence), DeliveryMethod.Sequenced);
                         foreach (var entity in snapshot.Entities)
                         {
-                            _depletedByNetworkId[entity.NetworkId] = entity.Depleted;
                             if (entity.NetworkId == OwnNetworkId)
                             {
                                 OwnTile = entity.Position.ToTileRounded();

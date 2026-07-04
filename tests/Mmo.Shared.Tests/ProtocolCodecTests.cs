@@ -509,12 +509,11 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyFive()
+    public void ProtocolVersionIsFortySix()
     {
-        // ECOLOGY E4 (v45, docs/ecology-v1-design.md): added the server->client RegionEcologyMessage (one authored
-        // region's legible state: id + display name + tile rect + per-type {typeId, state}). One additive message +
-        // tag; bump on top of v44 (telegraph T2). Pin it so a change is caught.
-        Assert.Equal(45, ProtocolCodec.Version);
+        // NODE-FIELD N2 (v46, docs/node-field-design.md): ZoneInfo gains CatalogHash, plus three new messages
+        // (NodeState, NodeStateBatch, HarvestNode). Bump on top of v45 (ecology E4). Pin it so a change is caught.
+        Assert.Equal(46, ProtocolCodec.Version);
     }
 
     // TELEGRAPH T2 (v44): the telegraph announcement round-trips — the ulong id, the shape (kind + Q12.4 origin +
@@ -1006,7 +1005,10 @@ public sealed class ProtocolCodecTests
             12,
             Seed: 1234,
             GenVersion: 1,
-            ContentHash: 0xDEADBEEFCAFEF00DUL);
+            ContentHash: 0xDEADBEEFCAFEF00DUL,
+            // NODE-FIELD N2 (v46): a distinct value from ContentHash so a codec bug that aliased the two
+            // fields (e.g. writing/reading the same one twice) would be caught.
+            CatalogHash: 0x1122334455667788UL);
 
         var decoded = Assert.IsType<ZoneInfoMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
 
@@ -1016,6 +1018,73 @@ public sealed class ProtocolCodecTests
         Assert.Equal(1234, decoded.Seed);
         Assert.Equal(1, decoded.GenVersion);
         Assert.Equal(0xDEADBEEFCAFEF00DUL, decoded.ContentHash);
+        Assert.Equal(0x1122334455667788UL, decoded.CatalogHash);
+    }
+
+    // NODE-FIELD N2 (v46): one node's harvest/respawn flip round-trips its index and depleted flag.
+    [Fact]
+    public void NodeStateMessageRoundTrips()
+    {
+        var original = new NodeStateMessage(NodeIndex: 4321, Depleted: true);
+
+        var decoded = Assert.IsType<NodeStateMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((ushort)4321, decoded.NodeIndex);
+        Assert.True(decoded.Depleted);
+        Assert.Equal(MessageType.NodeState, decoded.Type);
+    }
+
+    // NODE-FIELD N2 (v46): the login batch round-trips an ordered list of depleted indices.
+    [Fact]
+    public void NodeStateBatchMessageRoundTrips()
+    {
+        var original = new NodeStateBatchMessage(new ushort[] { 0, 1, 42, 65535 });
+
+        var decoded = Assert.IsType<NodeStateBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(new ushort[] { 0, 1, 42, 65535 }, decoded.DepletedIndices);
+        Assert.Equal(MessageType.NodeStateBatch, decoded.Type);
+    }
+
+    // NODE-FIELD N2 (v46): an empty batch (nothing depleted at login — the common case) ships a zero-count
+    // list, not a null reference.
+    [Fact]
+    public void NodeStateBatchMessageRoundTripsEmpty()
+    {
+        var original = new NodeStateBatchMessage(Array.Empty<ushort>());
+
+        var decoded = Assert.IsType<NodeStateBatchMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Empty(decoded.DepletedIndices);
+    }
+
+    // NODE-FIELD N2: the codec bounds the batch's depleted-index count against a malformed/hostile
+    // over-count so a corrupt packet can't force an unbounded allocation (mirrors
+    // RegionEcologyMessageRejectsOversizedTypeCount).
+    [Fact]
+    public void NodeStateBatchMessageRejectsOversizedCount()
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(ProtocolCodec.Magic);
+        writer.Write(ProtocolCodec.Version);
+        writer.Write((ushort)MessageType.NodeStateBatch);
+        writer.Write((ushort)60000); // over MaxNodeStateBatchIndices (8192) — rejected before any index is read
+        writer.Flush();
+
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(stream.ToArray()));
+    }
+
+    // NODE-FIELD N2 (v46): the client->server harvest request round-trips its target index.
+    [Fact]
+    public void HarvestNodeMessageRoundTrips()
+    {
+        var original = new HarvestNodeMessage(NodeIndex: 999);
+
+        var decoded = Assert.IsType<HarvestNodeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal((ushort)999, decoded.NodeIndex);
+        Assert.Equal(MessageType.HarvestNode, decoded.Type);
     }
 
     [Fact]

@@ -90,7 +90,16 @@ public static class ProtocolCodec
     // numbers). Sent to every client: the full authored region set on login, and a single re-send of just the
     // changed region on a type-state flip. Reliable-ordered, global (not AOI-scoped). Server + every in-repo
     // client flip together.
-    public const byte Version = 45;
+    // v46 — NODE-FIELD N2 (docs/node-field-design.md): scattered harvestables stop being entities. Four
+    // changes: (1) ZoneInfo gains a trailing CatalogHash (ulong) — the SAME drift-guard discipline as
+    // ContentHash, now over the shared NodeCatalog. (2) new server->client NodeStateMessage {ushort
+    // nodeIndex, bool depleted} — one node's harvest/respawn flip, reliable, GLOBAL (not AOI-scoped). (3)
+    // new server->client NodeStateBatchMessage {count-prefixed ushort[] depletedIndices} — the login
+    // snapshot of current exceptions (typically a handful). (4) new client->server HarvestNodeMessage
+    // {ushort nodeIndex} — the index-keyed harvest request replacing InteractRequest's former resource-
+    // harvest branch (InteractRequest still exists, now corpse-open only). Server + every in-repo client
+    // flip together.
+    public const byte Version = 46;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -115,6 +124,13 @@ public static class ProtocolCodec
     // decoded per-region type list so a malformed/hostile packet can't allocate unboundedly (same defensive cap
     // idea as MaxMonsterFields, just a smaller ceiling since a region's type roster is far narrower).
     private const int MaxEcologyTypesPerRegion = 64;
+
+    // NODE-FIELD N2: the login NodeStateBatch lists only currently-DEPLETED indices — D4 expects "typically
+    // dozens" among thousands of catalogue entries. Bounded well above any realistic steady-state count (a
+    // world where most of a ~5,000-node catalogue is depleted at once is a live-balance problem, not a wire
+    // one) but still far short of the full ushort index range, so a malformed/hostile packet can't force an
+    // unbounded allocation.
+    private const int MaxNodeStateBatchIndices = 8192;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -186,6 +202,10 @@ public static class ProtocolCodec
             case AdminSetPlayerCollisionMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the desired player↔player collision state.
                 writer.Write(value.Enabled);
+                break;
+            case HarvestNodeMessage value:
+                // NODE-FIELD N2 (v46): a single ushort — the catalogue index to harvest. Mirrored in the decode.
+                writer.Write(value.NodeIndex);
                 break;
             case PlayerCollisionSettingMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
@@ -274,6 +294,14 @@ public static class ProtocolCodec
                 break;
             case RegionEcologyMessage value:
                 WriteRegionEcology(writer, value);
+                break;
+            case NodeStateMessage value:
+                // NODE-FIELD N2 (v46): {ushort nodeIndex, bool depleted}. Mirrored in the decode.
+                writer.Write(value.NodeIndex);
+                writer.Write(value.Depleted);
+                break;
+            case NodeStateBatchMessage value:
+                WriteNodeStateBatch(writer, value);
                 break;
             case CorpseContentsMessage value:
                 WriteCorpseContents(writer, value);
@@ -383,6 +411,8 @@ public static class ProtocolCodec
             // PLAYER-COLLISION-TOGGLE (v43): a single bool mirrors the encode order.
             MessageType.AdminSetPlayerCollision => new AdminSetPlayerCollisionMessage(reader.ReadBoolean()),
             MessageType.PlayerCollisionSetting => new PlayerCollisionSettingMessage(reader.ReadBoolean()),
+            // NODE-FIELD N2 (v46): a single ushort node index. Mirrors the encode order.
+            MessageType.HarvestNode => new HarvestNodeMessage(reader.ReadUInt16()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
@@ -418,6 +448,9 @@ public static class ProtocolCodec
             MessageType.SpawnerMarker => new SpawnerMarkerMessage(reader.ReadUInt32(), ReadTile(reader), reader.ReadBoolean()),
             MessageType.Telegraph => ReadTelegraph(reader),
             MessageType.RegionEcology => ReadRegionEcology(reader),
+            // NODE-FIELD N2 (v46): {ushort nodeIndex, bool depleted} mirrors the encode order.
+            MessageType.NodeState => new NodeStateMessage(reader.ReadUInt16(), reader.ReadBoolean()),
+            MessageType.NodeStateBatch => ReadNodeStateBatch(reader),
             MessageType.CorpseContents => ReadCorpseContents(reader),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
@@ -428,6 +461,8 @@ public static class ProtocolCodec
     // Terrain ships as a seed descriptor, not a tile payload: dims + (Seed, GenVersion) + ContentHash.
     // Fixed-size and tiny — login terrain cost is constant regardless of map size. The client
     // regenerates the map locally via the shared TerrainGenerator and validates ContentHash.
+    // NODE-FIELD N2 (v46): CatalogHash rides last, after ContentHash — the SAME drift-guard discipline
+    // applied to the shared NodeCatalog. Mirrored in ReadZoneInfo.
     private static void WriteZoneInfo(BinaryWriter writer, ZoneInfoMessage zone)
     {
         WriteString(writer, zone.ZoneId);
@@ -436,6 +471,7 @@ public static class ProtocolCodec
         writer.Write(zone.Seed);
         writer.Write(zone.GenVersion);
         writer.Write(zone.ContentHash);
+        writer.Write(zone.CatalogHash);
     }
 
     private static ZoneInfoMessage ReadZoneInfo(BinaryReader reader)
@@ -446,7 +482,44 @@ public static class ProtocolCodec
         var seed = reader.ReadInt32();
         var genVersion = reader.ReadInt32();
         var contentHash = reader.ReadUInt64();
-        return new ZoneInfoMessage(zoneId, width, height, seed, genVersion, contentHash);
+        // NODE-FIELD N2 (v46): mirrors the write order — CatalogHash immediately after ContentHash.
+        var catalogHash = reader.ReadUInt64();
+        return new ZoneInfoMessage(zoneId, width, height, seed, genVersion, contentHash, catalogHash);
+    }
+
+    // NODE-FIELD N2 (v46): the login snapshot of the field's exceptions — a ushort count then that many ushort
+    // DEPLETED indices (never a full per-node payload — untouched nodes need no wire representation at all).
+    // Mirrored in ReadNodeStateBatch.
+    private static void WriteNodeStateBatch(BinaryWriter writer, NodeStateBatchMessage value)
+    {
+        var indices = value.DepletedIndices;
+        if (indices.Count > MaxNodeStateBatchIndices)
+        {
+            throw new ProtocolException($"NodeStateBatch has too many depleted indices: {indices.Count}.");
+        }
+
+        writer.Write((ushort)indices.Count);
+        foreach (var index in indices)
+        {
+            writer.Write(index);
+        }
+    }
+
+    private static NodeStateBatchMessage ReadNodeStateBatch(BinaryReader reader)
+    {
+        var count = reader.ReadUInt16();
+        if (count > MaxNodeStateBatchIndices)
+        {
+            throw new ProtocolException($"NodeStateBatch has too many depleted indices: {count}.");
+        }
+
+        var indices = new List<ushort>(count);
+        for (var i = 0; i < count; i++)
+        {
+            indices.Add(reader.ReadUInt16());
+        }
+
+        return new NodeStateBatchMessage(indices);
     }
 
     private static void WriteZoneDimension(BinaryWriter writer, int value, string name)

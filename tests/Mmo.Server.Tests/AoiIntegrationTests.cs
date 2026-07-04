@@ -120,10 +120,11 @@ public sealed class AoiIntegrationTests
     {
         using var database = await TestSqliteDatabase.CreateMigratedAsync();
         var port = GetFreeUdpPort();
-        // Interest radius spans the whole 64² map so at least one of the scattered resource nodes (the
-        // server's static, non-session-owned entities) lands in the observer's AOI regardless of where
-        // the seeded scatter placed them. Verifies such an entity both spawns (with kind + empty
-        // character id) and appears in the periodic world snapshot. (Despawn-on-AOI-exit is covered by
+        // NODE-FIELD N2: scattered harvestables are no longer entities, so the static non-session-owned
+        // subject is now an AUTHORED PROP (the town's House/Portal Resource-kind transients, genVersion 2
+        // world) — the observer spawns on the plaza (Authored distribution) with the houses well inside the
+        // 64u interest radius. Verifies such an entity both spawns (with kind + empty character id) and
+        // appears in the periodic world snapshot. (Despawn-on-AOI-exit is covered by
         // ClientReceivesSpawnAndDespawnWhenEntityEntersAndLeavesAoi.)
         var options = new ServerOptions(
             port,
@@ -132,14 +133,17 @@ public sealed class AoiIntegrationTests
             DatabaseProvider.Sqlite,
             database.ConnectionString,
             TestSqliteDatabase.MigrationsPath,
-            64,
-            64,
+            384,
+            384,
             50,
             15,
             64,
             150,
-            SpawnDistribution.Clustered,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            SpawnDistribution.Authored,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)) with
+        {
+            GenVersion = 2,
+        };
         var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
         using var shutdown = new CancellationTokenSource();
         var serverTask = server.RunAsync(shutdown.Token);

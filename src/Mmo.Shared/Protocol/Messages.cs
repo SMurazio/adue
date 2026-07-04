@@ -411,15 +411,55 @@ public readonly record struct RegionEcologyTypeEntry(string TypeId, EcologyPopul
 // generated blocked set. The client regenerates the identical map locally via the shared
 // TerrainGenerator and compares hashes as a drift/tamper check. Login terrain cost is now ~constant
 // regardless of map size. The server remains authoritative for movement validation.
+//
+// NODE-FIELD N2 (protocol v46, docs/node-field-design.md D2): CatalogHash is the SAME drift-guard
+// discipline applied to the shared NodeCatalog — the client independently builds the identical catalogue
+// from (ZoneId's zone Seed, the same regenerated AuthoredMap) and compares. A mismatch means the client's
+// scatter code has drifted from the server's (or the map/class table did) — see MmoClient.HandleZoneInfo
+// for the comparison (mirrors the ContentHash check exactly: loud diagnostic, not a connection-level
+// hard-fail — the server stays authoritative for the actual harvest regardless).
 public sealed record ZoneInfoMessage(
     string ZoneId,
     int Width,
     int Height,
     int Seed,
     int GenVersion,
-    ulong ContentHash) : IProtocolMessage
+    ulong ContentHash,
+    ulong CatalogHash) : IProtocolMessage
 {
     public MessageType Type => MessageType.ZoneInfo;
+}
+
+// NODE-FIELD N2 (protocol v46, docs/node-field-design.md D3/D4): server->client announcement that ONE
+// catalogue node's availability flipped — a harvest (Depleted=true) or a respawn (Depleted=false).
+// NodeIndex is the catalogue's stable ushort index (NEVER a position — see NodeCatalog's D1 rationale).
+// Sent reliable-ordered, GLOBAL (not AOI-scoped, like RegionEcology/PlayerCollisionSetting): D4 reasons
+// that at community scale a harvest event is tiny (~5 bytes) and player-paced, so per-session AOI diffing
+// buys nothing over just telling everyone.
+public sealed record NodeStateMessage(ushort NodeIndex, bool Depleted) : IProtocolMessage
+{
+    public MessageType Type => MessageType.NodeState;
+}
+
+// NODE-FIELD N2 (protocol v46, docs/node-field-design.md D4): sent ONCE on login — the field's full set of
+// current EXCEPTIONS, i.e. only the currently-DEPLETED indices (typically a handful among thousands; the
+// vast majority of untouched nodes need no wire representation at all — the whole point of the catalogue
+// architecture). A joining client's rendered field starts correct without a per-node payload. Reliable-
+// ordered.
+public sealed record NodeStateBatchMessage(IReadOnlyList<ushort> DepletedIndices) : IProtocolMessage
+{
+    public MessageType Type => MessageType.NodeStateBatch;
+}
+
+// NODE-FIELD N2 (protocol v46, docs/node-field-design.md D5): client->server harvest request, targeting a
+// catalogue INDEX — the node-field replacement for InteractRequest's former resource-harvest branch
+// (InteractRequest still exists, but now only ever resolves a corpse-open; harvestable nodes are no longer
+// WorldEntities an InteractRequest can name). The server validates range/availability/reach exactly as the
+// entity path did (see GameServer.HandleHarvestNode) and replies via the SAME owner-only InteractResult
+// (reused verbatim — the reason-code vocabulary is unchanged). Reliable-ordered, like InteractRequest.
+public sealed record HarvestNodeMessage(ushort NodeIndex) : IProtocolMessage
+{
+    public MessageType Type => MessageType.HarvestNode;
 }
 
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage

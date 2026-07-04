@@ -4,6 +4,7 @@ using Mmo.Client.Core;
 using Mmo.Server.Configuration;
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
+using Mmo.Shared.Domain.Population;
 using Mmo.Shared.Protocol;
 using Xunit;
 
@@ -74,7 +75,9 @@ public sealed class MmoClientReattachSeqTests
         // Hello + zone + login land, but the local EntitySpawn has NOT — so no predictor is attached yet and sends go
         // through the pre-spawn fallback counter.
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 50, 30, 0.5f));
-        client.HandleMessageForTests(new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash));
+        // NODE-FIELD N2: genVersion 1 (procedural) has no authored map to scatter from, so both sides agree on
+        // the trivial empty catalogue's hash.
+        client.HandleMessageForTests(new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash, NodeCatalog.Empty().CatalogHash));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
 
         uint preSpawnSeq = 0;
@@ -113,7 +116,9 @@ public sealed class MmoClientReattachSeqTests
 
         // 50ms cooldown is tick-aligned at 20Hz → a clean derived predictor speed; body radius 0.5 like production.
         client.HandleMessageForTests(new ServerHelloMessage("test", ProtocolCodec.Version, 20, 50, 30, 0.5f));
-        client.HandleMessageForTests(new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash));
+        // NODE-FIELD N2: genVersion 1 (procedural) has no authored map to scatter from, so both sides agree on
+        // the trivial empty catalogue's hash.
+        client.HandleMessageForTests(new ZoneInfoMessage(zone.Id, zone.Width, zone.Height, zone.Seed, zone.GenVersion, serverHash, NodeCatalog.Empty().CatalogHash));
         client.HandleMessageForTests(new LoginResultMessage(true, characterId, "Local", ClientRole.Player, new TileCoord(5, 5), ""));
         client.HandleMessageForTests(new EntitySpawnMessage(localNetworkId, characterId, EntityKind.Player, "Local", new TileCoord(5, 5), Direction8.S, StepCooldownMs: 50));
         client.HandleMessageForTests(SnapshotWithInputSeq(1, localNetworkId, 5, 5, lastInputSeq: 0));

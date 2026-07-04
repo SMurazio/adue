@@ -30,8 +30,7 @@ public sealed class WorldEntity
         Guid? characterId,
         ClientSession? ownerSession,
         bool isDurable,
-        Inventory? inventory = null,
-        ResourceNode? resource = null)
+        Inventory? inventory = null)
     {
         Id = id;
         NetworkId = networkId;
@@ -45,7 +44,6 @@ public sealed class WorldEntity
         OwnerSession = ownerSession;
         IsDurable = isDurable;
         Inventory = inventory;
-        Resource = resource;
     }
 
     public ulong Id { get; }
@@ -407,18 +405,6 @@ public sealed class WorldEntity
     // durable player entities; null for transient/world entities.
     public Inventory? Inventory { get; }
 
-    // Transient resource-node state (available/depleted + respawn timer). Present only on
-    // EntityKind.Resource entities that are harvestable; null for players and the legacy placeholder.
-    public ResourceNode? Resource { get; }
-
-    // Replicated availability bit that rides EntityStateSnapshot. False (the default) for everything
-    // that is not a harvestable resource node, so the snapshot path stays uniform.
-    public bool IsDepleted => Resource is { IsAvailable: false };
-
-    // The tick this node is scheduled to respawn at. 0 for non-resource entities. Lets the server queue
-    // a depleted node by its respawn time rather than rescanning all nodes each tick.
-    public uint ResourceRespawnAtTick => Resource?.RespawnAtTick ?? 0;
-
     public uint StateRevision { get; private set; } = 1;
 
     // S76: a per-entity counter of ACCEPTED tile moves only — it bumps exactly when Tile actually advances
@@ -428,33 +414,6 @@ public sealed class WorldEntity
     // to the predicted step it corresponds to. Emitted on the wire as the recipient-scoped RecipientStepSeq;
     // this stage only puts it on the wire (no reconcile change).
     public uint StepSequence { get; private set; }
-
-    // Harvests the node: marks it depleted, schedules respawn, and bumps StateRevision so the change
-    // re-replicates through the AOI snapshot delta path. Caller must have validated availability.
-    public void DepleteResource(uint serverTick)
-    {
-        if (Resource is null)
-        {
-            return;
-        }
-
-        Resource.Deplete(serverTick);
-        StateRevision++;
-    }
-
-    // Returns this node to Available if its respawn time has arrived, bumping StateRevision so the
-    // refreshed availability re-replicates. No-op (returns false) for non-resource or still-depleted
-    // entities.
-    public bool TryRespawnResource(uint serverTick)
-    {
-        if (Resource is null || !Resource.TryRespawn(serverTick))
-        {
-            return false;
-        }
-
-        StateRevision++;
-        return true;
-    }
 
     // The PLAYER continuous integrator — a direct port of the proven exp:ContinuousMover.Step (Z->Y, on WorldVector),
     // the GRID-AGNOSTIC open-field path (NO wall collision at THIS layer — Phase 2's swept-circle collision lives in

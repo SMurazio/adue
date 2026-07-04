@@ -4,50 +4,13 @@ using Xunit;
 
 namespace Mmo.Server.Tests;
 
+// NODE-FIELD N2: the per-instance ResourceNode (available/depleted + respawn timer) and the WorldEntity
+// depletion plumbing this file used to also pin were RETIRED along with the entity harvest path — that
+// mutable per-index state now lives in NodeField (see NodeFieldTests). ResourceNodeRegistry/
+// ResourceNodeDefinition survive UNCHANGED (N2 reuses them, keyed by NodeType, for the per-type yield/
+// respawn-ticks content the harvest flow awards) — this file keeps just their coverage.
 public sealed class ResourceNodeTests
 {
-    private static readonly ResourceNodeDefinition TreeDefinition =
-        new("tree", "Tree", YieldItemKey: "wood", YieldQuantity: 2, RespawnTicks: 10);
-
-    [Fact]
-    public void NewNodeStartsAvailable()
-    {
-        var node = new ResourceNode(TreeDefinition);
-
-        Assert.True(node.IsAvailable);
-    }
-
-    [Fact]
-    public void DepleteMarksUnavailableUntilRespawnTick()
-    {
-        var node = new ResourceNode(TreeDefinition);
-
-        node.Deplete(serverTick: 100);
-
-        Assert.False(node.IsAvailable);
-        Assert.False(node.TryRespawn(serverTick: 109));
-        Assert.False(node.IsAvailable);
-    }
-
-    [Fact]
-    public void RespawnsExactlyAtScheduledTick()
-    {
-        var node = new ResourceNode(TreeDefinition);
-        node.Deplete(serverTick: 100);
-
-        Assert.True(node.TryRespawn(serverTick: 110));
-        Assert.True(node.IsAvailable);
-    }
-
-    [Fact]
-    public void TryRespawnIsNoOpForAvailableNode()
-    {
-        var node = new ResourceNode(TreeDefinition);
-
-        Assert.False(node.TryRespawn(serverTick: 1000));
-        Assert.True(node.IsAvailable);
-    }
-
     [Fact]
     public void RegistryRejectsYieldWithUnknownItem()
     {
@@ -69,35 +32,5 @@ public sealed class ResourceNodeTests
         Assert.Equal("stone", rock.YieldItemKey);
         Assert.True(registry.TryGet("plant", out var plant));
         Assert.Equal("fiber", plant.YieldItemKey);
-    }
-
-    [Fact]
-    public void WorldEntityDepletionBumpsStateRevisionAndDepletedFlag()
-    {
-        var entity = new WorldEntity(
-            id: 1,
-            networkId: 1,
-            kind: EntityKind.Resource,
-            tile: new TileCoord(5, 5),
-            facing: Direction8.S,
-            displayName: "Tree",
-            characterId: null,
-            ownerSession: null,
-            isDurable: false,
-            inventory: null,
-            resource: new ResourceNode(TreeDefinition));
-
-        var initialRevision = entity.StateRevision;
-        Assert.False(entity.IsDepleted);
-
-        entity.DepleteResource(serverTick: 50);
-        Assert.True(entity.IsDepleted);
-        Assert.True(entity.StateRevision > initialRevision);
-
-        var depletedRevision = entity.StateRevision;
-        Assert.False(entity.TryRespawnResource(serverTick: 59));
-        Assert.True(entity.TryRespawnResource(serverTick: 60));
-        Assert.False(entity.IsDepleted);
-        Assert.True(entity.StateRevision > depletedRevision);
     }
 }

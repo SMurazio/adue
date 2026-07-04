@@ -67,8 +67,9 @@ deleted `LastSent*` machinery. **There is no lingering test for removed tile cod
 
 The tile **MAP/collision** layer is intentionally KEPT (per `.shared/memory/tile-continuous-cleanup.md`), so
 `BlockedTiles`, `SpawnTiles`, `TileGrid`, `TileCoord`, `TileWalls`, and the `*Tiles` config knobs
-(`WorldWidthTiles`, `EntityHitRadiusTiles`, `FreeAimRadiusTiles`, `ResourceNodeDensityTilesPerNode`) are LIVE —
-the tests touching them are KEEP, not cruft.
+(`WorldWidthTiles`, `EntityHitRadiusTiles`, `FreeAimRadiusTiles`) are LIVE — the tests touching them are
+KEEP, not cruft. (`ResourceNodeDensityTilesPerNode` was itself deleted in NODE-FIELD N2, along with the
+entity resource-scatter path it fed.)
 
 ---
 

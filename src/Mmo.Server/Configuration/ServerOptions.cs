@@ -35,15 +35,6 @@ public sealed record ServerOptions(
     // under an authored genVersion: an authored layout has no randomness to seed.)
     public int MapSeed { get; init; }
 
-    // Resource-node placement density: roughly one harvestable node per
-    // ResourceNodeDensityTilesPerNode-squared tiles of map area. The target count is derived from this
-    // and the map size (see Zone.PlanResourceNodeScatter) so it scales with the world. Default 28 is a
-    // moderate value: ~20 nodes on the 128² dev map and ~1.3k on a 1000² stress map — enough that a
-    // moving player usually has a few nodes in view without flooding the world with AOI entities.
-    // Init-only so existing test ServerOptions constructions don't have to thread it. Set 0 to disable
-    // scatter entirely (no resource nodes placed).
-    public int ResourceNodeDensityTilesPerNode { get; init; } = 28;
-
     public bool DebugMovement { get; init; }
 
     public IReadOnlySet<string> DebugMovementWatchNames { get; init; } =
@@ -99,7 +90,6 @@ public sealed record ServerOptions(
         {
             GenVersion = genVersion,
             MapSeed = ReadInt("MMO_MAP_SEED", 0),
-            ResourceNodeDensityTilesPerNode = ReadInt("MMO_RESOURCE_NODE_DENSITY_TILES", 28),
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
             DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
             DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d),
@@ -182,12 +172,6 @@ public sealed record ServerOptions(
         if (string.IsNullOrWhiteSpace(MigrationsPath))
         {
             throw new InvalidOperationException("MMO_MIGRATIONS_PATH cannot be empty.");
-        }
-
-        if (ResourceNodeDensityTilesPerNode < 0 || ResourceNodeDensityTilesPerNode > short.MaxValue)
-        {
-            throw new InvalidOperationException(
-                $"MMO_RESOURCE_NODE_DENSITY_TILES must be between 0 and {short.MaxValue} (0 disables scatter).");
         }
 
         if (DebugMovementHitchThresholdMultiplier < 1d || DebugMovementHitchThresholdMultiplier > 10d)

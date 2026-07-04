@@ -38,6 +38,10 @@ public enum MessageType : ushort
     // gather and the server integrator's gather flip TOGETHER (prediction parity — a client-only flag would desync).
     // Tag 17 is the next free client->server tag (8-11 are the deleted tile-step gaps). See AdminSetPlayerCollisionMessage.
     AdminSetPlayerCollision = 17,
+    // NODE-FIELD N2 (v46, docs/node-field-design.md D5): client->server harvest request targeting a catalogue
+    // INDEX (never a network id — harvestable nodes are no longer entities). Tag 18 is the next free
+    // client->server tag (8-11 are the deleted tile-step gaps). See HarvestNodeMessage.
+    HarvestNode = 18,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -96,5 +100,11 @@ public enum MessageType : ushort
     // authenticated client: the FULL set (one message per region) on login, and a single re-send of the changed
     // region whenever any of its type-states flips. Global (not AOI-scoped, like PlayerCollisionSetting/MonsterTuning)
     // — pre-walk legibility means every client needs every region regardless of proximity. See RegionEcologyMessage.
-    RegionEcology = 119
+    RegionEcology = 119,
+    // NODE-FIELD N2 (v46, docs/node-field-design.md D3/D4): server->client announcement that ONE catalogue node's
+    // availability flipped (harvest or respawn). Reliable-ordered, GLOBAL (not AOI-scoped). See NodeStateMessage.
+    NodeState = 120,
+    // NODE-FIELD N2 (v46): sent once on login — the field's full current exception list (only the DEPLETED
+    // indices). Reliable-ordered. See NodeStateBatchMessage.
+    NodeStateBatch = 121
 }

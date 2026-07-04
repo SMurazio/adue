@@ -2,6 +2,7 @@ using LiteNetLib;
 using Mmo.Client.Core.Continuous;
 using Mmo.Shared.Domain;
 using Mmo.Shared.Domain.Actions;
+using Mmo.Shared.Domain.Population;
 using Mmo.Shared.Protocol;
 
 namespace Mmo.Client.Core;
@@ -324,6 +325,24 @@ public sealed class MmoClient : IDisposable
     public IReadOnlyDictionary<string, RegionEcologyMessage> EcologyRegions => _ecologyRegions;
     public int EcologyRegionsVersion { get; private set; }
 
+    // NODE-FIELD N2 (docs/node-field-design.md D2/D4): the client's OWN independently-built mirror of the
+    // shared NodeCatalog — built in HandleZoneInfo from the SAME (zone seed, regenerated authored map) the
+    // server used, compared against ZoneInfo.CatalogHash as a drift/tamper check (mirrors the ContentHash
+    // check exactly). Null until the first ZoneInfo arrives. N3 reads this to know every node's tile/type for
+    // rendering; N2 itself renders nothing.
+    public NodeCatalog? NodeCatalog { get; private set; }
+
+    // NODE-FIELD N2 (D3/D4): the field's live EXCEPTIONS — catalogue indices currently DEPLETED. Replaced
+    // wholesale by the login NodeStateBatchMessage (the full truth at that instant) and upserted by each
+    // later NodeStateMessage flip. Read-only mirror; the client runs no node simulation. NodeFieldVersion
+    // bumps on every change so the Godot layer can cheaply detect "re-check the field" (mirrors
+    // EcologyRegionsVersion/MonsterTuningVersion). Cleared on Disconnect (the same T2/E4 ghost-data lesson —
+    // stale depletion from a PREVIOUS session must not survive a reconnect to a restarted server).
+    private readonly HashSet<ushort> _depletedNodeIndices = [];
+
+    public IReadOnlySet<ushort> DepletedNodeIndices => _depletedNodeIndices;
+    public int NodeFieldVersion { get; private set; }
+
     // TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): the ACTIVE ground telegraphs, from TelegraphMessage
     // (keyed by the scheduler's telegraph id — the upsert dedupes a hypothetical re-send). Each entry stores the
     // LOCKED wire shape + the two absolute server ticks of the deadline form; the client SELF-RESOLVES — there is no
@@ -564,6 +583,14 @@ public sealed class MmoClient : IDisposable
         // previous world's overlay rendered until the next session's first message.
         _ecologyRegions.Clear();
         EcologyRegionsVersion++;
+
+        // NODE-FIELD N2 (the SAME T2/E4 ghost-data lesson): drop the last session's node-field mirror so a
+        // reconnect to a restarted server doesn't keep rendering stale depletion. The catalogue is
+        // deterministic and gets rebuilt fresh by the next ZoneInfo regardless, but clear it too so nothing
+        // stale is read in the gap between reconnect and that message.
+        NodeCatalog = null;
+        _depletedNodeIndices.Clear();
+        NodeFieldVersion++;
     }
 
     // CONTINUOUS MIGRATION (Phase 4): the predictor MINTS the seq (PredictAndBuffer) then we Send the MoveIntent with
@@ -797,6 +824,16 @@ public sealed class MmoClient : IDisposable
     public void SendInteractRequest(uint targetNetworkId)
     {
         Send(new InteractRequestMessage(targetNetworkId), DeliveryMethod.ReliableOrdered);
+    }
+
+    // NODE-FIELD N2 (docs/node-field-design.md D5): send a harvest request for a catalogue node by INDEX —
+    // never a network id, since harvestable nodes are no longer entities. Reliable-ordered; no client-side
+    // prediction: the result lands via the SAME owner-only InteractResult (reused verbatim) + InventoryUpdate
+    // on success, and a NodeState broadcast to everyone on a real deplete. The server re-validates
+    // range/availability authoritatively.
+    public void SendHarvestNode(ushort nodeIndex)
+    {
+        Send(new HarvestNodeMessage(nodeIndex), DeliveryMethod.ReliableOrdered);
     }
 
     // COMBAT-S2B / FREEAIM: send a melee attack with a continuous AIM ANGLE. Mints the next sequence off the
@@ -1115,6 +1152,31 @@ public sealed class MmoClient : IDisposable
                 _ecologyRegions[regionEcology.RegionId] = regionEcology;
                 EcologyRegionsVersion++;
                 break;
+            case NodeStateMessage nodeState:
+                // NODE-FIELD N2: one node's flip (harvest or respawn), GLOBAL — upsert/drop it in the depleted set.
+                // Pure mirror; the client runs no node simulation, this only feeds N3's field rendering.
+                if (nodeState.Depleted)
+                {
+                    _depletedNodeIndices.Add(nodeState.NodeIndex);
+                }
+                else
+                {
+                    _depletedNodeIndices.Remove(nodeState.NodeIndex);
+                }
+
+                NodeFieldVersion++;
+                break;
+            case NodeStateBatchMessage nodeBatch:
+                // NODE-FIELD N2: the login snapshot of current exceptions — this IS the full truth at the moment
+                // it was sent, so REPLACE the set rather than merge into it.
+                _depletedNodeIndices.Clear();
+                foreach (var index in nodeBatch.DepletedIndices)
+                {
+                    _depletedNodeIndices.Add(index);
+                }
+
+                NodeFieldVersion++;
+                break;
             case DamageEventMessage damage:
                 // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the
                 // OLDEST if the buffer is somehow full (renderer stalled / flood) so it can never grow unbounded.
@@ -1206,6 +1268,28 @@ public sealed class MmoClient : IDisposable
         }
 
         Zone = model;
+
+        // NODE-FIELD N2 (D2): independently build the SAME shared catalogue the server did, from the SAME
+        // (zone seed, just-regenerated authored map), and compare CatalogHash — mirrors the ContentHash check
+        // immediately above EXACTLY (a loud diagnostic, not a connection-level hard-fail; the server stays
+        // authoritative for the actual harvest regardless of what this client renders). A non-authored
+        // (procedural, genVersion 1) zone has no authored data to scatter from, so both sides fall back to
+        // the trivial empty catalogue and the hash still agrees by construction.
+        var catalog = model.Authored is { } authoredMap ? Mmo.Shared.Domain.Population.NodeCatalog.Build(zone.Seed, authoredMap) : Mmo.Shared.Domain.Population.NodeCatalog.Empty();
+        if (catalog.CatalogHash != zone.CatalogHash)
+        {
+            _errors.Add(new ClientError(
+                "node-catalog-hash-mismatch",
+                $"Zone '{zone.ZoneId}' node catalogue hash mismatch: local {catalog.CatalogHash:X16} != server {zone.CatalogHash:X16} "
+                    + $"(seed={zone.Seed}, genVersion={zone.GenVersion}). Node-scatter drift or tampering."));
+        }
+
+        NodeCatalog = catalog;
+        // A fresh catalogue invalidates any previously-tracked depletion (indices only mean something against
+        // the catalogue that produced them); the login NodeStateBatch that follows re-fills the true state
+        // regardless, but clear defensively so nothing stale renders in the gap.
+        _depletedNodeIndices.Clear();
+        NodeFieldVersion++;
     }
 
     private void HandleLogin(LoginResultMessage login)

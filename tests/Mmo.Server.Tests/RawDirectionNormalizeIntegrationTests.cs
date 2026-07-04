@@ -148,10 +148,7 @@ public sealed class RawDirectionNormalizeIntegrationTests
             30f,
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase))
-        {
-            ResourceNodeDensityTilesPerNode = 0,
-        };
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
     private static int GetFreeUdpPort()

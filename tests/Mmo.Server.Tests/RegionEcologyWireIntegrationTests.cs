@@ -176,10 +176,7 @@ public sealed class RegionEcologyWireIntegrationTests
             30f,
             150,
             SpawnDistribution.Clustered,
-            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
-        {
-            ResourceNodeDensityTilesPerNode = 0,
-        };
+            new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase));
     }
 
     private static int GetFreeUdpPort()
