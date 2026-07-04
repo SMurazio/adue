@@ -114,6 +114,22 @@ public sealed class GameServer
 
     internal void SyncTelegraphsForTests(ClientSession recipient, WorldEntity recipientEntity) =>
         SyncTelegraphs(recipient, recipientEntity);
+
+    // ECOLOGY E2 test seams — same "no live tick thread" boot-wiring discipline as ZoneForTests/TelegraphsForTests:
+    // construct a GameServer, never call RunAsync, and drive the REAL production methods directly + tick-count-
+    // agnostic (serverTick is a parameter, not the live _serverTick field), so materialization pacing/skip-near-
+    // player/overgrown-modifier/kill-hook/no-leak behavior is testable in a plain deterministic loop with no real-
+    // time wait and no data race against a live tick thread. Never used by product code.
+    internal EcologyState EcologyForTests => _ecology;
+    internal IReadOnlyList<RegionSpawner> RegionSpawnersForTests => _regionSpawners;
+    internal void MaterializeRegionSpawnersForTests(uint serverTick) => MaterializeRegionSpawners(serverTick);
+    internal void KillMonsterForTests(WorldEntity monster) => KillMonster(monster);
+    internal int ClearRegionSpawnerMonstersForTests() => ClearRegionSpawnerMonsters();
+
+    // The raw reverse-map size — the direct "no leak" pin (distinct from RegionSpawner.LiveCount, which is a
+    // PER-SPAWNER set that a bug in the reverse map alone wouldn't show up in).
+    internal int RegionSpawnerOfMonsterCountForTests => _regionSpawnerOfMonster.Count;
+
     private readonly List<ClientSession> _authenticatedScratch = [];
     private readonly List<WorldEntity> _entityScratch = [];
     private readonly List<WorldEntity> _aoiCandidateScratch = [];
@@ -283,6 +299,35 @@ public sealed class GameServer
     // Monotonic spawner-id allocator (distinct id space from entity network ids — these key the red marker only).
     private uint _nextSpawnerId = 1;
 
+    // ECOLOGY E2 (docs/ecology-v1-design.md §3/§8 E2): one RegionSpawner per authored region×type, built ONCE at
+    // boot (BuildRegionSpawners, right after _ecology loads) from RegionSpawnPlanner's deterministic tile
+    // derivation. Materialized from the stock every tick (MaterializeRegionSpawners) — NOT the legacy
+    // MonsterSpawner timer path (D10: `/monster` orphan spawners keep their own timer, untouched, coexisting).
+    private readonly List<RegionSpawner> _regionSpawners = [];
+
+    // Reverse map: a live region-spawned monster's entity id -> the RegionSpawner that owns it, so KillMonster
+    // finds the region×type to record the kill against in O(1) — the region-ecology sibling of
+    // _spawnerOfMonster. A monster id is NEVER in both maps (SpawnMonsterForSpawner and SpawnMonsterForRegion are
+    // the only two spawn paths, and each registers into exactly one).
+    private readonly Dictionary<ulong, RegionSpawner> _regionSpawnerOfMonster = [];
+
+    // Reused candidate buffer for the "no spawn within 6 units of a player" gather (MaterializeRegionSpawners),
+    // mirroring _monsterAggroScratch's reuse discipline (single-threaded tick loop, refilled per call).
+    private readonly List<WorldEntity> _regionSpawnPlayerScratch = [];
+
+    // D5/§3 pacing: "one spawn per 2s per region×type", tick-quantised off the live tick rate at construction
+    // (mirrors how MonsterTypeRegistry quantises its own tick-based knobs once from options.TickRate).
+    private readonly uint _regionSpawnPacingTicks;
+
+    // D5/§3 "no spawn within 6 units of a player" — a EUCLIDEAN exclusion radius (world units), tested against
+    // the spawn tile's centre.
+    private const double RegionSpawnPlayerExclusionRadius = 6.0d;
+
+    // D7: overgrown-spawn modifier — new spawns get +25% maxHealth and +25% renderScale while their region×type
+    // reads Overgrown (EcologyState.PopulationState.Overgrown). Applied ONLY at spawn time (never retroactively
+    // to an already-alive monster), per the task brief.
+    private const double OvergrownSpawnStatMultiplier = 1.25d;
+
     // Half-extent (in tiles) of the cell neighborhood an AOI query must examine. The grid returns every
     // entity in the cells overlapping [viewer ± this], and the per-entity interest test then filters to
     // the exact set. It MUST cover the interest EXIT radius (interest radius + hysteresis), so a
@@ -340,6 +385,15 @@ public sealed class GameServer
         // on _monsterTypes/_zone — the ecology's "type" is just the string id RecordKill/E2 will pass, not a
         // resolved MonsterType.
         _ecology = new EcologyState(LoadEcology());
+        // ECOLOGY E2 (docs/ecology-v1-design.md §8 E2; docs/procedural-population-design.md D5): derive every
+        // authored region×type's spawn geography NOW (deterministic from the zone's seed/categories, computed
+        // once) and build its RegionSpawner. Needs _zone (map/categories) + _monsterTypes (resolve each typeId to
+        // its MonsterType) — both already constructed above; does NOT need _behaviors/_actionExecutor (those are
+        // only touched once materialization actually spawns a monster, in TickCore, not here).
+        _regionSpawners.AddRange(BuildRegionSpawners());
+        // D5/§3 pacing tick-quantised once from the live tick rate (>= 1 tick so a silly TickRate can't produce a
+        // zero-tick "spawn every tick" pace).
+        _regionSpawnPacingTicks = (uint)Math.Max(1, 2 * options.TickRate);
         // MOVEMENT-ACTIONS (Phase A/C): the action executor reuses the EXACT same shared collision derivation + apply
         // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
         // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE the behavior (Phase C) — it has no
@@ -960,6 +1014,12 @@ public sealed class GameServer
             {
                 _ecology.EcologyTick();
             }
+
+            // ECOLOGY E2 (§3 "Spawning"): materialize monsters from each region×type's stock, paced per
+            // RegionSpawner. Runs every tick (cheap — a handful of region×type entries, each a tick-compare
+            // unless its pacing gate is actually due) rather than gated like EcologyTick, so a spawn opportunity
+            // that opens up mid-window (e.g. right after a kill frees a slot) is picked up on the very next tick.
+            MaterializeRegionSpawners(_serverTick);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
@@ -1352,7 +1412,11 @@ public sealed class GameServer
             if (entity.Kind == EntityKind.Monster && _monsterTypeOf.TryGetValue(entity.Id, out var spawnType))
             {
                 tintRgb = spawnType.RenderTintRgb;
-                scaleMilli = (ushort)Math.Clamp((int)Math.Round(spawnType.RenderScale * 1000d), 0, ushort.MaxValue);
+                // ECOLOGY E2 (D7): a region-spawned monster born while its region×type was Overgrown carries a
+                // per-INSTANCE RenderScaleOverride (+25%, WorldEntity.SetRenderScaleOverride) — read it here in
+                // preference to the shared type's RenderScale so only THIS monster looks bigger, never the type.
+                var effectiveScale = entity.RenderScaleOverride ?? spawnType.RenderScale;
+                scaleMilli = (ushort)Math.Clamp((int)Math.Round(effectiveScale * 1000d), 0, ushort.MaxValue);
             }
 
             var packet = _messageEncodeBuffer.EncodeEntitySpawn(
@@ -1657,6 +1721,57 @@ public sealed class GameServer
         }
 
         return new EcologyRegistry();
+    }
+
+    // ECOLOGY E2: builds one RegionSpawner per authored region×type via RegionSpawnPlanner's deterministic
+    // derivation. An ecology.json type id that doesn't match any loaded MonsterType (a content-authoring
+    // mismatch) is skipped with a loud warning rather than crashing boot — the manifest-loading philosophy every
+    // other registry in this codebase follows (a typo'd id degrades, it never takes the server down).
+    private List<RegionSpawner> BuildRegionSpawners()
+    {
+        var result = new List<RegionSpawner>();
+        // ONE shared road-distance field for the whole zone, reused by every region×type (mirrors the client's
+        // DecorPlacer computing its own field once per zone build — see RegionSpawnPlanner's FORK note on why
+        // this is a SEPARATE computation, not a shared one).
+        var roadDistanceField = RegionSpawnPlanner.ComputeRoadDistanceField(_zone.Authored, _zone.Width, _zone.Height);
+
+        foreach (var region in _ecology.Registry.Regions)
+        {
+            foreach (var (typeId, config) in region.Types)
+            {
+                if (!_monsterTypes.TryGet(typeId, out var monsterType))
+                {
+                    Log.Warn($"Ecology region '{region.Id}' authors unknown monster type '{typeId}'; skipping its region spawner.");
+                    continue;
+                }
+
+                var targetTileCount = RegionSpawnPlanner.SpawnTileCountFor(config.MaxLive);
+                var spawnTiles = RegionSpawnPlanner.DeriveSpawnTiles(
+                    _zone.IsWalkable,
+                    _zone.Authored,
+                    _zone.Width,
+                    _zone.Height,
+                    roadDistanceField,
+                    _zone.Seed,
+                    region,
+                    typeId,
+                    targetTileCount,
+                    RegionSpawnPlanner.MinSpacing);
+
+                if (spawnTiles.Count == 0)
+                {
+                    Log.Warn($"Ecology region '{region.Id}'/{typeId} derived ZERO spawn tiles (region rect outside this zone?) — its RegionSpawner will never spawn.");
+                }
+                else
+                {
+                    Log.Info($"Ecology region '{region.Id}'/{typeId} derived {spawnTiles.Count} spawn tile(s) (target {targetTileCount}).");
+                }
+
+                result.Add(new RegionSpawner(region.Id, typeId, monsterType, config.MaxLive, spawnTiles));
+            }
+        }
+
+        return result;
     }
 
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
@@ -2568,7 +2683,12 @@ public sealed class GameServer
     // known-entity diff.
     private void HandleClearSpawnersCommand(ClientSession sender)
     {
-        if (_spawners.Count == 0)
+        // ECOLOGY E2 (D10 "/clearspawners clears BOTH kinds cleanly"): the "nothing to do" guard now also checks
+        // for live region-ecology monsters — a session that never ran /monster but has a populated world (the
+        // ecology materializes on its own from boot) must still get a real clear, not "no spawners".
+        var hasLegacySpawners = _spawners.Count > 0;
+        var hasRegionMonsters = _regionSpawners.Any(regionSpawner => regionSpawner.LiveCount > 0);
+        if (!hasLegacySpawners && !hasRegionMonsters)
         {
             SendSystem(sender, "clearspawners: no spawners.");
             return;
@@ -2607,8 +2727,15 @@ public sealed class GameServer
         }
 
         _spawners.Clear();
-        SendSystem(sender, $"clearspawners: removed {spawnerCount} spawner(s), despawned {monsterCount} monster(s).");
-        Log.Info($"{sender.DisplayName} cleared {spawnerCount} spawner(s) ({monsterCount} live monster(s) despawned).");
+
+        // ECOLOGY E2 (D10): region-spawned monsters despawn too — same leak-free cleanup, no corpse, no ecology
+        // stock/pressure change (an admin clear is not a kill). Unlike the legacy loop above, the RegionSpawner
+        // objects themselves are NEVER removed (a region×type is a permanent slot, not a dev-session spawner).
+        var regionMonsterCount = ClearRegionSpawnerMonsters();
+        monsterCount += regionMonsterCount;
+
+        SendSystem(sender, $"clearspawners: removed {spawnerCount} spawner(s), despawned {monsterCount} monster(s) ({regionMonsterCount} region-ecology).");
+        Log.Info($"{sender.DisplayName} cleared {spawnerCount} spawner(s) + {regionMonsterCount} region-ecology monster(s) ({monsterCount} total despawned).");
     }
 
     // LIVING-ENEMIES P3: spawns a fresh full-HP monster of the spawner's type at the spawner tile, wires it to the AI +
@@ -2616,30 +2743,186 @@ public sealed class GameServer
     // is a separate persistent spawner concept, so spawning a monster does NOT send a per-monster home anymore.
     private WorldEntity SpawnMonsterForSpawner(MonsterSpawner spawner)
     {
+        var monster = SpawnMonsterCore(spawner.Type, spawner.Tile, maxHealthOverride: null, renderScaleOverride: null);
+
+        // Link the monster to its spawner (both directions) so a death finds the spawner in O(1).
+        spawner.AttachMonster(monster.Id);
+        _spawnerOfMonster[monster.Id] = spawner;
+        return monster;
+    }
+
+    // ECOLOGY E2: spawns a fresh monster of `spawner`'s type at `tile` for a RegionSpawner (the region-ecology
+    // sibling of SpawnMonsterForSpawner). `overgrown` is D7's per-spawn modifier: while the region×type reads
+    // Overgrown, the NEW monster gets +25% maxHealth and +25% renderScale — applied ONLY at spawn (an
+    // already-alive monster never retroactively changes size/HP when its region later flips into/out of
+    // Overgrown).
+    private WorldEntity SpawnMonsterForRegion(RegionSpawner spawner, TileCoord tile, bool overgrown)
+    {
         var type = spawner.Type;
+        int? maxHealthOverride = overgrown ? (int)Math.Ceiling(type.MaxHealth * OvergrownSpawnStatMultiplier) : null;
+        double? renderScaleOverride = overgrown ? type.RenderScale * OvergrownSpawnStatMultiplier : null;
+        var monster = SpawnMonsterCore(type, tile, maxHealthOverride, renderScaleOverride);
+
+        spawner.AddLiveMonster(monster.Id);
+        _regionSpawnerOfMonster[monster.Id] = spawner;
+        return monster;
+    }
+
+    // The shared monster-spawn core (LIVING-ENEMIES P3 + ECOLOGY E2): rents a network id, spawns the transient
+    // entity, seeds its per-TYPE stats/speed (with the D7 overgrown overrides applied per-INSTANCE, never onto
+    // the shared MonsterType), and registers it with its type's behavior. Does NOT touch spawner-ownership
+    // bookkeeping (_spawnerOfMonster / _regionSpawnerOfMonster / RegionSpawner.AddLiveMonster) — that stays the
+    // caller's job, since the two spawner kinds track ownership differently (single-monster attach vs a live
+    // set).
+    private WorldEntity SpawnMonsterCore(MonsterType type, TileCoord tile, int? maxHealthOverride, double? renderScaleOverride)
+    {
         // Rent throws only on the (ushort-space) exhaustion the dummy/resource spawns also rely on never hitting.
-        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, type.DisplayName, spawner.Tile, Direction8.S);
-        // The monster takes its TYPE's stats/AI tuning. MaxHealth (spawn at full) + the move-speed multiplier (which
-        // feeds the EffectiveStepCooldown path so it steps on its OWN type-derived cadence — outrunnable). Remember the
-        // type for the AI step.
-        monster.SetMaxHealthFull(type.MaxHealth);
+        var monster = _zone.SpawnTransient(_networkIds.Rent(), EntityKind.Monster, type.DisplayName, tile, Direction8.S);
+        // The monster takes its TYPE's stats/AI tuning. MaxHealth (spawn at full, or the D7 overgrown override) +
+        // the move-speed multiplier (which feeds the EffectiveStepCooldown path so it steps on its OWN
+        // type-derived cadence — outrunnable). Remember the type for the AI step.
+        monster.SetMaxHealthFull(maxHealthOverride ?? type.MaxHealth);
         monster.TrySetSpeedMultiplier(type.MoveSpeedMultiplier);
         // Seed the monster's tiles/sec speed stat from its type multiplier (BaseMoveSpeedUnitsPerSecond ×
         // MoveSpeedMultiplier). MONSTER-BEHAVIOR P2: this is DORMANT for a HOPPER (it leaps via the cadence gate, not
         // the velocity integrator; Velocity stays Zero) but IS the walk speed for a GLIDER (GlideLocomotion reads
         // SpeedUnitsPerSecond per tick) — so it must be set at spawn for a gnoll to have a non-zero walk speed.
         RefreshSpeedStat(monster);
+        if (renderScaleOverride.HasValue)
+        {
+            monster.SetRenderScaleOverride(renderScaleOverride.Value);
+        }
+
         _monsterTypeOf[monster.Id] = type;
 
-        // Register with the roam AI: the spawner tile is the leash home; start Idle with an initial randomized pause,
-        // tick-quantised off THIS type's pause bounds.
+        // Register with the roam AI: start Idle with an initial randomized pause, tick-quantised off THIS type's
+        // pause bounds.
         var tunables = _monsterTypes.BuildTunables(type);
         ResolveBehavior(type).Register(monster, _serverTick, tunables.PauseMinTicks, tunables.PauseMaxTicks, tunables.AggroScanIntervalTicks);
-
-        // Link the monster to its spawner (both directions) so a death finds the spawner in O(1).
-        spawner.AttachMonster(monster.Id);
-        _spawnerOfMonster[monster.Id] = spawner;
         return monster;
+    }
+
+    // ECOLOGY E2 (§3 "Spawning"): per-tick materialization pass. For every RegionSpawner whose pacing gate is due
+    // AND whose live count is below its (Overgrown-adjusted, D7) effective cap, attempt ONE spawn: take the next
+    // round-robin spawn tile and, if no player is within RegionSpawnPlayerExclusionRadius of it, spawn there.
+    // Pacing is armed on every ATTEMPT (spawn or skip) — see RegionSpawner.ArmPacing's own doc for why a
+    // player-camped tile must not turn into a busy-loop. `serverTick` is a PARAMETER (not read from the live
+    // _serverTick field) so this stays headlessly testable in a plain tick-count loop, like EcologyState.
+    private void MaterializeRegionSpawners(uint serverTick)
+    {
+        if (_regionSpawners.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var spawner in _regionSpawners)
+        {
+            if (!spawner.IsSpawnPacingDue(serverTick))
+            {
+                continue;
+            }
+
+            var state = _ecology.StateOf(spawner.RegionId, spawner.TypeId);
+            var overgrown = state == EcologyState.PopulationState.Overgrown;
+            // D7: while Overgrown, the live cap itself grows +50% (rounded up) — the "more" half of "more and meaner".
+            var effectiveMaxLive = overgrown
+                ? (int)Math.Ceiling(spawner.BaseMaxLive * EcologyState.OvergrowthCapMultiplier)
+                : spawner.BaseMaxLive;
+            var stockFloor = (int)Math.Floor(_ecology.StockOf(spawner.RegionId, spawner.TypeId));
+            var target = Math.Min(stockFloor, effectiveMaxLive);
+
+            if (spawner.LiveCount >= target)
+            {
+                continue; // Nothing to do this window — no attempt happens, so pacing is NOT armed (stays "due").
+            }
+
+            // An attempt happens now (whether or not it results in a spawn) — arm the pacing gate.
+            spawner.ArmPacing(serverTick, _regionSpawnPacingTicks);
+
+            if (!spawner.TryTakeNextTile(out var tile))
+            {
+                continue; // This region×type derived ZERO spawn tiles (BuildRegionSpawners already warned) — never spawns.
+            }
+
+            if (IsPlayerWithinRegionSpawnExclusion(tile))
+            {
+                continue; // Skip, don't queue (§3/§8 E2) — the next attempt (one pacing window later) tries the NEXT tile.
+            }
+
+            SpawnMonsterForRegion(spawner, tile, overgrown);
+        }
+    }
+
+    // "No spawn within 6 units of a player" (§3/§8 E2) — mirrors FindMonsterAggroTarget's exact idiom: a coarse
+    // Chebyshev/tile pre-filter via the spatial grid (a strict superset of the Euclidean exclusion disc), then an
+    // exact Euclidean distance test on the returned candidates' Position.
+    private bool IsPlayerWithinRegionSpawnExclusion(TileCoord tile)
+    {
+        var gatherRadiusTiles = (int)Math.Ceiling(RegionSpawnPlayerExclusionRadius) + 1;
+        _zone.World.GatherInterestCandidates(tile, gatherRadiusTiles, _regionSpawnPlayerScratch);
+
+        var tileCenter = WorldVector.FromTile(tile);
+        var thresholdSq = RegionSpawnPlayerExclusionRadius * RegionSpawnPlayerExclusionRadius;
+        foreach (var candidate in _regionSpawnPlayerScratch)
+        {
+            if (candidate.Kind != EntityKind.Player)
+            {
+                continue;
+            }
+
+            if ((candidate.Position - tileCenter).LengthSquared < thresholdSq)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // ECOLOGY E2 (D10 "/clearspawners clears BOTH kinds cleanly"): despawns EVERY region spawner's live monsters
+    // (an admin clear, not a kill — mirrors the legacy loop in HandleClearSpawnersCommand exactly: same leak-free
+    // cleanup, no corpse, no ecology stock/pressure change). The RegionSpawner itself (its derived tiles, its
+    // pacing state) is NEVER removed — a region×type is a permanent slot, unlike a legacy MonsterSpawner. Returns
+    // the number of monsters actually despawned (folded into the command's total).
+    private int ClearRegionSpawnerMonsters()
+    {
+        var despawnedCount = 0;
+        foreach (var spawner in _regionSpawners)
+        {
+            if (spawner.LiveCount == 0)
+            {
+                continue;
+            }
+
+            // Snapshot to an array first — spawner.ClearLiveMonsters() below empties the very set this loop would
+            // otherwise be iterating.
+            foreach (var monsterId in spawner.LiveMonsterIds.ToArray())
+            {
+                if (_zone.Despawn(monsterId, out var removed))
+                {
+                    _actionExecutor.ClearEntity(monsterId);
+                    _contributionLedger.Forget(monsterId);
+                    if (_monsterTypeOf.TryGetValue(monsterId, out var typeToForget))
+                    {
+                        ResolveBehavior(typeToForget).Forget(monsterId);
+                    }
+                    else
+                    {
+                        _defaultBehavior.Forget(monsterId);
+                    }
+
+                    _monsterTypeOf.Remove(monsterId);
+                    _networkIds.Return(removed.NetworkId);
+                    despawnedCount++;
+                }
+
+                _regionSpawnerOfMonster.Remove(monsterId);
+            }
+
+            spawner.ClearLiveMonsters();
+        }
+
+        return despawnedCount;
     }
 
     // LIVING-ENEMIES P3: a monster DIED (HP hit 0 from a player attack). Despawn the entity (EntityDespawn to AOI
@@ -2693,12 +2976,28 @@ public sealed class GameServer
 
         _monsterTypeOf.Remove(monsterId);
 
-        // Notify the owning spawner so it schedules a respawn after the type's delay (read live).
+        // Notify the owning spawner so it schedules a respawn after the type's delay (read live). D10: a
+        // region-spawned monster is NEVER in _spawnerOfMonster (SpawnMonsterForRegion registers it into
+        // _regionSpawnerOfMonster instead), so exactly one of these two branches ever fires for a given monster.
         if (_spawnerOfMonster.Remove(monsterId, out var spawner))
         {
             var respawnTicks = _monsterTypes.RespawnTicks(spawner.Type);
             spawner.NotifyMonsterDied(monsterId, _serverTick, respawnTicks);
             Log.Info($"Monster {removed?.NetworkId} (spawner #{spawner.SpawnerId}) died; respawn in {respawnTicks} ticks.");
+        }
+        else if (_regionSpawnerOfMonster.Remove(monsterId, out var regionSpawner))
+        {
+            // ECOLOGY E2 (D1/D3 kill hook): a region-spawned monster died — permanently decrement its region×type's
+            // stock by 1 (clamped at the D3 floor) and add 1 pressure (the "recently hunted" decaying memory).
+            // ContributionLedger/loot flow above are UNTOUCHED — this only feeds the ecology math. NO legacy
+            // respawn timer for a region-spawned monster: repopulation flows from the stock via
+            // MaterializeRegionSpawners only (D1 "the timer-respawn model is deleted for ecology types").
+            regionSpawner.RemoveLiveMonster(monsterId);
+            _ecology.RecordKill(regionSpawner.RegionId, regionSpawner.TypeId);
+            Log.Info(
+                $"Monster {removed?.NetworkId} ({regionSpawner.RegionId}/{regionSpawner.TypeId}) died; " +
+                $"ecology stock={_ecology.StockOf(regionSpawner.RegionId, regionSpawner.TypeId):0.###}, " +
+                $"pressure={_ecology.PressureOf(regionSpawner.RegionId, regionSpawner.TypeId):0.###}.");
         }
 
         // Now free the monster's network id — the corpse (if one spawned) has already rented a DIFFERENT id, so the

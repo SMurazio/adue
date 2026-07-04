@@ -182,6 +182,27 @@ public sealed class WorldEntity
         StateRevision++;
     }
 
+    // ECOLOGY E2 (D7 overgrown modifier): a per-INSTANCE override for the type's RenderScale, set ONLY for a
+    // monster spawned while its region×type is Overgrown (+25% bigger). Null (the default) means "use the
+    // type's RenderScale unmodified" — every other monster (and every non-overgrown region spawn) is
+    // unaffected. This lives on the ENTITY rather than mutating the shared MonsterType.RenderScale because
+    // mutating the type would retroactively resize every OTHER monster of the same type (already-alive ones AND
+    // future non-overgrown spawns) — the exact same reasoning MaxHealth already follows via SetMaxHealthFull
+    // (per-entity Stats.MaxHealth), just for the render-scale field. Read once at EntitySpawn-send time
+    // (GameServer.EnsureEntitySpawns: `entity.RenderScaleOverride ?? spawnType.RenderScale`); never replicated
+    // again afterward (RenderScale itself isn't a live/tick-replicated field either).
+    public double? RenderScaleOverride { get; private set; }
+
+    public void SetRenderScaleOverride(double scale)
+    {
+        if (!double.IsFinite(scale) || scale <= 0)
+        {
+            return;
+        }
+
+        RenderScaleOverride = scale;
+    }
+
     // Sets the CURRENT value of one vital, clamping into [0, max] for that vital. Returns true if the stored
     // value actually changed (so the caller only re-replicates a real change), false otherwise. The dev-set
     // window drives this through the admin-gated server command; later damage/heal/regen will too.
