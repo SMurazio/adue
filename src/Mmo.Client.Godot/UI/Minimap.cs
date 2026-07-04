@@ -85,11 +85,12 @@ public partial class Minimap : Control
     // so an authored zone's minimap keeps the same translucent-overlay look a genVersion 1 zone has.
     private const byte AuthoredFloorAlphaByte = 234; // round(0.92 * 255)
 
-    // S110: object square colours. Available resource = warm amber (reads against the cool grey walls); depleted
-    // = dim grey-green so a harvested node is still visible but clearly spent. The depleted/available bit is
-    // already on EntityRenderState (read-only), so the tint is trivial.
+    // S110: object square colour — warm amber (reads against the cool grey walls). NODE-FIELD N2/N3
+    // (docs/node-field-design.md D3/D6): the depleted/available distinction this used to also draw is gone —
+    // House/Portal are the only Resource-kind entities left on the minimap (harvestable nodes are catalogue-
+    // only now, deliberately NOT plotted here — see HudState.MinimapObjects' own comment) and neither ever
+    // depletes.
     private static readonly Color ObjectAvailable = new(0.85f, 0.62f, 0.22f, 0.95f);
-    private static readonly Color ObjectDepleted = new(0.40f, 0.46f, 0.40f, 0.80f);
 
     private TextureRect? _mapView; // holds the baked full-map ImageTexture; translated under the arrow each frame.
     private Control? _viewport;    // clip-contents window inside the frame; the map scrolls within it.
@@ -535,7 +536,7 @@ public partial class Minimap : Control
                 var centreX = (obj.X * _scale) + _offset.X;
                 var centreY = (obj.Y * _scale) + _offset.Y;
                 var rect = new Rect2(centreX - (sidePx / 2f), centreY - (sidePx / 2f), sidePx, sidePx);
-                DrawRect(rect, obj.Depleted ? ObjectDepleted : ObjectAvailable, filled: true);
+                DrawRect(rect, ObjectAvailable, filled: true);
             }
         }
     }

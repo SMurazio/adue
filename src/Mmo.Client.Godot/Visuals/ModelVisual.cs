@@ -5,12 +5,17 @@ namespace Mmo.Client.Godot.Visuals;
 
 // A static / variant GLB grounded on the tile plane. Covers three configured archetypes:
 //   * Rock     — one of three variant models chosen deterministically by NetworkId hash, with a per-node
-//                spin, a per-variant ground offset, the live-tunable RockModelScale, and the depleted hide
-//                (S58). Verbatim behaviour from MmoClientRoot.TryCreateRockNode / the rock UpdateEntities arm.
-//   * Tree     — the single alberello model, grounded + scaled, with the same depleted hide (it is a
-//                harvestable "Tree" resource, replacing the old box).
-//   * Portal   — the single portalemagico model, decorative: grounded + scaled, NO depleted/harvest (it has
-//                no server resource entity today; wired so a "Portal"-named entity would render).
+//                spin, a per-variant ground offset, and the live-tunable RockModelScale (S58).
+//   * Tree     — the single alberello model, grounded + scaled.
+//   * Portal   — the single portalemagico model, decorative: grounded + scaled (it has no server resource
+//                entity today; wired so a "Portal"-named entity would render).
+//
+// CreateRock/CreateTree are UNREACHABLE today: EntityVisualFactory has no Rock/Tree VisualArchetype anymore
+// (removed — see its own comment) because NODE-FIELD N2/N3 (docs/node-field-design.md) retired harvestable
+// Tree/Rock/Plant nodes as WorldEntities entirely; they render via the catalogue field's MultiMeshes
+// (NodeFieldPainter) instead, never per-entity. Left in place (not deleted) rather than folded into that
+// cleanup — a separate call for the orchestrator, since VisualTuning's RockModelScale/TreeModelScale F5 panel
+// knobs hang off these. Only CreatePortal is live.
 //
 // The model variant/scale/offset config is data on the instance (chosen by the factory), so adding another
 // static model later is one more factory entry reusing this class — no new subclass.
@@ -136,11 +141,15 @@ public sealed partial class ModelVisual : EntityVisual
         // current panel scale.
         ApplyLiveScale();
 
-        // Harvestable models (Rock/Tree) start hidden if spawned already depleted; the decorative Portal
-        // ignores the bit and is always visible.
+        // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): harvestable Tree/Rock nodes are no longer
+        // WorldEntities (they render via the catalogue field's MultiMeshes instead — NodeFieldPainter), and
+        // state.Depleted is now a constant false on every remaining entity (EntityStateSnapshot's own
+        // comment) — the old "start hidden if spawned already depleted" hide was removed as dead code. Every
+        // model this class renders (today, only Portal via the factory — see its own header comment) is
+        // always visible.
         if (_model is not null)
         {
-            _model.Visible = _kind == ModelKind.Portal || !state.Depleted;
+            _model.Visible = true;
         }
     }
 
@@ -164,18 +173,6 @@ public sealed partial class ModelVisual : EntityVisual
             : (Tuning.TreeModelScale, TreeGroundOffset);
         _model.Scale = new Vector3(scale, scale, scale);
         _model.Position = new Vector3(0f, groundOffset * scale, 0f);
-    }
-
-    protected override void OnUpdate(EntityRenderState state, double now)
-    {
-        if (_model is null || _kind == ModelKind.Portal)
-        {
-            return;
-        }
-
-        // Rock/Tree rendered as a static GLB (no override material to grey): drive availability off the
-        // replicated Depleted bit — hide when harvested, show again on respawn. No prediction.
-        _model.Visible = !state.Depleted;
     }
 
     private static float RockGroundOffset(int variant)

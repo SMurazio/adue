@@ -5,10 +5,14 @@ namespace Mmo.Shared.Domain;
 // allocated a heap object per entity per snapshot, so GC churn scaled with the number of connected
 // clients. A struct stores them inline in the snapshot list/array with no per-entity heap allocation.
 //
-// Depleted is an additive per-entity state flag for resource nodes: a harvested node replicates as
-// Depleted=true to clients that can see it (AOI-gated, like every other field here) and flips back to
-// false when it respawns. It is meaningless (always false) for players and other entity kinds, which
-// keeps the AOI snapshot path uniform — node availability is just another bit of replicated state.
+// NODE-FIELD N2 (docs/node-field-design.md D3/D4): Depleted is now ALWAYS false — harvestable nodes are no
+// longer WorldEntities, so no entity kind ever sets this bit anymore (GameServer.BuildEntityState hard-codes
+// Depleted: false). Node availability instead replicates via the global, index-keyed
+// NodeStateMessage/NodeStateBatchMessage (never per-entity, never AOI-scoped). The field is kept — removing it
+// would ripple through the codec/wire (out of N2/N3's scope, and no protocol version bump is warranted for a
+// bit that already always reads false) — but no live consumer should branch on it; the client-side visuals
+// that used to (BoxVisual/ModelVisual/EntityVisual/Minimap) had their Depleted-conditional branches removed in
+// N3 once this went constant.
 //
 // COMBAT-S2A: Health + MaxHealth are the PUBLIC vitals replicated for the overhead HP bar. HP is public
 // (it drives a bar anyone nearby can see); mana/stamina stay OWNER-ONLY on the Stage-1 PlayerStatsMessage

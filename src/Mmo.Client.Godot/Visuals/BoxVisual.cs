@@ -5,10 +5,16 @@ using Mmo.Shared.Domain;
 namespace Mmo.Client.Godot.Visuals;
 
 // The placeholder primitive: a capsule for players/NPCs that have no model, a chunky box for resources that
-// have no model yet (Plant), and the forward-compatible fallback for any unknown archetype or a failed asset
-// load. Behaviour is lifted verbatim from MmoClientRoot's old CreateEntityNode box path: resources read as
-// scenery (box, green/grey by availability, hidden when depleted); players/NPCs read as avatars (capsule,
-// blue local / orange remote).
+// have no model yet (Plant, and the House/Portal PROP fallback if their real visual fails to load), and the
+// forward-compatible fallback for any unknown archetype or a failed asset load. Resources read as scenery
+// (green box); players/NPCs read as avatars (capsule, blue local / orange remote).
+//
+// NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): harvestable Tree/Rock/Plant nodes are no longer
+// WorldEntities at all (they render via the catalogue field's MultiMeshes — NodeFieldPainter — not per-entity
+// visuals), and the ONE remaining Resource-kind entity family (House/Portal props) never depletes. The
+// Depleted-driven hide/greyed-stump behaviour this class used to have (state.Depleted is now a constant false
+// on every entity, per EntityStateSnapshot's own comment) was removed as dead code — a resource box is always
+// shown, always the "available" colour.
 public sealed partial class BoxVisual : EntityVisual
 {
     // Shared meshes/materials — built once per visual. Distinct mesh + colour so a resource box is
@@ -21,10 +27,7 @@ public sealed partial class BoxVisual : EntityVisual
     private static readonly StandardMaterial3D CorpseMaterial = Material(new Color(0.40f, 0.28f, 0.18f));
     private static readonly StandardMaterial3D LocalEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
     private static readonly StandardMaterial3D RemoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
-    // Available = lush green; depleted = dim grey (also hidden when depleted, but the material keeps it
-    // readable if a future build shows stumps instead of hiding them).
     private static readonly StandardMaterial3D ResourceAvailableMaterial = Material(new Color(0.32f, 0.78f, 0.30f));
-    private static readonly StandardMaterial3D ResourceDepletedMaterial = Material(new Color(0.28f, 0.30f, 0.28f));
 
     private MeshInstance3D _body = null!;
 
@@ -36,8 +39,8 @@ public sealed partial class BoxVisual : EntityVisual
 
     private bool _isResource;
 
-    // LOOT P4b: this box is rendering a dropped corpse (the low loot-sack mesh). Distinct from _isResource so the
-    // depleted-availability logic (resource-only) never touches it, and it picks the corpse mesh/material.
+    // LOOT P4b: this box is rendering a dropped corpse (the low loot-sack mesh). Distinct from _isResource so
+    // mesh/material selection picks the corpse variant instead of the resource one.
     private bool _isCorpse;
 
     protected override void BuildChildren()
@@ -56,21 +59,6 @@ public sealed partial class BoxVisual : EntityVisual
         // NPCs (capsule) and corpses keep unit scale — the knob is plant-only.
         _body.Scale = _isResource ? new Vector3(Tuning.PlantModelScale, Tuning.PlantModelScale, Tuning.PlantModelScale) : Vector3.One;
         ApplyMaterial(state);
-        _body.Visible = !(_isResource && state.Depleted);
-    }
-
-    protected override void OnUpdate(EntityRenderState state, double now)
-    {
-        if (!_isResource)
-        {
-            return;
-        }
-
-        // Box-rendered resources (Plant, or a Rock/Tree that fell back to the box): drive availability purely
-        // off the replicated Depleted bit — hide + grey a harvested node; restore (show + green) when the
-        // server respawns it. No prediction.
-        _body.Visible = !state.Depleted;
-        _body.MaterialOverride = state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial;
     }
 
     // S65: re-apply the live "Plant" box scale to an already-spawned resource box so an F5 apply lands instantly
@@ -107,7 +95,7 @@ public sealed partial class BoxVisual : EntityVisual
     private void ApplyMaterial(EntityRenderState state)
     {
         _body.MaterialOverride = _isResource
-            ? (state.Depleted ? ResourceDepletedMaterial : ResourceAvailableMaterial)
+            ? ResourceAvailableMaterial
             : (_isCorpse ? CorpseMaterial : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial));
     }
 

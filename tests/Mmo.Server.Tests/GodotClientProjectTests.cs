@@ -134,7 +134,6 @@ public sealed class GodotClientProjectTests
         Assert.Contains("static readonly StandardMaterial3D LocalEntityMaterial", box);
         Assert.Contains("static readonly StandardMaterial3D RemoteEntityMaterial", box);
         Assert.Contains("static readonly StandardMaterial3D ResourceAvailableMaterial", box);
-        Assert.Contains("static readonly StandardMaterial3D ResourceDepletedMaterial", box);
         Assert.Contains("_body.Mesh = _isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh)", box);
     }
 

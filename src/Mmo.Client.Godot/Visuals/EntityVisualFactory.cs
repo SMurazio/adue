@@ -8,9 +8,9 @@ namespace Mmo.Client.Godot.Visuals;
 // (EntityKind + DisplayName) — Stage 2 replaces the body of ChooseArchetype with a server-sent VisualArchetype
 // without touching the renderer or the visual classes.
 //
-// Forward-compatible: an unknown archetype OR a failed asset load falls back to BoxVisual and never crashes
-// (the existing player/rock posture). The pool keys off the archetype the factory chose, so Create returns
-// both the archetype and the configured visual.
+// Forward-compatible: an unknown archetype OR a failed asset load falls back to BoxVisual and never crashes.
+// The pool keys off the archetype the factory chose, so Create returns both the archetype and the configured
+// visual.
 public sealed class EntityVisualFactory
 {
     private readonly VisualTuning _tuning;
@@ -43,13 +43,13 @@ public sealed class EntityVisualFactory
             return VisualArchetype.Corpse;
         }
 
+        // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): House/Portal are the only Resource-kind entities
+        // the server still spawns (SpawnAuthoredProps) — harvestable Tree/Rock/Plant nodes are catalogue-only
+        // now (NodeFieldPainter renders them, never per-entity), so this dispatch no longer has Rock/Tree cases.
         if (state.Kind == EntityKind.Resource)
         {
             return state.DisplayName switch
             {
-                "Rock" => VisualArchetype.Rock,
-                "Tree" => VisualArchetype.Tree,
-                // No server entity is named Portal/House today; wired so content that adds one renders.
                 "Portal" => VisualArchetype.Portal,
                 "House" => VisualArchetype.HouseSprite,
                 _ => VisualArchetype.Box
@@ -83,10 +83,6 @@ public sealed class EntityVisualFactory
             VisualArchetype.Player => PlayerVisual.LoadModelScene() is null ? null : new PlayerVisual(),
             VisualArchetype.DebugFacingBox => new DebugFacingBoxVisual(),
             VisualArchetype.CatoSprite => CatoSpriteVisual.LoadFrames() is null ? null : new CatoSpriteVisual(),
-            // DEBUG-CUBES: Rock/Tree render as the plain resource box (debug cube) instead of the GLB models.
-            // BoxVisual keys _isResource off state.Kind == Resource, so they stay green/depleted-aware cubes.
-            VisualArchetype.Rock => new BoxVisual(),
-            VisualArchetype.Tree => new BoxVisual(),
             VisualArchetype.Portal => ModelVisual.CreatePortal(),
             VisualArchetype.HouseSprite => SpriteVisual.LoadTexture() is null ? null : new SpriteVisual(),
             // LOOT P4b: the corpse sack is a BoxVisual variant (it keys off EntityKind.Corpse internally for the

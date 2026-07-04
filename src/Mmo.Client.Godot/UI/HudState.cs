@@ -94,18 +94,24 @@ public sealed class HudState
     public Direction8 LocalFacing { get; set; }
 
     // --- Minimap (world objects, S110) --------------------------------------------------------------------
-    // REAL, read-only: the trees/rocks/resource-nodes the client currently knows about (AOI-scoped — only the
-    // "current environment"). MmoClientRoot rebuilds this list each refresh from the same per-frame render-state
+    // REAL, read-only: the House/Portal props the client currently knows about (AOI-scoped — only the "current
+    // environment"). MmoClientRoot rebuilds this list each refresh from the same per-frame render-state
     // collection the 3D world renders from (read-only — no movement/world state is mutated). The minimap plots
     // each as a filled square sized to its footprint, through the SAME world->minimap transform the player marker
     // uses. Cleared + refilled in place so we don't churn allocations every frame.
+    //
+    // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): this used to also carry the ~188 tree/rock/plant
+    // resource entities (with a Depleted bit the minimap tinted). Harvestable nodes are no longer WorldEntities
+    // — they render via the catalogue field's MultiMeshes instead (NodeFieldPainter) — and D6 deliberately
+    // omits them from any per-node UI at field scale ("a forest of Tree labels is noise" applies here too), so
+    // only House/Portal (the one remaining Resource-kind entity family, which never depletes) still projects
+    // onto this list. The Depleted field was dropped accordingly.
     public List<MinimapObject> MinimapObjects { get; } = new();
 
     // One world object on the minimap. X/Y are the object's continuous world coords (X=east,
     // Y=south) — identical axes to LocalX/LocalY so objects line up with the player. FootprintUnits is the side
-    // length (in world units) of the square to draw — a 2-unit object reads as twice a 1-unit one. Depleted lets
-    // the minimap tint a harvested node distinctly from an available one.
-    public readonly record struct MinimapObject(float X, float Y, float FootprintUnits, bool Depleted);
+    // length (in world units) of the square to draw — a 2-unit object reads as twice a 1-unit one.
+    public readonly record struct MinimapObject(float X, float Y, float FootprintUnits);
 
     // --- Minimap (ecology regions, ECOLOGY E4) --------------------------------------------------------------
     // REAL, read-only: the authored ecology regions the client knows about, from MmoClient.EcologyRegions

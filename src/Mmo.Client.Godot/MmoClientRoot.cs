@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using Godot;
 using Mmo.Client.Core;
+using Mmo.Client.Core.Population;
 using Mmo.Client.Godot.Visuals;
 using Mmo.Shared.Domain;
 using Mmo.Shared.Domain.Actions;
@@ -282,6 +283,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private int _lastGc2;
 	private bool _zoneBuilt;
 	private bool _sentStartupChat;
+
+	// NODE-FIELD N3 (docs/node-field-design.md D6): the field's render view (chunked MultiMeshes) + the
+	// chunk index/jittered placements it was built from, kept so a later NodeFieldVersion change can rebuild
+	// just the affected chunk(s) instead of the whole field (NodeFieldView.SyncDepletion). Null until BuildZone
+	// builds them (a non-authored/genVersion-1 zone's empty catalogue leaves this null — no field to render,
+	// mirroring N2's "no catalogue -> no field" behaviour). _lastSyncedNodeFieldVersion tracks the last
+	// MmoClient.NodeFieldVersion we synced against so the per-frame check is a single int compare in the
+	// common (nothing changed) case.
+	private NodeFieldView? _nodeFieldView;
+	private NodeFieldChunkIndex? _nodeFieldChunkIndex;
+	private IReadOnlyList<NodeFieldPlacer.PlacedNode>? _nodeFieldPlacements;
+	private int _lastSyncedNodeFieldVersion = -1;
 	// Tracks the dev/monitoring HUD (perf HUD readout + server-metrics panel + status-panel diagnostics). Kept in
 	// sync with the STANDALONE F3 perf overlay's visibility (SetPerfPanelVisible): the perf HUD + graph live on that
 	// overlay, the metrics panel is the right-side overlay, and the status diagnostics key off this. Hidden by
@@ -490,6 +503,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			BuildZone(_client.Zone);
 			_zoneBuilt = true;
 		}
+
+		SyncNodeField();
 
 		AdvanceAutopilot(now);
 		SendStartupChat();
@@ -888,6 +903,12 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		return 0f;
 	}
 
+	// NODE-FIELD N3 (docs/node-field-design.md D5/D6): the E-press harvest key now has TWO candidate pools —
+	// the catalogue field (nodes, via NodeFieldTargeting/HarvestNodeMessage) and the entity list (corpses,
+	// via the unchanged HarvestTargeting/InteractRequest). Both share the SAME reach; we resolve each pool's
+	// own nearest candidate independently, then send whichever of the two is actually closer (the pre-N3
+	// behaviour picked one "nearest interactable" across a single unified list, so this preserves that intent
+	// for the rare case where a corpse and an available node are BOTH in reach at once).
 	private void TryHarvest()
 	{
 		// CONTINUOUS MIGRATION (Phase 9): targeting reads the SERVER-CONFIRMED continuous position (off-grid,
@@ -899,14 +920,30 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		// _renderStates is refreshed every frame in SampleRenderStates; it is the same data the renderer
-		// sees, so nearest-node selection matches what the player is looking at.
-		if (HarvestTargeting.TryFindNearestHarvestable(_renderStates, actorPosition, out var targetNetworkId))
+		// sees, so nearest-corpse selection matches what the player is looking at.
+		var hasCorpse = HarvestTargeting.TryFindNearestCorpse(
+			_renderStates, actorPosition, out var corpseNetworkId, out var corpseDistanceSquared);
+
+		var hasNode = false;
+		ushort nodeIndex = 0;
+		var nodeDistanceSquared = double.MaxValue;
+		if (_nodeFieldChunkIndex is { } chunkIndex && _client.NodeCatalog is not null)
 		{
-			_client.SendInteractRequest(targetNetworkId);
+			hasNode = NodeFieldTargeting.TryFindNearestAvailableNode(
+				chunkIndex, _client.DepletedNodeIndices, actorPosition, out nodeIndex, out nodeDistanceSquared);
+		}
+
+		if (hasNode && (!hasCorpse || nodeDistanceSquared <= corpseDistanceSquared))
+		{
+			_client.SendHarvestNode(nodeIndex);
+		}
+		else if (hasCorpse)
+		{
+			_client.SendInteractRequest(corpseNetworkId);
 		}
 		else
 		{
-			// No adjacent node: give immediate local feedback rather than a silent no-op. This is the one
+			// Nothing adjacent: give immediate local feedback rather than a silent no-op. This is the one
 			// place the client "knows" without the server, and it never mutates state — purely a hint.
 			ShowInteractFeedback("No resource node in reach.");
 		}
@@ -1947,12 +1984,33 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 		var decorMs = decorTimer.Elapsed.TotalMilliseconds;
 
+		// NODE-FIELD N3 (docs/node-field-design.md D6): the harvestable field — chunked MultiMeshes built from
+		// the SAME NodeCatalog mirror MmoClient's HandleZoneInfo already computed (N2) + verified against
+		// ZoneInfo.CatalogHash. Timed separately, same discipline as decor above. A non-authored (genVersion 1)
+		// zone's catalogue is the trivial empty one (N2), so this naturally renders nothing — mirrors the D1
+		// decor gate without a separate check.
+		var nodeFieldTimer = System.Diagnostics.Stopwatch.StartNew();
+		var nodeFieldInstanceCount = 0;
+		if (_client?.NodeCatalog is { } nodeCatalog && nodeCatalog.Entries.Count > 0)
+		{
+			var chunkIndex = NodeFieldChunkIndex.Build(nodeCatalog);
+			var placements = NodeFieldPlacer.PlaceAll(nodeCatalog, zone.Seed);
+			_nodeFieldChunkIndex = chunkIndex;
+			_nodeFieldPlacements = placements;
+			_nodeFieldView = NodeFieldView.Build(_worldRoot, chunkIndex, placements, _client.DepletedNodeIndices);
+			_lastSyncedNodeFieldVersion = _client.NodeFieldVersion;
+			nodeFieldInstanceCount = _nodeFieldView.InstanceCount;
+		}
+		var nodeFieldMs = nodeFieldTimer.Elapsed.TotalMilliseconds;
+
 		// M2 perf gate: the one-line budget check (target <250 ms at 384x384; see docs/town-floor1-blockout-design.md).
-		// P2 extends the same line with the decor sub-cost + instance count instead of adding a second print,
-		// so the <250 ms total budget (floor+walls+decor) stays checkable from one log line.
-		GD.Print("M2 zone build (floor+walls+decor): " +
+		// P2 extends the same line with the decor sub-cost + instance count; N3 extends it again with the node-field
+		// sub-cost + instance count, so the <250 ms total budget (floor+walls+decor+field) stays checkable from one
+		// log line.
+		GD.Print("M2 zone build (floor+walls+decor+field): " +
 			$"{buildTimer.Elapsed.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture)} ms " +
 			$"(decor {decorMs.ToString("F1", CultureInfo.InvariantCulture)} ms, {decorInstanceCount} instances) " +
+			$"(field {nodeFieldMs.ToString("F1", CultureInfo.InvariantCulture)} ms, {nodeFieldInstanceCount} instances) " +
 			$"({zone.Width}x{zone.Height}, genVersion {zone.GenVersion})");
 
 		// S109: hand the HUD minimap a READ-ONLY snapshot of the static map (extents + wall set) so it can bake its
@@ -1963,6 +2021,27 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_minimapGeneration++;
 		_hudState.Map = new Mmo.Client.Godot.UI.HudState.MinimapMap(
 			zone.Width, zone.Height, zone.BlockedTiles, zone.Authored, _minimapGeneration);
+	}
+
+	// NODE-FIELD N3 (docs/node-field-design.md D6): a NodeState/NodeStateBatch flip bumps MmoClient
+	// .NodeFieldVersion — cheap to poll (a single int compare in the common no-change case) so this runs every
+	// frame rather than needing a push/event hook. On a real change, NodeFieldView.SyncDepletion itself diffs
+	// the depleted set and rebuilds only the affected chunk(s). No-op before the field has been built (a
+	// non-authored zone, or before BuildZone has run yet).
+	private void SyncNodeField()
+	{
+		if (_client is not { } client || _nodeFieldView is not { } view)
+		{
+			return;
+		}
+
+		if (client.NodeFieldVersion == _lastSyncedNodeFieldVersion)
+		{
+			return;
+		}
+
+		view.SyncDepletion(client.DepletedNodeIndices);
+		_lastSyncedNodeFieldVersion = client.NodeFieldVersion;
 	}
 
 	private void SampleRenderStates(TimeSpan now)
@@ -2299,10 +2378,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_hud.SetState(_hudState);
 	}
 
-	// S110: project the client's known resource nodes onto HudState.MinimapObjects. Resources are point entities
-	// (one tile position) in the protocol — there is no replicated collision footprint — so the on-map square side
-	// is derived per-kind from a presentation constant (tree reads larger than rock; neutral default). The minimap
-	// scales these by its live zoom. Read-only: touches no movement/snapshot/AOI state.
+	// S110: project the client's known Resource-kind entities onto HudState.MinimapObjects. Resources are point
+	// entities (one tile position) in the protocol — there is no replicated collision footprint — so the on-map
+	// square side is derived per-kind from a presentation constant. The minimap scales these by its live zoom.
+	// Read-only: touches no movement/snapshot/AOI state.
+	//
+	// NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): the ~188 tree/rock/plant resource entities this used
+	// to also catch are gone (harvestable nodes are catalogue-only now, rendered by NodeFieldPainter, never
+	// entities) — House/Portal are the only Resource-kind entities left, so this now only ever plots those.
+	// Deliberately NOT extended to also plot the ~5,000-node field (D6's "no nameplates at field scale" applies
+	// just as much to minimap clutter).
 	private void RefreshMinimapObjects()
 	{
 		_hudState.MinimapObjects.Clear();
@@ -2316,7 +2401,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 			var footprint = MinimapFootprintTiles(state.DisplayName);
 			_hudState.MinimapObjects.Add(new Mmo.Client.Godot.UI.HudState.MinimapObject(
-				(float)state.Position.X, (float)state.Position.Y, footprint, state.Depleted));
+				(float)state.Position.X, (float)state.Position.Y, footprint));
 		}
 	}
 

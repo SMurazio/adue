@@ -143,8 +143,8 @@ void fragment() {
         OnRelease();
     }
 
-    // Per-frame update from the computed render state. Base drives wrapper position + label availability;
-    // subclasses extend (facing, animation, depleted hide) via OnUpdate.
+    // Per-frame update from the computed render state. Base drives wrapper position + label; subclasses
+    // extend (facing, animation) via OnUpdate.
     public void UpdateFrom(EntityRenderState state, double now)
     {
         // MOVEMENT-ACTIONS Phase B1 / Phase C: every kind tracks its horizontal render position and is LIFTED by the
@@ -157,9 +157,11 @@ void fragment() {
         if (_label is not null)
         {
             SetLabelText(state.DisplayName);
-            // Name label tracks availability: hide it when a resource is harvested (the model/box already
-            // hides) so a mined node leaves no floating label, and show it again on respawn.
-            _label.Visible = state.Kind != EntityKind.Resource || !state.Depleted;
+            // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): this used to hide a resource's name label
+            // once harvested (state.Depleted), but harvestable nodes are no longer WorldEntities (no
+            // nameplates at field scale either way — D6) and Depleted is now a constant false on every
+            // remaining entity, so the label is simply always shown.
+            _label.Visible = true;
         }
 
         UpdateHealthBar(state);

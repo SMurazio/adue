@@ -17,8 +17,10 @@ public enum VisualArchetype
     // model rig, chosen when the F5 "Cato sprite (player)" toggle is on. Pooled separately from Player so a
     // parked Cato is only reused for another Cato, never mixed with a real PlayerVisual.
     CatoSprite,
-    Rock,
-    Tree,
+    // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): Rock/Tree archetypes REMOVED — harvestable nodes are
+    // no longer WorldEntities (they render via the catalogue field's MultiMeshes, NodeFieldPainter, never
+    // per-entity), so no entity is ever spawned with a DisplayName these dispatched on. Any other unknown
+    // Resource-kind entity (only House/Portal remain) falls to Portal/HouseSprite/Box below as before.
     Portal,
     HouseSprite,
     // LOOT P4b: a dropped lootable corpse (EntityKind.Corpse). Rendered by BoxVisual as a small dark mound/sack on
