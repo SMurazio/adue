@@ -58,6 +58,41 @@ public sealed class RegionSpawnerIntegrationTests
         }
     }
 
+    // LAST SURVIVOR rule (E2 review finding 1): at the D3 brink (stock floored at 0.5 in every starter region)
+    // floor(stock) = 0 — an unguarded target would leave the region VISIBLY EXTINCT for the ~25 min the
+    // quadratic wound needs to crawl back past 1.0. The rule: target = min(max(1, floor(S)), effectiveMaxLive) —
+    // always one survivor — but the survivor regime trickles at 15x the normal pacing (30 s at defaults) so
+    // camping the last kill is not a 2 s loot faucet. This pins: (a) exactly ONE monster materializes at the
+    // brink (not zero); (b) after killing it, the next NORMAL pacing window spawns NOTHING (the slow trickle);
+    // (c) the 15x window later, the survivor returns.
+    [Fact]
+    public void BrinkRegion_AlwaysHostsExactlyOneSurvivor_OnASlowTrickle()
+    {
+        var server = CreateServer();
+        var spawner = server.RegionSpawnersForTests.First(s => s.RegionId == "slime_hollow" && s.TypeId == "slime");
+
+        // Drive the region to the brink BEFORE anything materializes (fresh server: nothing spawned yet at tick 0).
+        Assert.True(server.EcologyForTests.TrySetStock("slime_hollow", "slime", 0.4d)); // clamps to the 0.5 floor
+        Assert.Equal(0.5d, server.EcologyForTests.StockOf("slime_hollow", "slime"), 9);
+
+        // (a) one pacing window: exactly ONE survivor materializes, and further windows add nothing.
+        Materialize(server, startTick: 0, windows: 3);
+        Assert.Equal(1, spawner.LiveCount);
+
+        // (b) kill the survivor; the very next NORMAL window must NOT respawn it (survivor pacing = 15x).
+        var survivorId = spawner.LiveMonsterIds.Single();
+        Assert.True(server.ZoneForTests.World.TryGet(survivorId, out var survivor));
+        var killTick = 3u * PacingTicks;
+        server.KillMonsterForTests(survivor);
+        Assert.Equal(0.5d, server.EcologyForTests.StockOf("slime_hollow", "slime"), 9); // stock stays floored
+        server.MaterializeRegionSpawnersForTests(killTick + PacingTicks);
+        Assert.Equal(0, spawner.LiveCount);
+
+        // (c) after the 15x survivor window has elapsed, the lone survivor returns.
+        server.MaterializeRegionSpawnersForTests(killTick + (PacingTicks * 16));
+        Assert.Equal(1, spawner.LiveCount);
+    }
+
     [Fact]
     public void Boot_DerivesOneRegionSpawnerPerStarterRegionType_WithNonEmptySpawnTiles()
     {

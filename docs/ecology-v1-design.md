@@ -50,7 +50,12 @@ raw tallies.
 
 **D3. No local extinction.** `S_min = max(0.05·K, 0.5)`. WHY: full extinction is dead content with a
 near-permanent recovery (logistic growth from 0 is 0); the brink is punishment enough and the rumor
-text ("hunted to the brink") carries the story.
+text ("hunted to the brink") carries the story. **D3a (E2 review): the LAST SURVIVOR rule** — the
+materialization target is `min(max(1, floor(S)), effectiveMaxLive)`, never zero: floor(S_min)=0 would
+have made a brink region VISIBLY extinct for the ~25 min the quadratic wound takes to crawl past 1.0,
+which is exactly the dead-content reading this decision forbids. A lone survivor reads wounded-not-dead
+and keeps the region interactable; the survivor regime spawns on a 15× slow trickle (30 s at defaults)
+so camping the last kill is not a loot faucet.
 
 **D4. Regions are authored tile rectangles on the one sandbox zone.** New `Content/ecology.json`:
 regions with id, display name, rect bounds (tiles), and per-type entries {K, rPerMinute, maxLive,

@@ -2829,15 +2829,24 @@ public sealed class GameServer
                 ? (int)Math.Ceiling(spawner.BaseMaxLive * EcologyState.OvergrowthCapMultiplier)
                 : spawner.BaseMaxLive;
             var stockFloor = (int)Math.Floor(_ecology.StockOf(spawner.RegionId, spawner.TypeId));
-            var target = Math.Min(stockFloor, effectiveMaxLive);
+            // LAST SURVIVOR rule (E2 review finding 1, orchestrator decision): floor(stock) hits 0 at the D3
+            // brink (Smin 0.5 in every starter region), which would leave a fully-hunted region VISIBLY EXTINCT
+            // for the ~25 min the quadratic wound takes to crawl back past 1.0 — the dead-content reading D3
+            // exists to forbid. Instead the region always hosts at least ONE monster while its stock lives
+            // (always): a lone survivor in an emptied hollow reads as wounded-not-dead and keeps the region
+            // interactable. The survivor regime spawns on a SLOW trickle (below) so camping the last kill is a
+            // 30s-per-monster faucet, not a 2s one.
+            var survivorRegime = stockFloor < 1;
+            var target = Math.Min(Math.Max(1, stockFloor), effectiveMaxLive);
 
             if (spawner.LiveCount >= target)
             {
                 continue; // Nothing to do this window — no attempt happens, so pacing is NOT armed (stays "due").
             }
 
-            // An attempt happens now (whether or not it results in a spawn) — arm the pacing gate.
-            spawner.ArmPacing(serverTick, _regionSpawnPacingTicks);
+            // An attempt happens now (whether or not it results in a spawn) — arm the pacing gate. The survivor
+            // regime (stock below 1) trickles at 15x the normal pacing (30 s at the 2 s default).
+            spawner.ArmPacing(serverTick, survivorRegime ? _regionSpawnPacingTicks * 15 : _regionSpawnPacingTicks);
 
             if (!spawner.TryTakeNextTile(out var tile))
             {
