@@ -238,6 +238,12 @@ public sealed class GameServer
     // tick. Tick-rate-fixed at construction (for the tick-quantised pause/cooldown derivations).
     private readonly MonsterTypeRegistry _monsterTypes;
 
+    // ECOLOGY E1 (docs/ecology-v1-design.md §3/§8): the authored regions (Content/ecology.json, mirrors
+    // monsters.json's load/clamp/code-seed-fallback pattern) + their live per-region×type {stock, pressure} math
+    // engine. EcologyTick() is called from TickCore every 200 server ticks (10s @ 20Hz — see the gate at the call
+    // site). Server-only this phase: NO spawning (E2), NO persistence (E3), NO wire (E4) — just the numbers.
+    private readonly EcologyState _ecology;
+
     // LOOT P4a: the shared loot-table store (slime_loot + the nested rare_material_pool). KillMonster resolves
     // the dead monster's type -> LootTableId -> table and rolls it. P4a only LOGS the rolled stacks (P4b spawns
     // the corpse that holds them); nothing is delivered to any inventory here.
@@ -329,6 +335,11 @@ public sealed class GameServer
         // CONTINUOUS MIGRATION (Phase 8): built BEFORE the AI so the hop locomotion's live hop-distance provider can
         // read the default type's HopDistanceUnits fresh each hop.
         _monsterTypes = LoadMonsterTypes(options.TickRate);
+        // ECOLOGY E1: load the authored regions (Content/ecology.json, falling back to the code-seeded §7 starter
+        // regions like the monster manifest does) and build the live stock/pressure state off them. No dependency
+        // on _monsterTypes/_zone — the ecology's "type" is just the string id RecordKill/E2 will pass, not a
+        // resolved MonsterType.
+        _ecology = new EcologyState(LoadEcology());
         // MOVEMENT-ACTIONS (Phase A/C): the action executor reuses the EXACT same shared collision derivation + apply
         // seam ordinary movement and the hop use (so an action collides byte-identically), and the same live body
         // radius (read fresh per tick). Driven each tick by StepAll. CONSTRUCTED BEFORE the behavior (Phase C) — it has no
@@ -942,6 +953,13 @@ public sealed class GameServer
             RespawnPlayers();
             // LOOT P4b: despawn any corpse whose decay deadline has arrived (unlooted corpses don't linger forever).
             DecayCorpses();
+            // ECOLOGY E1 (docs/ecology-v1-design.md §3): advance the region×type stock/pressure math once every 200
+            // server ticks (10s @ 20Hz) — the "ecology tick" cadence is coarser than the movement/AI tick, so the
+            // gate lives here rather than inside EcologyState (which stays tick-count-agnostic for headless tests).
+            if (_serverTick % 200 == 0)
+            {
+                _ecology.EcologyTick();
+            }
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Persistence))
@@ -1611,6 +1629,36 @@ public sealed class GameServer
         return new MonsterTypeRegistry(tickRate);
     }
 
+    // ECOLOGY E1: load the authored region content from the loose data manifest at <output>/Content/ecology.json,
+    // mirroring LoadMonsterTypes exactly (loud parse-failure log, code-seeded fallback on missing/malformed file).
+    private static string EcologyManifestPath =>
+        Path.Combine(AppContext.BaseDirectory, "Content", "ecology.json");
+
+    private static EcologyRegistry LoadEcology()
+    {
+        var path = EcologyManifestPath;
+        if (File.Exists(path))
+        {
+            try
+            {
+                var registry = EcologyRegistry.FromManifestJson(File.ReadAllText(path));
+                Log.Info($"Loaded {registry.Regions.Count} ecology region(s) from data manifest: {path}.");
+                return registry;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn(
+                    $"Failed to load ecology manifest {path} ({ex.Message}); using the code-seeded defaults.");
+            }
+        }
+        else
+        {
+            Log.Info($"No ecology manifest at {path}; using the code-seeded defaults.");
+        }
+
+        return new EcologyRegistry();
+    }
+
     private static EntityStateSnapshot ToEntityStateSnapshot(WorldEntity entity)
     {
         // COMBAT-S2A: replicate PUBLIC HP (current + max) on the per-entity state for the overhead bar. Only
@@ -2194,7 +2242,7 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
                 : "commands: /help, /role. Admin commands require role Admin.");
             return;
         }
@@ -2242,6 +2290,9 @@ public sealed class GameServer
                 break;
             case "clearspawners":
                 HandleClearSpawnersCommand(sender);
+                break;
+            case "ecology":
+                HandleEcologyCommand(sender, parts);
                 break;
             default:
                 SendSystem(sender, $"unknown command: /{command}. Try /help.");
@@ -2391,6 +2442,74 @@ public sealed class GameServer
             $"slam: telegraph #{telegraphId} at {actor.Position.X:0.##},{actor.Position.Y:0.##} r={radius}, "
                 + $"resolves at tick {resolveTick} (~{windupMs}ms), damage={damage}.");
         Log.Info($"{sender.DisplayName} scheduled /slam #{telegraphId} r={radius} windup={windupMs}ms damage={damage} (resolve tick {resolveTick}).");
+    }
+
+    // ECOLOGY E1 (docs/ecology-v1-design.md §3): admin dev command /ecology — no args dumps every authored
+    // region×type's EXACT stock/pressure/state (admin eyes only, per D5 — players get fuzzy words via E4's
+    // /rumors, never numbers); `set <region> <type> <stock>` and `pressure <region> <type> <n>` force-write a
+    // value for live testing (clamped by EcologyState, same "live, no restart" philosophy as the F1 tuning knobs
+    // and /slam). Region/type ids are matched case-insensitively, same as monster type ids.
+    private void HandleEcologyCommand(ClientSession sender, string[] parts)
+    {
+        const string usage =
+            "usage: /ecology | /ecology set <region> <type> <stock> | /ecology pressure <region> <type> <n>.";
+
+        if (parts.Length == 1)
+        {
+            var any = false;
+            foreach (var region in _ecology.Registry.Regions)
+            {
+                foreach (var dumpTypeId in region.Types.Keys)
+                {
+                    any = true;
+                    SendSystem(
+                        sender,
+                        $"ecology: {region.DisplayName} ({region.Id})/{dumpTypeId}: "
+                            + $"stock={_ecology.StockOf(region.Id, dumpTypeId):0.###} "
+                            + $"pressure={_ecology.PressureOf(region.Id, dumpTypeId):0.###} "
+                            + $"state={_ecology.StateOf(region.Id, dumpTypeId)}.");
+                }
+            }
+
+            if (!any)
+            {
+                SendSystem(sender, "ecology: no authored regions.");
+            }
+
+            return;
+        }
+
+        var subcommand = parts[1].ToLowerInvariant();
+        if ((subcommand != "set" && subcommand != "pressure") || parts.Length < 5)
+        {
+            SendSystem(sender, usage);
+            return;
+        }
+
+        var regionId = parts[2];
+        var typeId = parts[3];
+        if (!double.TryParse(parts[4], NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            || !double.IsFinite(value))
+        {
+            SendSystem(sender, usage);
+            return;
+        }
+
+        var applied = subcommand == "set"
+            ? _ecology.TrySetStock(regionId, typeId, value)
+            : _ecology.TrySetPressure(regionId, typeId, value);
+
+        if (!applied)
+        {
+            SendSystem(sender, $"ecology: unknown region/type '{regionId}'/'{typeId}'.");
+            return;
+        }
+
+        var applyDescription = subcommand == "set"
+            ? $"stock={_ecology.StockOf(regionId, typeId):0.###}"
+            : $"pressure={_ecology.PressureOf(regionId, typeId):0.###}";
+        SendSystem(sender, $"ecology: {regionId}/{typeId} {applyDescription} (state={_ecology.StateOf(regionId, typeId)}).");
+        Log.Info($"{sender.DisplayName} set ecology {regionId}/{typeId} via /ecology {subcommand} {value}.");
     }
 
     // LIVING-ENEMIES P1: admin dev command /monster — spawns an EntityKind.Monster at the CALLER's current tile

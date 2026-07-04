@@ -1,0 +1,52 @@
+{
+  // Ecology REGION data manifest (ECOLOGY E1, docs/ecology-v1-design.md). This is the AUTHORITATIVE runtime
+  // source: the server loads this loose file from <output>/Content/ecology.json at startup; edit it + restart
+  // the server to retune regions with no code build. If this file is missing or fails to parse the server falls
+  // back to the code-seeded defaults in EcologyRegistry (the safety net) — and the three regions below are
+  // byte-for-byte identical to that code seed (a parity test pins this so the two can never silently drift).
+  //
+  // SCHEMA: each region is {id, displayName, minX/minY/maxX/maxY (an inclusive tile rect on the one sandbox
+  // zone), types: [{typeId, k, rPerMinute, maxLive}]}. k/rPerMinute/maxLive are clamped by EcologyRegistry to
+  // k in [1,64], rPerMinute in [0.05,10], maxLive in [1,32] (§7). rPerMinute is the LOGISTIC growth rate per
+  // real minute; the engine converts it internally to the per-10s ecology-tick rate.
+  //
+  // RECTS: chosen from the REAL wing coordinates in Mmo.Shared.Domain.AuthoredMaps.BuildTownAndFloor1 (the stamp
+  // program's own "WEST WING Slime Hollow" / "EAST WING Gnoll Scrubland" / "THE VERGE" comments) — see
+  // review/review-request-e1-ecology.md for the full rationale.
+  "regions": [
+    {
+      "id": "slime_hollow",
+      "displayName": "Slime Hollow",
+      "minX": 20,
+      "minY": 120,
+      "maxX": 140,
+      "maxY": 220,
+      "types": [
+        { "typeId": "slime", "k": 10, "rPerMinute": 1.0, "maxLive": 10 }
+      ]
+    },
+    {
+      "id": "eastern_scrubland",
+      "displayName": "Eastern Scrubland",
+      "minX": 250,
+      "minY": 120,
+      "maxX": 364,
+      "maxY": 220,
+      "types": [
+        { "typeId": "gnoll", "k": 8, "rPerMinute": 0.4, "maxLive": 8 }
+      ]
+    },
+    {
+      "id": "the_verge",
+      "displayName": "The Verge",
+      "minX": 100,
+      "minY": 300,
+      "maxX": 300,
+      "maxY": 370,
+      "types": [
+        { "typeId": "slime", "k": 6, "rPerMinute": 0.25, "maxLive": 6 },
+        { "typeId": "gnoll", "k": 6, "rPerMinute": 0.25, "maxLive": 6 }
+      ]
+    }
+  ]
+}

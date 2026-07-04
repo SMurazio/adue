@@ -21,5 +21,11 @@
     <None Include="Content\monsters.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- ECOLOGY E1: the region data manifest, same convention as monsters.json above (loaded from
+         <output>/Content/ecology.json at startup; PreserveNewest so an edit re-copies on build; propagates
+         transitively to Mmo.Server.Tests so a parity test can read the SAME shipped file). -->
+    <None Include="Content\ecology.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>
