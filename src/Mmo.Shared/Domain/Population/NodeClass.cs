@@ -31,14 +31,16 @@ public sealed record NodeClass(
     double NoiseCellScale,
     int Salt);
 
-// D8 content targets: total ~5,000 nodes on the 384x384 map -- Tree ~3,500 (70%), Rock ~1,000 (20%),
-// Plant ~500 (10%). Road/town suppression is strong (low RoadSuppression floor, generous
-// RoadFalloffTiles) so the town/road grass strip stays sparse while the wings and the Verge read as
-// genuine forest; NoiseCellScale is wide (10-16 tiles per patch, vs decor's 5-12) so trees in particular
-// clump into THICKETS rather than an even sprinkle (D8 "thick clusters via patch noise"). Salts are
-// arbitrary, pairwise-distinct, and deliberately a different constant family than
-// DecorClassTable's 0x1000s / Zone.ResourceNodeSeedSalt (0x5C4A11ED) so a node class scatter can never
-// alias another population system's PRNG stream even when folded against the same zone seed.
+// D8 content targets, DENSIFIED on user feel-test feedback (2026-07-04, "I would like even more
+// forest"): total ~8,300 nodes on the 384x384 map -- Tree ~6,500 (spacing dropped 3->2 so thickets
+// read as WOODS rather than orchards), Rock ~1,000, Plant ~800 (undergrowth). Road/town suppression is
+// strong (low RoadSuppression floor, generous RoadFalloffTiles) so the town/road grass strip stays
+// sparse while the wings and the Verge read as genuine forest; NoiseCellScale is wide (10-16 tiles per
+// patch, vs decor's 5-12) so trees in particular clump into THICKETS rather than an even sprinkle (D8
+// "thick clusters via patch noise"). Salts are arbitrary, pairwise-distinct, and deliberately a
+// different constant family than DecorClassTable's 0x1000s / Zone.ResourceNodeSeedSalt (0x5C4A11ED) so
+// a node class scatter can never alias another population system's PRNG stream even when folded
+// against the same zone seed.
 public static class NodeClassTable
 {
     public static readonly IReadOnlyList<NodeClass> Classes =
@@ -46,12 +48,12 @@ public static class NodeClassTable
         new NodeClass(
             Type: NodeType.Tree,
             Category: SurfaceCategory.Grass,
-            TargetCount: 3_500,
-            MinSpacing: 3,
-            BaseDensity: 0.55,
+            TargetCount: 6_500,
+            MinSpacing: 2,
+            BaseDensity: 0.62,
             RoadSuppression: 0.08,
             RoadFalloffTiles: 14,
-            NoiseCellScale: 14,
+            NoiseCellScale: 16,
             Salt: 0x9001),
 
         new NodeClass(
@@ -68,7 +70,7 @@ public static class NodeClassTable
         new NodeClass(
             Type: NodeType.Plant,
             Category: SurfaceCategory.Grass,
-            TargetCount: 500,
+            TargetCount: 800,
             MinSpacing: 3,
             BaseDensity: 0.30,
             RoadSuppression: 0.15,
