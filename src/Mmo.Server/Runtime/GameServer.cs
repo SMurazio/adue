@@ -86,6 +86,11 @@ public sealed class GameServer
     // interest radius) through THIS, not _options, so an admin AdminSetTuning can change them mid-run.
     private readonly ServerTuning _tuning;
     private readonly ICharacterRepository _characters;
+    // ECOLOGY E3 (docs/ecology-v1-design.md D8, S8 E3): the region_populations persistence seam. Defaults to
+    // NullEcologyRepository (see GameServer's ctor) when the caller doesn't supply one — every existing test
+    // suite constructs GameServer with just an ICharacterRepository, and this keeps them compiling/passing
+    // unchanged instead of forcing an ecology stub onto each one.
+    private readonly IEcologyRepository _ecologyRepository;
     private readonly ItemRegistry _itemRegistry = ItemRegistry.Default;
     private readonly ResourceNodeRegistry _resourceNodes;
     private readonly PersistenceWriteBehindWorker _persistence;
@@ -125,6 +130,12 @@ public sealed class GameServer
     internal void MaterializeRegionSpawnersForTests(uint serverTick) => MaterializeRegionSpawners(serverTick);
     internal void KillMonsterForTests(WorldEntity monster) => KillMonster(monster);
     internal int ClearRegionSpawnerMonstersForTests() => ClearRegionSpawnerMonsters();
+
+    // ECOLOGY E3 test seam: drives the SAME save path the checkpoint cadence/graceful shutdown call, without
+    // needing a live tick thread — lets a persistence test save deterministically after driving EcologyForTests
+    // directly (EcologyTick/RecordKill/TrySetStock), then boot a SECOND GameServer against the same repository to
+    // assert the restart-survival acceptance (§5.3).
+    internal Task SaveEcologyPopulationsForTests() => SaveEcologyPopulationsAsync(CancellationToken.None);
 
     // The raw reverse-map size — the direct "no leak" pin (distinct from RegionSpawner.LiveCount, which is a
     // PER-SPAWNER set that a bug in the reverse map alone wouldn't show up in).
@@ -362,12 +373,16 @@ public sealed class GameServer
     // first credit pass (the per-session seed handles a fresh peer's first move).
     private long _lastBudgetCreditTimestamp;
 
-    public GameServer(ServerOptions options, ICharacterRepository characters)
+    // ECOLOGY E3: `ecologyRepository` is OPTIONAL (defaults to NullEcologyRepository) so every existing test
+    // call site (`new GameServer(options, someCharacterRepository)`) keeps compiling unchanged — only Program.cs
+    // and any new persistence-focused test need to pass a real one.
+    public GameServer(ServerOptions options, ICharacterRepository characters, IEcologyRepository? ecologyRepository = null)
     {
         _options = options;
         _tuning = new ServerTuning(options);
         _aoiQueryRadiusTiles = ResolveAoiQueryRadiusTiles(_tuning.InterestRadius);
         _characters = characters;
+        _ecologyRepository = ecologyRepository ?? new NullEcologyRepository();
         _persistence = new PersistenceWriteBehindWorker(characters);
         _nextPersistenceCheckpointTick = options.PersistenceCheckpointTicks;
         _runtimeGuard = new ServerRuntimeGuard(_metrics);
@@ -393,6 +408,11 @@ public sealed class GameServer
         // on _monsterTypes/_zone — the ecology's "type" is just the string id RecordKill/E2 will pass, not a
         // resolved MonsterType.
         _ecology = new EcologyState(LoadEcology());
+        // ECOLOGY E3 (docs/ecology-v1-design.md D8, §8 E3): overlay any PERSISTED stock/pressure on top of the
+        // K-seed EcologyState just constructed — a restart must not heal the world. Must run AFTER the K-seed
+        // above (it only overwrites region×types it finds a saved row for) and BEFORE BuildRegionSpawners below
+        // (materialization reads live stock immediately).
+        LoadEcologyPopulations();
         // ECOLOGY E2 (docs/ecology-v1-design.md §8 E2; docs/procedural-population-design.md D5): derive every
         // authored region×type's spawn geography NOW (deterministic from the zone's seed/categories, computed
         // once) and build its RegionSpawner. Needs _zone (map/categories) + _monsterTypes (resolve each typeId to
@@ -617,6 +637,10 @@ public sealed class GameServer
             QueueConnectedPlayersForPersistence();
             await _persistence.FlushAsync(CancellationToken.None);
             await _persistence.DisposeAsync();
+            // ECOLOGY E3 (docs/ecology-v1-design.md D8): graceful-shutdown save — awaited directly (not
+            // Task.Run'd) since a restart must not heal the world and this is the LAST chance to persist before
+            // the process exits.
+            await SaveEcologyPopulationsAsync(CancellationToken.None);
             _syntheticLoad.Stop();
             _netManager.Stop();
             _cadenceTrace.Flush();
@@ -1754,6 +1778,100 @@ public sealed class GameServer
         }
 
         return new EcologyRegistry();
+    }
+
+    // ECOLOGY E3 (docs/ecology-v1-design.md D8, §8 E3): restore persisted stock/pressure OVER the K-seed
+    // EcologyState just constructed. Blocking on the repository's async LoadAllAsync here (rather than awaiting
+    // it from RunAsync) is deliberate: several test suites (RegionSpawnerIntegrationTests, AuthoredWorldTests,
+    // EcologyWireTests, ...) construct GameServer directly and drive its test seams WITHOUT ever calling
+    // RunAsync, so the load must already be visible right after the constructor returns. This runs exactly once
+    // at boot (never on the tick hot path); the table is tiny (a handful of region×type rows); and a console app
+    // has no SynchronizationContext to deadlock a blocking wait against — the same reasoning Program.cs already
+    // relies on when it awaits the migration runner before this constructor ever runs.
+    //
+    // Clamp/reject-on-load (the D8 "manifest may have changed K since the save" fork): TrySetStock/TrySetPressure
+    // apply the EXACT SAME guard the `/ecology set`/`/ecology pressure` admin commands use — a finite stock is
+    // clamped into [Smin, 1.5K] of the CURRENT config (never trusted verbatim), and a non-finite value is
+    // REJECTED outright, leaving that region×type at its fresh K-seed rather than poisoning the cell. A row whose
+    // region id or type id is no longer authored by the CURRENT manifest is an ORPHAN — ignored, logged, never
+    // applied (D8: "rows for regions/types no longer in the manifest are ignored").
+    private void LoadEcologyPopulations()
+    {
+        IReadOnlyList<RegionPopulationRecord> rows;
+        try
+        {
+            rows = _ecologyRepository.LoadAllAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Failed to load persisted ecology populations; every region×type stays at its K-seed.", exception);
+            return;
+        }
+
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var applied = 0;
+        var orphaned = 0;
+        foreach (var row in rows)
+        {
+            if (!_ecology.Registry.TryGet(row.RegionId, out var region) || !region.Types.ContainsKey(row.TypeId))
+            {
+                orphaned++;
+                Log.Warn($"Ignoring orphaned ecology row for '{row.RegionId}'/'{row.TypeId}' (no longer in the ecology manifest).");
+                continue;
+            }
+
+            if (_ecology.TrySetStock(row.RegionId, row.TypeId, row.Stock))
+            {
+                _ecology.TrySetPressure(row.RegionId, row.TypeId, row.Pressure);
+                applied++;
+            }
+            else
+            {
+                Log.Warn($"Rejected non-finite persisted stock for '{row.RegionId}'/'{row.TypeId}'; kept its K-seed.");
+            }
+        }
+
+        Log.Info($"Loaded {applied} persisted ecology row(s) from {rows.Count} saved ({orphaned} orphaned/ignored).");
+    }
+
+    // ECOLOGY E3: snapshots every region×type's live stock/pressure and saves it — the ONE method both the
+    // checkpoint cadence and the graceful-shutdown path call. Callers on the tick thread (CheckpointEcologyPopulations)
+    // must offload this behind Task.Run themselves; RunAsync's shutdown path is already off the tick thread (it
+    // runs in the async finally block after the loop exits) so it awaits this directly.
+    private async Task SaveEcologyPopulationsAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = _ecology.SnapshotAll();
+        var tick = (long)_serverTick;
+        var records = new List<RegionPopulationRecord>(snapshot.Count);
+        foreach (var cell in snapshot)
+        {
+            records.Add(new RegionPopulationRecord(cell.RegionId, cell.TypeId, cell.Stock, cell.Pressure, tick));
+        }
+
+        try
+        {
+            await _ecologyRepository.SaveAllAsync(records, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Failed to save ecology populations.", exception);
+        }
+    }
+
+    // ECOLOGY E3: fires on the SAME cadence CheckpointDirtyDurableState already uses for character state (D8: "on
+    // the existing character-checkpoint cadence") — no separate persistence timer to keep in sync. The snapshot
+    // itself (SnapshotAll) is a cheap in-memory read taken HERE on the tick thread; only the actual DB write is
+    // offloaded via Task.Run (the same "fire off the tick thread, log on failure" shape BeginLogin's async DB
+    // work uses), so the tick budget is never blocked on I/O. No overlap guard: at the checkpoint cadence
+    // (>= 1s, default 15s) a save of this table's tiny row count comfortably completes long before the next one
+    // fires.
+    private void CheckpointEcologyPopulations()
+    {
+        _ = Task.Run(() => SaveEcologyPopulationsAsync(CancellationToken.None));
     }
 
     // ECOLOGY E2: builds one RegionSpawner per authored region×type via RegionSpawnPlanner's deterministic
@@ -4800,6 +4918,7 @@ public sealed class GameServer
 
         FlushDirtyDurableTiles();
         FlushDirtyInventories();
+        CheckpointEcologyPopulations();
     }
 
     private void FlushDirtyDurableTiles()

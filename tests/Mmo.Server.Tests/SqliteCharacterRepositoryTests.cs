@@ -74,7 +74,7 @@ public sealed class SqliteCharacterRepositoryTests
         await using var command = connection.CreateCommand();
         command.CommandText = "select count(*) from schema_migrations;";
         var count = Convert.ToInt32(await command.ExecuteScalarAsync());
-        Assert.Equal(5, count);
+        Assert.Equal(6, count); // 006_region_populations (ecology E3) joined the set.
 
         command.CommandText = "select count(*) from accounts;";
         Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));

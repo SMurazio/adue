@@ -16,14 +16,15 @@ namespace Mmo.Server.Runtime;
 // decrement clamps at the same floor. D5 (five legible states): StateOf derives DEPLETED/THIN/HEALTHY/RICH/
 // OVERGROWN from S/K, exact at the 0.25/0.6/1.0/1.25 boundaries (see the acceptance tests).
 //
-// DEPLETED-BAND GROWTH SUPPRESSION (Allee-style; the orchestrator's resolution of the E1 brink-recovery fork):
-// while S < 0.25K (the D5 DEPLETED band) every growth increment is additionally multiplied by S/(0.25K) — LINEAR
-// suppression, factor 1.0 at the band edge and 0.2 at the 0.05K floor, never zero (so D3's no-extinction
-// guarantee holds: growth is slowed, never stopped). WHY: pure logistic recovery time scales with the LOG of the
-// deficit (the brink-vs-K/2 recovery-time ratio caps around ~2.5x), which fails the pillar-5 intent that hunting
-// a region to the brink WOUNDS it for a session; the suppression makes the depleted band a slow crawl (the
-// wound) while THIN and above recover at normal logistic speed. Applied to BOTH growth paths, normal and
-// overgrowth (it only bites below 0.25K anyway, which the overgrowth path can never reach — uniform by design).
+// DEPLETED-BAND GROWTH SUPPRESSION (Allee-style; revised TWICE — see DepletedSuppression's own comment for the
+// full history): while S < 0.25K (the D5 DEPLETED band) every growth increment is additionally multiplied by
+// (S/(0.25K))^2 — QUADRATIC suppression (the E1 review proved linear missed the doc's >= 5x brink-recovery bar),
+// factor 1.0 at the band edge, never zero (so D3's no-extinction guarantee holds: growth is slowed, never
+// stopped). WHY: pure logistic recovery time scales with the LOG of the deficit (the brink-vs-K/2 recovery-time
+// ratio caps around ~2.5x), which fails the pillar-5 intent that hunting a region to the brink WOUNDS it for a
+// session; the suppression makes the depleted band a slow crawl (the wound) while THIN and above recover at
+// normal logistic speed. Applied to BOTH growth paths, normal and overgrowth (it only bites below 0.25K anyway,
+// which the overgrowth path can never reach — uniform by design).
 public sealed class EcologyState
 {
     // D2: pressure is "idle" (overgrowth may proceed) below this; pressure decays toward it every ecology tick.
@@ -283,6 +284,26 @@ public sealed class EcologyState
     // sit in a region?"). Delegates straight to the registry (pure geometry, no state needed).
     public bool TryGetRegionAt(int tileX, int tileY, out EcologyRegion region) =>
         _registry.TryGetRegionAt(tileX, tileY, out region);
+
+    // ECOLOGY E3 (persistence, docs/ecology-v1-design.md D8): every region x type's live {stock, pressure} in one
+    // pass, for the repository's SaveAllAsync. Pure accessor — no math here, just enumerating the SAME `_cells`
+    // EcologyTick/RecordKill mutate. Order follows the registry's region/type enumeration (deterministic; not
+    // load-bearing for a keyed upsert, just makes a saved snapshot diff-stable for debugging).
+    public IReadOnlyList<(string RegionId, string TypeId, double Stock, double Pressure)> SnapshotAll()
+    {
+        var snapshot = new List<(string RegionId, string TypeId, double Stock, double Pressure)>();
+        foreach (var region in _registry.Regions)
+        {
+            var byType = _cells[region.Id];
+            foreach (var typeId in region.Types.Keys)
+            {
+                var cell = byType[typeId];
+                snapshot.Add((region.Id, typeId, cell.Stock, cell.Pressure));
+            }
+        }
+
+        return snapshot;
+    }
 
     private bool TryGetCell(string regionId, string typeId, out Cell cell, out EcologyTypeConfig config)
     {
