@@ -137,6 +137,25 @@ public sealed class GodotClientProjectTests
         Assert.Contains("_body.Mesh = _isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh)", box);
     }
 
+    // NODE-FIELD N3 review (de3164a, the MEDIUM finding): the three new MmoClientRoot integration points are
+    // Godot-only code no unit test can execute — pin them as source text (the established idiom of this file)
+    // so an accidental unwire fails the suite instead of shipping silently (the E4 minimap bridge shipped DEAD
+    // for exactly this lack of a writer-side pin).
+    [Fact]
+    public void GodotClientWiresTheNodeFieldEndToEnd()
+    {
+        var root = File.ReadAllText(FindGodotSource("MmoClientRoot.cs"));
+
+        // _Process polls the depleted-set version so state flips actually rebuild chunks.
+        Assert.Contains("SyncNodeField();", root);
+        // BuildZone actually constructs the field on authored zones.
+        Assert.Contains("NodeFieldPainter", root);
+        Assert.Contains("_nodeFieldView", root);
+        // The E-press harvest path resolves catalogue nodes (not just corpses) and sends HarvestNode.
+        Assert.Contains("NodeFieldTargeting", root);
+        Assert.Contains("HarvestNode", root);
+    }
+
     [Fact]
     public void GodotClientDrawsGridWithAShaderOnAPlane()
     {
