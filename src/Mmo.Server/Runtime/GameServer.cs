@@ -3299,12 +3299,13 @@ public sealed class GameServer
 
         ApplyShield(session, self, ShieldSoloStrength, t + ShieldDurationTicks, t + ShieldCooldownTicks);
         session.SetShieldPending(t);
-        if (partnerLive)
-        {
-            // Shared cooldown: block the partner's OWN fresh press too (an in-window press still upgrades above,
-            // because that path runs before the cooldown gate).
-            partner!.SetShieldCooldownUntil(t + ShieldCooldownTicks);
-        }
+        // LIVE FEEL FIX (2026-07-04, user repro: "the shield seems to go only on one"): the first press used to
+        // ALSO pre-arm the partner's cooldown, so a partner pressing just OUTSIDE the upgrade window got nothing
+        // for 10s — one bubble on screen. Per the spec ("a solo press still grants that player a weak personal
+        // shield"), a missed-window press now falls through to the partner's OWN solo grant; the SHARED cooldown
+        // binds where the spec puts it — on the upgraded shared bubble (both cooldowns armed in the upgrade path
+        // above). Worst case without the pre-block: two out-of-sync weak solos (10) on independent cooldowns —
+        // strictly less protection than one coordinated Perfect (40+40 on one shared cooldown).
     }
 
     // DUO-WAVE2 ability 2: arm one player's shield + shared cooldown and push the bubble to that player AND their

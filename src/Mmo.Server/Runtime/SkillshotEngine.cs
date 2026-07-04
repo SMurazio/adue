@@ -280,7 +280,9 @@ public sealed class SkillshotEngine
         _monsterHitScratch.Clear();
         foreach (var candidate in _candidateScratch)
         {
-            if (candidate.Kind != EntityKind.Monster || !CombatTargeting.IsAttackableEnemy(candidate))
+            // LIVE FEEL FIX (see TetherEngine.ResolveSweetDamage): IsAttackableEnemy is the single target-set
+            // truth — the extra Kind==Monster clause excluded training dummies from every duo ability at once.
+            if (!CombatTargeting.IsAttackableEnemy(candidate))
             {
                 continue;
             }

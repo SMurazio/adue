@@ -194,7 +194,12 @@ public sealed class TetherEngine
 
         switch (band)
         {
+            // LIVE FEEL FIX (2026-07-04, user repro): the WARNING band now damages enemies too — the amber
+            // beam visibly crossing a target while doing nothing read as a bug, not a buffer. The warning
+            // color keeps its real job (imminent break signal); Sweet-vs-Warning only changes the tick damage
+            // via the same distance curve (which naturally tapers past the band middle).
             case TetherBand.Sweet:
+            case TetherBand.Warning:
                 if (serverTick >= tether.NextSweetDamageTick)
                 {
                     ResolveSweetDamage(tether, a, b, distance, serverTick);
@@ -226,7 +231,7 @@ public sealed class TetherEngine
 
                 break;
 
-            // Inert / Warning: no damage either way.
+            // Inert: below minimum range the beam is slack — no effect on anything.
         }
     }
 
@@ -242,7 +247,10 @@ public sealed class TetherEngine
 
         foreach (var candidate in _candidateScratch)
         {
-            if (candidate.Kind != EntityKind.Monster || !CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
+            // LIVE FEEL FIX: IsAttackableEnemy is the SINGLE target-set truth (Dummy/Npc/Monster — the same set
+            // the melee hits, which is why training dummies must work here too). The old extra Kind==Monster
+            // clause silently excluded dummies — the user's live repro: a beam crossing two dummies, no damage.
+            if (!CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
             {
                 continue;
             }

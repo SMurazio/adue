@@ -204,7 +204,9 @@ public sealed class MidpointDetonationEngine
         _gather(center.ToTileRounded(), gatherRadius, _candidateScratch);
         foreach (var candidate in _candidateScratch)
         {
-            if (candidate.Kind != EntityKind.Monster || !CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
+            // LIVE FEEL FIX (see TetherEngine.ResolveSweetDamage): IsAttackableEnemy is the single target-set
+            // truth — the extra Kind==Monster clause excluded training dummies from every duo ability at once.
+            if (!CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
             {
                 continue;
             }
@@ -236,7 +238,7 @@ public sealed class MidpointDetonationEngine
             _gather(zone.Center.ToTileRounded(), gatherRadius, _candidateScratch);
             foreach (var candidate in _candidateScratch)
             {
-                if (candidate.Kind != EntityKind.Monster || !CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
+                if (!CombatTargeting.IsAttackableEnemy(candidate) || candidate.Stats.Health <= 0)
                 {
                     continue;
                 }
