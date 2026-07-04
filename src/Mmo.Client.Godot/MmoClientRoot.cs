@@ -2291,6 +2291,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// list the 3D world renders from — read-only, AOI-scoped ("current environment"). Rebuilt in place each
 		// refresh (AOI-bounded count) so no new server feed is needed and no allocation churns per frame.
 		RefreshMinimapObjects();
+		// ECOLOGY E4: feed the minimap's region shading from the client's replicated ecology region set — read-only,
+		// rebuilt in place each refresh (a handful of authored regions; no per-frame allocation churn worth avoiding
+		// further than that).
+		RefreshMinimapRegions();
 
 		_hud.SetState(_hudState);
 	}
@@ -2313,6 +2317,31 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			var footprint = MinimapFootprintTiles(state.DisplayName);
 			_hudState.MinimapObjects.Add(new Mmo.Client.Godot.UI.HudState.MinimapObject(
 				(float)state.Position.X, (float)state.Position.Y, footprint, state.Depleted));
+		}
+	}
+
+	// ECOLOGY E4: project the client's replicated ecology region set (MmoClient.EcologyRegions) onto
+	// HudState.MinimapRegions. Read-only: touches no movement/snapshot/AOI state, no ecology simulation — this is
+	// a pure mirror of whatever RegionEcologyMessage last carried for each region.
+	private void RefreshMinimapRegions()
+	{
+		_hudState.MinimapRegions.Clear();
+		if (_client is null)
+		{
+			return;
+		}
+
+		foreach (var region in _client.EcologyRegions.Values)
+		{
+			var states = new List<EcologyPopulationState>(region.Types.Count);
+			for (var i = 0; i < region.Types.Count; i++)
+			{
+				states.Add(region.Types[i].State);
+			}
+
+			var worst = EcologyLegibility.WorstOf(states);
+			_hudState.MinimapRegions.Add(new Mmo.Client.Godot.UI.HudState.MinimapRegion(
+				region.MinTileX, region.MinTileY, region.MaxTileX, region.MaxTileY, worst));
 		}
 	}
 

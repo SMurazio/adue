@@ -559,8 +559,11 @@ public sealed class MmoClient : IDisposable
 
         // ECOLOGY E4 (the SAME T2 lesson applied here): drop the last session's replicated region set so a
         // reconnect to a restarted server doesn't keep showing a stale minimap overlay until the new session's
-        // login resend happens to overwrite every region again.
+        // login resend happens to overwrite every region again. The version bump matters (E4 review LOW-2): the
+        // Godot bridge refresh is signalled by EcologyRegionsVersion, so a clear WITHOUT a bump could leave the
+        // previous world's overlay rendered until the next session's first message.
         _ecologyRegions.Clear();
+        EcologyRegionsVersion++;
     }
 
     // CONTINUOUS MIGRATION (Phase 4): the predictor MINTS the seq (PredictAndBuffer) then we Send the MoveIntent with
