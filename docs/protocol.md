@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `46` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `47` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -79,6 +79,14 @@ World snapshots should fit in a single UDP packet for the current channel target
   on login, the field's current exceptions (typically a handful among thousands); client→server
   `HarvestNodeMessage` (`ushort nodeIndex`) — the index-keyed harvest request that replaces `InteractRequest`'s
   former resource-harvest branch (`InteractRequest` still exists, now corpse-open only).
+- v47 (DUO-SKILLSHOT, exp/duo-abilities — EXPERIMENT branch): the co-op fusion-skillshot foundation + ability 1.
+  Three additive messages: client→server `FireSkillshotMessage` (`uint Sequence`, `ushort AimAngle`) — fire a
+  straight-line projectile toward a bearing, on its own dedup cursor; `AimPreviewMessage` (`uint ShooterNetworkId`,
+  `ushort Heading`, `bool Active`) — the aim-preview relay (client→server while holding fire with id 0, server→
+  **partner** with the shooter id stamped in), sent unreliable; server→client `PairStatusMessage`
+  (`uint PartnerNetworkId`, `bool Paired`) — the replicated `/pair` state. A new `EntityKind.Projectile` (byte 7)
+  rides the existing spawn message; its tier (solo/good/perfect) rides the EXISTING replicated `TintRgb`+`ScaleMilli`
+  (no new entity field). Pairing is a `/pair <name>` / `/unpair` chat command (mutual; disconnect unpairs).
 
 ## Client Messages
 

@@ -134,7 +134,8 @@ public sealed class GodotClientProjectTests
         Assert.Contains("static readonly StandardMaterial3D LocalEntityMaterial", box);
         Assert.Contains("static readonly StandardMaterial3D RemoteEntityMaterial", box);
         Assert.Contains("static readonly StandardMaterial3D ResourceAvailableMaterial", box);
-        Assert.Contains("_body.Mesh = _isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh)", box);
+        // DUO-EXP: the projectile sphere joined the static-mesh reuse chain.
+        Assert.Contains("_body.Mesh = _isProjectile ? ProjectileMesh : (_isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh))", box);
     }
 
     // NODE-FIELD N3 review (de3164a, the MEDIUM finding): the three new MmoClientRoot integration points are

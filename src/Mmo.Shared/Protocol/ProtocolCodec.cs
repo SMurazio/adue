@@ -99,7 +99,14 @@ public static class ProtocolCodec
     // {ushort nodeIndex} — the index-keyed harvest request replacing InteractRequest's former resource-
     // harvest branch (InteractRequest still exists, now corpse-open only). Server + every in-repo client
     // flip together.
-    public const byte Version = 46;
+    // v47 — DUO-SKILLSHOT (exp/duo-abilities): three additive messages for the co-op fusion-skillshot foundation +
+    // ability 1. (1) client->server FireSkillshotMessage {uint Sequence, ushort AimAngle} — fire toward a bearing on
+    // its own dedup cursor. (2) AimPreviewMessage {uint ShooterNetworkId, ushort Heading, bool Active} — the aim-
+    // preview relay (client->server while holding fire, server->partner with the shooter id filled in). (3) server->
+    // client PairStatusMessage {uint PartnerNetworkId, bool Paired} — the replicated pair state. Projectiles ride the
+    // EXISTING EntitySpawn TintRgb+ScaleMilli for their tier colour (no new entity field); EntityKind.Projectile is a
+    // wire-compatible new byte. Server + every in-repo client flip together.
+    public const byte Version = 47;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -206,6 +213,23 @@ public static class ProtocolCodec
             case HarvestNodeMessage value:
                 // NODE-FIELD N2 (v46): a single ushort — the catalogue index to harvest. Mirrored in the decode.
                 writer.Write(value.NodeIndex);
+                break;
+            case FireSkillshotMessage value:
+                // DUO-SKILLSHOT (v47): the fire trigger — dedup sequence then the launch bearing ushort. Mirrored in the decode.
+                writer.Write(value.Sequence);
+                writer.Write(value.AimAngle);
+                break;
+            case AimPreviewMessage value:
+                // DUO-SKILLSHOT (v47): the aim-preview relay — shooter net id (0 on the client->server leg), heading ushort,
+                // active flag. Mirrored in the decode.
+                writer.Write(value.ShooterNetworkId);
+                writer.Write(value.Heading);
+                writer.Write(value.Active);
+                break;
+            case PairStatusMessage value:
+                // DUO-SKILLSHOT (v47): the replicated pair state — partner net id + paired flag. Mirrored in the decode.
+                writer.Write(value.PartnerNetworkId);
+                writer.Write(value.Paired);
                 break;
             case PlayerCollisionSettingMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
@@ -413,6 +437,10 @@ public static class ProtocolCodec
             MessageType.PlayerCollisionSetting => new PlayerCollisionSettingMessage(reader.ReadBoolean()),
             // NODE-FIELD N2 (v46): a single ushort node index. Mirrors the encode order.
             MessageType.HarvestNode => new HarvestNodeMessage(reader.ReadUInt16()),
+            // DUO-SKILLSHOT (v47): mirror the encode order for the three new messages.
+            MessageType.FireSkillshot => new FireSkillshotMessage(reader.ReadUInt32(), reader.ReadUInt16()),
+            MessageType.AimPreview => new AimPreviewMessage(reader.ReadUInt32(), reader.ReadUInt16(), reader.ReadBoolean()),
+            MessageType.PairStatus => new PairStatusMessage(reader.ReadUInt32(), reader.ReadBoolean()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),

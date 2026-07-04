@@ -509,11 +509,11 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortySix()
+    public void ProtocolVersionIsFortySeven()
     {
-        // NODE-FIELD N2 (v46, docs/node-field-design.md): ZoneInfo gains CatalogHash, plus three new messages
-        // (NodeState, NodeStateBatch, HarvestNode). Bump on top of v45 (ecology E4). Pin it so a change is caught.
-        Assert.Equal(46, ProtocolCodec.Version);
+        // DUO-EXP (v47, exp/duo-abilities): PairStatus + AimPreview + FireSkillshot on top of v46 (node-field).
+        // Pin it so a change is caught.
+        Assert.Equal(47, ProtocolCodec.Version);
     }
 
     // TELEGRAPH T2 (v44): the telegraph announcement round-trips — the ulong id, the shape (kind + Q12.4 origin +

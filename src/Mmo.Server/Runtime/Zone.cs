@@ -319,6 +319,31 @@ public sealed class Zone
         return World.AddTransient(networkId, kind, displayName, tile, facing);
     }
 
+    // DUO-SKILLSHOT (exp/duo-abilities): spawn a transient PROJECTILE at a continuous `position` (NOT walkability-
+    // gated — a projectile flies over walls/water and expires; it never occupies a tile the way a body does). Distinct
+    // from SpawnTransient (which requires a walkable tile for corpses/dummies). The entity's rounded tile seeds the
+    // spatial-grid bucket; MoveProjectile migrates it as the projectile flies. RestorePosition sets the exact sub-tile
+    // spawn point (SpawnTransient/AddTransient only seed the tile centre) so a projectile launches from the shooter's
+    // true off-grid position, not the rounded tile.
+    public WorldEntity SpawnProjectile(uint networkId, WorldVector position, Direction8 facing)
+    {
+        // Empty display name — a projectile carries no overhead label (it is a fast transient bolt, not a named body).
+        var entity = World.AddTransient(networkId, EntityKind.Projectile, string.Empty, position.ToTileRounded(), facing);
+        entity.RestorePosition(position);
+        return entity;
+    }
+
+    // DUO-SKILLSHOT: apply a projectile's advanced position and migrate its spatial-grid bucket on a tile cross — the
+    // SAME apply/migrate bookkeeping ApplyMonsterLanding does, but with no wall collision (projectiles fly straight).
+    public void MoveProjectile(WorldEntity entity, WorldVector newPosition)
+    {
+        var previousTile = entity.TileCoord;
+        if (entity.ApplyResolvedMove(newPosition))
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+    }
+
     public bool Despawn(ulong entityId, out WorldEntity entity)
     {
         return World.Remove(entityId, out entity);

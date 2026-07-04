@@ -462,6 +462,39 @@ public sealed record HarvestNodeMessage(ushort NodeIndex) : IProtocolMessage
     public MessageType Type => MessageType.HarvestNode;
 }
 
+// DUO-SKILLSHOT (protocol v47, exp/duo-abilities): the client->server "fire my fusion skillshot" trigger. A SIBLING
+// of the attack/action streams (NOT the move stream): its OWN dedicated Sequence counter (client) dedup'd on a
+// DEDICATED _lastFireSeq cursor (server) that shares NOTHING with the move/attack/action cursors (the NET6 third-
+// stream lesson). AimAngle is the launch bearing, reusing the SAME AimAngle ushort quantization the attack aim uses
+// (0..65535 -> [0,2π), atan2(dz,dx), +X east / +Z south). The server spawns a straight-line projectile from the
+// shooter's position along this heading. Sent RELIABLE-ORDERED like Attack — low-rate, and a dropped fire must not
+// be lost.
+public sealed record FireSkillshotMessage(uint Sequence, ushort AimAngle) : IProtocolMessage
+{
+    public MessageType Type => MessageType.FireSkillshot;
+}
+
+// DUO-SKILLSHOT (protocol v47): the aim-preview relay, travelling BOTH directions with one shape. Client->server: the
+// shooter sends its current aim Heading while HOLDING the fire key (throttled ~8Hz, only while a partner exists);
+// ShooterNetworkId is 0 (the server knows the sender). Server->partner: the server relays it with ShooterNetworkId
+// set to the sender's network id so the partner draws the faint intercept-preview line from that shooter's position
+// along Heading. Active=false is the release edge (stop drawing). Sent UNRELIABLE: a dropped preview frame is
+// harmless and superseded by the next.
+public sealed record AimPreviewMessage(uint ShooterNetworkId, ushort Heading, bool Active) : IProtocolMessage
+{
+    public MessageType Type => MessageType.AimPreview;
+}
+
+// DUO-SKILLSHOT (protocol v47): server->client replication of a player's PAIR state — the FOUNDATION seam abilities
+// 2-4 also consume. PartnerNetworkId is the partner player's entity network id (meaningful only when Paired); Paired
+// is the mutual-pair flag. Sent to BOTH players when a /pair is established (each learns the other's id for the
+// intercept previews and future co-op cues) and Paired=false to the surviving partner when the pair breaks (/unpair
+// or a disconnect). Owner-only, reliable-ordered (a dropped pair edge would leave a client's partner state stale).
+public sealed record PairStatusMessage(uint PartnerNetworkId, bool Paired) : IProtocolMessage
+{
+    public MessageType Type => MessageType.PairStatus;
+}
+
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatBroadcast;

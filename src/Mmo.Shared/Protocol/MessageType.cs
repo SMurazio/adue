@@ -42,6 +42,16 @@ public enum MessageType : ushort
     // INDEX (never a network id — harvestable nodes are no longer entities). Tag 18 is the next free
     // client->server tag (8-11 are the deleted tile-step gaps). See HarvestNodeMessage.
     HarvestNode = 18,
+    // DUO-SKILLSHOT (v47, exp/duo-abilities): client->server "fire my fusion skillshot toward this aim". Its OWN
+    // dedicated dedup cursor (_lastFireSeq), independent of the move/attack/action cursors (the NET6 third-stream
+    // lesson). Reliable-ordered + low-rate. Tag 19 is the next free client->server tag. See FireSkillshotMessage.
+    FireSkillshot = 19,
+    // DUO-SKILLSHOT (v47): the aim-preview relay. Sent client->server while a player HOLDS the fire key (throttled
+    // ~8Hz, only while a partner exists); the server relays it ONLY to the partner (ShooterNetworkId filled in) so
+    // both clients draw the faint intercept-preview line. Sent UNRELIABLE (a dropped preview frame is superseded by
+    // the next). Tag 20 is the next free client->server tag; the type doubles as the server->partner relay. See
+    // AimPreviewMessage.
+    AimPreview = 20,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -106,5 +116,10 @@ public enum MessageType : ushort
     NodeState = 120,
     // NODE-FIELD N2 (v46): sent once on login — the field's full current exception list (only the DEPLETED
     // indices). Reliable-ordered. See NodeStateBatchMessage.
-    NodeStateBatch = 121
+    NodeStateBatch = 121,
+    // DUO-SKILLSHOT (v47, exp/duo-abilities): server->client replication of a player's PAIR state — the partner's
+    // network id + a paired flag. Sent to BOTH players on /pair (each learns the other's id for previews/cues) and
+    // Paired=false to the surviving partner on /unpair or disconnect. Reliable-ordered, owner-only. See
+    // PairStatusMessage. Tag 122 is the next free server->client tag.
+    PairStatus = 122
 }

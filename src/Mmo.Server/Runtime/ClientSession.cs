@@ -96,6 +96,12 @@ public sealed class ClientSession
     // monotonic `seq > cursor` gate is all the dedup needed (identical to the attack cursor).
     private uint _lastActionSeq;
 
+    // DUO-SKILLSHOT (exp/duo-abilities): the FIRE-stream dedup cursor (highest accepted FireSkillshotMessage seq). A
+    // FOURTH independent stream alongside move/attack/action — it shares NOTHING with any of them (the NET6 "one
+    // cursor per stream" lesson). The client mints fire seqs off its OWN counter; HandleFireSkillshot gates on THIS
+    // cursor only. Reliable-ordered + low-rate, so a strict monotonic `seq > cursor` gate is all the dedup needed.
+    private uint _lastFireSeq;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -146,6 +152,18 @@ public sealed class ClientSession
     {
         OpenCorpseEntityId = corpseEntityId;
     }
+
+    // DUO-SKILLSHOT (exp/duo-abilities): the PAIRING seam — the FOUNDATION abilities 2-4 also consume. A mutual pair
+    // links two online sessions; PartnerSession is the other session (null when solo). The pair is symmetric — the
+    // GameServer /pair command sets BOTH sides' PartnerSession to each other and /unpair (or a disconnect) clears
+    // BOTH. Ability logic reads PartnerSession to answer "who is this player's partner?" (e.g. the SkillshotEngine's
+    // fusion pairing gate, and the aim-preview relay's target). Kept as a plain session reference (not a copied
+    // network id) so it can never go stale while the partner is alive; the network id is derived on demand.
+    public ClientSession? PartnerSession { get; private set; }
+
+    public bool HasPartner => PartnerSession is not null;
+
+    public void SetPartner(ClientSession? partner) => PartnerSession = partner;
 
     // LIVING-ENEMIES P3: the player-death respawn guard. When the player's HP hits 0 it DIES: IsDead is set and
     // RespawnAtTick is the tick the server will teleport it back to spawn at full HP. While IsDead the player must not
@@ -336,6 +354,21 @@ public sealed class ClientSession
         }
 
         _lastActionSeq = sequence;
+        return true;
+    }
+
+    // DUO-SKILLSHOT: advances the FIRE-sequence cursor (_lastFireSeq) for an inbound FireSkillshotMessage. Rejects
+    // stale/duplicate sequences (seq <= the fire cursor) so a re-ordered/duplicate/replayed fire can't spawn two
+    // projectiles, returning false WITHOUT mutating anything. Fully independent of the move/attack/action cursors
+    // (the NET6 lesson applied to a fourth stream). Returns true iff the seq was fresh (the caller may then fire).
+    public bool TryConsumeFireSequence(uint sequence)
+    {
+        if (sequence <= _lastFireSeq)
+        {
+            return false;
+        }
+
+        _lastFireSeq = sequence;
         return true;
     }
 

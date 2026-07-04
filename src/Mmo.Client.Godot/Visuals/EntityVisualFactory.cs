@@ -43,6 +43,13 @@ public sealed class EntityVisualFactory
             return VisualArchetype.Corpse;
         }
 
+        // DUO-SKILLSHOT: a projectile renders as the small bright sphere (BoxVisual's projectile path), tinted+scaled
+        // by the server's replicated per-tier visual.
+        if (state.Kind == EntityKind.Projectile)
+        {
+            return VisualArchetype.Projectile;
+        }
+
         // NODE-FIELD N2/N3 (docs/node-field-design.md D3/D6): House/Portal are the only Resource-kind entities
         // the server still spawns (SpawnAuthoredProps) — harvestable Tree/Rock/Plant nodes are catalogue-only
         // now (NodeFieldPainter renders them, never per-entity), so this dispatch no longer has Rock/Tree cases.
@@ -88,6 +95,9 @@ public sealed class EntityVisualFactory
             // LOOT P4b: the corpse sack is a BoxVisual variant (it keys off EntityKind.Corpse internally for the
             // distinct low dark mesh), so it shares the pooled-box machinery and never needs an asset load.
             VisualArchetype.Corpse => new BoxVisual(),
+            // DUO-SKILLSHOT: the projectile sphere is a BoxVisual variant (keys off EntityKind.Projectile for the
+            // distinct bright sphere mesh + unshaded material), so it shares the pooled-box machinery, no asset load.
+            VisualArchetype.Projectile => new BoxVisual(),
             _ => new BoxVisual()
         };
     }

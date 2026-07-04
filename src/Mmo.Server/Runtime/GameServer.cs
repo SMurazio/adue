@@ -240,6 +240,16 @@ public sealed class GameServer
     // over the world's spatial gather + the gate).
     private readonly TelegraphScheduler _telegraphs;
 
+    // DUO-SKILLSHOT (exp/duo-abilities): the fusion-skillshot engine (Step() runs each tick in TickCore, a sibling of
+    // _telegraphs.ResolveDue). Constructed after _zone + _contributionLedger since it closes over the projectile
+    // spawn/move/despawn seams, the world's spatial gather, the shared monster-damage path, and the pairing gate.
+    private readonly SkillshotEngine _skillshots;
+
+    // DUO-SKILLSHOT: the per-projectile tier, keyed by the projectile entity id — read by EnsureEntitySpawns to map the
+    // tier to the replicated visual (tint + scale), the SAME channel monsters use. Set in the projectile spawn seam,
+    // dropped in the despawn seam. A small transient map (projectiles live < ~1.2s), never leaked.
+    private readonly Dictionary<ulong, ProjectileTier> _projectileTierOf = new();
+
     // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): the server-authoritative monster↔monster
     // de-penetration pass, run each tick AFTER all movement is resolved and BEFORE the snapshot (SeparateMonsters in
     // TickCore). Constructed after _zone since it closes over the SAME shared seams the hop/glide use — the spatial
@@ -476,6 +486,16 @@ public sealed class GameServer
         // superset query, and the SAME gate the monster melee routes through (one gate, two callers).
         _playerDamage = new PlayerDamageGate(_actionExecutor.HasActiveIFrames, OnPlayerDamageLanded);
         _telegraphs = new TelegraphScheduler(_zone.World.GatherInterestCandidates, _playerDamage.TryDamagePlayer);
+        // DUO-SKILLSHOT: the fusion-skillshot engine, wired to the SAME spatial gather AOI/combat use and the SAME
+        // monster-damage path the melee routes through (ApplyProjectileDamage → ApplyDamage + cosmetic event +
+        // contribution ledger + KillMonster). Spawn/move/despawn go through Zone; the pairing gate reads the sessions.
+        _skillshots = new SkillshotEngine(
+            SpawnProjectileEntity,
+            MoveProjectileEntity,
+            DespawnProjectileEntity,
+            _zone.World.GatherInterestCandidates,
+            ApplyProjectileDamage,
+            AreEntitiesPaired);
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
         // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
         // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop
@@ -704,6 +724,9 @@ public sealed class GameServer
             return;
         }
 
+        // DUO-SKILLSHOT: a disconnect unpairs — clear the pair + notify the surviving partner BEFORE despawn.
+        BreakPair(session);
+
         if (session.IsAuthenticated)
         {
             if (_zone.Despawn(session.EntityId!.Value, out var entity))
@@ -863,6 +886,18 @@ public sealed class GameServer
                     HandleLootAction(session, loot.CorpseNetworkId, loot.Kind, loot.TemplateKey);
                 }
                 break;
+            case FireSkillshotMessage fire:
+                if (session.IsAuthenticated)
+                {
+                    HandleFireSkillshot(session, fire.Sequence, fire.AimAngle);
+                }
+                break;
+            case AimPreviewMessage preview:
+                if (session.IsAuthenticated)
+                {
+                    HandleAimPreview(session, preview.Heading, preview.Active);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -878,7 +913,11 @@ public sealed class GameServer
 			// (like Attack/MoveIntent), so a dead player can't jump.
 			or MessageType.ActionIntent
 			// NODE-FIELD N2: a harvest is an action message too — suppressed while downed, like InteractRequest.
-			or MessageType.HarvestNode;
+			or MessageType.HarvestNode
+			// DUO-SKILLSHOT: firing a skillshot + streaming an aim preview are actions — suppressed while downed, like
+			// Attack (a dead player can't fire or telegraph an aim).
+			or MessageType.FireSkillshot
+			or MessageType.AimPreview;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -1019,6 +1058,8 @@ public sealed class GameServer
 
     private TakeoverState KickAuthenticatedSession(ClientSession session, string code, string message)
     {
+        // DUO-SKILLSHOT: a kick (relogin-elsewhere/takeover) unpairs — clear the pair + notify the partner first.
+        BreakPair(session);
         TrySend(session.Peer, new ServerErrorMessage(code, message), DeliveryMethod.ReliableOrdered);
         _sessions.Remove(session.Peer);
         _metrics.RecordPeerDisconnected();
@@ -1089,6 +1130,10 @@ public sealed class GameServer
             // judged against positions AT tick T, and BEFORE BroadcastSnapshot so the damage/HP change replicates
             // this same tick. ~free while nothing is pending (the common case).
             _telegraphs.ResolveDue(_serverTick);
+            // DUO-SKILLSHOT: step in-flight skillshots (fusion merge + straight-line flight + monster hits) after all
+            // movement, BEFORE BroadcastSnapshot so a fusion merge, a projectile move, and a hit's HP change all
+            // replicate this same tick. Fixed dt = 1/TickRate (the tick cadence). ~free when nothing is in flight.
+            _skillshots.Step(_serverTick, 1d / _options.TickRate);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -1518,6 +1563,17 @@ public sealed class GameServer
                 // preference to the shared type's RenderScale so only THIS monster looks bigger, never the type.
                 var effectiveScale = entity.RenderScaleOverride ?? spawnType.RenderScale;
                 scaleMilli = (ushort)Math.Clamp((int)Math.Round(effectiveScale * 1000d), 0, ushort.MaxValue);
+            }
+            else if (entity.Kind == EntityKind.Projectile && _projectileTierOf.TryGetValue(entity.Id, out var tier))
+            {
+                // DUO-SKILLSHOT: the projectile's tier rides the SAME replicated tint+scale channel monsters use —
+                // no new wire field. Solo = small bright cyan; Good = bigger amber; Perfect = biggest magenta.
+                (tintRgb, scaleMilli) = tier switch
+                {
+                    ProjectileTier.Perfect => (0xFF3CFFu, (ushort)1100),
+                    ProjectileTier.Good => (0xFFB020u, (ushort)850),
+                    _ => (0x40FFF0u, (ushort)550),
+                };
             }
 
             var packet = _messageEncodeBuffer.EncodeEntitySpawn(
@@ -2612,8 +2668,8 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /rumors, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
-                : "commands: /help, /role, /rumors. Admin commands require role Admin.");
+                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                : "commands: /help, /role, /rumors, /pair <name>, /unpair. Admin commands require role Admin.");
             return;
         }
 
@@ -2628,6 +2684,20 @@ public sealed class GameServer
         if (command == "rumors")
         {
             HandleRumorsCommand(sender);
+            return;
+        }
+
+        // DUO-SKILLSHOT (exp/duo-abilities): /pair <name> and /unpair are co-op gameplay verbs — available to EVERY
+        // player (resolved BEFORE the admin gate, like /rumors), not admin dev tools.
+        if (command == "pair")
+        {
+            HandlePairCommand(sender, parts);
+            return;
+        }
+
+        if (command == "unpair")
+        {
+            HandleUnpairCommand(sender);
             return;
         }
 
@@ -2820,6 +2890,263 @@ public sealed class GameServer
             $"slam: telegraph #{telegraphId} at {actor.Position.X:0.##},{actor.Position.Y:0.##} r={radius}, "
                 + $"resolves at tick {resolveTick} (~{windupMs}ms), damage={damage}.");
         Log.Info($"{sender.DisplayName} scheduled /slam #{telegraphId} r={radius} windup={windupMs}ms damage={damage} (resolve tick {resolveTick}).");
+    }
+
+    // DUO-SKILLSHOT (exp/duo-abilities): /pair <displayName> — establish a MUTUAL pair with another online player (the
+    // FOUNDATION seam abilities 2-4 consume). Either partner can /unpair; a disconnect unpairs. The pair links the two
+    // sessions symmetrically; PairStatus replicates each partner's network id to BOTH clients so they can draw the
+    // intercept previews. Available to every player (dispatched before the admin gate). Rejects: no name, self, a name
+    // that isn't a distinct online player, or a target already paired to someone else. Re-pairing breaks the sender's
+    // (and, if free, the target's) previous pair first.
+    private void HandlePairCommand(ClientSession sender, string[] parts)
+    {
+        if (parts.Length < 2)
+        {
+            SendSystem(sender, "usage: /pair <displayName>.");
+            return;
+        }
+
+        // The display name may contain spaces (join the remaining parts) — match case-insensitively.
+        var targetName = string.Join(' ', parts, 1, parts.Length - 1).Trim();
+        if (string.Equals(targetName, sender.DisplayName, StringComparison.OrdinalIgnoreCase))
+        {
+            SendSystem(sender, "pair: you cannot pair with yourself.");
+            return;
+        }
+
+        ClientSession? target = null;
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated && !ReferenceEquals(session, sender)
+                && string.Equals(session.DisplayName, targetName, StringComparison.OrdinalIgnoreCase))
+            {
+                target = session;
+                break;
+            }
+        }
+
+        if (target is null)
+        {
+            SendSystem(sender, $"pair: no online player named '{targetName}'.");
+            return;
+        }
+
+        // Already paired to each other — nothing to do.
+        if (ReferenceEquals(sender.PartnerSession, target) && ReferenceEquals(target.PartnerSession, sender))
+        {
+            SendSystem(sender, $"pair: already paired with {target.DisplayName}.");
+            return;
+        }
+
+        if (target.HasPartner && !ReferenceEquals(target.PartnerSession, sender))
+        {
+            SendSystem(sender, $"pair: {target.DisplayName} is already paired with someone else.");
+            return;
+        }
+
+        // Break the sender's prior pair (if any) so a player is only ever in one pair; notify the jilted partner.
+        BreakPair(sender);
+
+        sender.SetPartner(target);
+        target.SetPartner(sender);
+        SendPairStatus(sender, target);
+        SendPairStatus(target, sender);
+        SendSystem(sender, $"paired with {target.DisplayName}.");
+        SendSystem(target, $"paired with {sender.DisplayName}.");
+        Log.Info($"Paired {sender.DisplayName} <-> {target.DisplayName}.");
+    }
+
+    // DUO-SKILLSHOT: /unpair — break the sender's current pair (if any), notifying + updating both sides.
+    private void HandleUnpairCommand(ClientSession sender)
+    {
+        if (!sender.HasPartner)
+        {
+            SendSystem(sender, "unpair: you are not paired.");
+            return;
+        }
+
+        var partnerName = sender.PartnerSession!.DisplayName;
+        BreakPair(sender);
+        SendSystem(sender, $"unpaired from {partnerName}.");
+    }
+
+    // DUO-SKILLSHOT: break `session`'s pair (if any), clearing BOTH sides and pushing the updated PairStatus (a
+    // Paired=false to the surviving partner, and to `session` itself so its client clears the partner). A no-op when
+    // unpaired. Shared by /unpair, re-pairing, disconnect, and kick — the single pair-teardown funnel.
+    private void BreakPair(ClientSession session)
+    {
+        var partner = session.PartnerSession;
+        if (partner is null)
+        {
+            return;
+        }
+
+        session.SetPartner(null);
+        partner.SetPartner(null);
+        SendPairStatusCleared(session);
+        SendPairStatusCleared(partner);
+        SendSystem(partner, $"{session.DisplayName} unpaired.");
+        Log.Info($"Unpaired {session.DisplayName} <-> {partner.DisplayName}.");
+    }
+
+    // DUO-SKILLSHOT: replicate the paired state to `recipient` — the partner's current network id + Paired=true.
+    private void SendPairStatus(ClientSession recipient, ClientSession partner)
+    {
+        TrySend(recipient.Peer, new PairStatusMessage(partner.NetworkId, true), DeliveryMethod.ReliableOrdered);
+    }
+
+    // DUO-SKILLSHOT: replicate the unpaired state to `recipient` (Paired=false; partner id irrelevant).
+    private void SendPairStatusCleared(ClientSession recipient)
+    {
+        TrySend(recipient.Peer, new PairStatusMessage(0u, false), DeliveryMethod.ReliableOrdered);
+    }
+
+    // DUO-SKILLSHOT: fire a fusion skillshot from the caller toward `aimAngle`. Dedup on the session's DEDICATED fire
+    // cursor (independent of move/attack/action), resolve the shooter entity, and hand a solo projectile to the engine
+    // (it owns the flight/fusion/hit). No per-entity cooldown this experiment — the fire cadence is the client's key
+    // press. Solo shots fire regardless of pairing; pairing only gates whether two shots FUSE (engine-side).
+    private void HandleFireSkillshot(ClientSession session, uint sequence, ushort aimAngle)
+    {
+        if (!session.TryConsumeFireSequence(sequence))
+        {
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var shooter))
+        {
+            return;
+        }
+
+        var aimDir = AimAngle.ToUnitVector(aimAngle);
+        _skillshots.Fire(shooter.Id, shooter.CharacterId ?? Guid.Empty, shooter.Position, aimDir);
+    }
+
+    // DUO-SKILLSHOT: relay a shooter's aim-preview to its PARTNER only. The sender streams these ~8Hz while holding the
+    // fire key (client-throttled, and only while a partner exists); the server stamps the sender's network id so the
+    // partner draws the faint intercept-preview line from the sender's position along the heading. No projectile/state
+    // change — pure relay. Dropped silently when the sender has no partner (the client shouldn't send in that case).
+    private void HandleAimPreview(ClientSession session, ushort heading, bool active)
+    {
+        var partner = session.PartnerSession;
+        if (partner is null || !partner.IsAuthenticated)
+        {
+            return;
+        }
+
+        TrySend(partner.Peer, new AimPreviewMessage(session.NetworkId, heading, active), DeliveryMethod.Unreliable);
+    }
+
+    // ---- DUO-SKILLSHOT engine seams ----
+
+    // Spawn the replicated projectile WorldEntity, set its constant flight velocity (so remote clients extrapolate
+    // smoothly between the sparse tile-cross snapshot updates), zero its vitals (no HP bar), record its tier for the
+    // visual replication, and return its entity id. Facing follows the velocity heading. Rents a network id like any
+    // transient spawn.
+    private ulong SpawnProjectileEntity(WorldVector position, WorldVector velocity, ProjectileTier tier)
+    {
+        var facing = Direction8FromUnit(velocity.Normalized());
+        var entity = _zone.SpawnProjectile(_networkIds.Rent(), position, facing);
+        entity.SetVelocity(velocity);
+        entity.MakeNonCombatant();
+        _projectileTierOf[entity.Id] = tier;
+        return entity.Id;
+    }
+
+    // Move the projectile entity to its advanced position (Zone migrates the spatial-grid bucket on a tile cross).
+    private void MoveProjectileEntity(ulong entityId, WorldVector newPosition)
+    {
+        if (_zone.World.TryGet(entityId, out var entity))
+        {
+            _zone.MoveProjectile(entity, newPosition);
+        }
+    }
+
+    // Despawn the projectile entity (world removal → EntityDespawn to AOI viewers), free its network id, drop its tier.
+    private void DespawnProjectileEntity(ulong entityId)
+    {
+        _projectileTierOf.Remove(entityId);
+        if (_zone.Despawn(entityId, out var removed))
+        {
+            _networkIds.Return(removed.NetworkId);
+        }
+    }
+
+    // Apply projectile damage to a monster through the SAME seam the melee uses: ApplyDamage, a cosmetic AOI damage
+    // number, the contribution ledger (for corpse loot eligibility), and KillMonster on death. Returns whether the
+    // monster died this hit (drives the Perfect pierce). Mirrors HandleAttack's post-hit tail.
+    private bool ApplyProjectileDamage(WorldEntity monster, int amount, ulong shooterEntityId, Guid shooterCharacterId, uint serverTick)
+    {
+        if (!monster.ApplyDamage(amount))
+        {
+            return false;
+        }
+
+        // Float a cosmetic damage number to every AOI viewer (the shooter has no client-side prediction for a
+        // projectile, so — unlike melee — it is NOT excluded).
+        BroadcastDamageEvent(monster, amount);
+
+        if (shooterCharacterId != Guid.Empty)
+        {
+            _contributionLedger.RecordDamage(monster.Id, shooterCharacterId, amount);
+        }
+
+        if (monster.Stats.Health <= 0)
+        {
+            KillMonster(monster);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Whether two shooter entities are mutually PAIRED (the fusion gate). Resolves each entity to its owning session
+    // and checks the symmetric pair link. The session set is tiny (a co-op session), so the linear resolve is cheap.
+    private bool AreEntitiesPaired(ulong shooterEntityIdA, ulong shooterEntityIdB)
+    {
+        var a = SessionByEntity(shooterEntityIdA);
+        var b = SessionByEntity(shooterEntityIdB);
+        return a is not null && b is not null
+            && ReferenceEquals(a.PartnerSession, b) && ReferenceEquals(b.PartnerSession, a);
+    }
+
+    // DUO-SKILLSHOT: resolve the authenticated session owning `entityId`, or null. Linear scan over the (small) session
+    // set — no reverse index maintained for this experiment.
+    private ClientSession? SessionByEntity(ulong entityId)
+    {
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated && session.EntityId == entityId)
+            {
+                return session;
+            }
+        }
+
+        return null;
+    }
+
+    // DUO-SKILLSHOT: the Direction8 a continuous unit heading points toward (nearest of 8), for the projectile's
+    // sprite facing. Mirrors the 8-way table used elsewhere; defaults to S for a zero vector.
+    private static Direction8 Direction8FromUnit(WorldVector unitDir)
+    {
+        if (unitDir.LengthSquared <= 0d)
+        {
+            return Direction8.S;
+        }
+
+        var dx = Math.Sign(unitDir.X);
+        var dy = Math.Sign(unitDir.Y);
+        return (dx, dy) switch
+        {
+            (0, -1) => Direction8.N,
+            (1, -1) => Direction8.NE,
+            (1, 0) => Direction8.E,
+            (1, 1) => Direction8.SE,
+            (0, 1) => Direction8.S,
+            (-1, 1) => Direction8.SW,
+            (-1, 0) => Direction8.W,
+            (-1, -1) => Direction8.NW,
+            _ => Direction8.S,
+        };
     }
 
     // ECOLOGY E4 (docs/ecology-v1-design.md D6b, §8 E4): /rumors — ALL players, not just admins (unlike every

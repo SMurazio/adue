@@ -25,6 +25,11 @@ public sealed partial class BoxVisual : EntityVisual
     // greyish-brown so it reads as a dropped bag at a glance.
     private static readonly BoxMesh CorpseMesh = new() { Size = new Vector3(0.6f, 0.3f, 0.6f) };
     private static readonly StandardMaterial3D CorpseMaterial = Material(new Color(0.40f, 0.28f, 0.18f));
+    // DUO-SKILLSHOT: a small bright sphere for an in-flight skillshot. White + UNSHADED base so the server's replicated
+    // per-tier tint (multiplied in ApplyRenderTint) reads as its exact colour (cyan/amber/magenta) and it glows over
+    // the terrain regardless of lighting. The per-tier SIZE rides the replicated RenderScale (ApplyAppearance).
+    private static readonly SphereMesh ProjectileMesh = new() { Radius = 0.22f, Height = 0.44f, RadialSegments = 12, Rings = 6 };
+    private static readonly StandardMaterial3D ProjectileMaterial = UnshadedMaterial(new Color(1f, 1f, 1f));
     private static readonly StandardMaterial3D LocalEntityMaterial = Material(new Color(0.22f, 0.70f, 1.0f));
     private static readonly StandardMaterial3D RemoteEntityMaterial = Material(new Color(0.94f, 0.68f, 0.22f));
     private static readonly StandardMaterial3D ResourceAvailableMaterial = Material(new Color(0.32f, 0.78f, 0.30f));
@@ -43,6 +48,10 @@ public sealed partial class BoxVisual : EntityVisual
     // mesh/material selection picks the corpse variant instead of the resource one.
     private bool _isCorpse;
 
+    // DUO-SKILLSHOT: this box is rendering an in-flight skillshot (the bright sphere). Distinct flag so mesh/material
+    // selection picks the projectile variant.
+    private bool _isProjectile;
+
     protected override void BuildChildren()
     {
         _body = new MeshInstance3D { Name = "Body" };
@@ -53,7 +62,8 @@ public sealed partial class BoxVisual : EntityVisual
     {
         _isResource = state.Kind == EntityKind.Resource;
         _isCorpse = state.Kind == EntityKind.Corpse;
-        _body.Mesh = _isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh);
+        _isProjectile = state.Kind == EntityKind.Projectile;
+        _body.Mesh = _isProjectile ? ProjectileMesh : (_isResource ? ResourceMesh : (_isCorpse ? CorpseMesh : EntityMesh));
         // S65: the "Plant" resource box is live-tunable via VisualTuning.PlantModelScale (default 1.0 = native
         // 0.7³). Re-applied on every (re)acquire so a pooled box reflects the current F5 panel scale. Players /
         // NPCs (capsule) and corpses keep unit scale — the knob is plant-only.
@@ -94,13 +104,25 @@ public sealed partial class BoxVisual : EntityVisual
 
     private void ApplyMaterial(EntityRenderState state)
     {
-        _body.MaterialOverride = _isResource
-            ? ResourceAvailableMaterial
-            : (_isCorpse ? CorpseMaterial : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial));
+        _body.MaterialOverride = _isProjectile
+            ? ProjectileMaterial
+            : (_isResource
+                ? ResourceAvailableMaterial
+                : (_isCorpse ? CorpseMaterial : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial)));
     }
 
     private static StandardMaterial3D Material(Color color)
     {
         return new StandardMaterial3D { AlbedoColor = color, Roughness = 0.82f };
+    }
+
+    // DUO-SKILLSHOT: an UNSHADED (self-lit) material so a projectile reads as a bright bolt over any terrain lighting.
+    private static StandardMaterial3D UnshadedMaterial(Color color)
+    {
+        return new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        };
     }
 }

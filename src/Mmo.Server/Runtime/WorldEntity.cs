@@ -201,6 +201,22 @@ public sealed class WorldEntity
         RenderScaleOverride = scale;
     }
 
+    // DUO-SKILLSHOT: zero this entity's vitals so it carries NO public HP (MaxHealth 0). A projectile is a transient
+    // non-combatant — it must not float an overhead HP bar (the client hides the bar when MaxHealth == 0, HasHealth
+    // false). Called once right after a projectile spawns. Bumps StateRevision so the zeroed HP rides the first
+    // snapshot. Distinct from ApplyDamage (which subtracts within an existing max).
+    public void MakeNonCombatant()
+    {
+        var updated = new CharacterStats(0, 0, 0, 0, 0, 0);
+        if (Stats == updated)
+        {
+            return;
+        }
+
+        Stats = updated;
+        StateRevision++;
+    }
+
     // Sets the CURRENT value of one vital, clamping into [0, max] for that vital. Returns true if the stored
     // value actually changed (so the caller only re-replicates a real change), false otherwise. The dev-set
     // window drives this through the admin-gated server command; later damage/heal/regen will too.

@@ -36,4 +36,13 @@ public enum EntityKind : byte
     // Wire note: same as Monster — a new EntityKind byte is wire-compatible (client + server ship together), so no
     // protocol VERSION bump. The spawn message already carries Kind as a byte.
     Corpse = 6,
+
+    // DUO-SKILLSHOT (exp/duo-abilities): a server-simulated transient PROJECTILE — a fusion-skillshot shot in flight.
+    // A lightweight WorldEntity so it AOI-replicates + interpolates through the SAME snapshot path players/monsters use
+    // (projectiles MOVE — exactly what entities are for). The SkillshotEngine owns its flight (straight-line, tick-
+    // stepped), its monster-hit resolution (reusing the melee's damage/contribution/death seam), and its fusion merge.
+    // It is NON-combatant (zeroed vitals so no overhead HP bar) and is NEVER a collision obstacle nor an attackable
+    // enemy (CombatTargeting excludes it). Its tier (solo/good/perfect) rides the EXISTING replicated TintRgb+ScaleMilli
+    // so it renders coloured/sized with no new wire field. Renders client-side via a dedicated bright Projectile visual.
+    Projectile = 7,
 }

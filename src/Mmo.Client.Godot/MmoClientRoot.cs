@@ -522,6 +522,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateServerPositionMarkers();
 		UpdateTelegraphDecals();
 		UpdateAimWedge();
+		UpdateSkillshotAim(now);
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
@@ -1064,6 +1065,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		foreach (var state in _renderStates)
 		{
 			if (state.NetworkId == localNetworkId)
+			{
+				x = (float)state.Position.X;
+				z = (float)state.Position.Y;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	// DUO-SKILLSHOT (exp/duo-abilities): the render position of ANY entity by network id (generalizes
+	// TryGetLocalRenderPosition), for drawing a partner's intercept-preview line from the partner's position.
+	private bool TryGetRenderPosition(uint networkId, out float x, out float z)
+	{
+		x = 0f;
+		z = 0f;
+		foreach (var state in _renderStates)
+		{
+			if (state.NetworkId == networkId)
 			{
 				x = (float)state.Position.X;
 				z = (float)state.Position.Y;
@@ -4308,6 +4328,148 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			_aimWedge.Position = new Vector3(px, 0.05f, pz);
 		}
+	}
+
+	// ---- DUO-SKILLSHOT (exp/duo-abilities): Q = fire the fusion skillshot (HOLD to aim, RELEASE to fire) ----
+
+	private const Key SkillshotFireKey = Key.Q;
+
+	// The faint intercept-preview lines (self + partner), pooled MeshInstance3D under _worldRoot with a shared thin-
+	// quad ArrayMesh scaled to the projectile's max range and yawed to the aim heading.
+	private MeshInstance3D? _selfPreviewLine;
+	private MeshInstance3D? _partnerPreviewLine;
+	private ArrayMesh? _previewLineMesh;
+
+	// Cyan, faint, unshaded — reads as an aim guide over the terrain, distinct from the red attack wedge.
+	private static readonly StandardMaterial3D SkillshotPreviewMaterial = MarkerMaterial(new Color(0.30f, 0.95f, 0.90f, 0.30f));
+
+	// The preview line length = the server's projectile max range (SkillshotEngine.ProjectileMaxRangeUnits). Kept in
+	// sync by hand (an experiment const, not replicated).
+	private const float SkillshotPreviewRangeUnits = 14f;
+
+	// ~8Hz preview relay cadence (only sent while a partner exists), matching the throttle the design specifies.
+	private const ulong SkillshotPreviewSendIntervalMs = 125;
+
+	private bool _skillshotAiming;
+	private float _skillshotAimRadians;
+	private ulong _lastPreviewSentMs;
+
+	// Per-frame: poll Q (hold-to-aim, release-to-fire). While held, resolve the player→cursor aim, throttle-relay it to
+	// the partner (so they can line up an intercept), and draw the local preview line. On release, fire the skillshot
+	// toward the last aim and tell the partner to stop drawing. Chat focus cancels an in-progress aim WITHOUT firing
+	// (so opening chat mid-hold doesn't loose a shot).
+	private void UpdateSkillshotAim(TimeSpan now)
+	{
+		if (_client is null)
+		{
+			return;
+		}
+
+		var chatFocused = _chatInput?.HasFocus() == true;
+		var held = !chatFocused && _client.IsLoggedIn && Input.IsKeyPressed(SkillshotFireKey);
+
+		if (held)
+		{
+			_skillshotAimRadians = TryGetAimToCursor(out var cursorAim) ? cursorAim : LocalFacingRadians();
+			_skillshotAiming = true;
+
+			// Relay the aim to the partner (only when paired), throttled ~8Hz.
+			var nowMs = Time.GetTicksMsec();
+			if (_client.IsPaired && nowMs - _lastPreviewSentMs >= SkillshotPreviewSendIntervalMs)
+			{
+				_client.SendAimPreview(AimAngle.Quantize(_skillshotAimRadians), true);
+				_lastPreviewSentMs = nowMs;
+			}
+		}
+		else if (_skillshotAiming)
+		{
+			_skillshotAiming = false;
+
+			// Fire on RELEASE (not on a chat-focus cancel). A chat-focus steal leaves `held` false but `chatFocused`
+			// true — treat that as a cancel so opening chat mid-hold doesn't fire.
+			if (!chatFocused)
+			{
+				_client.SendFireSkillshot(AimAngle.Quantize(_skillshotAimRadians));
+			}
+
+			if (_client.IsPaired)
+			{
+				_client.SendAimPreview(AimAngle.Quantize(_skillshotAimRadians), false);
+			}
+		}
+
+		UpdateSkillshotPreviewLines();
+	}
+
+	// Build the shared thin-quad line mesh once: a unit rectangle spanning X in [0,1], thin in Z, in the ground plane.
+	// The MeshInstance3D scales X to the range and yaws by -aim, so +X maps to the world aim bearing (same convention
+	// as the aim wedge).
+	private void EnsureSkillshotPreviewLines()
+	{
+		if (_worldRoot is null || _selfPreviewLine is not null)
+		{
+			return;
+		}
+
+		if (_previewLineMesh is null)
+		{
+			const float halfWidth = 0.06f;
+			var verts = new Godot.Collections.Array();
+			verts.Resize((int)Mesh.ArrayType.Max);
+			verts[(int)Mesh.ArrayType.Vertex] = new Vector3[]
+			{
+				new(0f, 0f, -halfWidth), new(1f, 0f, -halfWidth), new(1f, 0f, halfWidth),
+				new(0f, 0f, -halfWidth), new(1f, 0f, halfWidth), new(0f, 0f, halfWidth),
+			};
+			_previewLineMesh = new ArrayMesh();
+			_previewLineMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, verts);
+		}
+
+		_selfPreviewLine = new MeshInstance3D { Name = "SkillshotPreviewSelf", Mesh = _previewLineMesh, MaterialOverride = SkillshotPreviewMaterial, Visible = false };
+		_partnerPreviewLine = new MeshInstance3D { Name = "SkillshotPreviewPartner", Mesh = _previewLineMesh, MaterialOverride = SkillshotPreviewMaterial, Visible = false };
+		_worldRoot.AddChild(_selfPreviewLine);
+		_worldRoot.AddChild(_partnerPreviewLine);
+	}
+
+	private void UpdateSkillshotPreviewLines()
+	{
+		EnsureSkillshotPreviewLines();
+		if (_selfPreviewLine is null || _partnerPreviewLine is null)
+		{
+			return;
+		}
+
+		// Self line: while aiming, from the local player along the current aim.
+		if (_skillshotAiming && TryGetLocalRenderPosition(out var sx, out var sz))
+		{
+			PlacePreviewLine(_selfPreviewLine, sx, sz, _skillshotAimRadians);
+			_selfPreviewLine.Visible = true;
+		}
+		else
+		{
+			_selfPreviewLine.Visible = false;
+		}
+
+		// Partner line: while the partner is relaying an active aim, from the partner's position along their heading.
+		if (_client?.PartnerAimPreview is { Active: true } partner
+			&& TryGetRenderPosition(partner.ShooterNetworkId, out var px, out var pz))
+		{
+			PlacePreviewLine(_partnerPreviewLine, px, pz, partner.HeadingRadians);
+			_partnerPreviewLine.Visible = true;
+		}
+		else
+		{
+			_partnerPreviewLine.Visible = false;
+		}
+	}
+
+	// Position/orient/scale a preview line from a shooter's world XZ along `aimRadians` out to the projectile range.
+	private static void PlacePreviewLine(MeshInstance3D line, float x, float z, float aimRadians)
+	{
+		line.Position = new Vector3(x, 0.06f, z);
+		// Yaw +X -> world aim (θ = -aim), the same mapping the aim wedge uses.
+		line.Rotation = new Vector3(0f, -aimRadians, 0f);
+		line.Scale = new Vector3(SkillshotPreviewRangeUnits, 1f, 1f);
 	}
 
 	// FREEAIM: continuous local facing. Render-only, local-only, NOT replicated — the local player's visual yaws

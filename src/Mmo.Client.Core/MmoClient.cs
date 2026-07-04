@@ -113,6 +113,11 @@ public sealed class MmoClient : IDisposable
     // actions on its matching independent _lastActionSeq cursor.
     private uint _nextActionSeq;
 
+    // DUO-SKILLSHOT (exp/duo-abilities): the FIRE stream's OWN monotonic counter — SEPARATE from move/attack/action
+    // (the NET6 lesson, a fourth stream gets a fourth cursor). SendFireSkillshot mints off THIS only; the server
+    // dedups on its matching independent _lastFireSeq.
+    private uint _fireSeq;
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -207,6 +212,21 @@ public sealed class MmoClient : IDisposable
     public Guid LocalCharacterId => _localCharacterId;
 
     public uint? LocalNetworkId { get; private set; }
+
+    // DUO-SKILLSHOT (exp/duo-abilities): the FOUNDATION pair state (abilities 2-4 read it too). PartnerNetworkId is the
+    // paired partner's entity network id (null when solo); bumped via PairStatus. PairVersion lets the Godot layer
+    // cheaply detect a change (re-read for HUD/preview). PartnerAimPreview is the partner's live aim while they hold
+    // the fire key (relayed by the server) — the presentation layer draws the faint intercept-preview line from that
+    // shooter's position along the heading; null when the partner isn't aiming.
+    public uint? PartnerNetworkId { get; private set; }
+
+    public bool IsPaired => PartnerNetworkId.HasValue;
+
+    public int PairVersion { get; private set; }
+
+    public readonly record struct AimPreviewState(uint ShooterNetworkId, float HeadingRadians, bool Active);
+
+    public AimPreviewState? PartnerAimPreview { get; private set; }
 
     public TileCoord? LocalTile => LocalNetworkId.HasValue && _entities.TryGetValue(LocalNetworkId.Value, out var entity)
         ? entity.Tile
@@ -661,6 +681,10 @@ public sealed class MmoClient : IDisposable
         // COMBAT-S1: drop the cached vitals so a stale prior-session value can't briefly feed the HUD on reconnect
         // (the next login always re-sends PlayerStats). Reset alongside the other local-entity state.
         LocalStats = null;
+        // DUO-SKILLSHOT: drop the pair + partner-preview state so a stale prior-session partner can't linger on
+        // logout/AOI-exit (a fresh /pair re-sends PairStatus).
+        PartnerNetworkId = null;
+        PartnerAimPreview = null;
     }
 
     // CONTINUOUS MIGRATION (Phase 4): attach a fresh continuous predictor for the LOCAL player when one isn't already
@@ -834,6 +858,27 @@ public sealed class MmoClient : IDisposable
     public void SendHarvestNode(ushort nodeIndex)
     {
         Send(new HarvestNodeMessage(nodeIndex), DeliveryMethod.ReliableOrdered);
+    }
+
+    // DUO-SKILLSHOT (exp/duo-abilities): fire a fusion skillshot toward a continuous AIM ANGLE (the player→cursor world
+    // bearing, quantized via AimAngle.Quantize by the caller). Mints the next sequence off the DEDICATED _fireSeq
+    // counter and sends RELIABLE-ORDERED (low-rate; a dropped fire must not be lost). No client-side prediction — the
+    // projectile is a server-simulated entity that AOI-replicates back (a few frames later under latency, acceptable
+    // for the experiment). Returns the fire seq sent (for tests / diagnostics).
+    public uint SendFireSkillshot(ushort aimAngle)
+    {
+        var sequence = ++_fireSeq;
+        Send(new FireSkillshotMessage(sequence, aimAngle), DeliveryMethod.ReliableOrdered);
+        return sequence;
+    }
+
+    // DUO-SKILLSHOT: stream the local player's current aim preview to the server, which relays it to the PARTNER only
+    // (so the partner can line up an intercept). Called ~8Hz while HOLDING the fire key, and once with active=false on
+    // release. Sent UNRELIABLE — a dropped preview frame is harmless (the next supersedes it). ShooterNetworkId is 0 on
+    // this leg (the server stamps the sender's id on the relay).
+    public void SendAimPreview(ushort heading, bool active)
+    {
+        Send(new AimPreviewMessage(0u, heading, active), DeliveryMethod.Unreliable);
     }
 
     // COMBAT-S2B / FREEAIM: send a melee attack with a continuous AIM ANGLE. Mints the next sequence off the
@@ -1186,6 +1231,23 @@ public sealed class MmoClient : IDisposable
                 }
 
                 _damageEvents.Add(new DamageEvent(damage.NetworkId, damage.Amount, damage.Health));
+                break;
+            case PairStatusMessage pair:
+                // DUO-SKILLSHOT: adopt the replicated pair state. On unpair, also drop any stale partner aim preview.
+                PartnerNetworkId = pair.Paired ? pair.PartnerNetworkId : null;
+                if (!pair.Paired)
+                {
+                    PartnerAimPreview = null;
+                }
+
+                PairVersion++;
+                break;
+            case AimPreviewMessage preview:
+                // DUO-SKILLSHOT: the partner's relayed aim while they hold fire (ShooterNetworkId is the partner's id).
+                // active=false is the release edge — clear the preview. Pure presentation state (the intercept line).
+                PartnerAimPreview = preview.Active
+                    ? new AimPreviewState(preview.ShooterNetworkId, (float)AimAngle.ToRadians(preview.Heading), true)
+                    : null;
                 break;
         }
     }

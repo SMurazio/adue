@@ -27,5 +27,10 @@ public enum VisualArchetype
     // the ground (distinct from a player capsule / resource box at a glance) so a kill leaves a visible, walk-up-and-
     // interact corpse. No art yet — a coloured low box. Pooled separately so a parked corpse never reuses a player.
     Corpse,
+    // DUO-SKILLSHOT (exp/duo-abilities): an in-flight fusion-skillshot projectile (EntityKind.Projectile). Rendered by
+    // BoxVisual's projectile path as a small bright sphere; the server's replicated tint+scale colour/size it per tier
+    // (solo cyan / good amber / perfect magenta, bigger for stronger). Pooled separately so a parked projectile never
+    // reuses (or is reused as) a body.
+    Projectile,
     Box
 }
