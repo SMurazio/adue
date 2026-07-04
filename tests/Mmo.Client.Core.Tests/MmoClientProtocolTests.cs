@@ -457,6 +457,50 @@ public sealed class MmoClientProtocolTests
         Assert.False(client.SpawnerMarkers.ContainsKey(7));
     }
 
+    // ECOLOGY E4: the replicated region set mirror — upserted keyed by region id (a login FULL SET is one
+    // message per region; a later state-flip re-send just overwrites that entry), version bumps on every
+    // update, and Disconnect() clears it (the T2 ghost-decal lesson applied to the ecology overlay).
+    [Fact]
+    public void RegionEcologyMessageIsMirroredAndClearedOnDisconnect()
+    {
+        using var client = CreateClient(out _);
+
+        Assert.Empty(client.EcologyRegions);
+        Assert.Equal(0, client.EcologyRegionsVersion);
+
+        client.HandleMessageForTests(new RegionEcologyMessage(
+            "slime_hollow",
+            "Slime Hollow",
+            20,
+            120,
+            140,
+            220,
+            new[] { new RegionEcologyTypeEntry("slime", EcologyPopulationState.Rich) }));
+
+        Assert.True(client.EcologyRegions.TryGetValue("slime_hollow", out var region));
+        Assert.Equal("Slime Hollow", region.DisplayName);
+        Assert.Equal(EcologyPopulationState.Rich, region.Types[0].State);
+        Assert.Equal(1, client.EcologyRegionsVersion);
+
+        // A second region upserts a SEPARATE entry (never overwrites the first).
+        client.HandleMessageForTests(new RegionEcologyMessage(
+            "eastern_scrubland", "Eastern Scrubland", 250, 120, 364, 220,
+            new[] { new RegionEcologyTypeEntry("gnoll", EcologyPopulationState.Healthy) }));
+        Assert.Equal(2, client.EcologyRegions.Count);
+        Assert.Equal(2, client.EcologyRegionsVersion);
+
+        // A state-flip re-send for the SAME region id overwrites its entry, not append a new one.
+        client.HandleMessageForTests(new RegionEcologyMessage(
+            "slime_hollow", "Slime Hollow", 20, 120, 140, 220,
+            new[] { new RegionEcologyTypeEntry("slime", EcologyPopulationState.Depleted) }));
+        Assert.Equal(2, client.EcologyRegions.Count);
+        Assert.Equal(EcologyPopulationState.Depleted, client.EcologyRegions["slime_hollow"].Types[0].State);
+        Assert.Equal(3, client.EcologyRegionsVersion);
+
+        client.Disconnect();
+        Assert.Empty(client.EcologyRegions);
+    }
+
     private static WorldSnapshotMessage Snapshot(uint sequence, bool isComplete, params EntityStateSnapshot[] entities)
     {
         return new WorldSnapshotMessage(10, sequence, entities.Length, isComplete, 0, 1, entities);

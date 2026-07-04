@@ -107,6 +107,19 @@ public sealed class HudState
     // the minimap tint a harvested node distinctly from an available one.
     public readonly record struct MinimapObject(float X, float Y, float FootprintUnits, bool Depleted);
 
+    // --- Minimap (ecology regions, ECOLOGY E4) --------------------------------------------------------------
+    // REAL, read-only: the authored ecology regions the client knows about, from MmoClient.EcologyRegions
+    // (RegionEcologyMessage — full set on login, one region re-sent on a state flip). MmoClientRoot rebuilds this
+    // list each refresh; the minimap draws one translucent rect per region, tinted by MinimapEcologyOverlay's
+    // color for the region's WorstState. D5: fuzzy words, never numbers — WorstState is the ONLY ecology signal
+    // this carries, exactly what rode the wire.
+    public List<MinimapRegion> MinimapRegions { get; } = new();
+
+    // One authored region on the minimap. MinTileX/MinTileY/MaxTileX/MaxTileY are the region's INCLUSIVE tile
+    // rect (mirrors RegionEcologyMessage); WorstState is the region's worst-type-state (EcologyLegibility.WorstOf)
+    // — the minimap looks up its overlay color from MinimapEcologyOverlay.ColorFor at draw time.
+    public readonly record struct MinimapRegion(int MinTileX, int MinTileY, int MaxTileX, int MaxTileY, EcologyPopulationState WorstState);
+
     // --- Minimap (static environment, S109) ---------------------------------------------------------------
     // REAL, read-only: the static map the minimap rasterises ONCE (walls + world bounds). The world is
     // local/seed-based (S42) — the client already regenerates the blocked-tile set into a ZoneModel, so we

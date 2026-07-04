@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `44` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `45` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -61,6 +61,16 @@ World snapshots should fit in a single UDP packet for the current channel target
 - v42 (MONSTER-TUNING-SAVE): parameterless, admin-gated `SaveMonsterTuningMessage` — F1 Save persists live monster tuning to `Content/monsters.json`.
 - v43 (PLAYER-COLLISION-TOGGLE): admin-gated client→server `AdminSetPlayerCollisionMessage` + server→client `PlayerCollisionSettingMessage` (sent on login + broadcast on change) — live server-authoritative player↔player collision toggle, default ON; monster collision unaffected.
 - v44 (TELEGRAPH T2): server→client `TelegraphMessage` — the deadline-form ground-telegraph announcement (`ulong` telegraph id, shape kind byte + Q12.4 origin + Q12.4 `ushort` radius, `uint` startTick + resolveTick). Clients fill `(now − start)/(T − start)` against a cosmetic server-clock estimate and self-resolve at T; deliberately NO resolve/cancel counterpart (a telegraph outlives its caster). Reliable, AOI-scoped via a known-id diff (the SpawnerMarker pattern) that also delivers active telegraphs to mid-windup AOI joiners.
+- v45 (ECOLOGY E4, docs/ecology-v1-design.md): server→client `RegionEcologyMessage` — one authored ecology
+  region's LEGIBLE state: region id, display name, its inclusive tile rect (four ushorts), and one
+  `{typeId, state}` entry per monster type the region hosts, where `state` is the D5 five-state enum
+  (Depleted/Thin/Healthy/Rich/Overgrown). No stock/pressure number ever rides this message — fuzzy words, never
+  numbers; exact stocks stay admin-only via `/ecology`. Sent to every authenticated client: the full authored
+  region set (one message per region) on login, and a single re-send of just the changed region whenever any of
+  its type-states flips (compared once per ecology tick and once per kill — flips are rare, so this is ~zero
+  steady-state traffic). Reliable-ordered, global (not AOI-scoped, like `PlayerCollisionSetting`/`MonsterTuning`)
+  — pre-walk legibility means every client needs every region regardless of proximity. The client mirrors it for
+  the minimap's per-region shading (tinted by the region's WORST type-state) and touches no simulation.
 
 ## Client Messages
 
@@ -100,6 +110,13 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
 - `CorpseContents` / `CorpseContentsMessage` (v35): server→owner contents of an OPEN corpse (template key + quantity + rarity per stack), re-sent after each take/loot-all; `Open=false` closes the window. Owner-only + reliable-ordered.
 - `PlayerCollisionSetting` (v43): the authoritative player↔player collision flag (`bool`). Sent on login + broadcast on every change (global, not AOI-scoped) so every client's obstacle gather matches the server integrator's. Reliable-ordered.
 - `Telegraph` / `TelegraphMessage` (v44): a scheduled ground telegraph — `ulong` telegraph id, the LOCKED cast-time shape (`byte` kind — circle only at v44; origin as Q12.4 fixed-point like snapshot positions; radius as a Q12.4 `ushort`), and the two absolute server ticks `startTick`/`resolveTick`. The client renders the fill as `(estimatedNow − start)/(resolve − start)` clamped [0,1] against its **cosmetic** server-clock estimate (EMA of the snapshot-header tick — presentation only, never simulation) and self-resolves at T, so every viewer's fill completes at the same wall-clock instant and a late AOI joiner shows the correct remaining fill. Membership is **center-point at tick T, server-side** (the drawn circle IS the hit rule — the decal renders the exact wire radius). No resolve/cancel message exists. Reliable-ordered, AOI-scoped per recipient by the known-id diff pass (schedule-time send and mid-windup AOI-enter are the same path).
+- `RegionEcology` / `RegionEcologyMessage` (v45, docs/ecology-v1-design.md): server→client replication of ONE
+  authored ecology region's current legible state — region id, display name, its inclusive tile rect, and one
+  `{typeId, state}` entry per hosted monster type (`state` the D5 five-state enum; no stock/pressure number ever
+  rides the wire). Sent to every authenticated client: the FULL authored region set on login, and a single
+  re-send of just the changed region whenever any of its type-states flips. Reliable-ordered, global (not
+  AOI-scoped, like `PlayerCollisionSetting`) — legibility is a pre-walk read, so every client needs every region
+  regardless of proximity. The client uses it purely for the minimap's region shading; it drives no simulation.
 - `ServerError`: code and message.
 
 ## Rules

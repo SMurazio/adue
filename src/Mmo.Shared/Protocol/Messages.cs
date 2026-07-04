@@ -374,6 +374,38 @@ public sealed record TelegraphMessage(ulong TelegraphId, TelegraphShape Shape, u
     public MessageType Type => MessageType.Telegraph;
 }
 
+// ECOLOGY E4 (protocol v45, docs/ecology-v1-design.md D5/D6, §3/§8 E4): server->client replication of ONE
+// authored ecology region's current legible state — the wire half of the "read the world before you walk there"
+// pillar. RegionId/DisplayName/the tile rect are the region's IMMUTABLE authored geometry (from EcologyRegistry);
+// Types is one {typeId, state} entry per monster type the region hosts. D5: fuzzy words, never numbers — no
+// stock/pressure value ever rides this message, only the five-state EcologyPopulationState enum.
+//
+// Sent to every authenticated client: the FULL set (one RegionEcologyMessage per authored region) on login, and
+// a single RE-SEND of just the changed region whenever ANY of its type-states flips (compared once per
+// EcologyTick + once per RecordKill — state flips are rare, so this carries ~zero steady-state traffic, like
+// MonsterTuning/SpawnerMarker). Reliable-ordered, GLOBAL (not AOI-scoped, like PlayerCollisionSetting/
+// CombatTuning) — legibility is a pre-walk read, so every client needs every region regardless of proximity.
+//
+// MinTileX/MinTileY/MaxTileX/MaxTileY are the region's INCLUSIVE tile rect (mirrors EcologyRegion's own
+// MinX/MinY/MaxX/MaxY) — the minimap overlay draws exactly this rect, tinted by the region's WORST type-state
+// (EcologyLegibility.WorstOf).
+public sealed record RegionEcologyMessage(
+    string RegionId,
+    string DisplayName,
+    int MinTileX,
+    int MinTileY,
+    int MaxTileX,
+    int MaxTileY,
+    IReadOnlyList<RegionEcologyTypeEntry> Types) : IProtocolMessage
+{
+    public MessageType Type => MessageType.RegionEcology;
+}
+
+// One monster type's replicated legibility state within a region. TypeId is the monster-type registry key
+// (matches MonsterTuningMessage's per-type Id); State is the D5 five-state enum — the ONLY ecology signal that
+// ever reaches a client (D5: fuzzy words, never numbers).
+public readonly record struct RegionEcologyTypeEntry(string TypeId, EcologyPopulationState State);
+
 // Terrain is procedural content, not state: instead of shipping the blocked-tile list, ZoneInfo carries
 // a tiny descriptor — dimensions plus the generator (Seed, GenVersion) — and a ContentHash of the
 // generated blocked set. The client regenerates the identical map locally via the shared

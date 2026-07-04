@@ -83,7 +83,14 @@ public static class ProtocolCodec
     // resolve/cancel counterpart (T1: a telegraph outlives its caster). Reliable-ordered, AOI-scoped via the
     // known-id diff (the SpawnerMarker pattern), which also delivers active telegraphs to mid-windup AOI joiners.
     // Server + every in-repo client flip together.
-    public const byte Version = 44;
+    // v45 — ECOLOGY E4 (docs/ecology-v1-design.md D5/D6, §3/§8 E4): one additive server->client
+    // RegionEcologyMessage — one authored region's legible state: {string regionId, string displayName, four
+    // ushort tile-rect bounds, a count-prefixed list of {string typeId, byte state}}. State is the D5 five-state
+    // enum (EcologyPopulationState) — NO stock/pressure number ever rides this message (fuzzy words, never
+    // numbers). Sent to every client: the full authored region set on login, and a single re-send of just the
+    // changed region on a type-state flip. Reliable-ordered, global (not AOI-scoped). Server + every in-repo
+    // client flip together.
+    public const byte Version = 45;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -103,6 +110,11 @@ public static class ProtocolCodec
     // LOOT P4c: a corpse holds a handful of rolled stacks; bound the decoded list so a malformed/hostile packet
     // can't allocate unboundedly (same defensive cap idea as the inventory-update bound).
     private const int MaxCorpseItems = 256;
+
+    // ECOLOGY E4: a region hosts a handful of monster types (the starter content tops out at 2); bound the
+    // decoded per-region type list so a malformed/hostile packet can't allocate unboundedly (same defensive cap
+    // idea as MaxMonsterFields, just a smaller ceiling since a region's type roster is far narrower).
+    private const int MaxEcologyTypesPerRegion = 64;
 
     public static byte[] Encode(IProtocolMessage message)
     {
@@ -260,6 +272,9 @@ public static class ProtocolCodec
             case TelegraphMessage value:
                 WriteTelegraph(writer, value);
                 break;
+            case RegionEcologyMessage value:
+                WriteRegionEcology(writer, value);
+                break;
             case CorpseContentsMessage value:
                 WriteCorpseContents(writer, value);
                 break;
@@ -402,6 +417,7 @@ public static class ProtocolCodec
             MessageType.MonsterTuning => new MonsterTuningMessage(ReadMonsterTuning(reader)),
             MessageType.SpawnerMarker => new SpawnerMarkerMessage(reader.ReadUInt32(), ReadTile(reader), reader.ReadBoolean()),
             MessageType.Telegraph => ReadTelegraph(reader),
+            MessageType.RegionEcology => ReadRegionEcology(reader),
             MessageType.CorpseContents => ReadCorpseContents(reader),
             MessageType.EntityDespawn => new EntityDespawnMessage(reader.ReadUInt32(), reader.ReadUInt32()),
             MessageType.ZoneInfo => ReadZoneInfo(reader),
@@ -616,6 +632,85 @@ public static class ProtocolCodec
         }
 
         return (TelegraphShapeKind)value;
+    }
+
+    // ECOLOGY E4: one authored region's legible state. Wire order: region id, display name, the four rect bounds
+    // as ushort tiles (mirrors the doc's "4x ushort tiles" — plain tile indices, NOT the TileCoord/int16
+    // WriteTile encoding other messages use, since a region rect is always non-negative content geometry, never
+    // a signed entity position), then a count-prefixed list of {typeId string, state byte}. Mirrored byte-for-
+    // byte by ReadRegionEcology.
+    private static void WriteRegionEcology(BinaryWriter writer, RegionEcologyMessage value)
+    {
+        WriteString(writer, value.RegionId);
+        WriteString(writer, value.DisplayName);
+        WriteEcologyRectBound(writer, value.MinTileX);
+        WriteEcologyRectBound(writer, value.MinTileY);
+        WriteEcologyRectBound(writer, value.MaxTileX);
+        WriteEcologyRectBound(writer, value.MaxTileY);
+
+        var types = value.Types;
+        if (types.Count > MaxEcologyTypesPerRegion)
+        {
+            throw new ProtocolException($"Ecology region '{value.RegionId}' has too many type entries: {types.Count}.");
+        }
+
+        writer.Write((ushort)types.Count);
+        foreach (var entry in types)
+        {
+            WriteString(writer, entry.TypeId);
+            writer.Write((byte)entry.State);
+        }
+    }
+
+    private static RegionEcologyMessage ReadRegionEcology(BinaryReader reader)
+    {
+        var regionId = ReadString(reader);
+        var displayName = ReadString(reader);
+        var minX = reader.ReadUInt16();
+        var minY = reader.ReadUInt16();
+        var maxX = reader.ReadUInt16();
+        var maxY = reader.ReadUInt16();
+
+        var count = reader.ReadUInt16();
+        if (count > MaxEcologyTypesPerRegion)
+        {
+            throw new ProtocolException($"Ecology region '{regionId}' has too many type entries: {count}.");
+        }
+
+        var types = new List<RegionEcologyTypeEntry>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var typeId = ReadString(reader);
+            var state = ReadEcologyPopulationState(reader);
+            types.Add(new RegionEcologyTypeEntry(typeId, state));
+        }
+
+        return new RegionEcologyMessage(regionId, displayName, minX, minY, maxX, maxY, types);
+    }
+
+    // A region rect bound is authored content geometry (always >= 0 on the one sandbox zone) — a plain ushort,
+    // range-validated so a hostile/out-of-range value fails loudly on ENCODE rather than silently truncating.
+    private static void WriteEcologyRectBound(BinaryWriter writer, int value)
+    {
+        if (value < 0 || value > ushort.MaxValue)
+        {
+            throw new ProtocolException($"Ecology region rect bound is out of range: {value}.");
+        }
+
+        writer.Write((ushort)value);
+    }
+
+    // ECOLOGY E4: range-validate the population-state byte (mirroring ReadTelegraphShapeKind/ReadAttackKind) so a
+    // malformed/hostile packet can't smuggle an out-of-range state into the client's minimap overlay.
+    private static EcologyPopulationState ReadEcologyPopulationState(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)EcologyPopulationState.Overgrown)
+        {
+            throw new ProtocolException($"Invalid EcologyPopulationState value: {value}.");
+        }
+
+        return (EcologyPopulationState)value;
     }
 
     private static void WriteHeader(BinaryWriter writer, MessageType type)

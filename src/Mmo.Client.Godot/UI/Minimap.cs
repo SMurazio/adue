@@ -93,6 +93,9 @@ public partial class Minimap : Control
 
     private TextureRect? _mapView; // holds the baked full-map ImageTexture; translated under the arrow each frame.
     private Control? _viewport;    // clip-contents window inside the frame; the map scrolls within it.
+    // ECOLOGY E4: translucent per-region shading, drawn ABOVE the base map but BELOW the object squares/arrow —
+    // shares the SAME map offset/scale as everything else (see the class-level "one transform" note).
+    private RegionOverlay? _regions;
     private ObjectLayer? _objects; // S110: filled-square overlay above the map, below the arrow; shares the map offset.
     private TextureRect? _arrow;   // pinned at the viewport centre, rotated to the player's facing.
 
@@ -145,6 +148,18 @@ public partial class Minimap : Control
             MouseFilter = MouseFilterEnum.Ignore,
         };
         _viewport.AddChild(_mapView);
+
+        // ECOLOGY E4: the region-shading overlay. Added right after the base map (drawn above it) and BEFORE the
+        // object layer/arrow (drawn below them) — region tints are background-level legibility, never meant to
+        // obscure a resource square or the player marker.
+        _regions = new RegionOverlay
+        {
+            Name = "EcologyRegions",
+            OffsetRight = inner,
+            OffsetBottom = inner,
+            MouseFilter = MouseFilterEnum.Ignore,
+        };
+        _viewport.AddChild(_regions);
 
         // S110: the object overlay. A full-viewport canvas that draws the world-object squares each time the set
         // (or the map offset / zoom) changes. Added AFTER the map so it draws above the walls; the arrow is added
@@ -268,6 +283,7 @@ public partial class Minimap : Control
 
         UpdatePlayer(state);
         UpdateObjects(state);
+        UpdateRegions(state);
     }
 
     // Rasterise the static map (walls + bounds) into an ImageTexture ONCE per zone (keyed by Generation only).
@@ -428,6 +444,19 @@ public partial class Minimap : Control
         _objects.SetData(state.MinimapObjects, offset, _mapScale);
     }
 
+    // ECOLOGY E4: push the current region set + the SAME shared map offset onto the region overlay, exactly like
+    // UpdateObjects does for world objects — one offset formula, no drift.
+    private void UpdateRegions(HudState state)
+    {
+        if (_regions is null || _viewport is null)
+        {
+            return;
+        }
+
+        var offset = (_bakedMap is not null && state.HasLocalPosition) ? MapOffset(state) : (Vector2?)null;
+        _regions.SetData(state.MinimapRegions, offset, _mapScale);
+    }
+
     // The single world->minimap translation for the baked map AND the object layer: shift everything so the
     // local player's pixel lands at the inner-viewport centre (player-centred). One formula = no drift — it
     // lives in the Godot-free MinimapTransform so it is headlessly pinned by MinimapTransformTests.
@@ -507,6 +536,69 @@ public partial class Minimap : Control
                 var centreY = (obj.Y * _scale) + _offset.Y;
                 var rect = new Rect2(centreX - (sidePx / 2f), centreY - (sidePx / 2f), sidePx, sidePx);
                 DrawRect(rect, obj.Depleted ? ObjectDepleted : ObjectAvailable, filled: true);
+            }
+        }
+    }
+
+    // ECOLOGY E4: draws one translucent rect per authored region, tinted by MinimapEcologyOverlay.ColorFor(region
+    // .WorstState). Mirrors ObjectLayer's shape exactly (same SetData/offset/scale/QueueRedraw contract) so this
+    // is bake-friendly by construction — a state flip only re-fills this tiny list + redraws it, NEVER touches the
+    // baked base-layer texture (EnsureBaked stays gated on the map Generation alone).
+    //
+    // Region rect -> pixel: MinTileX/MinTileY are integer tile INDICES, so tile t's west/north edge sits at the
+    // CONTINUOUS coordinate t exactly (a tile spans [t, t+1) in continuous space) — pixel = t*scale + offset,
+    // the SAME "continuous coord * scale + offset" formula ObjectLayer applies to obj.X/obj.Y (no second offset
+    // formula; see the class-level "one transform" note). The rect spans through MaxTileX/MaxTileY INCLUSIVE, so
+    // its east/south edge sits at (MaxTile + 1) in continuous space.
+    private sealed partial class RegionOverlay : Control
+    {
+        private readonly System.Collections.Generic.List<HudState.MinimapRegion> _items = new();
+        private Vector2 _offset;
+        private bool _visible;
+        private float _scale = DefaultMapScale;
+
+        public RegionOverlay()
+        {
+            ClipContents = false; // the parent viewport clips; the layer itself spans the inner viewport.
+        }
+
+        public void SetData(
+            System.Collections.Generic.IReadOnlyList<HudState.MinimapRegion> items, Vector2? offset, int scale)
+        {
+            _items.Clear();
+            for (var i = 0; i < items.Count; i++)
+            {
+                _items.Add(items[i]);
+            }
+
+            _offset = offset ?? Vector2.Zero;
+            _visible = offset.HasValue;
+            _scale = scale;
+            QueueRedraw();
+        }
+
+        public override void _Draw()
+        {
+            if (!_visible)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _items.Count; i++)
+            {
+                var region = _items[i];
+                var (r, g, b, a) = MinimapEcologyOverlay.ColorFor(region.WorstState);
+                if (a == 0)
+                {
+                    continue; // HEALTHY (or an unknown state): no overlay ink at all — the unremarkable baseline.
+                }
+
+                var left = (region.MinTileX * _scale) + _offset.X;
+                var top = (region.MinTileY * _scale) + _offset.Y;
+                var width = (region.MaxTileX - region.MinTileX + 1) * _scale;
+                var height = (region.MaxTileY - region.MinTileY + 1) * _scale;
+                var color = new Color(r / 255f, g / 255f, b / 255f, a / 255f);
+                DrawRect(new Rect2(left, top, width, height), color, filled: true);
             }
         }
     }

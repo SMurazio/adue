@@ -89,5 +89,12 @@ public enum MessageType : ushort
     // telegraph outlives its caster by the T1 decision, so there is nothing to cancel). Sent reliable-ordered, AOI-scoped
     // per recipient by the SAME known-id diff pass the spawner markers use — which is also what delivers still-active
     // telegraphs to a viewer that enters AOI mid-windup (the late-join case). See TelegraphMessage.
-    Telegraph = 118
+    Telegraph = 118,
+    // ECOLOGY E4 (v45, docs/ecology-v1-design.md D5/D6, §3/§8 E4): server->client replication of ONE authored
+    // ecology region's current LEGIBLE state — id, display name, rect bounds, and one {typeId, D5 five-state enum}
+    // entry per hosted type. NO stock/pressure numbers ride the wire (fuzzy words, never numbers). Sent to every
+    // authenticated client: the FULL set (one message per region) on login, and a single re-send of the changed
+    // region whenever any of its type-states flips. Global (not AOI-scoped, like PlayerCollisionSetting/MonsterTuning)
+    // — pre-walk legibility means every client needs every region regardless of proximity. See RegionEcologyMessage.
+    RegionEcology = 119
 }

@@ -312,6 +312,18 @@ public sealed class MmoClient : IDisposable
 
     public IReadOnlyDictionary<uint, TileCoord> SpawnerMarkers => _spawnerMarkers;
 
+    // ECOLOGY E4 (docs/ecology-v1-design.md D6a, §3/§8 E4): the replicated ecology region set, from
+    // RegionEcologyMessage — keyed by region id (upserted; the login FULL SET is one message per region, and a
+    // later state-flip re-send just overwrites that region's entry). Read-only mirror for the minimap's region
+    // shading; the client runs no ecology simulation. EcologyRegionsVersion bumps on every add/update so the
+    // Godot layer can cheaply detect "re-check the overlay" without diffing (mirrors MonsterTuningVersion).
+    // Cleared on Disconnect (the T2 ghost-decal lesson: stale region data from a PREVIOUS session must not survive
+    // a reconnect to a restarted server).
+    private readonly Dictionary<string, RegionEcologyMessage> _ecologyRegions = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyDictionary<string, RegionEcologyMessage> EcologyRegions => _ecologyRegions;
+    public int EcologyRegionsVersion { get; private set; }
+
     // TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): the ACTIVE ground telegraphs, from TelegraphMessage
     // (keyed by the scheduler's telegraph id — the upsert dedupes a hypothetical re-send). Each entry stores the
     // LOCKED wire shape + the two absolute server ticks of the deadline form; the client SELF-RESOLVES — there is no
@@ -544,6 +556,11 @@ public sealed class MmoClient : IDisposable
         // as jitter around a now-meaningless offset.
         _activeTelegraphs.Clear();
         _cosmeticServerClock.Reset();
+
+        // ECOLOGY E4 (the SAME T2 lesson applied here): drop the last session's replicated region set so a
+        // reconnect to a restarted server doesn't keep showing a stale minimap overlay until the new session's
+        // login resend happens to overwrite every region again.
+        _ecologyRegions.Clear();
     }
 
     // CONTINUOUS MIGRATION (Phase 4): the predictor MINTS the seq (PredictAndBuffer) then we Send the MoveIntent with
@@ -1087,6 +1104,13 @@ public sealed class MmoClient : IDisposable
                 // it via CopyTelegraphDecalsTo; who is actually hit stays server-authoritative at T.
                 _activeTelegraphs[telegraph.TelegraphId] =
                     new ActiveClientTelegraph(telegraph.Shape, telegraph.StartTick, telegraph.ResolveTick);
+                break;
+            case RegionEcologyMessage regionEcology:
+                // ECOLOGY E4: upsert keyed by region id — the login FULL SET arrives as one message per region, and
+                // a later state-flip re-send just overwrites that one entry. Pure mirror; the client runs no ecology
+                // simulation, this only feeds the minimap's region shading.
+                _ecologyRegions[regionEcology.RegionId] = regionEcology;
+                EcologyRegionsVersion++;
                 break;
             case DamageEventMessage damage:
                 // COMBAT-QOL: queue a cosmetic damage event for the presentation layer to float a number. Drop the

@@ -315,6 +315,14 @@ public sealed class GameServer
     // mirroring _monsterAggroScratch's reuse discipline (single-threaded tick loop, refilled per call).
     private readonly List<WorldEntity> _regionSpawnPlayerScratch = [];
 
+    // ECOLOGY E4 (docs/ecology-v1-design.md §3/§8 E4): the LAST-BROADCAST per-region×type state, seeded at boot
+    // from the freshly-constructed _ecology (so the very first CheckRegionEcologyChange call — the next
+    // EcologyTick or the first kill — compares against real initial values, never an empty cache that would
+    // spuriously "flip" every type on the first check). CheckRegionEcologyChange updates this in lockstep with
+    // every BroadcastRegionEcology, so the cache always reflects exactly what was last put on the wire.
+    private readonly Dictionary<string, Dictionary<string, EcologyState.PopulationState>> _lastSentEcologyState =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // D5/§3 pacing: "one spawn per 2s per region×type", tick-quantised off the live tick rate at construction
     // (mirrors how MonsterTypeRegistry quantises its own tick-based knobs once from options.TickRate).
     private readonly uint _regionSpawnPacingTicks;
@@ -391,6 +399,19 @@ public sealed class GameServer
         // its MonsterType) — both already constructed above; does NOT need _behaviors/_actionExecutor (those are
         // only touched once materialization actually spawns a monster, in TickCore, not here).
         _regionSpawners.AddRange(BuildRegionSpawners());
+        // ECOLOGY E4: seed the last-broadcast cache from the just-constructed _ecology's initial values (D1: every
+        // region×type seeds at K) — see the field doc for why an empty cache would be wrong.
+        foreach (var region in _ecology.Registry.Regions)
+        {
+            var byType = new Dictionary<string, EcologyState.PopulationState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var typeId in region.Types.Keys)
+            {
+                byType[typeId] = _ecology.StateOf(region.Id, typeId);
+            }
+
+            _lastSentEcologyState[region.Id] = byType;
+        }
+
         // D5/§3 pacing tick-quantised once from the live tick rate (>= 1 tick so a silly TickRate can't produce a
         // zero-tick "spawn every tick" pace).
         _regionSpawnPacingTicks = (uint)Math.Max(1, 2 * options.TickRate);
@@ -875,6 +896,11 @@ public sealed class GameServer
                         // client's obstacle gather gates on the SAME value the server integrator does (prediction
                         // parity) from the first frame — and the F1 Server-tab checkbox seeds to the live value.
                         SendPlayerCollisionSetting(current);
+                        // ECOLOGY E4 (D6a/D6c): replicate the full authored region set (minimap legibility) then
+                        // announce the single most-extreme region as a login rumor — both read-only off the live
+                        // EcologyState, no simulation gated on either.
+                        SendRegionEcology(current);
+                        SendEcologyLoginRumor(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -1013,6 +1039,13 @@ public sealed class GameServer
             if (_serverTick % 200 == 0)
             {
                 _ecology.EcologyTick();
+                // ECOLOGY E4: growth can move any/all regions this tick, so check every authored region for a
+                // type-state flip and re-send only the ones that actually changed (CheckRegionEcologyChange is a
+                // no-op wire-wise when nothing flipped — the common case).
+                foreach (var region in _ecology.Registry.Regions)
+                {
+                    CheckRegionEcologyChange(region);
+                }
             }
 
             // ECOLOGY E2 (§3 "Spawning"): materialize monsters from each region×type's stock, paced per
@@ -2357,14 +2390,22 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
-                : "commands: /help, /role. Admin commands require role Admin.");
+                ? "commands: /help, /role, /rumors, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                : "commands: /help, /role, /rumors. Admin commands require role Admin.");
             return;
         }
 
         if (command == "role")
         {
             SendSystem(sender, $"role: {sender.Role}");
+            return;
+        }
+
+        // ECOLOGY E4 (D6b): /rumors is available to EVERY player, not just admins — resolved BEFORE the admin
+        // gate below, like /help and /role.
+        if (command == "rumors")
+        {
+            HandleRumorsCommand(sender);
             return;
         }
 
@@ -2559,6 +2600,25 @@ public sealed class GameServer
         Log.Info($"{sender.DisplayName} scheduled /slam #{telegraphId} r={radius} windup={windupMs}ms damage={damage} (resolve tick {resolveTick}).");
     }
 
+    // ECOLOGY E4 (docs/ecology-v1-design.md D6b, §8 E4): /rumors — ALL players, not just admins (unlike every
+    // other command below, this one is dispatched BEFORE the admin-role gate in HandleCommand). One flavored line
+    // per authored region, chosen by that region's WORST type-state (EcologyWire.WorstStateOf) through the shared
+    // EcologyRumors table — fuzzy words only, never a stock/pressure number (D5).
+    private void HandleRumorsCommand(ClientSession sender)
+    {
+        var any = false;
+        foreach (var region in _ecology.Registry.Regions)
+        {
+            any = true;
+            SendSystem(sender, EcologyRumors.LineFor(region.DisplayName, EcologyWire.WorstStateOf(_ecology, region)));
+        }
+
+        if (!any)
+        {
+            SendSystem(sender, "rumors: no news from any region.");
+        }
+    }
+
     // ECOLOGY E1 (docs/ecology-v1-design.md §3): admin dev command /ecology — no args dumps every authored
     // region×type's EXACT stock/pressure/state (admin eyes only, per D5 — players get fuzzy words via E4's
     // /rumors, never numbers); `set <region> <type> <stock>` and `pressure <region> <type> <n>` force-write a
@@ -2625,6 +2685,13 @@ public sealed class GameServer
             : $"pressure={_ecology.PressureOf(regionId, typeId):0.###}";
         SendSystem(sender, $"ecology: {regionId}/{typeId} {applyDescription} (state={_ecology.StateOf(regionId, typeId)}).");
         Log.Info($"{sender.DisplayName} set ecology {regionId}/{typeId} via /ecology {subcommand} {value}.");
+
+        // ECOLOGY E4: a forced /ecology set|pressure is a live admin action like any other tuning knob — check +
+        // (if it actually moved the state) broadcast immediately rather than waiting for the next EcologyTick.
+        if (_ecology.Registry.TryGet(regionId, out var forcedRegion))
+        {
+            CheckRegionEcologyChange(forcedRegion);
+        }
     }
 
     // LIVING-ENEMIES P1: admin dev command /monster — spawns an EntityKind.Monster at the CALLER's current tile
@@ -3007,6 +3074,12 @@ public sealed class GameServer
                 $"Monster {removed?.NetworkId} ({regionSpawner.RegionId}/{regionSpawner.TypeId}) died; " +
                 $"ecology stock={_ecology.StockOf(regionSpawner.RegionId, regionSpawner.TypeId):0.###}, " +
                 $"pressure={_ecology.PressureOf(regionSpawner.RegionId, regionSpawner.TypeId):0.###}.");
+            // ECOLOGY E4: a kill can only ever change ITS OWN region×type, so check just that one region rather
+            // than the full-registry scan EcologyTick does.
+            if (_ecology.Registry.TryGet(regionSpawner.RegionId, out var killedRegion))
+            {
+                CheckRegionEcologyChange(killedRegion);
+            }
         }
 
         // Now free the monster's network id — the corpse (if one spawned) has already rented a DIFFERENT id, so the
@@ -3659,6 +3732,89 @@ public sealed class GameServer
             {
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
+        }
+    }
+
+    // ECOLOGY E4 (docs/ecology-v1-design.md §3/§8 E4): replicate the FULL authored region set to one client — one
+    // RegionEcologyMessage per region (mirrors the design's "full set on login"; each region is its own message,
+    // never a bulk list, so a single region's later re-send is byte-identical in shape). Reliable-ordered, sent
+    // once on login (initial truth) — the minimap has every region's legible state before the client ever moves.
+    private void SendRegionEcology(ClientSession session)
+    {
+        foreach (var region in _ecology.Registry.Regions)
+        {
+            TrySend(session.Peer, EcologyWire.BuildMessage(_ecology, region), DeliveryMethod.ReliableOrdered);
+        }
+    }
+
+    // ECOLOGY E4 (D6c): on login completion, announce the SINGLE most extreme authored region as one system
+    // chat line — "max distance from Healthy in either direction; ties -> first" (EcologyLegibility.
+    // DistanceFromHealthy over each region's WORST type-state). A no-op if no regions are authored at all.
+    private void SendEcologyLoginRumor(ClientSession session)
+    {
+        EcologyRegion? mostExtreme = null;
+        var bestDistance = -1;
+        foreach (var region in _ecology.Registry.Regions)
+        {
+            var distance = EcologyLegibility.DistanceFromHealthy(EcologyWire.WorstStateOf(_ecology, region));
+            if (distance > bestDistance)
+            {
+                mostExtreme = region;
+                bestDistance = distance;
+            }
+        }
+
+        if (mostExtreme is null)
+        {
+            return;
+        }
+
+        var worst = EcologyWire.WorstStateOf(_ecology, mostExtreme);
+        SendSystem(session, EcologyRumors.LineFor(mostExtreme.DisplayName, worst));
+    }
+
+    // ECOLOGY E4: re-send ONE region's current legible state to every authenticated client. Called only when
+    // CheckRegionEcologyChange finds an actual per-type state DIFFERENCE against the last-broadcast cache — state
+    // flips are rare (D2), so this carries ~zero steady-state traffic. Global (not AOI-scoped, like
+    // BroadcastPlayerCollisionSetting) — legibility is a pre-walk read, every client needs every region regardless
+    // of proximity.
+    private void BroadcastRegionEcology(EcologyRegion region)
+    {
+        var message = EcologyWire.BuildMessage(_ecology, region);
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated)
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // ECOLOGY E4: the state-flip DETECTOR. Compares `region`'s CURRENT per-type state against the last-broadcast
+    // cache (_lastSentEcologyState); if ANY type differs, re-sends the region (BroadcastRegionEcology) and — in
+    // the SAME pass — brings the cache current for every type in the region (not just the one that changed), so
+    // later calls never re-diff against a stale value. Called after each EcologyTick (once per authored region —
+    // growth can move any/all of them) and after each RecordKill (once, for just the killed monster's region —
+    // a kill can only ever change that one region×type) and after a forced /ecology set|pressure (so an admin's
+    // live force-set is visible immediately, same "live, no restart" philosophy as the other admin tuning knobs).
+    private void CheckRegionEcologyChange(EcologyRegion region)
+    {
+        var cache = _lastSentEcologyState[region.Id];
+        var changed = false;
+        foreach (var typeId in region.Types.Keys)
+        {
+            var current = _ecology.StateOf(region.Id, typeId);
+            if (!cache.TryGetValue(typeId, out var previous) || previous != current)
+            {
+                changed = true;
+            }
+
+            cache[typeId] = current;
+        }
+
+        if (changed)
+        {
+            BroadcastRegionEcology(region);
         }
     }
 

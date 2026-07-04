@@ -509,12 +509,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyFour()
+    public void ProtocolVersionIsFortyFive()
     {
-        // TELEGRAPH T2 (v44): added the server->client TelegraphMessage (deadline-form ground-telegraph announcement:
-        // id + shape + startTick/resolveTick). One additive message + tag; bump on top of v43 (player-collision
-        // toggle). Pin it so a change is caught.
-        Assert.Equal(44, ProtocolCodec.Version);
+        // ECOLOGY E4 (v45, docs/ecology-v1-design.md): added the server->client RegionEcologyMessage (one authored
+        // region's legible state: id + display name + tile rect + per-type {typeId, state}). One additive message +
+        // tag; bump on top of v44 (telegraph T2). Pin it so a change is caught.
+        Assert.Equal(45, ProtocolCodec.Version);
     }
 
     // TELEGRAPH T2 (v44): the telegraph announcement round-trips — the ulong id, the shape (kind + Q12.4 origin +
@@ -557,6 +557,105 @@ public sealed class ProtocolCodecTests
         Assert.Equal(10.0625d, decoded.Shape.Origin.X, 6);   // round(10.04·16 = 160.64) = 161 → 10.0625
         Assert.Equal(-10.0625d, decoded.Shape.Origin.Y, 6);  // symmetric away-from-zero
         Assert.Equal(2.0625d, decoded.Shape.Radius, 6);      // round(2.04·16 = 32.64) = 33 → 2.0625
+    }
+
+    // ECOLOGY E4 (v45): a region hosting TWO monster types (mirrors The Verge) round-trips its id, display name,
+    // inclusive tile rect, and every per-type {typeId, state} entry in order.
+    [Fact]
+    public void RegionEcologyMessageRoundTrips()
+    {
+        var original = new RegionEcologyMessage(
+            "the_verge",
+            "The Verge",
+            100,
+            300,
+            300,
+            370,
+            new[]
+            {
+                new RegionEcologyTypeEntry("slime", EcologyPopulationState.Depleted),
+                new RegionEcologyTypeEntry("gnoll", EcologyPopulationState.Overgrown),
+            });
+
+        var decoded = Assert.IsType<RegionEcologyMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal("the_verge", decoded.RegionId);
+        Assert.Equal("The Verge", decoded.DisplayName);
+        Assert.Equal(100, decoded.MinTileX);
+        Assert.Equal(300, decoded.MinTileY);
+        Assert.Equal(300, decoded.MaxTileX);
+        Assert.Equal(370, decoded.MaxTileY);
+        Assert.Equal(2, decoded.Types.Count);
+        Assert.Equal("slime", decoded.Types[0].TypeId);
+        Assert.Equal(EcologyPopulationState.Depleted, decoded.Types[0].State);
+        Assert.Equal("gnoll", decoded.Types[1].TypeId);
+        Assert.Equal(EcologyPopulationState.Overgrown, decoded.Types[1].State);
+        Assert.Equal(MessageType.RegionEcology, decoded.Type);
+    }
+
+    // ECOLOGY E4: a region with no hosted types (never authored in practice, but the codec must not crash) ships
+    // an empty count-prefixed list, not a null reference.
+    [Fact]
+    public void RegionEcologyMessageRoundTripsWithNoTypes()
+    {
+        var original = new RegionEcologyMessage("empty_region", "Empty Region", 0, 0, 10, 10, Array.Empty<RegionEcologyTypeEntry>());
+
+        var decoded = Assert.IsType<RegionEcologyMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Empty(decoded.Types);
+    }
+
+    // ECOLOGY E4: a malformed/hostile packet with an out-of-range population-state byte is rejected on decode, so
+    // the client's minimap overlay never sees an unknown state (mirrors AttackMessageRejectsOutOfRangeKind).
+    [Fact]
+    public void RegionEcologyMessageRejectsOutOfRangeState()
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(ProtocolCodec.Magic);
+        writer.Write(ProtocolCodec.Version);
+        writer.Write((ushort)MessageType.RegionEcology);
+        WriteTestString(writer, "region");
+        WriteTestString(writer, "Region");
+        writer.Write((ushort)0);  // minX
+        writer.Write((ushort)0);  // minY
+        writer.Write((ushort)10); // maxX
+        writer.Write((ushort)10); // maxY
+        writer.Write((ushort)1);  // one type entry
+        WriteTestString(writer, "slime");
+        writer.Write((byte)200);  // out-of-range EcologyPopulationState (valid range is 0..4)
+        writer.Flush();
+
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(stream.ToArray()));
+    }
+
+    // ECOLOGY E4: the codec bounds the per-region type list against a malformed/hostile over-count so a corrupt
+    // packet can't force an unbounded allocation (mirrors the inventory/corpse/monster-tuning list bounds).
+    [Fact]
+    public void RegionEcologyMessageRejectsOversizedTypeCount()
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(ProtocolCodec.Magic);
+        writer.Write(ProtocolCodec.Version);
+        writer.Write((ushort)MessageType.RegionEcology);
+        WriteTestString(writer, "region");
+        WriteTestString(writer, "Region");
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write((ushort)10);
+        writer.Write((ushort)10);
+        writer.Write((ushort)5000); // over MaxEcologyTypesPerRegion (64) — rejected before any entry is read
+        writer.Flush();
+
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(stream.ToArray()));
+    }
+
+    private static void WriteTestString(BinaryWriter writer, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        writer.Write((ushort)bytes.Length);
+        writer.Write(bytes);
     }
 
     // PLAYER-COLLISION-TOGGLE (v43): both the admin toggle and the replication message round-trip their single bool
