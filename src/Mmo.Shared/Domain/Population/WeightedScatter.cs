@@ -111,6 +111,7 @@ public static class WeightedScatter
 
         var budget = maxAttempts ?? ((targetCount * 64L) + 1024L);
         var state = SplitMix64.SeedState(seed);
+        var spacingIndex = new SpacingIndex(minSpacing);
 
         for (var attempt = 0L; attempt < budget && placements.Count < targetCount; attempt++)
         {
@@ -130,30 +131,84 @@ public static class WeightedScatter
                 continue;
             }
 
-            if (!IsFarEnough(placements, tile, minSpacing))
+            if (!spacingIndex.IsFarEnough(tile))
             {
                 continue;
             }
 
             used.Add(tile);
             placements.Add(tile);
+            spacingIndex.Add(tile);
         }
 
         return placements;
     }
 
-    private static bool IsFarEnough(List<TileCoord> placements, TileCoord candidate, int minSpacing)
+    // P2-FLAGGED PERF FIX: the original IsFarEnough linear-scanned the whole placement list per candidate,
+    // making Scatter O(targetCount^2) -- at P2's decor scale (12k placements in one call, 27k across a zone
+    // build) that is hundreds of millions of Chebyshev tests on the client login path. This spatial hash
+    // buckets placed tiles into a grid of cell size = minSpacing; because any tile within Chebyshev
+    // distance < minSpacing of a candidate differs by < minSpacing in BOTH axes, it can only live in the
+    // candidate's own bucket or one of its 8 neighbors -- so the check inspects at most 9 small buckets.
+    // EQUIVALENCE ARGUMENT (the correctness contract): this changes ONLY the spacing lookup's data
+    // structure. The PRNG draw sequence, iteration order, and every accept/reject decision are byte-
+    // identical to the linear version, so the output remains the same pure function of the inputs -- all
+    // pre-existing determinism/distribution tests pass unchanged, and a brute-force-reference equivalence
+    // test pins it.
+    private sealed class SpacingIndex
     {
-        foreach (var tile in placements)
+        private readonly int _minSpacing;
+        private readonly Dictionary<long, List<TileCoord>> _buckets = new();
+
+        public SpacingIndex(int minSpacing)
         {
-            var dx = Math.Abs(tile.X - candidate.X);
-            var dy = Math.Abs(tile.Y - candidate.Y);
-            if (Math.Max(dx, dy) < minSpacing)
-            {
-                return false;
-            }
+            _minSpacing = minSpacing;
         }
 
-        return true;
+        public bool IsFarEnough(TileCoord candidate)
+        {
+            var bx = Bucket(candidate.X);
+            var by = Bucket(candidate.Y);
+            for (var nx = bx - 1; nx <= bx + 1; nx++)
+            {
+                for (var ny = by - 1; ny <= by + 1; ny++)
+                {
+                    if (!_buckets.TryGetValue(Key(nx, ny), out var bucket))
+                    {
+                        continue;
+                    }
+
+                    foreach (var tile in bucket)
+                    {
+                        var dx = Math.Abs(tile.X - candidate.X);
+                        var dy = Math.Abs(tile.Y - candidate.Y);
+                        if (Math.Max(dx, dy) < _minSpacing)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        public void Add(TileCoord tile)
+        {
+            var key = Key(Bucket(tile.X), Bucket(tile.Y));
+            if (!_buckets.TryGetValue(key, out var bucket))
+            {
+                bucket = new List<TileCoord>(4);
+                _buckets[key] = bucket;
+            }
+
+            bucket.Add(tile);
+        }
+
+        // Grid coords are non-negative (draws come from [0, width) x [0, height)), but floor-divide safely
+        // anyway so a future caller with offset coordinates cannot silently corrupt bucketing.
+        private int Bucket(int value) => (int)Math.Floor(value / (double)_minSpacing);
+
+        private static long Key(int bx, int by) => ((long)bx << 32) ^ (uint)by;
     }
 }
