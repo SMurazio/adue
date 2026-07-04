@@ -102,6 +102,22 @@ public sealed class ClientSession
     // cursor only. Reliable-ordered + low-rate, so a strict monotonic `seq > cursor` gate is all the dedup needed.
     private uint _lastFireSeq;
 
+    // DUO-WAVE2 (exp/duo-abilities): the DUO-ABILITY-stream dedup cursor (highest accepted DuoAbilityMessage seq). A
+    // FIFTH independent stream alongside move/attack/action/fire — shares NOTHING with any of them (the NET6 "one
+    // cursor per stream" lesson). The R/G/V co-op triggers all ride this one stream. Reliable-ordered + low-rate, so a
+    // strict monotonic `seq > cursor` gate is all the dedup needed.
+    private uint _lastDuoSeq;
+
+    // DUO-WAVE2 ability 2 (Unison Shield): the damage-absorption pool state. _shieldPool is the REMAINING absorb amount
+    // (0 = none); _shieldExpiryTick is the absolute tick it lapses (the pool is dead at/after it). _shieldPendingPress
+    // Tick is the tick this player last pressed R while awaiting a possible partner coincidence (null = none) — the
+    // partner's in-window press UPGRADES a solo shield to a shared one. _shieldCooldownUntilTick is the SHARED-cooldown
+    // gate (a fresh solo/first press is rejected before it). All server-tick uints; the gate absorbs off _shieldPool.
+    private int _shieldPool;
+    private uint _shieldExpiryTick;
+    private uint? _shieldPendingPressTick;
+    private uint _shieldCooldownUntilTick;
+
     // Minimum ticks between accepted Interact requests from one client. Cheap flood guard so a client
     // cannot spam the interaction path within a single tick or hammer it across consecutive ticks;
     // depleting a node already gates legitimate re-harvest for far longer.
@@ -371,6 +387,84 @@ public sealed class ClientSession
         _lastFireSeq = sequence;
         return true;
     }
+
+    // DUO-WAVE2: advances the DUO-ABILITY-sequence cursor for an inbound DuoAbilityMessage (R/G/V). Rejects stale/
+    // duplicate sequences (seq <= the cursor) without mutating anything; fully independent of the move/attack/action/
+    // fire cursors. Returns true iff fresh (the caller may then dispatch the co-op verb).
+    public bool TryConsumeDuoSequence(uint sequence)
+    {
+        if (sequence <= _lastDuoSeq)
+        {
+            return false;
+        }
+
+        _lastDuoSeq = sequence;
+        return true;
+    }
+
+    // DUO-WAVE2 ability 2: ARM this player's shield with `strength` absorb, lapsing at `expiryTick`. Overwrites the
+    // pool with the stronger of the current (still-live) pool and `strength` so a paired UPGRADE (solo 10 -> shared 40)
+    // never weakens an already-granted shield, and the expiry extends to the new one.
+    public void ArmShield(int strength, uint expiryTick, uint serverTick)
+    {
+        var current = ShieldRemainingAt(serverTick);
+        _shieldPool = Math.Max(current, strength);
+        _shieldExpiryTick = expiryTick;
+    }
+
+    // DUO-WAVE2 ability 2: the REMAINING absorb pool at `serverTick` (0 once expired). Read by the client-status push.
+    public int ShieldRemainingAt(uint serverTick) => serverTick < _shieldExpiryTick ? _shieldPool : 0;
+
+    public uint ShieldExpiryTick => _shieldExpiryTick;
+
+    // DUO-WAVE2 ability 2: absorb up to `amount` of an incoming hit at `serverTick`, decrementing the pool; returns the
+    // amount ABSORBED (0 when expired/empty). The PlayerDamageGate calls this between the i-frame check and ApplyDamage.
+    public int AbsorbWithShield(int amount, uint serverTick)
+    {
+        if (amount <= 0 || serverTick >= _shieldExpiryTick || _shieldPool <= 0)
+        {
+            return 0;
+        }
+
+        var absorbed = Math.Min(_shieldPool, amount);
+        _shieldPool -= absorbed;
+        if (_shieldPool <= 0)
+        {
+            // Fully drained — clear the expiry too so the expiry poll doesn't fire a redundant clear later, and a
+            // fresh arm re-seeds cleanly.
+            _shieldExpiryTick = 0;
+        }
+
+        return absorbed;
+    }
+
+    // DUO-WAVE2 ability 2: transition an ARMED-but-now-LAPSED shield to cleared, ONCE. Returns true the first tick the
+    // shield's duration elapses (with a pool still armed), so the server can push a single ShieldStatus(Active=false)
+    // to drop the client bubble (there is no other expiry signal on the wire). A drained shield already reset the
+    // expiry in AbsorbWithShield, so this won't double-fire.
+    public bool TryExpireShield(uint serverTick)
+    {
+        if (_shieldExpiryTick != 0 && serverTick >= _shieldExpiryTick)
+        {
+            _shieldExpiryTick = 0;
+            _shieldPool = 0;
+            return true;
+        }
+
+        return false;
+    }
+
+    // DUO-WAVE2 ability 2: the pending-press bookkeeping (a solo press awaiting a possible partner coincidence) and the
+    // shared-cooldown gate. Kept as plain get/set; the GameServer handler owns the timing-window policy.
+    public uint? ShieldPendingPressTick => _shieldPendingPressTick;
+
+    public void SetShieldPending(uint serverTick) => _shieldPendingPressTick = serverTick;
+
+    public void ClearShieldPending() => _shieldPendingPressTick = null;
+
+    public uint ShieldCooldownUntilTick => _shieldCooldownUntilTick;
+
+    public void SetShieldCooldownUntil(uint tick) => _shieldCooldownUntilTick = tick;
 
     // Clears the moving flag to stopped (keepalive safety timeout, or any server-side halt). Does not
     // touch the input cursor, so a later genuine input still has to advance past LastInputSeq.

@@ -523,6 +523,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateTelegraphDecals();
 		UpdateAimWedge();
 		UpdateSkillshotAim(now);
+		UpdateDuoVisuals();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
@@ -704,6 +705,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (key.Keycode == Key.K && _chatInput?.HasFocus() != true)
 		{
 			TryMovementAction(ActionId.Charge, "Charge!");
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
+		// DUO-WAVE2 (exp/duo-abilities) — co-op ability triggers (TEMPORARY DEV KEYS, like J/K; Phase E binds real
+		// skill inputs). R = Unison Shield (ability 2), G = Laser Tether toggle (ability 3), V = Midpoint Detonation
+		// initiate/confirm (ability 4). Each is a discrete press routed to the server's DuoAbility stream (server-
+		// authoritative — no client prediction). Not while typing in chat.
+		if (_client is not null && _client.IsLoggedIn && _chatInput?.HasFocus() != true
+			&& key.Keycode is Key.R or Key.G or Key.V)
+		{
+			var ability = key.Keycode switch
+			{
+				Key.R => DuoAbilityKind.Shield,
+				Key.G => DuoAbilityKind.TetherToggle,
+				_ => DuoAbilityKind.Detonate,
+			};
+			_client.SendDuoAbility(ability);
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -4470,6 +4489,157 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// Yaw +X -> world aim (θ = -aim), the same mapping the aim wedge uses.
 		line.Rotation = new Vector3(0f, -aimRadians, 0f);
 		line.Scale = new Vector3(SkillshotPreviewRangeUnits, 1f, 1f);
+	}
+
+	// ---- DUO-WAVE2 (exp/duo-abilities): abilities 2-4 presentation (shield bubble, tether beam, blast-charge decal) ----
+
+	private static readonly SphereMesh ShieldBubbleMesh = new() { Radius = 1f, Height = 2f, RadialSegments = 24, Rings = 12 };
+	private static readonly StandardMaterial3D ShieldBubbleMaterial = MarkerMaterial(new Color(0.45f, 0.80f, 1.00f, 0.22f));
+
+	// Tether beam colours by the band the client recomputes from the two players' live distance (cool in the sweet
+	// spot, amber in the warning gap, red overstretched/broken) — the honest tension read.
+	private static readonly StandardMaterial3D TetherSweetMaterial = MarkerMaterial(new Color(0.25f, 0.60f, 1.00f, 0.55f));
+	private static readonly StandardMaterial3D TetherWarningMaterial = MarkerMaterial(new Color(1.00f, 0.65f, 0.10f, 0.60f));
+	private static readonly StandardMaterial3D TetherOverstretchMaterial = MarkerMaterial(new Color(1.00f, 0.15f, 0.10f, 0.70f));
+
+	// The blast-charge decal reuses the telegraph disc mesh; a distinct magenta so it never reads as an enemy telegraph.
+	private static readonly StandardMaterial3D MidpointChargeMaterial = MarkerMaterial(new Color(0.90f, 0.30f, 1.00f, 0.38f));
+
+	private readonly Dictionary<uint, MeshInstance3D> _shieldBubbles = [];
+	private readonly List<uint> _shieldStaleScratch = [];
+	private MeshInstance3D? _tetherBeam;
+	private MeshInstance3D? _chargeDecal;
+
+	// Per-frame: mirror MmoClient's replicated duo state into pooled world nodes. Pure presentation — the server owns
+	// every effect; this only draws. Echo cues are drained (a future flash+ring hook; bounded in the core meanwhile).
+	private void UpdateDuoVisuals()
+	{
+		if (_worldRoot is null || _client is null)
+		{
+			return;
+		}
+
+		// Drain echo cues (flash + expanding ring is a deferred polish hook — the core bounds the queue meanwhile).
+		while (_client.TryDequeueEchoCue(out _))
+		{
+		}
+
+		UpdateShieldBubbles();
+		UpdateTetherBeam();
+		UpdateChargeDecal();
+	}
+
+	// A translucent sphere around each shielded entity, scaled by shield strength (bigger bubble = stronger tier).
+	private void UpdateShieldBubbles()
+	{
+		var shields = _client!.Shields;
+		foreach (var (networkId, shield) in shields)
+		{
+			if (!TryGetRenderPosition(networkId, out var x, out var z))
+			{
+				continue;
+			}
+
+			if (!_shieldBubbles.TryGetValue(networkId, out var node))
+			{
+				node = new MeshInstance3D
+				{
+					Name = $"ShieldBubble_{networkId}",
+					Mesh = ShieldBubbleMesh,
+					MaterialOverride = ShieldBubbleMaterial,
+				};
+				_worldRoot!.AddChild(node);
+				_shieldBubbles[networkId] = node;
+			}
+
+			// Radius scales gently with strength: solo(10) ~0.85, Good(25) ~1.05, Perfect(40) ~1.25 units.
+			var radius = 0.75f + (Mathf.Min(shield.Strength, (ushort)60) / 60f * 0.7f);
+			node.Position = new Vector3(x, 0.9f, z);
+			node.Scale = new Vector3(radius, radius, radius);
+			node.Visible = true;
+		}
+
+		// Free bubbles whose entity no longer carries a shield.
+		if (_shieldBubbles.Count > 0)
+		{
+			_shieldStaleScratch.Clear();
+			foreach (var id in _shieldBubbles.Keys)
+			{
+				if (!shields.ContainsKey(id))
+				{
+					_shieldStaleScratch.Add(id);
+				}
+			}
+
+			foreach (var id in _shieldStaleScratch)
+			{
+				_shieldBubbles[id].QueueFree();
+				_shieldBubbles.Remove(id);
+			}
+		}
+	}
+
+	// One stretched thin quad between the two linked players, coloured by the live distance band. Reuses the skillshot
+	// preview line mesh (a unit rect along +X); positioned at the owner, yawed toward the partner, scaled to the gap.
+	private void UpdateTetherBeam()
+	{
+		EnsureSkillshotPreviewLines();
+		if (_previewLineMesh is null)
+		{
+			return;
+		}
+
+		if (_tetherBeam is null)
+		{
+			_tetherBeam = new MeshInstance3D { Name = "TetherBeam", Mesh = _previewLineMesh, MaterialOverride = TetherSweetMaterial, Visible = false };
+			_worldRoot!.AddChild(_tetherBeam);
+		}
+
+		if (_client!.ActiveTether is not { } tether
+			|| !TryGetRenderPosition(tether.OwnerNetworkId, out var ox, out var oz)
+			|| !TryGetRenderPosition(tether.PartnerNetworkId, out var px, out var pz))
+		{
+			_tetherBeam.Visible = false;
+			return;
+		}
+
+		var dx = px - ox;
+		var dz = pz - oz;
+		var distance = Mathf.Sqrt((dx * dx) + (dz * dz));
+		var heading = Mathf.Atan2(dz, dx);
+		_tetherBeam.Position = new Vector3(ox, 0.08f, oz);
+		_tetherBeam.Rotation = new Vector3(0f, -heading, 0f);
+		_tetherBeam.Scale = new Vector3(Mathf.Max(distance, 0.01f), 1f, 1f);
+		_tetherBeam.MaterialOverride = tether.State == TetherState.Broken
+			? TetherOverstretchMaterial
+			: distance switch
+			{
+				>= 12f => TetherOverstretchMaterial,
+				> 10f => TetherWarningMaterial,
+				_ => TetherSweetMaterial,
+			};
+		_tetherBeam.Visible = true;
+	}
+
+	// The live-tracking blast-charge disc at the current midpoint (reuses the telegraph disc mesh, distinct colour).
+	private void UpdateChargeDecal()
+	{
+		if (_chargeDecal is null)
+		{
+			_chargeDecal = new MeshInstance3D { Name = "MidpointCharge", Mesh = TelegraphDiscMesh, MaterialOverride = MidpointChargeMaterial, Visible = false };
+			_worldRoot!.AddChild(_chargeDecal);
+		}
+
+		if (_client!.ActiveCharge is not { } charge)
+		{
+			_chargeDecal.Visible = false;
+			return;
+		}
+
+		_chargeDecal.Position = new Vector3((float)charge.Origin.X, 0.04f, (float)charge.Origin.Y);
+		var radius = Mathf.Max((float)charge.RadiusUnits, 0.05f);
+		_chargeDecal.Scale = new Vector3(radius, 1f, radius);
+		_chargeDecal.Visible = true;
 	}
 
 	// FREEAIM: continuous local facing. Render-only, local-only, NOT replicated — the local player's visual yaws

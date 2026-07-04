@@ -106,7 +106,17 @@ public static class ProtocolCodec
     // client PairStatusMessage {uint PartnerNetworkId, bool Paired} — the replicated pair state. Projectiles ride the
     // EXISTING EntitySpawn TintRgb+ScaleMilli for their tier colour (no new entity field); EntityKind.Projectile is a
     // wire-compatible new byte. Server + every in-repo client flip together.
-    public const byte Version = 47;
+    // v48 — DUO-WAVE2 (exp/duo-abilities): five additive messages for co-op abilities 2-4. (1) client->server
+    // DuoAbilityMessage {uint Sequence, byte Ability} — the ONE R/G/V trigger on its own dedup cursor. (2) server->
+    // client ShieldStatusMessage {uint NetworkId, ushort Strength, uint ExpiryTick, bool Active} — the absorption
+    // bubble. (3) server->partner EchoCueMessage {uint NetworkId, byte Cue} — the flash+ring react cue (unreliable).
+    // (4) server->both TetherStatusMessage {uint OwnerNetworkId, uint PartnerNetworkId, byte State} — the beam on/off/
+    // broken. (5) server->both MidpointChargeMessage {ulong ChargeId, shape (kind + Q12.4 origin + Q12.4 ushort radius),
+    // uint StartTick, uint ResolveTick, bool Active} — the live-tracking blast marker (a dedicated message, NOT a
+    // reused Telegraph — the telegraph client path dedups by id + self-resolves a LOCKED origin, resisting the per-tick
+    // origin updates this ability needs). The Ability/Cue/State bytes are range-validated on decode (hostile-input
+    // safe, mirroring AttackKind). Server + every in-repo client flip together.
+    public const byte Version = 48;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -230,6 +240,33 @@ public static class ProtocolCodec
                 // DUO-SKILLSHOT (v47): the replicated pair state — partner net id + paired flag. Mirrored in the decode.
                 writer.Write(value.PartnerNetworkId);
                 writer.Write(value.Paired);
+                break;
+            case DuoAbilityMessage value:
+                // DUO-WAVE2 (v48): the R/G/V trigger — dedup sequence then the ability selector byte. Mirrored in the decode.
+                writer.Write(value.Sequence);
+                writer.Write((byte)value.Ability);
+                break;
+            case ShieldStatusMessage value:
+                // DUO-WAVE2 (v48): shield bubble — net id, remaining pool, expiry tick, active flag. Mirrored in the decode.
+                writer.Write(value.NetworkId);
+                writer.Write(value.Strength);
+                writer.Write(value.ExpiryTick);
+                writer.Write(value.Active);
+                break;
+            case EchoCueMessage value:
+                // DUO-WAVE2 (v48): echo cue — the cued character's net id + the cue-kind byte. Mirrored in the decode.
+                writer.Write(value.NetworkId);
+                writer.Write((byte)value.Cue);
+                break;
+            case TetherStatusMessage value:
+                // DUO-WAVE2 (v48): tether state — the two linked net ids + the state byte. Mirrored in the decode.
+                writer.Write(value.OwnerNetworkId);
+                writer.Write(value.PartnerNetworkId);
+                writer.Write((byte)value.State);
+                break;
+            case MidpointChargeMessage value:
+                // DUO-WAVE2 (v48): the live-tracking blast marker — id, Q12.4 shape, the charge window, active flag.
+                WriteMidpointCharge(writer, value);
                 break;
             case PlayerCollisionSettingMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
@@ -441,6 +478,12 @@ public static class ProtocolCodec
             MessageType.FireSkillshot => new FireSkillshotMessage(reader.ReadUInt32(), reader.ReadUInt16()),
             MessageType.AimPreview => new AimPreviewMessage(reader.ReadUInt32(), reader.ReadUInt16(), reader.ReadBoolean()),
             MessageType.PairStatus => new PairStatusMessage(reader.ReadUInt32(), reader.ReadBoolean()),
+            // DUO-WAVE2 (v48): mirror the encode order for the five new messages; the discriminator bytes are range-validated.
+            MessageType.DuoAbility => new DuoAbilityMessage(reader.ReadUInt32(), ReadDuoAbilityKind(reader)),
+            MessageType.ShieldStatus => new ShieldStatusMessage(reader.ReadUInt32(), reader.ReadUInt16(), reader.ReadUInt32(), reader.ReadBoolean()),
+            MessageType.EchoCue => new EchoCueMessage(reader.ReadUInt32(), ReadEchoCueKind(reader)),
+            MessageType.TetherStatus => new TetherStatusMessage(reader.ReadUInt32(), reader.ReadUInt32(), ReadTetherState(reader)),
+            MessageType.MidpointCharge => ReadMidpointCharge(reader),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
@@ -733,6 +776,69 @@ public static class ProtocolCodec
         }
 
         return (TelegraphShapeKind)value;
+    }
+
+    // DUO-WAVE2 (v48) ability 4: the live-tracking blast marker. Wire order mirrors the telegraph's shape encoding
+    // (id, kind byte, Q12.4 origin, Q12.4 ushort radius) so the client reuses the telegraph decal fixed-point, then the
+    // two absolute charge ticks + the active flag. Quantize on SEND only. Mirrored byte-for-byte by ReadMidpointCharge.
+    private static void WriteMidpointCharge(BinaryWriter writer, MidpointChargeMessage value)
+    {
+        writer.Write(value.ChargeId);
+        writer.Write((byte)value.Shape.Kind);
+        var (qx, qy) = PositionEncoding.Encode(value.Shape.Origin);
+        writer.Write(qx);
+        writer.Write(qy);
+        writer.Write(QuantizeTelegraphRadius(value.Shape.Radius));
+        writer.Write(value.StartTick);
+        writer.Write(value.ResolveTick);
+        writer.Write(value.Active);
+    }
+
+    private static MidpointChargeMessage ReadMidpointCharge(BinaryReader reader)
+    {
+        var chargeId = reader.ReadUInt64();
+        var kind = ReadTelegraphShapeKind(reader);
+        var origin = PositionEncoding.Decode(reader.ReadInt16(), reader.ReadInt16());
+        var radius = reader.ReadUInt16() / PositionEncoding.Scale;
+        var startTick = reader.ReadUInt32();
+        var resolveTick = reader.ReadUInt32();
+        var active = reader.ReadBoolean();
+        return new MidpointChargeMessage(chargeId, new TelegraphShape(kind, origin, radius), startTick, resolveTick, active);
+    }
+
+    // DUO-WAVE2 (v48): range-validate the co-op ability discriminator bytes (mirroring ReadAttackKind) so a malformed/
+    // hostile packet can't smuggle an out-of-range selector into a server handler or the client renderer.
+    private static DuoAbilityKind ReadDuoAbilityKind(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value < (byte)DuoAbilityKind.Shield || value > (byte)DuoAbilityKind.Detonate)
+        {
+            throw new ProtocolException($"Invalid DuoAbilityKind value: {value}.");
+        }
+
+        return (DuoAbilityKind)value;
+    }
+
+    private static EchoCueKind ReadEchoCueKind(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value < (byte)EchoCueKind.ShieldPress || value > (byte)EchoCueKind.DetonateConfirm)
+        {
+            throw new ProtocolException($"Invalid EchoCueKind value: {value}.");
+        }
+
+        return (EchoCueKind)value;
+    }
+
+    private static TetherState ReadTetherState(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)TetherState.Broken)
+        {
+            throw new ProtocolException($"Invalid TetherState value: {value}.");
+        }
+
+        return (TetherState)value;
     }
 
     // ECOLOGY E4: one authored region's legible state. Wire order: region id, display name, the four rect bounds

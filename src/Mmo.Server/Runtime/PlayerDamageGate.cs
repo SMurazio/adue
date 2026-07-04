@@ -23,13 +23,25 @@ public sealed class PlayerDamageGate
     // the death edge (MarkDead + respawn scheduling). Called ONLY when ApplyDamage actually changed stored Health.
     public delegate void DamageLandedDelegate(WorldEntity victim, int amount, string source);
 
+    // DUO-WAVE2 ability 2 (Unison Shield): the OPTIONAL absorption seam. Given an incoming hit, decrement the victim's
+    // shield pool and return how much it ABSORBED (0 when no/expired shield). Injected so the gate stays headlessly
+    // testable both with and without a shield; null (the default) preserves the exact pre-shield behaviour. This is
+    // the ONLY reason the gate exists (the design note): a shield MUST absorb before ApplyDamage, at the single choke
+    // point, so it can never be bypassed by a future damage source.
+    public delegate int TryAbsorbShieldDelegate(WorldEntity victim, int amount, uint serverTick);
+
     private readonly HasActiveIFramesDelegate _hasActiveIFrames;
     private readonly DamageLandedDelegate _onDamageLanded;
+    private readonly TryAbsorbShieldDelegate? _tryAbsorbShield;
 
-    public PlayerDamageGate(HasActiveIFramesDelegate hasActiveIFrames, DamageLandedDelegate onDamageLanded)
+    public PlayerDamageGate(
+        HasActiveIFramesDelegate hasActiveIFrames,
+        DamageLandedDelegate onDamageLanded,
+        TryAbsorbShieldDelegate? tryAbsorbShield = null)
     {
         _hasActiveIFrames = hasActiveIFrames ?? throw new ArgumentNullException(nameof(hasActiveIFrames));
         _onDamageLanded = onDamageLanded ?? throw new ArgumentNullException(nameof(onDamageLanded));
+        _tryAbsorbShield = tryAbsorbShield;
     }
 
     // Damage `victim` (a PLAYER) by `amount` at `serverTick`, attributed to `source` (a log/display string like
@@ -38,6 +50,8 @@ public sealed class PlayerDamageGate
     //   1. players only — this is the PLAYER-damage choke point (monster/dummy damage has its own attack path);
     //   2. dead-guard — a downed player awaiting respawn takes no further hits (no re-death the same window);
     //   3. i-frames — a victim inside its dodge-roll's server-side i-frame window takes NOTHING (design §2.7);
+    //   3b. shield absorb (DUO-WAVE2 ability 2) — a Unison Shield pool absorbs first; a WHOLLY-absorbed hit is negated
+    //       (health unchanged, no landed tail), a partial hit continues with the reduced remainder;
     //   4. ApplyDamage — a hit on an already-0-HP victim is a no-op (no number, no spam); a real change runs the
     //      injected landed tail (broadcast + death edge).
     public bool TryDamagePlayer(WorldEntity victim, int amount, uint serverTick, string source)
@@ -63,6 +77,24 @@ public sealed class PlayerDamageGate
         {
             Log.Info($"{source} hit {victim.DisplayName} NEGATED by dodge-roll i-frames.");
             return false;
+        }
+
+        // DUO-WAVE2 ability 2 (Unison Shield): absorb before applying. The pool sits on the victim's session; the seam
+        // decrements it and returns how much it soaked. A WHOLLY-absorbed hit is negated (return false — health
+        // unchanged, no landed tail, no death); a partial hit continues with the reduced remainder. Sits exactly
+        // between the i-frame check and ApplyDamage so no player-damage source can bypass it (the choke-point promise).
+        if (_tryAbsorbShield is not null && amount > 0)
+        {
+            var absorbed = _tryAbsorbShield(victim, amount, serverTick);
+            if (absorbed > 0)
+            {
+                Log.Info($"{source} on {victim.DisplayName}: shield absorbed {absorbed} of {amount}.");
+                amount -= absorbed;
+                if (amount <= 0)
+                {
+                    return false;
+                }
+            }
         }
 
         // Authoritative damage rides the snapshot HP field (the HUD bar falls). A real change floats a number via

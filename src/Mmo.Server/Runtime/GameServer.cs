@@ -250,6 +250,21 @@ public sealed class GameServer
     // dropped in the despawn seam. A small transient map (projectiles live < ~1.2s), never leaked.
     private readonly Dictionary<ulong, ProjectileTier> _projectileTierOf = new();
 
+    // DUO-WAVE2 (exp/duo-abilities) ability 3 (Laser Tether) + ability 4 (Midpoint Detonation): the two co-op steppers,
+    // siblings of _skillshots (Step() each tick in TickCore, before the snapshot). Both close over the SAME spatial
+    // gather, the shared monster-damage seam (ApplyDuoMonsterDamage), the shared monster-slow seam (SlowMonster), and —
+    // for the tether's overstretch DoT — the player-damage choke point. Wire status/marker/cue relays close back over
+    // the session set.
+    private readonly TetherEngine _tether;
+    private readonly MidpointDetonationEngine _detonation;
+
+    // DUO-WAVE2: the SHARED monster-slow registry (tether sweep + detonation slow zone). Maps a monster entity id to the
+    // absolute tick its brief slow lapses; while present its SpeedMultiplier is held at base × MonsterSlowFactor and the
+    // reduced cadence is replicated via MovementSpeedChanged (the reused speed-modifier path). StepMonsterSlows restores
+    // the base multiplier + re-broadcasts once the tick passes.
+    private readonly Dictionary<ulong, uint> _monsterSlowUntil = new();
+    private readonly List<ulong> _slowExpiryScratch = [];
+
     // MONSTER-SEPARATION (todo/N-monster-monster-collision-separation.md): the server-authoritative monster↔monster
     // de-penetration pass, run each tick AFTER all movement is resolved and BEFORE the snapshot (SeparateMonsters in
     // TickCore). Constructed after _zone since it closes over the SAME shared seams the hop/glide use — the spatial
@@ -484,7 +499,9 @@ public sealed class GameServer
         // TELEGRAPH T1: the player-damage choke point (the REAL executor i-frame oracle + this class's landed tail)
         // and the telegraph engine wired through it — the SAME spatial gather AOI/aggro use for the resolve-time
         // superset query, and the SAME gate the monster melee routes through (one gate, two callers).
-        _playerDamage = new PlayerDamageGate(_actionExecutor.HasActiveIFrames, OnPlayerDamageLanded);
+        // DUO-WAVE2 ability 2 (Unison Shield): the gate now also carries the shield ABSORB seam (AbsorbShield), so a
+        // shield soaks a hit at the single choke point before ApplyDamage — no player-damage source can bypass it.
+        _playerDamage = new PlayerDamageGate(_actionExecutor.HasActiveIFrames, OnPlayerDamageLanded, AbsorbShield);
         _telegraphs = new TelegraphScheduler(_zone.World.GatherInterestCandidates, _playerDamage.TryDamagePlayer);
         // DUO-SKILLSHOT: the fusion-skillshot engine, wired to the SAME spatial gather AOI/combat use and the SAME
         // monster-damage path the melee routes through (ApplyProjectileDamage → ApplyDamage + cosmetic event +
@@ -496,6 +513,22 @@ public sealed class GameServer
             _zone.World.GatherInterestCandidates,
             ApplyProjectileDamage,
             AreEntitiesPaired);
+        // DUO-WAVE2 ability 3 (Laser Tether): the beam stepper — same spatial gather, the shared monster-damage +
+        // monster-slow seams, the player-damage choke point for the overstretch DoT, and the tether-status wire relay.
+        _tether = new TetherEngine(
+            _zone.World.GatherInterestCandidates,
+            ApplyDuoMonsterDamage,
+            SlowMonster,
+            _playerDamage.TryDamagePlayer,
+            SendTetherStatus);
+        // DUO-WAVE2 ability 4 (Midpoint Detonation): the charge/blast stepper — same gather + monster-damage + slow
+        // seams, plus the echo-cue relay and the live-tracking charge-marker relay.
+        _detonation = new MidpointDetonationEngine(
+            _zone.World.GatherInterestCandidates,
+            ApplyDuoMonsterDamage,
+            SlowMonster,
+            SendEchoCueTo,
+            SendMidpointCharge);
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
         // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
         // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop
@@ -898,6 +931,12 @@ public sealed class GameServer
                     HandleAimPreview(session, preview.Heading, preview.Active);
                 }
                 break;
+            case DuoAbilityMessage duo:
+                if (session.IsAuthenticated)
+                {
+                    HandleDuoAbility(session, duo.Sequence, duo.Ability);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -917,7 +956,10 @@ public sealed class GameServer
 			// DUO-SKILLSHOT: firing a skillshot + streaming an aim preview are actions — suppressed while downed, like
 			// Attack (a dead player can't fire or telegraph an aim).
 			or MessageType.FireSkillshot
-			or MessageType.AimPreview;
+			or MessageType.AimPreview
+			// DUO-WAVE2: the co-op R/G/V triggers are actions - suppressed while downed (a dead player cannot
+			// shield, toggle a tether, or detonate).
+			or MessageType.DuoAbility;
 
     private void BeginLogin(NetPeer peer, ClientSession session, LoginRequestMessage login)
     {
@@ -1134,6 +1176,13 @@ public sealed class GameServer
             // movement, BEFORE BroadcastSnapshot so a fusion merge, a projectile move, and a hit's HP change all
             // replicate this same tick. Fixed dt = 1/TickRate (the tick cadence). ~free when nothing is in flight.
             _skillshots.Step(_serverTick, 1d / _options.TickRate);
+            // DUO-WAVE2 abilities 3 & 4: step the tether (band resolve + monster/player damage) and the midpoint
+            // detonation (confirm-window expiry, charge live-tracking, blast resolve, lingering slow zones) — siblings
+            // of the skillshot step, BEFORE the snapshot so damage/HP/marker changes replicate this same tick. Then
+            // restore any monster whose brief slow lapsed (re-broadcasting the base cadence). ~free when none active.
+            _tether.Step(_serverTick, 1d / _options.TickRate);
+            _detonation.Step(_serverTick);
+            StepMonsterSlows(_serverTick);
         }
 
         using (tickBudget.Measure(TickBudgetCategory.Other))
@@ -1144,6 +1193,9 @@ public sealed class GameServer
             // whose downed window elapsed. Both poll tiny sets (spawners / sessions) and no-op when nothing is due.
             RespawnMonsters();
             RespawnPlayers();
+            // DUO-WAVE2 ability 2: drop any shield whose 4s duration lapsed this tick (push a single ShieldStatus clear
+            // so the client bubble disappears — the only expiry signal on the wire). ~free when no shield is armed.
+            StepShieldExpiry(_serverTick);
             // LOOT P4b: despawn any corpse whose decay deadline has arrived (unlooted corpses don't linger forever).
             DecayCorpses();
             // ECOLOGY E1 (docs/ecology-v1-design.md §3): advance the region×type stock/pressure math once every 200
@@ -2981,6 +3033,17 @@ public sealed class GameServer
             return;
         }
 
+        // DUO-WAVE2: a broken pair drops any active tether + in-progress detonation between the two (one call catches
+        // both, since they involve the pair). Done BEFORE the links clear so the status relays still resolve sessions.
+        if (session.EntityId is { } sessionEntityId)
+        {
+            TearDownDuoAbilities(sessionEntityId);
+        }
+        else if (partner.EntityId is { } partnerEntityId)
+        {
+            TearDownDuoAbilities(partnerEntityId);
+        }
+
         session.SetPartner(null);
         partner.SetPartner(null);
         SendPairStatusCleared(session);
@@ -3147,6 +3210,296 @@ public sealed class GameServer
             (-1, -1) => Direction8.NW,
             _ => Direction8.S,
         };
+    }
+
+    // ==== DUO-WAVE2 (exp/duo-abilities): co-op abilities 2-4 ====
+
+    // Ability 2 (Unison Shield) timing + strengths (server ticks @20Hz). Perfect is the tighter window; a coincidence
+    // within it grants the strongest shared shield. A solo press grants a weak personal shield; the shared cooldown
+    // runs from the FIRST press. Tunables live here (the one obvious place, per-ability).
+    private const uint ShieldPerfectWindowTicks = 2;
+    private const uint ShieldGoodWindowTicks = 6;
+    private const int ShieldSoloStrength = 10;
+    private const int ShieldGoodStrength = 25;
+    private const int ShieldPerfectStrength = 40;
+    private const uint ShieldDurationTicks = 80;    // 4s
+    private const uint ShieldCooldownTicks = 200;   // 10s shared cooldown
+
+    // The SHARED monster-slow (tether sweep + detonation slow zone): 30% slow for 1s (@20Hz). One place for both.
+    private const double MonsterSlowFactor = 0.7d;
+    private const uint MonsterSlowDurationTicks = 20;
+
+    // DUO-WAVE2: dispatch a co-op R/G/V trigger. Dedup on the session's DEDICATED duo cursor (independent of move/
+    // attack/action/fire), resolve the caller's entity, and route to the ability. A malformed selector never reaches
+    // here (the codec range-validates DuoAbilityKind).
+    private void HandleDuoAbility(ClientSession session, uint sequence, DuoAbilityKind ability)
+    {
+        if (!session.TryConsumeDuoSequence(sequence))
+        {
+            return;
+        }
+
+        if (!TryGetSessionEntity(session, out var self))
+        {
+            return;
+        }
+
+        switch (ability)
+        {
+            case DuoAbilityKind.Shield:
+                HandleShieldPress(session, self);
+                break;
+            case DuoAbilityKind.TetherToggle:
+                HandleTetherToggle(session, self);
+                break;
+            case DuoAbilityKind.Detonate:
+                HandleDetonate(session, self);
+                break;
+        }
+    }
+
+    // DUO-WAVE2 ability 2 (Unison Shield): the caller pressed R. Flash an echo cue on the partner (so they can react),
+    // then either COMPLETE a shared shield (the partner has a pending press within the timing window — both get the
+    // tier's shield, shared cooldown from the first press) or, on a fresh press off cooldown, grant a weak SOLO shield
+    // and record the pending press so the partner can still upgrade it within the window.
+    private void HandleShieldPress(ClientSession session, WorldEntity self)
+    {
+        var t = _serverTick;
+        var partner = session.PartnerSession;
+        var partnerLive = partner is { IsAuthenticated: true };
+
+        if (partnerLive)
+        {
+            // Echo cue on the partner's character (unreliable — a missed flash is harmless).
+            TrySend(partner!.Peer, new EchoCueMessage(self.NetworkId, EchoCueKind.ShieldPress), DeliveryMethod.Unreliable);
+        }
+
+        // Shared upgrade: the partner already has a pending press within the window → both get the shared shield.
+        if (partnerLive && partner!.ShieldPendingPressTick is { } pTick)
+        {
+            var tier = PairedTimingWindow.Classify(t, pTick, ShieldPerfectWindowTicks, ShieldGoodWindowTicks);
+            if (tier != PairTier.None && TryGetSessionEntity(partner, out var partnerEntity))
+            {
+                var strength = tier == PairTier.Perfect ? ShieldPerfectStrength : ShieldGoodStrength;
+                var expiry = t + ShieldDurationTicks;
+                var cooldownUntil = Math.Min(t, pTick) + ShieldCooldownTicks;
+                ApplyShield(session, self, strength, expiry, cooldownUntil);
+                ApplyShield(partner, partnerEntity, strength, expiry, cooldownUntil);
+                session.ClearShieldPending();
+                partner.ClearShieldPending();
+                return;
+            }
+        }
+
+        // Fresh / solo press: gate on the shared cooldown.
+        if (t < session.ShieldCooldownUntilTick)
+        {
+            return;
+        }
+
+        ApplyShield(session, self, ShieldSoloStrength, t + ShieldDurationTicks, t + ShieldCooldownTicks);
+        session.SetShieldPending(t);
+        if (partnerLive)
+        {
+            // Shared cooldown: block the partner's OWN fresh press too (an in-window press still upgrades above,
+            // because that path runs before the cooldown gate).
+            partner!.SetShieldCooldownUntil(t + ShieldCooldownTicks);
+        }
+    }
+
+    // DUO-WAVE2 ability 2: arm one player's shield + shared cooldown and push the bubble to that player AND their
+    // partner (both render it). ArmShield keeps the stronger of any live pool and the new strength (a solo→shared upgrade).
+    private void ApplyShield(ClientSession session, WorldEntity entity, int strength, uint expiryTick, uint cooldownUntil)
+    {
+        session.ArmShield(strength, expiryTick, _serverTick);
+        session.SetShieldCooldownUntil(cooldownUntil);
+        var pool = session.ShieldRemainingAt(_serverTick);
+        var message = new ShieldStatusMessage(entity.NetworkId, (ushort)Math.Clamp(pool, 0, ushort.MaxValue), expiryTick, pool > 0);
+        SendToSelfAndPartner(session, message, DeliveryMethod.ReliableOrdered);
+    }
+
+    // DUO-WAVE2 ability 2: per-tick shield-expiry pass. For each session whose shield just lapsed, push a single
+    // ShieldStatus(Active=false) to that player + partner so both drop the bubble (natural 4s expiry has no other wire
+    // signal). Cheap: a tiny loop over sessions, and TryExpireShield no-ops unless a shield is actually armed + due.
+    private void StepShieldExpiry(uint serverTick)
+    {
+        foreach (var session in _sessions.Values)
+        {
+            if (session.IsAuthenticated && session.TryExpireShield(serverTick) && TryGetSessionEntity(session, out var entity))
+            {
+                SendToSelfAndPartner(session, new ShieldStatusMessage(entity.NetworkId, 0, 0, false), DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // DUO-WAVE2 ability 2: the shield ABSORB seam the PlayerDamageGate calls (between i-frame + ApplyDamage). Decrement
+    // the victim's session pool; on a real absorb, re-push the shrunk bubble to the victim + partner. Returns the amount soaked.
+    private int AbsorbShield(WorldEntity victim, int amount, uint serverTick)
+    {
+        if (victim.OwnerSession is not { } session)
+        {
+            return 0;
+        }
+
+        var absorbed = session.AbsorbWithShield(amount, serverTick);
+        if (absorbed > 0)
+        {
+            var pool = session.ShieldRemainingAt(serverTick);
+            var message = new ShieldStatusMessage(victim.NetworkId, (ushort)Math.Clamp(pool, 0, ushort.MaxValue), session.ShieldExpiryTick, pool > 0);
+            SendToSelfAndPartner(session, message, DeliveryMethod.ReliableOrdered);
+        }
+
+        return absorbed;
+    }
+
+    // DUO-WAVE2 ability 3 (Laser Tether): the caller pressed G — toggle the beam with their partner (either partner may
+    // toggle; both see the state). No partner ⇒ a hint, nothing to link.
+    private void HandleTetherToggle(ClientSession session, WorldEntity self)
+    {
+        if (session.PartnerSession is not { IsAuthenticated: true } partner || !TryGetSessionEntity(partner, out var partnerEntity))
+        {
+            SendSystem(session, "tether: you have no partner to link with (/pair <name>).");
+            return;
+        }
+
+        _tether.Toggle(self, partnerEntity, _serverTick);
+    }
+
+    // DUO-WAVE2 ability 4 (Midpoint Detonation): the caller pressed V — initiate, or confirm the partner's pending
+    // initiate. A solo player (no partner) still initiates; the engine degrades it to a self-blast when unconfirmed.
+    private void HandleDetonate(ClientSession session, WorldEntity self)
+    {
+        WorldEntity? partnerEntity = null;
+        if (session.PartnerSession is { IsAuthenticated: true } partner && TryGetSessionEntity(partner, out var pe))
+        {
+            partnerEntity = pe;
+        }
+
+        _detonation.PressDetonate(self, partnerEntity, _serverTick);
+    }
+
+    // DUO-WAVE2: send `message` to a session AND its partner (both render shared visuals like the shield bubble).
+    private void SendToSelfAndPartner(ClientSession session, IProtocolMessage message, DeliveryMethod delivery)
+    {
+        TrySend(session.Peer, message, delivery);
+        if (session.PartnerSession is { IsAuthenticated: true } partner)
+        {
+            TrySend(partner.Peer, message, delivery);
+        }
+    }
+
+    // DUO-WAVE2 ability 3: the tether-status wire relay (engine seam) — push on/off/broken to BOTH linked players.
+    private void SendTetherStatus(WorldEntity a, WorldEntity b, TetherState state)
+    {
+        var message = new TetherStatusMessage(a.NetworkId, b.NetworkId, state);
+        if (SessionByEntity(a.Id) is { } sa)
+        {
+            TrySend(sa.Peer, message, DeliveryMethod.ReliableOrdered);
+        }
+
+        if (SessionByEntity(b.Id) is { } sb)
+        {
+            TrySend(sb.Peer, message, DeliveryMethod.ReliableOrdered);
+        }
+    }
+
+    // DUO-WAVE2 abilities 2 & 4: the echo-cue wire relay (engine seam) — flash a brief cue on the target's own client.
+    private void SendEchoCueTo(WorldEntity target, EchoCueKind cue)
+    {
+        if (SessionByEntity(target.Id) is { } session)
+        {
+            TrySend(session.Peer, new EchoCueMessage(target.NetworkId, cue), DeliveryMethod.Unreliable);
+        }
+    }
+
+    // DUO-WAVE2 ability 4: the live-tracking charge-marker relay (engine seam) — push the current blast circle to both
+    // the initiator and the confirmer each charge tick (Active=false is the resolve/cancel end edge).
+    private void SendMidpointCharge(
+        WorldEntity initiator, WorldEntity partner, ulong chargeId, WorldVector origin, double radiusUnits,
+        uint startTick, uint resolveTick, bool active)
+    {
+        var message = new MidpointChargeMessage(chargeId, TelegraphShape.Circle(origin, radiusUnits), startTick, resolveTick, active);
+        if (SessionByEntity(initiator.Id) is { } si)
+        {
+            TrySend(si.Peer, message, DeliveryMethod.ReliableOrdered);
+        }
+
+        if (SessionByEntity(partner.Id) is { } sp)
+        {
+            TrySend(sp.Peer, message, DeliveryMethod.ReliableOrdered);
+        }
+    }
+
+    // DUO-WAVE2 abilities 3 & 4: the shared monster-damage seam — apply `amount` through the SAME melee path the
+    // skillshot uses (ApplyProjectileDamage: ApplyDamage + cosmetic number + contribution ledger + KillMonster),
+    // attributed to `attributedTo` (one of the paired players) for loot eligibility. Return value is unused here.
+    private void ApplyDuoMonsterDamage(WorldEntity monster, WorldEntity attributedTo, int amount, uint serverTick)
+    {
+        ApplyProjectileDamage(monster, amount, attributedTo.Id, attributedTo.CharacterId ?? Guid.Empty, serverTick);
+    }
+
+    // DUO-WAVE2 abilities 3 & 4: the SHARED monster-slow seam — arm/refresh a monster's brief 30%/1s slow via the
+    // reused speed-modifier path (entity SpeedMultiplier → EntitySpawn/MovementSpeedChanged cadence). Re-arming while
+    // already slowed only extends the expiry (the multiplier is not re-stacked — TrySetSpeedMultiplier no-ops an equal
+    // value anyway). StepMonsterSlows restores the base multiplier once the expiry passes.
+    private void SlowMonster(WorldEntity monster, uint serverTick)
+    {
+        if (monster.Kind != EntityKind.Monster)
+        {
+            return;
+        }
+
+        var until = serverTick + MonsterSlowDurationTicks;
+        var alreadySlowed = _monsterSlowUntil.TryGetValue(monster.Id, out var prev);
+        _monsterSlowUntil[monster.Id] = alreadySlowed ? Math.Max(prev, until) : until;
+        if (!alreadySlowed && monster.TrySetSpeedMultiplier(BaseMoveMultiplier(monster) * MonsterSlowFactor))
+        {
+            RefreshSpeedStat(monster);
+            BroadcastMovementSpeedChanged(monster, EffectiveStepCooldownMs(monster));
+        }
+    }
+
+    // DUO-WAVE2: restore any monster whose brief slow lapsed this tick — reset its base multiplier + re-broadcast the
+    // cadence. Also drops entries for monsters that despawned mid-slow (the id no longer resolves). ~free when none slowed.
+    private void StepMonsterSlows(uint serverTick)
+    {
+        if (_monsterSlowUntil.Count == 0)
+        {
+            return;
+        }
+
+        _slowExpiryScratch.Clear();
+        foreach (var (id, until) in _monsterSlowUntil)
+        {
+            if (serverTick >= until)
+            {
+                _slowExpiryScratch.Add(id);
+            }
+        }
+
+        foreach (var id in _slowExpiryScratch)
+        {
+            _monsterSlowUntil.Remove(id);
+            if (_zone.World.TryGet(id, out var monster) && monster.Kind == EntityKind.Monster
+                && monster.TrySetSpeedMultiplier(BaseMoveMultiplier(monster)))
+            {
+                RefreshSpeedStat(monster);
+                BroadcastMovementSpeedChanged(monster, EffectiveStepCooldownMs(monster));
+            }
+        }
+    }
+
+    // DUO-WAVE2: a monster's un-slowed base speed multiplier — its live TYPE MoveSpeedMultiplier (1.0 for a monster with
+    // no registered type). The slow multiplies this; the restore resets to it.
+    private double BaseMoveMultiplier(WorldEntity monster)
+        => _monsterTypeOf.TryGetValue(monster.Id, out var type) ? type.MoveSpeedMultiplier : 1.0d;
+
+    // DUO-WAVE2: tear down any active tether + in-progress detonation involving `entityId` (unpair / disconnect). The
+    // tether push its Off status to both clients; the detonation cancels silently. Called from the BreakPair funnel.
+    private void TearDownDuoAbilities(ulong entityId)
+    {
+        _tether.RemoveInvolving(entityId);
+        _detonation.RemoveInvolving(entityId);
     }
 
     // ECOLOGY E4 (docs/ecology-v1-design.md D6b, §8 E4): /rumors — ALL players, not just admins (unlike every

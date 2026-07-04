@@ -118,6 +118,10 @@ public sealed class MmoClient : IDisposable
     // dedups on its matching independent _lastFireSeq.
     private uint _fireSeq;
 
+    // DUO-WAVE2 (exp/duo-abilities): the DUO-ABILITY stream's OWN monotonic counter (R/G/V triggers) — a fifth stream,
+    // its own cursor (the NET6 lesson). SendDuoAbility mints off THIS only; the server dedups on _lastDuoSeq.
+    private uint _duoSeq;
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -227,6 +231,34 @@ public sealed class MmoClient : IDisposable
     public readonly record struct AimPreviewState(uint ShooterNetworkId, float HeadingRadians, bool Active);
 
     public AimPreviewState? PartnerAimPreview { get; private set; }
+
+    // DUO-WAVE2 (exp/duo-abilities): abilities 2-4 replicated presentation state the Godot layer renders. All pure
+    // mirror — no client authority; the server resolves every effect. DuoVisualVersion bumps on any change so the HUD
+    // rebuilds cheaply.
+    public readonly record struct ShieldVisual(uint NetworkId, ushort Strength, uint ExpiryTick);
+
+    public readonly record struct TetherVisual(uint OwnerNetworkId, uint PartnerNetworkId, TetherState State);
+
+    public readonly record struct MidpointChargeVisual(
+        uint ChargeId, WorldVector Origin, double RadiusUnits, uint StartTick, uint ResolveTick);
+
+    public readonly record struct EchoCueEvent(uint NetworkId, EchoCueKind Cue);
+
+    private readonly Dictionary<uint, ShieldVisual> _shields = new();
+
+    // The set of currently-shielded entities (network id -> bubble). The renderer draws a translucent sphere around each.
+    public IReadOnlyDictionary<uint, ShieldVisual> Shields => _shields;
+
+    // The active tether (null = none). State Broken is a brief "snapped" flag before the following Off clears it.
+    public TetherVisual? ActiveTether { get; private set; }
+
+    // The active midpoint-detonation charge marker (null = none). Origin live-updates each charge tick.
+    public MidpointChargeVisual? ActiveCharge { get; private set; }
+
+    public int DuoVisualVersion { get; private set; }
+
+    // Brief echo cues (flash + expanding ring) awaiting playback; the Godot layer drains them each frame.
+    private readonly List<EchoCueEvent> _pendingEchoCues = new();
 
     public TileCoord? LocalTile => LocalNetworkId.HasValue && _entities.TryGetValue(LocalNetworkId.Value, out var entity)
         ? entity.Tile
@@ -685,6 +717,12 @@ public sealed class MmoClient : IDisposable
         // logout/AOI-exit (a fresh /pair re-sends PairStatus).
         PartnerNetworkId = null;
         PartnerAimPreview = null;
+        // DUO-WAVE2: drop abilities 2-4 presentation state so a stale bubble/beam/marker can't linger past a logout.
+        _shields.Clear();
+        _pendingEchoCues.Clear();
+        ActiveTether = null;
+        ActiveCharge = null;
+        DuoVisualVersion++;
     }
 
     // CONTINUOUS MIGRATION (Phase 4): attach a fresh continuous predictor for the LOCAL player when one isn't already
@@ -879,6 +917,31 @@ public sealed class MmoClient : IDisposable
     public void SendAimPreview(ushort heading, bool active)
     {
         Send(new AimPreviewMessage(0u, heading, active), DeliveryMethod.Unreliable);
+    }
+
+    // DUO-WAVE2 (exp/duo-abilities): fire a co-op R/G/V trigger (Shield / TetherToggle / Detonate). Mints the next
+    // sequence off the DEDICATED _duoSeq counter and sends RELIABLE-ORDERED (low-rate; a dropped trigger must not be
+    // lost). The server timestamps the press at receipt and resolves the ability authoritatively. Returns the seq sent.
+    public uint SendDuoAbility(DuoAbilityKind ability)
+    {
+        var sequence = ++_duoSeq;
+        Send(new DuoAbilityMessage(sequence, ability), DeliveryMethod.ReliableOrdered);
+        return sequence;
+    }
+
+    // DUO-WAVE2: drain one pending echo cue (flash + expanding ring), FIFO. Returns false when none remain. The Godot
+    // layer calls this each frame and plays the cue on the named entity.
+    public bool TryDequeueEchoCue(out EchoCueEvent cue)
+    {
+        if (_pendingEchoCues.Count == 0)
+        {
+            cue = default;
+            return false;
+        }
+
+        cue = _pendingEchoCues[0];
+        _pendingEchoCues.RemoveAt(0);
+        return true;
     }
 
     // COMBAT-S2B / FREEAIM: send a melee attack with a continuous AIM ANGLE. Mints the next sequence off the
@@ -1248,6 +1311,44 @@ public sealed class MmoClient : IDisposable
                 PartnerAimPreview = preview.Active
                     ? new AimPreviewState(preview.ShooterNetworkId, (float)AimAngle.ToRadians(preview.Heading), true)
                     : null;
+                break;
+            case ShieldStatusMessage shield:
+                // DUO-WAVE2 ability 2: adopt/drop the shield bubble for the named entity (self or partner).
+                if (shield.Active && shield.Strength > 0)
+                {
+                    _shields[shield.NetworkId] = new ShieldVisual(shield.NetworkId, shield.Strength, shield.ExpiryTick);
+                }
+                else
+                {
+                    _shields.Remove(shield.NetworkId);
+                }
+
+                DuoVisualVersion++;
+                break;
+            case EchoCueMessage cue:
+                // DUO-WAVE2 abilities 2 & 4: queue the brief flash+ring cue (drained by the Godot layer). Bounded.
+                if (_pendingEchoCues.Count >= 32)
+                {
+                    _pendingEchoCues.RemoveAt(0);
+                }
+
+                _pendingEchoCues.Add(new EchoCueEvent(cue.NetworkId, cue.Cue));
+                break;
+            case TetherStatusMessage tether:
+                // DUO-WAVE2 ability 3: Off clears the beam; On/Broken set the current tether (Broken is a brief snapped
+                // state a following Off clears).
+                ActiveTether = tether.State == TetherState.Off
+                    ? null
+                    : new TetherVisual(tether.OwnerNetworkId, tether.PartnerNetworkId, tether.State);
+                DuoVisualVersion++;
+                break;
+            case MidpointChargeMessage charge:
+                // DUO-WAVE2 ability 4: the live-tracking blast marker; Active=false is the resolve/cancel end edge.
+                ActiveCharge = charge.Active
+                    ? new MidpointChargeVisual(
+                        (uint)charge.ChargeId, charge.Shape.Origin, charge.Shape.Radius, charge.StartTick, charge.ResolveTick)
+                    : null;
+                DuoVisualVersion++;
                 break;
         }
     }

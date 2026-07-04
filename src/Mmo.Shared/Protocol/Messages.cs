@@ -495,6 +495,58 @@ public sealed record PairStatusMessage(uint PartnerNetworkId, bool Paired) : IPr
     public MessageType Type => MessageType.PairStatus;
 }
 
+// DUO-WAVE2 (protocol v48, exp/duo-abilities): the ONE client->server trigger for co-op abilities 2-4. A SIBLING of the
+// attack/action/fire streams (NOT the move stream): its OWN dedicated Sequence counter (client) dedup'd on a DEDICATED
+// _lastDuoSeq cursor (server). Ability is the DuoAbilityKind selector (Shield/TetherToggle/Detonate) the codec range-
+// validates. The server timestamps the press at its RECEIPT tick (experiment rigor — no client-authored tick this
+// wave); the timing windows are server-tick based. Sent RELIABLE-ORDERED like Attack — low-rate, a dropped trigger
+// must not be lost.
+public sealed record DuoAbilityMessage(uint Sequence, DuoAbilityKind Ability) : IProtocolMessage
+{
+    public MessageType Type => MessageType.DuoAbility;
+}
+
+// DUO-WAVE2 (protocol v48) ability 2 (Unison Shield): server->client replication of a player's damage-absorption
+// SHIELD. NetworkId is the shielded player's entity id; Strength is the REMAINING absorb pool (shrinks as hits are
+// absorbed); ExpiryTick is the absolute server tick the bubble drops; Active=false is an explicit clear. Sent to the
+// shielded player AND their partner (both render the translucent bubble, scaled by Strength/tier), on arm and on each
+// absorbed hit. Reliable-ordered — a dropped arm/clear would leave a stale bubble.
+public sealed record ShieldStatusMessage(uint NetworkId, ushort Strength, uint ExpiryTick, bool Active) : IProtocolMessage
+{
+    public MessageType Type => MessageType.ShieldStatus;
+}
+
+// DUO-WAVE2 (protocol v48) abilities 2 & 4: the brief server->partner ECHO CUE — a flash + expanding ring on the named
+// character so the partner can REACT rather than pre-plan. NetworkId is the character the cue plays on; Cue is the
+// EchoCueKind (shield press / detonate initiate / detonate confirm) the codec range-validates. Sent UNRELIABLE — a
+// dropped cue is a missed flash and harmless.
+public sealed record EchoCueMessage(uint NetworkId, EchoCueKind Cue) : IProtocolMessage
+{
+    public MessageType Type => MessageType.EchoCue;
+}
+
+// DUO-WAVE2 (protocol v48) ability 3 (Laser Tether): server->both-partners TETHER state. OwnerNetworkId/
+// PartnerNetworkId are the two linked players' entity ids; State is the TetherState (Off/On/Broken) the codec range-
+// validates. The client draws the beam between the two entities and colours it by the distance band it recomputes
+// locally (cool in the sweet spot, amber near max range, red overstretched) — no band byte rides the wire. Reliable-
+// ordered — a dropped on/off/broken edge would desync the drawn beam.
+public sealed record TetherStatusMessage(uint OwnerNetworkId, uint PartnerNetworkId, TetherState State) : IProtocolMessage
+{
+    public MessageType Type => MessageType.TetherStatus;
+}
+
+// DUO-WAVE2 (protocol v48) ability 4 (Midpoint Detonation): server->both-partners charge marker — a LIVE-TRACKING
+// variant of the telegraph decal. ChargeId keys the decal; Shape is the CURRENT circle (kind + Q12.4 origin + Q12.4
+// ushort radius — the SAME PositionEncoding as the telegraph, so the decal lands exactly where the wire says);
+// StartTick/ResolveTick are the absolute charge window; Active=false is the resolve/cancel end edge (drop the decal).
+// Sent each charge tick with the live midpoint origin (the pair aims by repositioning). Reliable-ordered. A dedicated
+// message rather than reusing TelegraphMessage: the telegraph's client path dedups by id + self-resolves a LOCKED
+// origin, which resists per-tick origin updates — see the codec version note.
+public sealed record MidpointChargeMessage(ulong ChargeId, TelegraphShape Shape, uint StartTick, uint ResolveTick, bool Active) : IProtocolMessage
+{
+    public MessageType Type => MessageType.MidpointCharge;
+}
+
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatBroadcast;

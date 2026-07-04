@@ -52,6 +52,11 @@ public enum MessageType : ushort
     // the next). Tag 20 is the next free client->server tag; the type doubles as the server->partner relay. See
     // AimPreviewMessage.
     AimPreview = 20,
+    // DUO-WAVE2 (v48, exp/duo-abilities): the ONE client->server trigger for co-op abilities 2-4 — R=Shield,
+    // G=TetherToggle, V=Detonate (DuoAbilityMessage carries the selector byte). Its OWN dedicated dedup cursor
+    // (_lastDuoSeq), independent of the move/attack/action/fire cursors (the NET6 "one cursor per stream" lesson).
+    // Reliable-ordered + low-rate. Tag 21 is the next free client->server tag. See DuoAbilityMessage.
+    DuoAbility = 21,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -121,5 +126,24 @@ public enum MessageType : ushort
     // network id + a paired flag. Sent to BOTH players on /pair (each learns the other's id for previews/cues) and
     // Paired=false to the surviving partner on /unpair or disconnect. Reliable-ordered, owner-only. See
     // PairStatusMessage. Tag 122 is the next free server->client tag.
-    PairStatus = 122
+    PairStatus = 122,
+    // DUO-WAVE2 (v48, exp/duo-abilities) ability 2 (Unison Shield): server->client replication of a player's damage-
+    // absorption SHIELD — {uint NetworkId, ushort Strength (remaining absorb pool), uint ExpiryTick, bool Active}. Sent
+    // to the shielded player AND their partner (so both render the translucent bubble), on arm and on each absorbed
+    // hit (the pool shrinks). Active=false / a passed ExpiryTick drops the bubble. Reliable-ordered. See ShieldStatusMessage.
+    ShieldStatus = 123,
+    // DUO-WAVE2 (v48) abilities 2 & 4: the brief server->partner ECHO CUE — {uint NetworkId, byte Cue} — a flash +
+    // expanding ring on the named character so the partner can REACT (shield press / detonate initiate / detonate
+    // confirm, per EchoCueKind). Sent UNRELIABLE (a dropped cue is a missed flash, harmless). See EchoCueMessage.
+    EchoCue = 124,
+    // DUO-WAVE2 (v48) ability 3 (Laser Tether): server->both-partners TETHER state — {uint OwnerNetworkId, uint
+    // PartnerNetworkId, byte State} (Off/On/Broken). The client draws the beam between the two named entities and
+    // colours it by the distance band it recomputes locally (no band byte on the wire). Reliable-ordered. See
+    // TetherStatusMessage.
+    TetherStatus = 125,
+    // DUO-WAVE2 (v48) ability 4 (Midpoint Detonation): server->both-partners charge marker — {uint ChargeId, Q12.4
+    // origin, Q12.4 ushort radius, uint StartTick, uint ResolveTick, bool Active}. A LIVE-TRACKING variant of the
+    // telegraph decal: sent EACH charge tick with the current midpoint origin (the pair aims by repositioning), and
+    // once with Active=false at resolve. Reliable-ordered. See MidpointChargeMessage. Tag 127 is the next free tag.
+    MidpointCharge = 126
 }

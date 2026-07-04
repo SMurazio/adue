@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `47` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `48` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -87,6 +87,21 @@ World snapshots should fit in a single UDP packet for the current channel target
   (`uint PartnerNetworkId`, `bool Paired`) — the replicated `/pair` state. A new `EntityKind.Projectile` (byte 7)
   rides the existing spawn message; its tier (solo/good/perfect) rides the EXISTING replicated `TintRgb`+`ScaleMilli`
   (no new entity field). Pairing is a `/pair <name>` / `/unpair` chat command (mutual; disconnect unpairs).
+- v48 (DUO-WAVE2, exp/duo-abilities — EXPERIMENT branch): co-op abilities 2-4. FIVE additive messages, all
+  discriminator bytes range-validated on decode: client→server `DuoAbilityMessage` (`uint Sequence`,
+  `byte Ability` — Shield/TetherToggle/Detonate) — the ONE R/G/V trigger on its own dedup cursor (`_lastDuoSeq`),
+  reliable; server→client `ShieldStatusMessage` (`uint NetworkId`, `ushort Strength`, `uint ExpiryTick`,
+  `bool Active`) — the absorption bubble, sent to the shielded player + partner on arm / on each absorbed hit / on
+  expiry, reliable; server→partner `EchoCueMessage` (`uint NetworkId`, `byte Cue` — shield press / detonate
+  initiate / detonate confirm) — the flash+ring react cue, unreliable; server→both `TetherStatusMessage`
+  (`uint OwnerNetworkId`, `uint PartnerNetworkId`, `byte State` — Off/On/Broken) — the beam state (the client
+  colours the beam by the distance band it recomputes locally; no band byte on the wire), reliable; server→both
+  `MidpointChargeMessage` (`ulong ChargeId`, shape `byte kind` + Q12.4 origin + Q12.4 `ushort` radius,
+  `uint StartTick`, `uint ResolveTick`, `bool Active`) — the LIVE-TRACKING blast-charge decal, sent each charge
+  tick with the current midpoint origin (a dedicated message, NOT a reused `Telegraph` — the telegraph client path
+  dedups by id + self-resolves a LOCKED origin, which resists per-tick origin updates), reliable. Damage-absorption
+  is applied INSIDE the `PlayerDamageGate` (between the i-frame check and `ApplyDamage`); the tether-overstretch and
+  monster-slow effects reuse the existing player-damage gate and `MovementSpeedChanged` speed-modifier paths.
 
 ## Client Messages
 

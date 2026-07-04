@@ -509,11 +509,87 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortySeven()
+    public void ProtocolVersionIsFortyEight()
     {
-        // DUO-EXP (v47, exp/duo-abilities): PairStatus + AimPreview + FireSkillshot on top of v46 (node-field).
-        // Pin it so a change is caught.
-        Assert.Equal(47, ProtocolCodec.Version);
+        // DUO-WAVE2 (v48, exp/duo-abilities): DuoAbility + ShieldStatus + EchoCue + TetherStatus + MidpointCharge on
+        // top of v47 (duo foundation). Pin it so a change is caught.
+        Assert.Equal(48, ProtocolCodec.Version);
+    }
+
+    // DUO-WAVE2 (v48): the co-op ability wire messages round-trip, and every discriminator byte is hostile-input
+    // validated on decode (a corrupt selector is a ProtocolException, never a silent misinterpretation — the
+    // ReadAttackKind discipline).
+    [Fact]
+    public void DuoAbilityMessageRoundTrips()
+    {
+        foreach (var ability in new[] { DuoAbilityKind.Shield, DuoAbilityKind.TetherToggle, DuoAbilityKind.Detonate })
+        {
+            var decoded = Assert.IsType<DuoAbilityMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(new DuoAbilityMessage(7u, ability))));
+            Assert.Equal(7u, decoded.Sequence);
+            Assert.Equal(ability, decoded.Ability);
+        }
+    }
+
+    [Fact]
+    public void ShieldStatusMessageRoundTrips()
+    {
+        var decoded = Assert.IsType<ShieldStatusMessage>(
+            ProtocolCodec.Decode(ProtocolCodec.Encode(new ShieldStatusMessage(42u, 40, 1234u, true))));
+        Assert.Equal(42u, decoded.NetworkId);
+        Assert.Equal((ushort)40, decoded.Strength);
+        Assert.Equal(1234u, decoded.ExpiryTick);
+        Assert.True(decoded.Active);
+    }
+
+    [Fact]
+    public void EchoCueMessageRoundTrips()
+    {
+        var decoded = Assert.IsType<EchoCueMessage>(
+            ProtocolCodec.Decode(ProtocolCodec.Encode(new EchoCueMessage(9u, EchoCueKind.DetonateConfirm))));
+        Assert.Equal(9u, decoded.NetworkId);
+        Assert.Equal(EchoCueKind.DetonateConfirm, decoded.Cue);
+    }
+
+    [Fact]
+    public void TetherStatusMessageRoundTrips()
+    {
+        var decoded = Assert.IsType<TetherStatusMessage>(
+            ProtocolCodec.Decode(ProtocolCodec.Encode(new TetherStatusMessage(3u, 5u, TetherState.Broken))));
+        Assert.Equal(3u, decoded.OwnerNetworkId);
+        Assert.Equal(5u, decoded.PartnerNetworkId);
+        Assert.Equal(TetherState.Broken, decoded.State);
+    }
+
+    [Fact]
+    public void MidpointChargeMessageRoundTrips()
+    {
+        var original = new MidpointChargeMessage(
+            77UL, new TelegraphShape(TelegraphShapeKind.Circle, new WorldVector(12.5d, -4.25d), 3.5d), 100u, 116u, true);
+        var decoded = Assert.IsType<MidpointChargeMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+        Assert.Equal(77UL, decoded.ChargeId);
+        Assert.Equal(TelegraphShapeKind.Circle, decoded.Shape.Kind);
+        Assert.Equal(12.5d, decoded.Shape.Origin.X, 3);
+        Assert.Equal(-4.25d, decoded.Shape.Origin.Y, 3);
+        Assert.Equal(3.5d, decoded.Shape.Radius, 3);
+        Assert.Equal(100u, decoded.StartTick);
+        Assert.Equal(116u, decoded.ResolveTick);
+        Assert.True(decoded.Active);
+    }
+
+    [Fact]
+    public void DuoDiscriminatorBytes_AreHostileInputValidated()
+    {
+        // Corrupt the trailing discriminator byte of each encoded message and assert the decode rejects it.
+        AssertLastBytePoisonRejected(new DuoAbilityMessage(1u, DuoAbilityKind.Shield), 0);   // 0 is below Shield(1)
+        AssertLastBytePoisonRejected(new EchoCueMessage(1u, EchoCueKind.ShieldPress), 99);
+        AssertLastBytePoisonRejected(new TetherStatusMessage(1u, 2u, TetherState.On), 99);
+    }
+
+    private static void AssertLastBytePoisonRejected(IProtocolMessage message, byte poison)
+    {
+        var bytes = ProtocolCodec.Encode(message);
+        bytes[^1] = poison;
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(bytes));
     }
 
     // TELEGRAPH T2 (v44): the telegraph announcement round-trips — the ulong id, the shape (kind + Q12.4 origin +
