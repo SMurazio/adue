@@ -65,20 +65,18 @@ public sealed class EcologyStateTests
 
     // §5.1 #1b: "brink recovery from S_min takes markedly longer than from K/2 (the wound is real)".
     //
-    // FORK RESOLVED (orchestrator decision on the E1 briefing's flagged fork): the doc's original ">= 10x" figure
-    // is unreachable under PURE logistic growth (recovery time scales with the LOG of the deficit — the ratio
-    // caps ~2.5x at a non-degenerate milestone), so the MODEL gained depleted-band growth suppression
-    // (Allee-style — see EcologyState.DepletedSuppression): below 0.25K every growth increment is multiplied by
-    // S/(0.25K), making the DEPLETED band a slow crawl (the wound) while THIN and above recover at normal
-    // logistic speed. With the suppression in place, the empirically-true ratios at the 80%-of-K milestone are
-    // 4.889x (K=10 — the only pair whose Smin is the fractional 0.05K floor), 4.286x (K=8) and 3.441x (K=6): the
-    // smaller-K pairs are weaker because the ABSOLUTE floor (0.5) exceeds 0.05K there (Smin sits at 0.0625K /
-    // 0.0833K), so less of the suppressed band is traversed. Each pair pins its own bound just below its
-    // empirical value (the same pin-just-below style as the pre-suppression 2.2x bound this replaces).
+    // FORK RESOLVED TWICE (see EcologyState.DepletedSuppression's comment for the full history): pure logistic
+    // caps the ratio ~2.5x -> the model gained LINEAR depleted-band suppression -> the E1 independent review
+    // (REQUEST-CHANGES) found the linear form still MISSED the doc's >= 5x bar on all three starter pairs
+    // (4.889x / 4.286x / 3.441x — weakest for small K, where the absolute 0.5 floor eats most of the band) and
+    // that these thresholds had been calibrated BELOW the bar instead of escalating. The suppression is now
+    // QUADRATIC ((S/0.25K)^2), and every pair asserts the doc's actual acceptance number — 5.0, not an
+    // implementation-derived value. If the model can't clear the bar, this test MUST fail; never re-tune the
+    // threshold to the implementation.
     [Theory]
-    [InlineData(10.0, 1.0, 4.5)] // empirical 4.889x (44 ecology ticks from S_min vs 9 from K/2)
-    [InlineData(8.0, 0.4, 4.0)]  // empirical 4.286x (90 vs 21)
-    [InlineData(6.0, 0.25, 3.2)] // empirical 3.441x (117 vs 34)
+    [InlineData(10.0, 1.0, 5.0)]
+    [InlineData(8.0, 0.4, 5.0)]
+    [InlineData(6.0, 0.25, 5.0)]
     public void BrinkRecovery_FromSMin_IsMarkedlySlowerThanFromKHalf(double k, double rPerMinute, double minRatio)
     {
         var target = k * 0.8d;
@@ -102,15 +100,15 @@ public sealed class EcologyStateTests
     // band edge, NOT inside the strict "< 0.25K" band) the factor is exactly 1.0 — the plain logistic increment.
     // K=40 keeps the absolute 0.5 floor out of play (Smin = 0.05K = 2).
     [Fact]
-    public void DepletedBandSuppression_ScalesTheIncrementLinearly_AndIsInertAtTheBandEdge()
+    public void DepletedBandSuppression_ScalesTheIncrementQuadratically_AndIsInertAtTheBandEdge()
     {
         const double k = 40d;
         const double rPerTick = 1.0d / 6.0d; // rPerMinute 1.0 across 6 ecology ticks/minute.
 
         var midBand = new EcologyState(SingleTypeRegistry(k, rPerMinute: 1.0));
-        Assert.True(midBand.TrySetStock("r", "t", 5d)); // 0.125K -> suppression factor 5/10 = 0.5.
+        Assert.True(midBand.TrySetStock("r", "t", 5d)); // 0.125K -> QUADRATIC suppression (5/10)^2 = 0.25.
         midBand.EcologyTick();
-        var expectedMidBand = 5d + rPerTick * 5d * (1d - 5d / k) * 0.5d;
+        var expectedMidBand = 5d + rPerTick * 5d * (1d - 5d / k) * 0.25d;
         Assert.Equal(expectedMidBand, midBand.StockOf("r", "t"), 9);
 
         var bandEdge = new EcologyState(SingleTypeRegistry(k, rPerMinute: 1.0));
@@ -118,6 +116,46 @@ public sealed class EcologyStateTests
         bandEdge.EcologyTick();
         var expectedBandEdge = 10d + rPerTick * 10d * (1d - 10d / k);
         Assert.Equal(expectedBandEdge, bandEdge.StockOf("r", "t"), 9);
+    }
+
+    // E1 review finding 2: at the registry's MAX authorable rate (10/min => r*dt ~ 1.667/tick) the raw discrete
+    // logistic step genuinely overshoots K (damped-oscillation regime) — the GrowOne clamp is load-bearing, not
+    // float hygiene. This pins: from mid-stock at max rate, stock never exceeds K and never decreases (monotone
+    // convergence AS OBSERVED, i.e. the clamp is doing its job). Delete the clamp and this fails.
+    [Fact]
+    public void MaxAuthorableRate_NeverOvershootsK_AndNeverDecreases()
+    {
+        const double k = 40d;
+        var state = new EcologyState(SingleTypeRegistry(k, rPerMinute: 10.0));
+        Assert.True(state.TrySetStock("r", "t", k * 0.65d));
+        // High pressure gates the OVERGROWTH branch off for the whole run (10 * 0.98^50 ~ 3.6, still >= the 0.5
+        // idle threshold) — this pin is about the STANDARD branch's clamp; growth past K under idle pressure is
+        // a feature (D2 overgrowth), not the regression under guard. (First gate run caught exactly that: the
+        // unpressured version converged to K and then legitimately overgrew to 47.4.)
+        Assert.True(state.TrySetPressure("r", "t", 10d));
+
+        var previous = state.StockOf("r", "t");
+        for (var i = 0; i < 50; i++)
+        {
+            state.EcologyTick();
+            var current = state.StockOf("r", "t");
+            Assert.True(current <= k, $"tick {i}: stock {current} exceeded K={k} — the GrowOne clamp regressed.");
+            Assert.True(current >= previous, $"tick {i}: stock decreased {previous} -> {current}.");
+            previous = current;
+        }
+
+        Assert.Equal(k, previous, 9); // and it actually converges to K, not to an oscillation band below it.
+    }
+
+    // E1 review finding 4: non-finite force-writes are rejected INSIDE the state (Math.Clamp would propagate NaN).
+    [Fact]
+    public void NonFiniteForcedValues_AreRejected()
+    {
+        var state = new EcologyState(SingleTypeRegistry(10d, rPerMinute: 1.0));
+        Assert.False(state.TrySetStock("r", "t", double.NaN));
+        Assert.False(state.TrySetStock("r", "t", double.PositiveInfinity));
+        Assert.False(state.TrySetPressure("r", "t", double.NaN));
+        Assert.Equal(10d, state.StockOf("r", "t"), 9); // seeded at K, untouched by the rejected writes.
     }
 
     private static int TicksToReach(EcologyState state, double target)

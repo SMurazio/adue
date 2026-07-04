@@ -117,14 +117,16 @@ public sealed class EcologyState
 
         if (cell.Stock < k)
         {
-            // Standard logistic growth toward K, times the depleted-band suppression (1.0 at/above 0.25K). r is
-            // small at the starter rates (<= 1.0/min => <= 0.167/tick), well inside the monotonic-convergence
-            // region of the discrete logistic map (no oscillation/overshoot) — and suppression only shrinks the
-            // increment further, so monotonicity is preserved.
+            // Standard logistic growth toward K, times the depleted-band suppression (1.0 at/above 0.25K).
             cell.Stock += rPerTick * cell.Stock * (1d - cell.Stock / k) * DepletedSuppression(cell.Stock, k);
             if (cell.Stock > k)
             {
-                cell.Stock = k; // guard a hair of floating-point overshoot landing exactly on the K boundary.
+                // LOAD-BEARING clamp, not float hygiene (E1 review finding 2): at the registry's clamped MAX rate
+                // (10/min => r*dt ~ 1.667/tick) the discrete logistic map sits in the damped-oscillation regime and
+                // a raw step from mid-stock genuinely overshoots K by a few percent. The clamp absorbs it and keeps
+                // recovery monotonic at EVERY authorable rate — do not remove it believing it dead code (a test at
+                // the max rate pins this).
+                cell.Stock = k;
             }
         }
         else if (cell.Pressure < PressureIdleThreshold)
@@ -161,13 +163,24 @@ public sealed class EcologyState
     }
 
     // DEPLETED-BAND GROWTH SUPPRESSION (see the class doc): the Allee-style multiplier on every growth increment.
-    // Linear in S within the DEPLETED band — S/(0.25K) below 0.25K (0.2 at the 0.05K floor, approaching 1.0 at the
-    // band edge), exactly 1.0 at/above it. Strictly positive for any S above zero (the D3 floor guarantees S > 0),
-    // so growth is slowed to a crawl at the brink but NEVER stopped — no-extinction is preserved.
+    // QUADRATIC in S within the DEPLETED band — (S/(0.25K))^2 below 0.25K, exactly 1.0 at/above it. REVISED from
+    // linear by the E1 independent review (REQUEST-CHANGES): with the linear form the floor-entry factor is
+    // Smin/band = 2/K — WEAKEST for small K, so The Verge (K=6) recovered from the brink only ~3.4x slower than
+    // from K/2, under the doc's >= 5x acceptance bar (and the shipped test thresholds had been calibrated to the
+    // miss instead of escalating it). Squaring deepens the wound where it matters — the crawl near the floor —
+    // (K=10: 0.2 -> 0.04; K=6: 0.33 -> 0.11) so every starter region clears the bar, and reads truer: deep wounds
+    // heal disproportionately slowly. Still strictly positive for any S above zero (the D3 floor guarantees
+    // S > 0), so growth slows to a crawl at the brink but NEVER stops — no-extinction is preserved.
     private static double DepletedSuppression(double stock, double k)
     {
         var band = DepletedBandFractionOfK * k;
-        return stock < band ? stock / band : 1d;
+        if (stock >= band)
+        {
+            return 1d;
+        }
+
+        var fraction = stock / band;
+        return fraction * fraction;
     }
 
     // D1/D3 kill hook (E2 wires the caller): a kill in `regionId` of `typeId` permanently decrements stock by 1
@@ -239,7 +252,10 @@ public sealed class EcologyState
     // [Smin, 1.5K] like the natural growth/kill paths never exceed. False for an unknown region/type.
     public bool TrySetStock(string regionId, string typeId, double value)
     {
-        if (!TryGetCell(regionId, typeId, out var cell, out var config))
+        // Non-finite guard INSIDE the state (E1 review finding 4): Math.Clamp propagates NaN rather than
+        // clamping it, and only the /ecology command's parser filters today — a future E2+ caller must not be
+        // able to poison a stock cell. Same guard on TrySetPressure.
+        if (!double.IsFinite(value) || !TryGetCell(regionId, typeId, out var cell, out var config))
         {
             return false;
         }
@@ -254,7 +270,7 @@ public sealed class EcologyState
     // [0, MaxForcedPressure]. False for an unknown region/type.
     public bool TrySetPressure(string regionId, string typeId, double value)
     {
-        if (!TryGetCell(regionId, typeId, out var cell, out _))
+        if (!double.IsFinite(value) || !TryGetCell(regionId, typeId, out var cell, out _))
         {
             return false;
         }

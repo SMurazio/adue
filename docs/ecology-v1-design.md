@@ -33,10 +33,13 @@ short per-spawn pacing delay). WHY: a 5s timer makes hunting pressure literally 
 the single number that makes farming *matter*, the core pillar-5 claim.
 
 **D2. Logistic regrowth + depleted-band suppression + decaying pressure.** Per ecology tick (every
-10 s): `S += r · S · (1 − S/K) · depletedFactor` where `depletedFactor = min(1, S / 0.25K)` (Allee-style
-suppression — REVISED during E1: pure logistic recovery time scales with the LOG of the deficit, capping
-the brink-vs-half recovery ratio at ~2.5× no matter the tuning, which fails the intent below; the E1
-implementer proved the original ≥10× acceptance bar unreachable). Per-minute rate `r` authored per
+10 s): `S += r · S · (1 − S/K) · depletedFactor` where `depletedFactor = min(1, (S / 0.25K)²)`
+(Allee-style suppression — REVISED TWICE: the E1 implementer proved the original ≥10× bar unreachable
+under pure logistic (log-of-deficit cap ~2.5×) → linear suppression added; the E1 independent review
+then proved LINEAR still missed the ≥5× bar on all three starter regions (floor-entry factor 2/K is
+weakest for small K — 3.44× on the Verge) → QUADRATIC, which clears the bar everywhere and reads truer:
+deep wounds heal disproportionately slowly. Authoring note: K min is 3, not 1 — below K=3 the absolute
+0.5 stock floor sits at/above the 0.25K band and DEPLETED becomes unreachable). Per-minute rate `r` authored per
 region×type; pressure decays `*= 0.98` (≈half-life 5.7 min), `+= 1` per kill. Overgrowth: while
 `pressure < pressureIdleThreshold` (default 0.5) growth continues past K at `r/3` (same depletedFactor
 applies, inert above 0.25K) up to `S_max = 1.5K`. WHY: a hunted-to-the-brink region crawls through the

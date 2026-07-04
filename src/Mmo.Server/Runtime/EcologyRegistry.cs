@@ -10,8 +10,10 @@ namespace Mmo.Server.Runtime;
 // per-type K/r/maxLive) — it owns no mutable stock/pressure; EcologyState owns that (constructed FROM this).
 public sealed class EcologyRegistry
 {
-    // Clamps mirroring the §7 authoring note: "K ∈ [1,64], r ∈ [0.05, 10]/min, maxLive ∈ [1,32]".
-    private const double MinK = 1d;
+    // Clamps mirroring the §7 authoring note — EXCEPT MinK, raised 1 -> 3 by the E1 independent review: with
+    // K <= 2 the absolute stock floor (0.5) sits AT/ABOVE the 0.25K depleted band, making the DEPLETED state
+    // unreachable and voiding D2's suppression mechanic for that region. K >= 3 keeps floor (0.5) < band (0.75).
+    private const double MinK = 3d;
     private const double MaxK = 64d;
     private const double MinRPerMinute = 0.05d;
     private const double MaxRPerMinute = 10d;

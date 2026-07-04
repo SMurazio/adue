@@ -65,7 +65,9 @@ public sealed class EcologyRegistryTests
     }
 
     [Theory]
-    [InlineData(0.0, 1.0)]     // K below min -> clamped up to 1
+    [InlineData(0.0, 3.0)]     // K below min -> clamped up to 3 (raised 1->3 by the E1 review: K <= 2 puts the
+                               // 0.5 stock floor at/above the 0.25K band, making DEPLETED unreachable)
+    [InlineData(2.0, 3.0)]     // the exact latent-trap K the review named
     [InlineData(1000.0, 64.0)] // K above max -> clamped down to 64
     public void KIsClampedOnLoad(double authoredK, double expectedK)
     {
