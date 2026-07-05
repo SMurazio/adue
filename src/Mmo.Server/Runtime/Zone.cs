@@ -293,6 +293,31 @@ public sealed class Zone
         return crossedTile;
     }
 
+    // BOSS-3 (P2 Repel, docs/boss-encounter-sunderer-design.md): shove `entity` to a continuous `target`, swept-circle
+    // WALL-resolved (so a knockback can never punch a body through the arena's wall ring), migrating the spatial bucket
+    // + re-publishing the new position. WALLS ONLY (no entity obstacles — a shove is a hard displacement; the monster/
+    // player separation pass de-overlaps bodies next tick). The reconcile snap on a shoved LOCAL player is the accepted
+    // v1 (design "Knockback vs prediction": server-authoritative displacement, no predicted shove). Mirrors
+    // IntegrateMovement's resolve+migrate but with an EXPLICIT delta and no velocity — a teleport-style set, not a glide.
+    public void DisplaceResolved(WorldEntity entity, WorldVector target, double radius)
+    {
+        var previousTile = entity.TileCoord;
+        var start = entity.Position;
+        var delta = target - start;
+        _tileGrid.QueryNearbyWalls(start, delta, radius, _wallScratch);
+        var resolved = ContinuousCollision.Resolve(start, delta, radius, _wallScratch);
+        if (entity.ApplyResolvedMove(resolved))
+        {
+            World.OnEntityMoved(entity, previousTile);
+        }
+        else
+        {
+            // A short (wall-clamped) shove that crosses no tile still must re-publish the nudged position — the same
+            // stop-edge / separation re-include path (ApplyResolvedMove only bumps StateRevision on a tile cross).
+            entity.MarkRepositioned();
+        }
+    }
+
     public WorldEntity SpawnPlayer(
         uint networkId,
         Guid characterId,

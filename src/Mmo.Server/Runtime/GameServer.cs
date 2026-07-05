@@ -617,6 +617,11 @@ public sealed class GameServer
             // encounter-agnostic behind this delegate. Inert for any non-drone (only the "interposer" type selects it).
             ["interposer"] = new InterposerBehavior((WorldEntity drone, out WorldVector target) =>
                 _bossEncounter.TryGetInterposeTarget(out target)),
+            // BOSS-3 (P2): the splinter's minimal seek-nearest-participant brain. Its target (the nearest living
+            // participant) is the encounter's authority (TryGetSplinterTarget); the POP is encounter-driven, so the
+            // brain never harms a player. Inert for any non-splinter (only the "splinter" type selects it).
+            ["splinter"] = new SplinterBehavior((WorldEntity splinter, out WorldVector target) =>
+                _bossEncounter.TryGetSplinterTarget(splinter, out target)),
         };
         // BOSS-1 (docs/boss-encounter-sunderer-design.md): the Sunderer encounter engine. Every world touch is an
         // injected seam so the engine is headlessly testable and GameServer stays the single wiring point: spawn the
@@ -655,7 +660,31 @@ public sealed class GameServer
             // BOSS-2 (P1): tear down an encounter ADD (the drone) through the SAME leak-free by-id path the boss uses.
             despawnAdd: DespawnBossEntity,
             // BOSS-2 (P1): broadcast the boss's plating state to AOI viewers (Laws 4/7 legibility).
-            broadcastPlating: BroadcastBossPlating);
+            broadcastPlating: BroadcastBossPlating,
+            // BOSS-3 (P2): damage a participant through THE player-damage choke point (i-frames + shield absorb apply
+            // naturally) — the user's damage-choke invariant; the engine never mutates Stats directly.
+            damagePlayer: _playerDamage.TryDamagePlayer,
+            // BOSS-3 (P2 Repel): server-authoritative, wall-resolved displacement (the reconcile snap is accepted v1).
+            displacePlayer: (player, target) => _zone.DisplaceResolved(player, target, CollisionDefaults.BodyRadius),
+            // BOSS-3 (P2 Echo Lash): reuse the wave-2 shield ECHO CUE on the participant's own client (ShieldPress kind,
+            // no protocol change) — resolve the entity, then the existing SendEchoCueTo relay.
+            echoCue: entityId =>
+            {
+                if (_zone.World.TryGet(entityId, out var participant))
+                {
+                    SendEchoCueTo(participant, EchoCueKind.ShieldPress);
+                }
+            },
+            // BOSS-3 (P2 Splinter ring): spawn a splinter add (the "splinter" type), like the drone (engine owns cadence).
+            spawnSplinter: tile =>
+            {
+                var type = _monsterTypes.TryGet("splinter", out var splinter) ? splinter : _monsterTypes.Default;
+                return SpawnMonsterCore(type, tile, maxHealthOverride: null, renderScaleOverride: null);
+            },
+            // BOSS-3 (P2 Repel/Bind): schedule the field's VISUAL as a NO-DAMAGE telegraph ring (damage 0) — reuse the
+            // decal wire; the field RESOLVE is encounter-side on pair distance, so the ring carries zero gameplay weight.
+            scheduleFieldVisual: (center, radius, startTick, resolveTick) =>
+                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Circle(center, radius), startTick, resolveTick, damage: 0, source: "Sunder field"));
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         SpawnAuthoredProps();

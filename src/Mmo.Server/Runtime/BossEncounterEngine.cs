@@ -79,6 +79,32 @@ public sealed class BossEncounterEngine
     // and permanent-off at 70%.
     public delegate void BroadcastPlatingDelegate(ulong bossId, bool platingActive);
 
+    // BOSS-3 (P2 SUNDER): damage a PARTICIPANT through THE player-damage choke point (PlayerDamageGate.TryDamagePlayer)
+    // — the ONLY player-damage path (the user's damage-choke invariant), so the dodge-roll i-frames + the Unison-Shield
+    // absorb apply to every field/lash/pop hit for FREE. Returns true iff damage actually landed. NEVER mutate Stats
+    // directly here.
+    public delegate bool DamagePlayerDelegate(WorldEntity victim, int amount, uint serverTick, string source);
+
+    // BOSS-3 (P2 Repel): server-authoritative DISPLACEMENT — set a participant's continuous position to `target`,
+    // wall-resolved, migrating the spatial bucket + bumping StateRevision (Zone.DisplaceResolved). The reconcile snap on
+    // the shoved local player is the accepted v1 (design "Knockback vs prediction").
+    public delegate void DisplacePlayerDelegate(WorldEntity player, WorldVector target);
+
+    // BOSS-3 (P2 Echo Lash): play the shield ECHO CUE on a participant's own client — REUSE the wave-2 EchoCueMessage
+    // wire exactly as the shield upgrade path sends it (EchoCueKind.ShieldPress), so NO protocol change.
+    public delegate void EchoCueDelegate(ulong entityId);
+
+    // BOSS-3 (P2 Splinter ring): spawn a splinter ADD at `tile` and return its entity — the "splinter" type (glide
+    // body, splinter brain, 15 HP, no loot), like the drone via SpawnMonsterCore (NOT a spawner — the engine owns the
+    // re-ring cadence + teardown + the pop).
+    public delegate WorldEntity SpawnSplinterDelegate(TileCoord tile);
+
+    // BOSS-3 (P2 Repel/Bind): schedule a NO-DAMAGE telegraph ring as the field's VISUAL — REUSE the existing decal wire
+    // (TelegraphScheduler.Schedule) with damage 0, a harmless auto-removing ring. The field RESOLVE is encounter-side
+    // and judged on PAIR DISTANCE (not shape membership), so the visual carries zero gameplay weight — it only tells the
+    // pair "a field is charging on you." `center`/`radiusUnits` size one ring; the engine calls it once per participant.
+    public delegate void ScheduleFieldVisualDelegate(WorldVector center, double radiusUnits, uint startTick, uint resolveTick);
+
     // HP scaled at spawn by participant count (design "Boss stats"): 1200 duo / 700 solo.
     public const int DuoBossHealth = 1200;
     public const int SoloBossHealth = 700;
@@ -107,6 +133,62 @@ public sealed class BossEncounterEngine
     private const double DroneFirstSpawnSeconds = 5d;
     private const double DroneRespawnSeconds = 6d;
 
+    // ==== BOSS-3 (P2 SUNDER, docs/boss-encounter-sunderer-design.md "P2 — SUNDER") ====
+    // P2 mechanics are live while the encounter is Active AND the boss's HP is in (P3HealthFraction, PlatingHealthFraction]
+    // — i.e. between 40% and 70%. Crossing 70% (the P1 crumble) ARMS them with staggered first-fire delays ANCHORED at
+    // that tick; crossing 40% DISARMS them (adds cleared + P3 teaser) — P3 itself arrives in BOSS-4.
+    public const double P3HealthFraction = 0.40d;
+
+    // Repel / Bind FIELDS (S1 distance contest). First field FieldFirstDelaySeconds after the crumble, then every
+    // FieldIntervalSeconds, ALTERNATING Repel↔Bind (duo). A FieldTelegraphSeconds ring decal telegraphs each; the
+    // resolve is PAIR DISTANCE (not shape membership). REPEL: pair within FieldRepelTriggerRangeUnits at resolve →
+    // FieldDamage each + knocked FieldRepelKnockbackUnits directly apart. BIND: pair farther than FieldBindTriggerRangeUnits
+    // apart → FieldDamage each (no displacement). The lace's home band (8–12u) sits BETWEEN the asks (Law 6). SOLO (Law
+    // 2): a single move-out ring, REPEL-only vs the BOSS (within range of the boss → damage + knockback away from it);
+    // no Bind solo. FieldTelegraphRingRadiusUnits is cosmetic-only (the ring is a "brace" indicator, not the hit test).
+    private const double FieldFirstDelaySeconds = 6d;
+    private const double FieldIntervalSeconds = 9d;
+    private const double FieldTelegraphSeconds = 1.2d;
+    private const double FieldTelegraphRingRadiusUnits = 2.0d;
+    private const int FieldDamage = 15;
+    private const double FieldRepelTriggerRangeUnits = 6d;
+    private const double FieldBindTriggerRangeUnits = 4d;
+    private const double FieldRepelKnockbackUnits = 3d;
+
+    // ECHO LASH (T1 sync pressure). Every LashIntervalSeconds (first LashFirstDelaySeconds after the crumble): the shield
+    // ECHO CUE + a chat brace-line play for every participant, then LashPulseCountDuo (solo: LashPulseCountSolo) pulses of
+    // LashPulseDamage each — the first LashCueLeadSeconds after the cue (reaction lead), the rest LashPulseSpacingSeconds
+    // apart. EVERY pulse routes through the PlayerDamageGate, so i-frames + shield absorb apply naturally (an upgraded
+    // unison shield eats both pulses; two solo shields eat one each; no shield = eat both). NEVER lethal from full HP BY
+    // DESIGN — pressure, not a wipe check — so there is deliberately NO lethality special-casing here.
+    private const double LashFirstDelaySeconds = 11d;
+    private const double LashIntervalSeconds = 14d;
+    private const double LashCueLeadSeconds = 1.25d;
+    private const double LashPulseSpacingSeconds = 0.5d;
+    private const int LashPulseDamage = 18;
+    private const int LashPulseCountDuo = 2;
+    private const int LashPulseCountSolo = 1;
+
+    // SPLINTER RING (S7 vulnerability). RingFirstDelaySeconds after the crumble, then every RingIntervalSeconds:
+    // SplinterCountDuo (solo: SplinterCountSolo) splinters spawn evenly on a radius-SplinterRingRadiusUnits ring around
+    // the boss + creep toward the nearest living participant (SplinterBehavior); a splinter within SplinterPopRangeUnits
+    // of one POPS for SplinterPopDamage (through the gate) + despawns. The tether orbit-sweep clears the ring — its
+    // showcase moment. The splinter's 15 HP / 1.2 u/s / no-attack stats + the seek brain are the "splinter" monster
+    // type; this engine owns the WHEN (ring cadence) + the POP.
+    private const double RingFirstDelaySeconds = 8d;
+    private const double RingIntervalSeconds = 20d;
+    private const double SplinterRingRadiusUnits = 7d;
+    private const int SplinterCountDuo = 6;
+    private const int SplinterCountSolo = 3;
+    private const double SplinterPopRangeUnits = 1d;
+    private const int SplinterPopDamage = 12;
+
+    // STAGGER-BY-CONSTRUCTION (task contract): with these constants @20 Hz, relative to the crumble anchor T0, a field
+    // RESOLVES at T0 + 144t (≡ T0+4 mod 10), a ring SPAWNS at T0 + 160t (≡ T0+0 mod 10), and each lash PULSE lands at
+    // T0 + {245,255}t (≡ T0+5 mod 10). Every cadence interval is a whole multiple of 10 ticks (9s=180 / 14s=280 /
+    // 20s=400), so those residues never shift — the three resolve streams occupy DISJOINT residue classes {4},{0},{5}
+    // mod 10 for ANY anchor, i.e. no two ever resolve on the same tick. (StaggerConstants_… pins this empirically.)
+
     // The chat countdown before the boss spawns, and the grace window after the arena empties before it resets.
     private const double CountdownSeconds = 3d;
     private const double EmptyResetSeconds = 10d;
@@ -126,6 +208,11 @@ public sealed class BossEncounterEngine
     private readonly SpawnDroneDelegate _spawnDrone;
     private readonly DespawnAddDelegate _despawnAdd;
     private readonly BroadcastPlatingDelegate _broadcastPlating;
+    private readonly DamagePlayerDelegate _damagePlayer;
+    private readonly DisplacePlayerDelegate _displacePlayer;
+    private readonly EchoCueDelegate _echoCue;
+    private readonly SpawnSplinterDelegate _spawnSplinter;
+    private readonly ScheduleFieldVisualDelegate _scheduleFieldVisual;
 
     private readonly uint _countdownTicks;
     private readonly uint _emptyResetTicks;
@@ -135,6 +222,15 @@ public sealed class BossEncounterEngine
     private readonly uint _soloShatterWindowTicks;
     private readonly uint _droneFirstSpawnTicks;
     private readonly uint _droneRespawnTicks;
+    private readonly uint _fieldFirstDelayTicks;
+    private readonly uint _fieldIntervalTicks;
+    private readonly uint _fieldTelegraphTicks;
+    private readonly uint _lashFirstDelayTicks;
+    private readonly uint _lashIntervalTicks;
+    private readonly uint _lashCueLeadTicks;
+    private readonly uint _lashPulseSpacingTicks;
+    private readonly uint _ringFirstDelayTicks;
+    private readonly uint _ringIntervalTicks;
 
     // A participant: the entity + the tile it should be teleported back to on leave. Value struct, held in a list
     // (never more than 2 — issuer + partner — so a list is cheaper than a dictionary).
@@ -174,6 +270,27 @@ public sealed class BossEncounterEngine
     private bool _droneSpawnScheduled;
     private uint _droneSpawnTick;
 
+    // BOSS-3 (P2 SUNDER) state. `_p2Active` latches ON at the 70% crumble, OFF at the 40% edge; `_p3Reached` latches
+    // once HP first crosses <=40% (diagnostic — P2 never re-arms this run regardless). Field: `_nextFieldTick` schedules
+    // the next FIRE; `_fieldPending`/`_fieldResolveTick` carry the armed field to its distance-resolve; `_fieldPendingIsRepel`
+    // is the pending field's kind; `_fieldAlternator` toggles each fire (Repel↔Bind). Lash: `_nextLashTick` schedules the
+    // next cue; `_lashPulsesRemaining`/`_lashNextPulseTick` drive the armed pulses. Ring: `_nextRingTick` schedules the
+    // next ring. `_adds` is the GENERALIZED encounter-adds ledger (BOSS-2): EVERY live add id — the interposer drone (P1)
+    // and the splinters (P2) — so ONE teardown loop clears them on every end path; anything in it that is NOT `_droneId`
+    // is a splinter (the drone keeps its own respawn-cadence fields above).
+    private bool _p2Active;
+    private bool _p3Reached;
+    private uint _nextFieldTick;
+    private bool _fieldPending;
+    private uint _fieldResolveTick;
+    private bool _fieldPendingIsRepel;
+    private bool _fieldAlternator;
+    private uint _nextLashTick;
+    private int _lashPulsesRemaining;
+    private uint _lashNextPulseTick;
+    private uint _nextRingTick;
+    private readonly List<ulong> _adds = [];
+
     public BossEncounterEngine(
         int tickRate,
         SpawnBossDelegate spawnBoss,
@@ -183,7 +300,12 @@ public sealed class BossEncounterEngine
         NotifyDelegate notify,
         SpawnDroneDelegate spawnDrone,
         DespawnAddDelegate despawnAdd,
-        BroadcastPlatingDelegate broadcastPlating)
+        BroadcastPlatingDelegate broadcastPlating,
+        DamagePlayerDelegate damagePlayer,
+        DisplacePlayerDelegate displacePlayer,
+        EchoCueDelegate echoCue,
+        SpawnSplinterDelegate spawnSplinter,
+        ScheduleFieldVisualDelegate scheduleFieldVisual)
     {
         _tickRate = tickRate;
         _spawnBoss = spawnBoss ?? throw new ArgumentNullException(nameof(spawnBoss));
@@ -194,6 +316,11 @@ public sealed class BossEncounterEngine
         _spawnDrone = spawnDrone ?? throw new ArgumentNullException(nameof(spawnDrone));
         _despawnAdd = despawnAdd ?? throw new ArgumentNullException(nameof(despawnAdd));
         _broadcastPlating = broadcastPlating ?? throw new ArgumentNullException(nameof(broadcastPlating));
+        _damagePlayer = damagePlayer ?? throw new ArgumentNullException(nameof(damagePlayer));
+        _displacePlayer = displacePlayer ?? throw new ArgumentNullException(nameof(displacePlayer));
+        _echoCue = echoCue ?? throw new ArgumentNullException(nameof(echoCue));
+        _spawnSplinter = spawnSplinter ?? throw new ArgumentNullException(nameof(spawnSplinter));
+        _scheduleFieldVisual = scheduleFieldVisual ?? throw new ArgumentNullException(nameof(scheduleFieldVisual));
         _countdownTicks = SecondsToTicks(CountdownSeconds);
         _emptyResetTicks = SecondsToTicks(EmptyResetSeconds);
         _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
@@ -202,6 +329,15 @@ public sealed class BossEncounterEngine
         _soloShatterWindowTicks = SecondsToTicks(SoloShatterWindowSeconds);
         _droneFirstSpawnTicks = SecondsToTicks(DroneFirstSpawnSeconds);
         _droneRespawnTicks = SecondsToTicks(DroneRespawnSeconds);
+        _fieldFirstDelayTicks = SecondsToTicks(FieldFirstDelaySeconds);
+        _fieldIntervalTicks = SecondsToTicks(FieldIntervalSeconds);
+        _fieldTelegraphTicks = SecondsToTicks(FieldTelegraphSeconds);
+        _lashFirstDelayTicks = SecondsToTicks(LashFirstDelaySeconds);
+        _lashIntervalTicks = SecondsToTicks(LashIntervalSeconds);
+        _lashCueLeadTicks = SecondsToTicks(LashCueLeadSeconds);
+        _lashPulseSpacingTicks = SecondsToTicks(LashPulseSpacingSeconds);
+        _ringFirstDelayTicks = SecondsToTicks(RingFirstDelaySeconds);
+        _ringIntervalTicks = SecondsToTicks(RingIntervalSeconds);
     }
 
     // Test/diagnostic visibility (like BasicRoamerBehavior's TryGetPhase) — never drives replication.
@@ -218,6 +354,13 @@ public sealed class BossEncounterEngine
     public bool PlatingPermanentlyOff => _platingPermanentlyOff;
     public bool DroneAlive => _droneAlive;
     public ulong DroneId => _droneId;
+
+    // BOSS-3 (P2) test/diagnostic visibility. P2Active = the SUNDER mechanics are live (armed at the 70% crumble, off
+    // at 40%). P3Reached = HP has crossed <=40% (P2 disarmed for good this run). AddCount = live encounter adds (drone
+    // in P1, splinters in P2).
+    public bool P2Active => _p2Active;
+    public bool P3Reached => _p3Reached;
+    public int AddCount => _adds.Count;
 
     // Seconds → ticks, the canonical windup quantization (Math.Ceiling, floored at 1) GameServer uses everywhere.
     private uint SecondsToTicks(double seconds) => (uint)Math.Max(1, (int)Math.Ceiling(seconds * _tickRate));
@@ -379,6 +522,13 @@ public sealed class BossEncounterEngine
         _droneId = 0;
         _droneSpawnScheduled = true;
         _droneSpawnTick = serverTick + _droneFirstSpawnTicks;
+
+        // BOSS-3 (P2): fresh P2 state — the SUNDER mechanics arm only at the 70% crumble, so they are latched OFF here.
+        _p2Active = false;
+        _p3Reached = false;
+        _fieldPending = false;
+        _lashPulsesRemaining = 0;
+        _adds.Clear();
 
         _broadcastPlating(_bossId, true);
         AnnounceAll("THE SUNDERER awakens. Break its bond-hunger together!");
@@ -630,12 +780,14 @@ public sealed class BossEncounterEngine
         if (!_platingPermanentlyOff && boss.Stats.MaxHealth > 0
             && boss.Stats.Health <= (int)Math.Round(boss.Stats.MaxHealth * PlatingHealthFraction, MidpointRounding.AwayFromZero))
         {
-            CrumbleForGood();
-            return; // below 70% the plating + drone are done; nothing else to pump.
+            CrumbleForGood(serverTick); // the P1→P2 edge: plating gone for good, P2 (SUNDER) mechanics arm here.
+            return;
         }
 
         if (_platingPermanentlyOff)
         {
+            // BOSS-3: below 70% the P1 plating + drone are done; pump the P2 SUNDER mechanics instead (until 40% → P3).
+            StepP2(serverTick, boss);
             return;
         }
 
@@ -653,6 +805,7 @@ public sealed class BossEncounterEngine
         {
             if (_tryResolve(_droneId) is null)
             {
+                _adds.Remove(_droneId); // the add ledger drops the dead drone (killed by a player) before the respawn.
                 _droneAlive = false;
                 _droneId = 0;
                 _droneSpawnScheduled = true;
@@ -665,6 +818,7 @@ public sealed class BossEncounterEngine
             _droneId = drone.Id;
             _droneAlive = true;
             _droneSpawnScheduled = false;
+            _adds.Add(_droneId); // track the drone in the generalized add ledger (torn down with the splinters).
         }
     }
 
@@ -693,9 +847,10 @@ public sealed class BossEncounterEngine
         AnnounceAll("The plating SHATTERS — strike now!");
     }
 
-    // The plating crumbles for good at the 70% boundary: latch it off, drop any open window, stop + tear down the
-    // interposer drone (the mechanics are done this run), and broadcast + chat the permanent-off (Laws 4/7).
-    private void CrumbleForGood()
+    // The plating crumbles for good at the 70% boundary (the P1→P2 edge): latch it off, drop any open window, stop +
+    // tear down the interposer drone (the P1 add is done this run), broadcast + chat the permanent-off (Laws 4/7), and
+    // ARM the P2 (SUNDER) mechanics anchored at this tick.
+    private void CrumbleForGood(uint serverTick)
     {
         _platingPermanentlyOff = true;
         _windowOpen = false;
@@ -703,15 +858,17 @@ public sealed class BossEncounterEngine
         TearDownDrone();
         _broadcastPlating(_bossId, false);
         AnnounceAll("The plating crumbles for good!");
+        ArmP2(serverTick);
     }
 
-    // Despawn the live interposer drone (leak-free, idempotent) and clear its schedule — used by CrumbleForGood and
-    // the full teardown.
+    // Despawn the live interposer drone (leak-free, idempotent), drop it from the add ledger, and clear its schedule —
+    // used by CrumbleForGood (the P1 add ends at the crumble; no splinters exist yet, so this touches only the drone).
     private void TearDownDrone()
     {
         if (_droneAlive)
         {
             _despawnAdd(_droneId);
+            _adds.Remove(_droneId);
         }
 
         _droneAlive = false;
@@ -719,14 +876,343 @@ public sealed class BossEncounterEngine
         _droneSpawnScheduled = false;
     }
 
-    // Full teardown of the P1 mechanics — the drone add + the plating window/hit-count state — on any encounter end
-    // (victory / wipe / empty / countdown-cancel). The plating on/off latches themselves are re-initialised fresh in
-    // SpawnBossNow, so this only needs to clear what could leak a live entity or stale window across runs.
+    // Full teardown on any encounter end (victory / wipe / empty / countdown-cancel): despawn EVERY live add (drone +
+    // splinters) in one loop, and clear the plating window + P2 pending state so nothing lands after the fight ended.
+    // The on/off latches are re-initialised fresh in SpawnBossNow, so this only clears what could leak a live entity or
+    // a stale pending resolve across runs.
     private void TearDownEncounterMechanics()
     {
-        TearDownDrone();
+        DespawnAllAdds();
         _windowOpen = false;
         _soloHitTicks.Clear();
+        _p2Active = false;
+        _fieldPending = false;
+        _lashPulsesRemaining = 0;
+    }
+
+    // BOSS-3: despawn EVERY live encounter add (the drone + all splinters) leak-free (idempotent), clear the ledger,
+    // and reset the drone's cadence bookkeeping (its id lived in the ledger). Used by the full teardown + the 40% P2
+    // disarm — the "adds cleaned everywhere the boss is" invariant, now covering the whole add ledger.
+    private void DespawnAllAdds()
+    {
+        foreach (var id in _adds)
+        {
+            _despawnAdd(id);
+        }
+
+        _adds.Clear();
+        _droneAlive = false;
+        _droneId = 0;
+        _droneSpawnScheduled = false;
+    }
+
+    // ==== BOSS-3 (P2 SUNDER): Repel/Bind fields + Echo Lash + splinter ring ====
+
+    // Arm the P2 mechanics at the 70% crumble tick — every cadence is offset from THIS anchor (the staggered-by-
+    // construction first-fire delays). The first duo field is REPEL (the home band 8–12u is already Repel-safe; the ask
+    // then alternates to Bind and back).
+    private void ArmP2(uint serverTick)
+    {
+        _p2Active = true;
+        _fieldPending = false;
+        _fieldAlternator = true; // first field Repel.
+        _lashPulsesRemaining = 0;
+        _nextFieldTick = serverTick + _fieldFirstDelayTicks;
+        _nextLashTick = serverTick + _lashFirstDelayTicks;
+        _nextRingTick = serverTick + _ringFirstDelayTicks;
+        AnnounceAll("The Sunderer sunders your bond — mind the distance!");
+    }
+
+    // The per-tick P2 pump (called from StepPlatingAndAdds once the plating has crumbled). Order is fixed for
+    // determinism (field resolve → lash → ring → splinter pops); the three damage streams occupy disjoint tick
+    // residue classes so no two ever resolve on the same tick anyway.
+    private void StepP2(uint serverTick, WorldEntity boss)
+    {
+        // 40% edge → DISARM P2 (adds cleared + P3 teaser). P3 itself is BOSS-4; below 40% the boss fights its baseline
+        // kit. Latched (_p2Active off) so the mechanics never re-arm this run.
+        if (_p2Active && boss.Stats.MaxHealth > 0
+            && boss.Stats.Health <= (int)Math.Round(boss.Stats.MaxHealth * P3HealthFraction, MidpointRounding.AwayFromZero))
+        {
+            DisarmP2();
+            return;
+        }
+
+        if (!_p2Active)
+        {
+            return;
+        }
+
+        StepFields(serverTick);
+        StepEchoLash(serverTick);
+        StepSplinterRing(serverTick, boss);
+        StepSplinterPops(serverTick);
+    }
+
+    // The 40% disarm: stop the P2 mechanics for good, clear every splinter (the ring dies at 40% too), cancel any
+    // pending field/lash so nothing lands after, and chat the P3 teaser. Does NOT reset the encounter — the boss keeps
+    // fighting its baseline kit until BOSS-4's P3 (or death).
+    private void DisarmP2()
+    {
+        _p2Active = false;
+        _p3Reached = true;
+        _fieldPending = false;
+        _lashPulsesRemaining = 0;
+        DespawnAllAdds(); // splinters die at 40% (the drone is already long gone from the crumble).
+        AnnounceAll("The Sunderer draws its shattered mass inward...");
+    }
+
+    // Repel/Bind fields: resolve a pending field at its telegraph deadline (distance-judged), then fire the next when
+    // its cadence arrives. A field is never pending and re-firing at once (cadence 9s ≫ telegraph 1.2s).
+    private void StepFields(uint serverTick)
+    {
+        if (_fieldPending && serverTick >= _fieldResolveTick)
+        {
+            ResolveField(serverTick);
+            _fieldPending = false;
+        }
+
+        if (!_fieldPending && serverTick >= _nextFieldTick)
+        {
+            FireField(serverTick);
+            _nextFieldTick = serverTick + _fieldIntervalTicks;
+        }
+    }
+
+    // Announce the ask + schedule the cosmetic ring decal around each living participant, and arm the pending field
+    // (its kind captured now; the alternator toggles for the next fire). The RESOLVE (distance test) lands
+    // FieldTelegraphSeconds later in ResolveField.
+    private void FireField(uint serverTick)
+    {
+        _fieldPendingIsRepel = _fieldAlternator;
+        _fieldAlternator = !_fieldAlternator;
+        _fieldResolveTick = serverTick + _fieldTelegraphTicks;
+        _fieldPending = true;
+
+        var living = GetLivingParticipants();
+        foreach (var e in living)
+        {
+            _scheduleFieldVisual(e.Position, FieldTelegraphRingRadiusUnits, serverTick, _fieldResolveTick);
+        }
+
+        if (living.Count >= 2)
+        {
+            AnnounceAll(_fieldPendingIsRepel
+                ? "The Sunderer REPELS — break apart!"
+                : "The Sunderer BINDS — come together!");
+        }
+        else
+        {
+            AnnounceAll("The Sunderer's field charges — move clear of it!");
+        }
+    }
+
+    // Resolve the pending field on PAIR DISTANCE (not shape membership). Two living participants → the duo Repel/Bind
+    // ask; one → the solo move-out ring (REPEL-only vs the boss, the Law-2 degradation — a duo down to one live member
+    // resolves as solo too); zero → skip (a wipe is imminent). Damage ALWAYS routes through the gate.
+    private void ResolveField(uint serverTick)
+    {
+        var living = GetLivingParticipants();
+        if (living.Count >= 2)
+        {
+            var a = living[0];
+            var b = living[1];
+            var separation = (a.Position - b.Position).Length;
+            if (_fieldPendingIsRepel)
+            {
+                if (separation <= FieldRepelTriggerRangeUnits)
+                {
+                    _damagePlayer(a, FieldDamage, serverTick, "Repel field");
+                    _damagePlayer(b, FieldDamage, serverTick, "Repel field");
+                    var apart = DirectionApart(a.Position, b.Position);
+                    _displacePlayer(a, a.Position + apart * FieldRepelKnockbackUnits);
+                    _displacePlayer(b, b.Position - apart * FieldRepelKnockbackUnits);
+                }
+            }
+            else if (separation > FieldBindTriggerRangeUnits)
+            {
+                _damagePlayer(a, FieldDamage, serverTick, "Bind field");
+                _damagePlayer(b, FieldDamage, serverTick, "Bind field");
+            }
+
+            return;
+        }
+
+        if (living.Count == 1 && _tryResolve(_bossId) is { } boss)
+        {
+            var solo = living[0];
+            if ((solo.Position - boss.Position).Length <= FieldRepelTriggerRangeUnits)
+            {
+                _damagePlayer(solo, FieldDamage, serverTick, "Sunder field");
+                var away = DirectionApart(solo.Position, boss.Position);
+                _displacePlayer(solo, solo.Position + away * FieldRepelKnockbackUnits);
+            }
+        }
+    }
+
+    // Echo Lash: fire the cue + arm the pulses when the cadence arrives, then deliver each armed pulse to every LIVING
+    // participant through the gate at its spaced tick. The cue plays for ALL tracked participants (harmless on a downed
+    // one); only the living take pulse damage.
+    private void StepEchoLash(uint serverTick)
+    {
+        if (_lashPulsesRemaining == 0 && serverTick >= _nextLashTick)
+        {
+            foreach (var p in _participants)
+            {
+                _echoCue(p.EntityId);
+            }
+
+            AnnounceAll("The Sunderer inhales — brace as one!");
+            _lashPulsesRemaining = _participantsAtSpawn >= 2 ? LashPulseCountDuo : LashPulseCountSolo;
+            _lashNextPulseTick = serverTick + _lashCueLeadTicks;
+            _nextLashTick = serverTick + _lashIntervalTicks;
+        }
+
+        if (_lashPulsesRemaining > 0 && serverTick >= _lashNextPulseTick)
+        {
+            foreach (var e in GetLivingParticipants())
+            {
+                _damagePlayer(e, LashPulseDamage, serverTick, "Echo Lash");
+            }
+
+            _lashPulsesRemaining--;
+            if (_lashPulsesRemaining > 0)
+            {
+                _lashNextPulseTick = serverTick + _lashPulseSpacingTicks;
+            }
+        }
+    }
+
+    // Splinter ring: on cadence, spawn N splinters evenly on a radius-7 ring around the boss (6 duo / 3 solo) and track
+    // them in the add ledger. They creep toward the nearest participant (SplinterBehavior) and pop in StepSplinterPops.
+    private void StepSplinterRing(uint serverTick, WorldEntity boss)
+    {
+        if (serverTick < _nextRingTick)
+        {
+            return;
+        }
+
+        var count = _participantsAtSpawn >= 2 ? SplinterCountDuo : SplinterCountSolo;
+        for (var i = 0; i < count; i++)
+        {
+            var angle = (2d * Math.PI * i) / count;
+            var point = boss.Position + new WorldVector(Math.Cos(angle), Math.Sin(angle)) * SplinterRingRadiusUnits;
+            // CLAMP into the arena interior: the boss CHASES around the 22×22 room, so a ring fired near a wall would
+            // otherwise place a point outside the interior — and the real spawn seam (Zone.SpawnTransient) THROWS on a
+            // non-walkable tile. Every interior tile is walkable floor, so clamping keeps the spawn safe (a ring near a
+            // wall piles onto the wall-side edge — acceptable; the splinters still creep out).
+            var splinter = _spawnSplinter(ClampToArenaInterior(point));
+            _adds.Add(splinter.Id);
+        }
+
+        AnnounceAll("Splinters erupt from the Sunderer — sweep them clear!");
+        _nextRingTick = serverTick + _ringIntervalTicks;
+    }
+
+    // Splinter pops: a splinter within SplinterPopRangeUnits of its nearest living participant POPS — damage that
+    // participant through the gate + despawn the splinter. A splinter already gone (killed by the tether/skillshot)
+    // just drops from the ledger. Iterated backwards for safe in-loop removal; the drone id (if any lingered) is skipped
+    // — only splinters pop.
+    private void StepSplinterPops(uint serverTick)
+    {
+        for (var i = _adds.Count - 1; i >= 0; i--)
+        {
+            var id = _adds[i];
+            if (id == _droneId)
+            {
+                continue; // never a splinter.
+            }
+
+            var splinter = _tryResolve(id);
+            if (splinter is null)
+            {
+                _adds.RemoveAt(i); // killed — the tether/skillshot cleared it.
+                continue;
+            }
+
+            var nearest = NearestLivingParticipant(splinter.Position, out var distance);
+            if (nearest is not null && distance <= SplinterPopRangeUnits)
+            {
+                _damagePlayer(nearest, SplinterPopDamage, serverTick, "Splinter");
+                _despawnAdd(id);
+                _adds.RemoveAt(i);
+            }
+        }
+    }
+
+    // BOSS-3 (P2): the target the SplinterBehavior steers each splinter toward — its nearest LIVING participant's
+    // position. False (the splinter holds) when the encounter is not active or no participant is alive.
+    public bool TryGetSplinterTarget(WorldEntity splinter, out WorldVector target)
+    {
+        target = default;
+        if (_state != EncounterState.Active || !_bossSpawned)
+        {
+            return false;
+        }
+
+        var nearest = NearestLivingParticipant(splinter.Position, out _);
+        if (nearest is null)
+        {
+            return false;
+        }
+
+        target = nearest.Position;
+        return true;
+    }
+
+    // The living (Health > 0) participant entities, resolved fresh. Small (<=2) — allocated on the rare field/lash
+    // ticks only; the per-tick splinter pop pass uses the alloc-free NearestLivingParticipant instead.
+    private List<WorldEntity> GetLivingParticipants()
+    {
+        var living = new List<WorldEntity>(_participants.Count);
+        foreach (var p in _participants)
+        {
+            if (_tryResolve(p.EntityId) is { Stats.Health: > 0 } e)
+            {
+                living.Add(e);
+            }
+        }
+
+        return living;
+    }
+
+    // The nearest living participant to `from`, and its distance (double.MaxValue when none). Alloc-free (iterates the
+    // <=2 participant records) — the per-splinter, per-tick primitive.
+    private WorldEntity? NearestLivingParticipant(WorldVector from, out double distance)
+    {
+        WorldEntity? best = null;
+        distance = double.MaxValue;
+        foreach (var p in _participants)
+        {
+            if (_tryResolve(p.EntityId) is { Stats.Health: > 0 } e)
+            {
+                var d = (e.Position - from).Length;
+                if (d < distance)
+                {
+                    distance = d;
+                    best = e;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    // Clamp a continuous point's rounded tile into the arena interior (every interior tile is walkable floor), so a
+    // splinter ring fired while the boss is near a wall never asks the spawn seam for a non-walkable tile.
+    private static TileCoord ClampToArenaInterior(WorldVector point)
+    {
+        var tile = point.ToTileRounded();
+        return new TileCoord(
+            Math.Clamp(tile.X, BossArena.InteriorMinX, BossArena.InteriorMaxX),
+            Math.Clamp(tile.Y, BossArena.InteriorMinY, BossArena.InteriorMaxY));
+    }
+
+    // The unit heading from `other` to `point` (the direction `point` is pushed AWAY from `other`); an arbitrary axis
+    // (+x) for coincident positions so a knockback never produces a zero shove.
+    private static WorldVector DirectionApart(WorldVector point, WorldVector other)
+    {
+        var dir = (point - other).Normalized();
+        return dir.LengthSquared > 0d ? dir : new WorldVector(1d, 0d);
     }
 
     private void AnnounceAll(string text)

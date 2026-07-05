@@ -39,10 +39,24 @@ public sealed class BossEncounterEngineTests
         public readonly List<ulong> AddDespawns = [];
         public readonly List<(ulong BossId, bool Active)> PlatingBroadcasts = [];
 
+        // BOSS-3 (P2): recorders. PlayerDamage is the REAL PlayerDamageGate's landed tail (the engine routes every
+        // field/lash/pop hit through the genuine choke-point method group — no i-frame oracle + no shield seam wired
+        // here, so the gate's dead-guard + ApplyDamage + landed tail are exercised; the i-frame/shield behaviour is
+        // pinned by PlayerDamageGate/TelegraphScheduler's own suites, not re-verified here).
+        public readonly List<(ulong Id, int Amount, string Source)> PlayerDamage = [];
+        public readonly List<(ulong Id, WorldVector To)> Displacements = [];
+        public readonly List<ulong> EchoCues = [];
+        public int SplinterSpawnCount;
+        public readonly List<(WorldVector Center, double Radius, uint Start, uint Resolve)> FieldVisuals = [];
+
         private uint _nextNetworkId = 1000;
 
         public Harness()
         {
+            var gate = new PlayerDamageGate(
+                hasActiveIFrames: (_, _) => false,
+                onDamageLanded: (victim, amount, source) => PlayerDamage.Add((victim.Id, amount, source)));
+
             Engine = new BossEncounterEngine(
                 TickRate,
                 spawnBoss: (tile, maxHealth) =>
@@ -83,7 +97,29 @@ public sealed class BossEncounterEngineTests
                         AddDespawns.Add(id);
                     }
                 },
-                broadcastPlating: (bossId, active) => PlatingBroadcasts.Add((bossId, active)));
+                broadcastPlating: (bossId, active) => PlatingBroadcasts.Add((bossId, active)),
+                // BOSS-3 (P2): route damage through the REAL PlayerDamageGate (the choke-point method group), record
+                // displacement/echo/splinter-spawn/field-visual seams like the P1 recorders.
+                damagePlayer: gate.TryDamagePlayer,
+                displacePlayer: (player, to) =>
+                {
+                    Displacements.Add((player.Id, to));
+                    var previous = player.TileCoord;
+                    if (player.ApplyResolvedMove(to))
+                    {
+                        World.OnEntityMoved(player, previous);
+                    }
+                },
+                echoCue: id => EchoCues.Add(id),
+                spawnSplinter: tile =>
+                {
+                    var splinter = World.AddTransient(_nextNetworkId++, EntityKind.Monster, "Splinter", tile, Direction8.S);
+                    splinter.SetMaxHealthFull(15);
+                    SplinterSpawnCount++;
+                    return splinter;
+                },
+                scheduleFieldVisual: (center, radius, start, resolve) =>
+                    FieldVisuals.Add((center, radius, start, resolve)));
         }
 
         // BOSS-2 (P1): begin a fight and run the 3 s countdown so the boss is spawned + Active. Participants enter at
@@ -109,6 +145,355 @@ public sealed class BossEncounterEngineTests
                 Engine.Step(t);
             }
         }
+
+        // BOSS-3 (P2): drop the boss to `fraction` of max HP, then Step(atTick) so the plating crumbles (fraction must
+        // be <=70% and >40% to LAND in P2). The crumble ANCHORS every P2 cadence at `atTick`; returns it.
+        public uint CrumbleIntoP2(uint atTick, double fraction = 0.65d)
+        {
+            var boss = Boss!;
+            var target = (int)(boss.Stats.MaxHealth * fraction);
+            boss.ApplyDamage(boss.Stats.Health - target);
+            Engine.Step(atTick);
+            Assert.True(Engine.P2Active, "test setup: the boss did not enter P2 at the crumble tick.");
+            return atTick;
+        }
+
+        // Reposition a participant to a continuous point, keeping the spatial bucket in sync (the field-distance primitive).
+        public void MoveTo(WorldEntity e, WorldVector position)
+        {
+            var previous = e.TileCoord;
+            if (e.ApplyResolvedMove(position))
+            {
+                World.OnEntityMoved(e, previous);
+            }
+        }
+    }
+
+    // ==== BOSS-3 (P2 SUNDER): Repel/Bind fields + Echo Lash + splinter ring ====
+
+    // The interior-centre reference the field tests position participants around (well inside the 22×22 arena so a 3u
+    // knockback never leaves it and the wipe/prune checks keep the fight Active).
+    private static readonly WorldVector ArenaCentre =
+        new((BossArena.InteriorMinX + BossArena.InteriorMaxX) / 2d, (BossArena.InteriorMinY + BossArena.InteriorMaxY) / 2d);
+
+    [Fact]
+    public void Fields_ArmAtCrumble_TelegraphThenAlternateRepelBind()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP2(atTick: 100);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("crumbles for good"));
+
+        // First field fires 6 s (120 t) after the crumble, telegraphs for 1.2 s (24 t), resolves at +144. A ring decal
+        // is scheduled around EACH of the 2 participants at fire.
+        h.StepThrough(t0 + 1, t0 + 120);
+        Assert.Equal(2, h.FieldVisuals.Count);
+        Assert.All(h.FieldVisuals, v => Assert.Equal(t0 + 144, v.Resolve));
+        Assert.Contains(h.Announcements, a => a.Text.Contains("REPELS")); // first field is Repel.
+
+        // Second field is BIND, one interval (9 s = 180 t) after the first fire.
+        h.StepThrough(t0 + 121, t0 + 300);
+        Assert.Equal(4, h.FieldVisuals.Count);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("BINDS"));
+    }
+
+    [Fact]
+    public void RepelField_DamagesAndKnocksApart_OnlyWhenTooClose()
+    {
+        // Too close at resolve → both take 15 + are shoved 3u apart.
+        var close = new Harness();
+        var cp = close.BeginAndSpawnBoss(duo: true);
+        var t0 = close.CrumbleIntoP2(atTick: 100);
+        close.MoveTo(cp[0], ArenaCentre + new WorldVector(-1d, 0d));
+        close.MoveTo(cp[1], ArenaCentre + new WorldVector(1d, 0d)); // 2u apart (<=6u).
+        close.StepThrough(t0 + 1, t0 + 144); // fire @+120, resolve @+144.
+        Assert.Equal(2, close.PlayerDamage.Count(d => d.Source == "Repel field"));
+        Assert.All(close.PlayerDamage.Where(d => d.Source == "Repel field"), d => Assert.Equal(15, d.Amount));
+        Assert.Equal(2, close.Displacements.Count); // both knocked apart.
+
+        // Far apart at resolve → the Repel does nothing (no damage, no displacement).
+        var far = new Harness();
+        var fp = far.BeginAndSpawnBoss(duo: true);
+        var f0 = far.CrumbleIntoP2(atTick: 100);
+        far.MoveTo(fp[0], ArenaCentre + new WorldVector(-5d, 0d));
+        far.MoveTo(fp[1], ArenaCentre + new WorldVector(5d, 0d)); // 10u apart (>6u).
+        far.StepThrough(f0 + 1, f0 + 144);
+        Assert.Empty(far.PlayerDamage.Where(d => d.Source == "Repel field"));
+        Assert.Empty(far.Displacements);
+    }
+
+    [Fact]
+    public void BindField_Damages_OnlyWhenTooFar_AndNeverDisplaces()
+    {
+        // The 2nd field is Bind. Far apart at its resolve → both take 15, NO displacement.
+        var far = new Harness();
+        var fp = far.BeginAndSpawnBoss(duo: true);
+        var f0 = far.CrumbleIntoP2(atTick: 100);
+        // Keep them close through the 1st (Repel) field so it neither damages-far nor perturbs the setup...
+        far.MoveTo(fp[0], ArenaCentre + new WorldVector(-1d, 0d));
+        far.MoveTo(fp[1], ArenaCentre + new WorldVector(1d, 0d));
+        far.StepThrough(f0 + 1, f0 + 200); // past the 1st field's resolve (+144); 2nd fires @+300.
+        far.PlayerDamage.Clear();
+        far.Displacements.Clear();
+        // Now spread them out for the Bind resolve (2nd field fire +300, resolve +324).
+        far.MoveTo(fp[0], ArenaCentre + new WorldVector(-5d, 0d));
+        far.MoveTo(fp[1], ArenaCentre + new WorldVector(5d, 0d)); // 10u apart (>4u).
+        far.StepThrough(f0 + 201, f0 + 324);
+        Assert.Equal(2, far.PlayerDamage.Count(d => d.Source == "Bind field"));
+        Assert.Empty(far.Displacements); // Bind never knocks.
+
+        // Together at the Bind resolve → nothing. (The 1st Repel field knocks them apart at +144, so re-close them
+        // before the 2nd field's Bind resolve.)
+        var near = new Harness();
+        var np = near.BeginAndSpawnBoss(duo: true);
+        var n0 = near.CrumbleIntoP2(atTick: 100);
+        near.MoveTo(np[0], ArenaCentre + new WorldVector(-1d, 0d));
+        near.MoveTo(np[1], ArenaCentre + new WorldVector(1d, 0d));
+        near.StepThrough(n0 + 1, n0 + 200); // past the 1st (Repel) field's resolve.
+        near.PlayerDamage.Clear();
+        near.MoveTo(np[0], ArenaCentre + new WorldVector(-1d, 0d));
+        near.MoveTo(np[1], ArenaCentre + new WorldVector(1d, 0d)); // 2u apart for the Bind resolve.
+        near.StepThrough(n0 + 201, n0 + 324);
+        Assert.Empty(near.PlayerDamage.Where(d => d.Source == "Bind field"));
+    }
+
+    [Fact]
+    public void SoloField_IsMoveOutVsBoss_RepelOnly()
+    {
+        var h = new Harness();
+        var p = h.BeginAndSpawnBoss(duo: false);
+        var t0 = h.CrumbleIntoP2(atTick: 100);
+        var boss = h.Boss!;
+        // Stand within 6u of the boss at the resolve → damage + knockback away from the boss.
+        h.MoveTo(p[0], boss.Position + new WorldVector(2d, 0d));
+        h.StepThrough(t0 + 1, t0 + 144);
+        Assert.Single(h.PlayerDamage, d => d.Source == "Sunder field" && d.Amount == 15);
+        Assert.Single(h.Displacements);
+        // Shoved AWAY from the boss (position moved further out along +x).
+        Assert.True(h.Displacements[0].To.X > boss.Position.X + 2d);
+    }
+
+    [Fact]
+    public void EchoLash_CueThenTwoPulses_HalfSecondApart_LivingOnly()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP2(atTick: 100);
+        // Keep them spread beyond the Repel/Bind bands is irrelevant to the lash; just avoid a wipe (huge HP).
+        players[0].SetMaxHealthFull(100000);
+        players[1].SetMaxHealthFull(100000);
+
+        // Cue @ +220; pulse1 @ +245 (cue + 1.25 s); pulse2 @ +255 (+0.5 s). Cue reaches BOTH participants.
+        h.StepThrough(t0 + 1, t0 + 244);
+        Assert.Equal(2, h.EchoCues.Count(id => id == players[0].Id || id == players[1].Id));
+        Assert.Contains(h.Announcements, a => a.Text.Contains("brace as one"));
+        Assert.Empty(h.PlayerDamage.Where(d => d.Source == "Echo Lash")); // not until +245.
+
+        h.Engine.Step(t0 + 245);
+        Assert.Equal(2, h.PlayerDamage.Count(d => d.Source == "Echo Lash")); // pulse 1 hits both living.
+        h.StepThrough(t0 + 246, t0 + 254);
+        Assert.Equal(2, h.PlayerDamage.Count(d => d.Source == "Echo Lash")); // still just pulse 1.
+        h.Engine.Step(t0 + 255);
+        Assert.Equal(4, h.PlayerDamage.Count(d => d.Source == "Echo Lash")); // pulse 2.
+        Assert.All(h.PlayerDamage.Where(d => d.Source == "Echo Lash"), d => Assert.Equal(18, d.Amount));
+
+        // Solo: a SINGLE pulse.
+        var solo = new Harness();
+        var s = solo.BeginAndSpawnBoss(duo: false);
+        var s0 = solo.CrumbleIntoP2(atTick: 100);
+        s[0].SetMaxHealthFull(100000);
+        solo.StepThrough(s0 + 1, s0 + 260);
+        Assert.Single(solo.PlayerDamage, d => d.Source == "Echo Lash");
+    }
+
+    [Fact]
+    public void SplinterRing_SpawnsSixDuo_ThreeSolo_AndReRings()
+    {
+        var duo = new Harness();
+        var players = duo.BeginAndSpawnBoss(duo: true);
+        // This test spans 28 s of live P2 — the harness routes field/lash damage through the REAL PlayerDamageGate,
+        // and two players standing motionless at the entry tiles accumulate a genuine WIPE (~117 damage) before the
+        // re-ring, resetting the encounter (correct engine behavior that failed this test's original draft). Tanky
+        // HP keeps the fight alive; wipe semantics have their own test.
+        foreach (var player in players)
+        {
+            player.SetMaxHealthFull(100_000);
+        }
+
+        var d0 = duo.CrumbleIntoP2(atTick: 100);
+        // First ring 8 s (160 t) after the crumble.
+        duo.StepThrough(d0 + 1, d0 + 159);
+        Assert.Equal(0, duo.SplinterSpawnCount);
+        duo.Engine.Step(d0 + 160);
+        Assert.Equal(6, duo.SplinterSpawnCount);
+        Assert.Equal(6, duo.Engine.AddCount);
+        // Re-rings every 20 s (400 t) → +560.
+        duo.StepThrough(d0 + 161, d0 + 559);
+        Assert.Equal(6, duo.SplinterSpawnCount);
+        duo.Engine.Step(d0 + 560);
+        Assert.Equal(12, duo.SplinterSpawnCount);
+
+        var solo = new Harness();
+        solo.BeginAndSpawnBoss(duo: false);
+        var s0 = solo.CrumbleIntoP2(atTick: 100);
+        solo.StepThrough(s0 + 1, s0 + 160);
+        Assert.Equal(3, solo.SplinterSpawnCount);
+    }
+
+    [Fact]
+    public void Splinter_PopsWithinOneUnit_DamagesParticipant_AndDespawns()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP2(atTick: 100);
+        h.StepThrough(t0 + 1, t0 + 160); // ring spawns.
+        Assert.Equal(6, h.Engine.AddCount);
+
+        // Drag one splinter onto a participant (within 1u) — it pops on the next Step.
+        var splinter = h.World.Entities.Where(e => e.DisplayName == "Splinter" && e.Stats.Health > 0)
+            .OrderBy(e => e.Id).First();
+        h.MoveTo(splinter, players[0].Position + new WorldVector(0.5d, 0d));
+        var before = h.PlayerDamage.Count;
+        h.Engine.Step(t0 + 161);
+        Assert.Equal(before + 1, h.PlayerDamage.Count);
+        var pop = h.PlayerDamage[^1];
+        Assert.Equal(players[0].Id, pop.Id);
+        Assert.Equal("Splinter", pop.Source);
+        Assert.Equal(12, pop.Amount);
+        Assert.Contains(splinter.Id, h.AddDespawns);
+        Assert.Equal(5, h.Engine.AddCount); // popped splinter left the ledger.
+    }
+
+    [Fact]
+    public void Splinters_TornDown_OnWipe_Victory_AndWalkOut()
+    {
+        // Wipe: both die in-arena → immediate reset tears the ring down.
+        var wipe = new Harness();
+        var wp = wipe.BeginAndSpawnBoss(duo: true);
+        var w0 = wipe.CrumbleIntoP2(atTick: 100);
+        wipe.StepThrough(w0 + 1, w0 + 160);
+        Assert.Equal(6, wipe.Engine.AddCount);
+        wp[0].ApplyDamage(wp[0].Stats.Health);
+        wp[1].ApplyDamage(wp[1].Stats.Health);
+        wipe.Engine.Step(w0 + 161);
+        Assert.Equal(EncounterState.Idle, wipe.Engine.State);
+        Assert.Equal(0, wipe.Engine.AddCount);
+        Assert.Equal(6, wipe.AddDespawns.Count);
+
+        // Victory: boss removed → adds torn down, victors retained.
+        var victory = new Harness();
+        victory.BeginAndSpawnBoss(duo: true);
+        var v0 = victory.CrumbleIntoP2(atTick: 100);
+        victory.StepThrough(v0 + 1, v0 + 160);
+        Assert.True(victory.World.Remove(victory.Engine.BossId, out _));
+        victory.Engine.Step(v0 + 161);
+        Assert.Equal(EncounterState.Idle, victory.Engine.State);
+        Assert.Equal(0, victory.Engine.AddCount);
+        Assert.Equal(6, victory.AddDespawns.Count);
+
+        // Walk-out (solo leaves → empty → grace reset) tears the ring down.
+        var walk = new Harness();
+        var lone = walk.BeginAndSpawnBoss(duo: false);
+        var l0 = walk.CrumbleIntoP2(atTick: 100);
+        walk.StepThrough(l0 + 1, l0 + 160);
+        Assert.Equal(3, walk.Engine.AddCount);
+        Assert.True(walk.Engine.TryLeave(lone[0], out _));
+        walk.StepThrough(l0 + 161, l0 + 161 + 200); // arm + 10 s grace.
+        Assert.Equal(EncounterState.Idle, walk.Engine.State);
+        Assert.Equal(0, walk.Engine.AddCount);
+        Assert.Equal(3, walk.AddDespawns.Count);
+    }
+
+    [Fact]
+    public void P2_DisarmsAtFortyPercent_ClearsSplinters_AndTeases()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP2(atTick: 100);
+        h.StepThrough(t0 + 1, t0 + 160); // ring up.
+        Assert.Equal(6, h.Engine.AddCount);
+
+        // Drop the boss to exactly 40% (480/1200): P2 disarms on the next Step.
+        h.Boss!.ApplyDamage(h.Boss!.Stats.Health - 480);
+        h.Engine.Step(t0 + 161);
+        Assert.False(h.Engine.P2Active);
+        Assert.True(h.Engine.P3Reached);
+        Assert.Equal(0, h.Engine.AddCount);
+        Assert.Equal(6, h.AddDespawns.Count); // existing splinters die at 40%.
+        Assert.Contains(h.Announcements, a => a.Text.Contains("shattered mass inward"));
+
+        // No more rings below 40%.
+        h.StepThrough(t0 + 162, t0 + 700);
+        Assert.Equal(6, h.SplinterSpawnCount); // never re-rang.
+    }
+
+    [Fact]
+    public void NoP2Activity_AboveSeventy_OrOutsideActive()
+    {
+        // Above 70%: the boss stays full-HP; P2 never arms (no fields/lash/ring across a long run).
+        var above = new Harness();
+        above.BeginAndSpawnBoss(duo: true);
+        above.StepThrough(61, 900);
+        Assert.False(above.Engine.P2Active);
+        Assert.Empty(above.FieldVisuals);
+        Assert.Equal(0, above.SplinterSpawnCount);
+        Assert.Empty(above.EchoCues);
+        Assert.Empty(above.PlayerDamage);
+
+        // Countdown/Idle: a would-be P2 tick never runs (no boss, not Active).
+        var countdown = new Harness();
+        var issuer = countdown.AddPlayer("Solo", TownA);
+        countdown.Engine.TryBegin(issuer, partner: null, serverTick: 0, out _);
+        countdown.StepThrough(1, 40);
+        Assert.False(countdown.Engine.P2Active);
+        Assert.Empty(countdown.FieldVisuals);
+    }
+
+    [Fact]
+    public void StaggerConstants_FieldResolve_LashPulse_RingSpawn_NeverShareATick()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP2(atTick: 137); // an arbitrary (odd) anchor — the disjointness must hold for ANY anchor.
+        // Keep everyone alive + spread so pulses always land and no self-wipe (huge HP; far from boss so no pops).
+        players[0].SetMaxHealthFull(10_000_000);
+        players[1].SetMaxHealthFull(10_000_000);
+        h.MoveTo(players[0], ArenaCentre + new WorldVector(-5d, 0d));
+        h.MoveTo(players[1], ArenaCentre + new WorldVector(5d, 0d));
+
+        var lashPulseTicks = new List<uint>();
+        var ringSpawnTicks = new List<uint>();
+        var lashSeen = 0;
+        var ringSeen = 0;
+        for (var t = t0 + 1; t <= t0 + 1200; t++) // 60 s of P2.
+        {
+            h.Engine.Step(t);
+            var lashNow = h.PlayerDamage.Count(d => d.Source == "Echo Lash");
+            if (lashNow > lashSeen)
+            {
+                lashPulseTicks.Add(t);
+                lashSeen = lashNow;
+            }
+
+            if (h.SplinterSpawnCount > ringSeen)
+            {
+                ringSpawnTicks.Add(t);
+                ringSeen = h.SplinterSpawnCount;
+            }
+        }
+
+        // Field RESOLVE ticks are the scheduled visual deadlines (fire + telegraph) — one per fire, deduped.
+        var fieldResolveTicks = h.FieldVisuals.Select(v => v.Resolve).Distinct().ToHashSet();
+        var lashSet = lashPulseTicks.ToHashSet();
+        var ringSet = ringSpawnTicks.ToHashSet();
+
+        Assert.NotEmpty(fieldResolveTicks);
+        Assert.NotEmpty(lashSet);
+        Assert.NotEmpty(ringSet);
+        // Pairwise disjoint — no two of the three damage/spawn streams ever resolve on the same tick, by construction.
+        Assert.Empty(fieldResolveTicks.Intersect(lashSet));
+        Assert.Empty(fieldResolveTicks.Intersect(ringSet));
+        Assert.Empty(lashSet.Intersect(ringSet));
     }
 
     [Fact]

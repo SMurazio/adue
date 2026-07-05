@@ -173,6 +173,33 @@
       "attackCooldownMs": 1000,
       "attackRangeUnits": 0.5,
       "respawnMs": 5000
+    },
+    {
+      // BOSS-3 (docs/boss-encounter-sunderer-design.md P2 SUNDER): THE SPLINTER — the Sunderer's P2 ring add,
+      // spawned/despawned by the BossEncounterEngine (NOT a spawner; respawnMs is inert — the engine owns the ~20 s
+      // re-ring cadence + the pop). It WALKS (glide) at 1.2 u/s (moveSpeedMultiplier 0.3 × the 4 u/s base) and runs the
+      // minimal "splinter" brain (SplinterBehavior): each think-tick it creeps toward the NEAREST living participant.
+      // It has NO attack (attackDamage 0) and does not aggro/leash/roam (the splinter brain ignores those tunables; the
+      // small values here only satisfy the registry clamps). 15 HP, dies to anything (the tether orbit-sweep clears the
+      // ring — the S7 vulnerability), lootTableId "" = no loot/corpse. The POP (~12 damage + self-despawn once within
+      // 1 u of a participant) is ENCOUNTER-driven, not a monster attack. renderTint a jagged bone/ash white + renderScale
+      // 0.5 (small, clearly a shard swarm).
+      "id": "splinter",
+      "displayName": "Splinter",
+      "lootTableId": "",
+      "locomotionId": "glide",
+      "behaviorId": "splinter",
+      "renderTint": "#D8CFC0",
+      "renderScale": 0.5,
+      "maxHealth": 15,
+      "moveSpeedMultiplier": 0.3,
+      "roamRadius": 0.5,
+      "aggroRadius": 0.5,
+      "chaseLeash": 0.5,
+      "attackDamage": 0,
+      "attackCooldownMs": 1000,
+      "attackRangeUnits": 0.5,
+      "respawnMs": 5000
     }
   ]
 }
