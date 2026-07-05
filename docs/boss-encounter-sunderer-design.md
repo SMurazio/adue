@@ -4,6 +4,12 @@
 the counterplay-hook half of the four founding mechanics' Card debt: each phase contests some pair
 channels and is vulnerable to exactly one mechanic. Branch: exp/duo-abilities.*
 
+> **STATUS — SHIPPED + REVIEWED (2026-07-05), NOT merged to main.** All four phases (BOSS-1..4) are
+> implemented, gated, and independently reviewed on `exp/duo-abilities`; the live **duo feel-test is
+> the remaining gate.** The sections below are the ORIGINAL PLAN — read the **"Shipped deltas"**
+> section at the bottom for where the build diverged (build-time rulings + post-feel-test tuning).
+> Anything in the plan that the deltas contradict, the deltas win.
+
 ## Fiction (one line)
 
 A dungeon construct that feeds on bonds — its whole kit tries to pull the pair apart, and it dies
@@ -108,7 +114,10 @@ aim into ward-break into burst is the 10-second clip ✓. 11 Latency: no new syn
 than existing ones; shield debt acknowledged ✓. 12 Kit-budget: encounter ASKS for the existing 4,
 adds zero new player-facing mechanics ✓.
 
-## Implementation plan (each phase = own todo, own commit, reviewed per policy)
+## Implementation plan (each phase = own todo, own commit, reviewed per policy) — ALL DONE
+
+*(All four shipped + reviewed on `exp/duo-abilities`; todo files deleted on commit. Remaining
+LOW/NIT items in `todo/N-boss{1,2,3,4}-review-followups.md` + `todo/N-telegraph-shapes-review-nits.md`.)*
 
 - **BOSS-1 (arena + trigger + lifecycle)**: arena stamp + hash re-pins; `/boss` command (teleport,
   return position, countdown, reset/leave/victory rules); boss monster manifest entry + encounter
@@ -125,3 +134,57 @@ adds zero new player-facing mechanics ✓.
 Tuning knobs (HP, damages, cadences, radii, window lengths) live in the boss's manifest entry /
 encounter constants — expect a live tuning pass with the F1 Monster tab pattern after the first
 full-fight feel-test.
+
+---
+
+## Shipped deltas (2026-07-05) — where the build diverged from the plan above
+
+Build-time rulings and post-feel-test tuning. **These win over the plan when they conflict.**
+
+**Arena / trigger.** Exterior `(356,356)-(379,379)`, 22×22 `DungeonStone` interior (masks the
+grass-only node scatter for free); entry tiles `(367,361)`/`(369,361)`, boss spawn `(368,371)`.
+`genVersion` was NOT bumped (it selects a generation *algorithm*, not a content revision) — the map
+ContentHash + NodeCatalog CatalogHash were re-pinned instead (`BossArena.cs` is the single geometry
+source). Teleport verified a hard predictor snap; a remote-partner snap needed the one client fix
+(`RemotePositionInterpolator` resets on a >8u jump). **Victory now auto-ejects** lingering victors
+to their return tiles after a 15s grace (BOSS-1 review MEDIUM — the shared, non-instanced arena
+would otherwise soft-lock for the whole server) — this supersedes the plan's "no auto-eject."
+
+**Cleave / Lunge + telegraph shapes.** The wedge/line telegraph shapes did NOT exist — BOSS-1
+shipped Cleave as a **circle slam** + Lunge as a **dash with no telegraph**, deferred to a dedicated
+protocol task. That task (protocol **v50**, honest render==hit shared membership in `TelegraphShape`)
+then made Cleave a real 130° **wedge** and Lunge a **line** with its damage on the telegraph resolve.
+A lunge-type boss also never falls back to the old instant untelegraphed dash (`ChargeEnabled &&
+!LungeEnabled`).
+
+**P1 Husk.** As planned. **Legibility (post-feel-test):** the boss steel-tints while plated; hits on
+it now render **deflected** — a struck-through grey number for a P1 chip hit, the word **"TURNED"**
+on the local predicted swing (plated = reduced, not zero, so no false "IMMUNE" vs the dropping health
+bar); a world **teach label** "cross your skillshots to shatter!" floats over the boss. The
+spawn-time plating broadcast is state-synced at entity introduction (BOSS-2 review HIGH — the edge
+was dropped before any client knew the boss); the client clears plated ids on despawn (recycled
+network ids would inherit a stale tint).
+
+**P2 Sunder.** As planned. The Repel/Bind field **ring visual is a damage-0 telegraph drawn at each
+player's FIRE-time position**, while the resolve is judged on pair distance 1.2s later — a
+render≠hit-test exception (BOSS-3 review MEDIUM) **flagged for the feel-test / user decision** (the
+honest alternative: draw the ring around the PARTNER at the rule radius). **Splinters TUNED** after
+the feel-test ("waves too slow/weak"): move-speed multiplier `0.3→0.65` (~2.6 u/s) and pop damage
+`12→18`. Displacement rides the new wall-swept `Zone.DisplaceResolved` (direct Zone tests added in
+BOSS-4). Known Law-11 shield receipt-tick debt still accepted.
+
+**P3 Core.** The **ward rides `BossPlatingMessage`** (ward up = plating-true = steel tint; zero new
+protocol — the chat lines carry the semantic difference; teach label "detonate at its heart!" chosen
+client-side by HP fraction). The boss **roots with dormant melee** (its brain is skipped while rooted
+— cleave/lunge are silent; the beam/shove/aim are the P3 contest) — fork ruling, v1. The
+**ward-breaking blast is a KEY, not damage** (it deals 0 to the boss; opens the window next tick) —
+fork ruling, feel-test watch item. Root moved to `BossArena.CoreRootTile` (368,368) = the true
+interior centre (BOSS-4 review MEDIUM — the spawn tile sat 3 tiles north, leaving a south beam-safe
+band) and the **sweep beam grew 11u→16u** to cover the farthest corner. The rooted boss is excluded
+from the monster-separation pass so trickle splinters can't walk it off-centre. **Enrage scales the
+BEAM only** (not cleave — melee is dormant while rooted).
+
+**Verification / model policy.** BOSS-1/2 sonnet-reviewed; BOSS-3/4 + the telegraph-shapes task
+Fable-reviewed (protocol + player-damage-path high-risk band). The unkillable-boss class was
+explicitly verified clean in duo, degraded-duo, and solo. Legibility layer is a client-cosmetic
+self-reviewed change (the live playtest is its gate). See `.shared/memory/sunderer-encounter-status.md`.
