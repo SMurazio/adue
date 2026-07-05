@@ -123,6 +123,59 @@ public sealed class MidpointDetonationEngineTests
         Assert.Equal(0, engine.PendingCount);
     }
 
+    // BOSS-4 REVIEW (LOW-2): the onBlast report is the ONLY way the Sunderer's Core ward is broken — if a refactor
+    // ever reported from the duo branch only, the SOLO fight would become an unkillable boss with no red test. Pin
+    // that ResolveBlast reports the blast CENTRE + tick from BOTH resolve paths, exactly once per blast.
+    [Fact]
+    public void BlastReport_FiresOncePerBlast_ForDuoAndSoloPaths_AtTheBlastCentre()
+    {
+        // ---- DUO: initiate + confirm + charge to resolution -> reports the final midpoint. ----
+        var duoWorld = new WorldState();
+        var a = duoWorld.AddTransient(1, EntityKind.Player, "A", new TileCoord(10, 10), Direction8.S);
+        var b = duoWorld.AddTransient(2, EntityKind.Player, "B", new TileCoord(14, 10), Direction8.S);
+        var duoBlasts = new List<(WorldVector Center, uint Tick)>();
+        var duoEngine = CreateEngineWithBlastReport(duoWorld, (c, t) => duoBlasts.Add((c, t)));
+
+        duoEngine.PressDetonate(a, b, 0);
+        duoEngine.PressDetonate(b, a, 2); // Perfect confirm; charge ends at tick 18.
+        for (uint tick = 2; tick <= 18; tick++)
+        {
+            duoEngine.Step(tick);
+        }
+
+        var duoBlast = Assert.Single(duoBlasts);
+        var expectedMid = (a.Position + b.Position) * 0.5d;
+        Assert.Equal(expectedMid.X, duoBlast.Center.X, 6);
+        Assert.Equal(expectedMid.Y, duoBlast.Center.Y, 6);
+
+        // ---- SOLO: initiate, never confirm -> the degradation self-blast STILL reports, at the initiator. ----
+        var soloWorld = new WorldState();
+        var solo = soloWorld.AddTransient(1, EntityKind.Player, "S", new TileCoord(10, 10), Direction8.S);
+        var soloBlasts = new List<(WorldVector Center, uint Tick)>();
+        var soloEngine = CreateEngineWithBlastReport(soloWorld, (c, t) => soloBlasts.Add((c, t)));
+
+        soloEngine.PressDetonate(solo, partner: null, serverTick: 0);
+        for (uint tick = 0; tick <= MidpointDetonationEngine.ConfirmWindowTicks; tick++)
+        {
+            soloEngine.Step(tick);
+        }
+
+        var soloBlast = Assert.Single(soloBlasts);
+        Assert.Equal(solo.Position.X, soloBlast.Center.X, 6);
+        Assert.Equal(solo.Position.Y, soloBlast.Center.Y, 6);
+    }
+
+    private static MidpointDetonationEngine CreateEngineWithBlastReport(
+        WorldState world,
+        MidpointDetonationEngine.BlastReportDelegate onBlast) =>
+        new(
+            world.GatherInterestCandidates,
+            (_, _, _, _) => { },
+            (_, _) => { },
+            (_, _) => { },
+            (_, _, _, _, _, _, _, _) => { },
+            onBlast);
+
     [Fact]
     public void SlowZone_LingersAndSlowsMonstersInside_ThenExpires()
     {

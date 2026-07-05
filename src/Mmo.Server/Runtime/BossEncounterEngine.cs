@@ -218,14 +218,16 @@ public sealed class BossEncounterEngine
     private const double BurstWindowSeconds = 8d;
 
     // ROTATING SWEEP BEAM (line telegraphs — the honest-telegraph form of a rotating beam). The first beam BeamFirstDelay
-    // after the root, then every BeamInterval, a line from the boss (length BeamLengthUnits reaches the walls from centre,
-    // half-width BeamHalfWidthUnits, BeamWindup windup, BeamDamage through the scheduler's gate) at a bearing that ADVANCES
+    // after the root, then every BeamInterval, a line from the boss (length BeamLengthUnits — REVIEW MEDIUM-2: sized to
+    // cover the FARTHEST interior corner from the CoreRootTile, ~15.6u, so no standing spot in the arena is permanently
+    // beam-safe; the wall ring truncates the overshoot visually and membership is center-point anyway), half-width
+    // BeamHalfWidthUnits, BeamWindup windup, BeamDamage through the scheduler's gate) at a bearing that ADVANCES
     // BeamBearingAdvance per beam in a CONSISTENT rotation direction (players learn to walk WITH it). Staggered off the
     // knockback by construction — see the residue note below.
     private const double BeamFirstDelaySeconds = 4d;
     private const double BeamIntervalSeconds = 3d;
     private const double BeamWindupSeconds = 1.2d;
-    private const double BeamLengthUnits = 11d;
+    private const double BeamLengthUnits = 16d;
     private const double BeamHalfWidthUnits = 1d;
     private const int BeamDamage = 25;
     private const double BeamBearingAdvanceRadians = 40d * Math.PI / 180d; // ~40° per beam.
@@ -1131,7 +1133,9 @@ public sealed class BossEncounterEngine
         _trickleAngle = 0d;
         _nextBeamCastTick = serverTick + _beamFirstDelayTicks;
         _nextPulseCueTick = serverTick + _pulseFirstDelayTicks;
-        _rootBoss(boss, BossArena.BossSpawnTile);
+        // REVIEW MEDIUM-2: root at the interior's TRUE centre (CoreRootTile), not the spawn tile — the spawn tile
+        // sits 3 tiles north of centre, which left the south band permanently outside the beam's reach.
+        _rootBoss(boss, BossArena.CoreRootTile);
         _broadcastPlating(_bossId, true); // ward SEALS → steel tint (ward up = plating-message true).
         AnnounceAll("The Sunderer roots — its core seals!");
     }

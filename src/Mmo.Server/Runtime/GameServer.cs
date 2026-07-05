@@ -698,10 +698,13 @@ public sealed class GameServer
             // BOSS-4 (P3 root): re-centre the boss ONCE at the 40% edge — Zone.Teleport (bumps StateRevision → the snap
             // rides the snapshot), cancel any in-flight action (a lunge dash mid-cast), and zero its velocity so the
             // glider stops extrapolating. The ONGOING chase suppression is the IsBossRooted gate in StepMonsterAi.
+            // REVIEW MEDIUM-1: Cancel, NOT ClearEntity — Cancel is the interrupt seam that LANDS an airborne entity
+            // (SnapToGround); ClearEntity is the leaving-the-world teardown and left a mid-leap boss frozen floating
+            // at its arc height for the whole Core phase (the brain skip means nothing would ever land it).
             rootBoss: (boss, tile) =>
             {
                 _zone.Teleport(boss, tile);
-                _actionExecutor.ClearEntity(boss.Id);
+                _actionExecutor.Cancel(boss, _serverTick);
                 boss.StopMovement();
             },
             // BOSS-4 (P3 rotating sweep beam): schedule a LINE telegraph from the boss through the scheduler's NORMAL gate
@@ -5383,6 +5386,13 @@ public sealed class GameServer
 
         _monsterSeparationScratch.Clear();
         _zone.World.CopyMonstersTo(_monsterSeparationScratch);
+        // BOSS-4 REVIEW (LOW-1): a ROOTED Core-phase boss is a pillar, not a body to de-overlap — separation applies
+        // half-penetration to BOTH parties, so enrage-trickle splinters (all converging on a player hugging the boss)
+        // would otherwise walk the "rooted" boss off-centre cumulatively. Excluding it keeps the root exact; overlap
+        // with the stationary boss body is visual-only and self-resolves when the other body moves on. The predicate
+        // is false for every monster outside P3, so this is a no-op scan in the common case.
+        _monsterSeparationScratch.RemoveAll(m => _bossEncounter.IsBossRooted(m.Id));
+
         _monsterSeparation.Separate(_monsterSeparationScratch);
     }
 

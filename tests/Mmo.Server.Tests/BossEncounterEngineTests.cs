@@ -1005,8 +1005,10 @@ public sealed class BossEncounterEngineTests
         var t0 = h.CrumbleIntoP3(atTick: 200);
         Assert.True(h.Engine.P3Active);
         Assert.True(h.Engine.WardUp);
-        // The boss was re-centred (rooted) ONCE at the edge, and IsBossRooted now gates ONLY this boss.
-        Assert.Single(h.RootCalls, r => r.BossId == bossId && r.Tile == BossArena.BossSpawnTile);
+        // The boss was re-centred (rooted) ONCE at the edge to the arena's TRUE centre (CoreRootTile, review
+        // MEDIUM-2 — not the spawn tile, which sat 3 tiles north and left a south beam-safe band), and
+        // IsBossRooted now gates ONLY this boss.
+        Assert.Single(h.RootCalls, r => r.BossId == bossId && r.Tile == BossArena.CoreRootTile);
         Assert.True(h.Engine.IsBossRooted(bossId));
         Assert.False(h.Engine.IsBossRooted(bossId + 999));
         Assert.Contains(h.Announcements, a => a.Text.Contains("core seals"));
@@ -1129,7 +1131,7 @@ public sealed class BossEncounterEngineTests
         Assert.Equal(t0 + 80u, first.Start);
         Assert.Equal(t0 + 104u, first.Resolve); // 1.2 s windup = 24 t.
         Assert.Equal(25, first.Damage);
-        Assert.Equal(11d, first.Length);
+        Assert.Equal(16d, first.Length); // review MEDIUM-2: 16u covers the farthest corner from the true-centre root.
         Assert.Equal(1d, first.HalfWidth);
 
         // Next beams every 3 s (60 t), each advancing the bearing a consistent ~40°.

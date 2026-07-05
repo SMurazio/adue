@@ -38,6 +38,12 @@ public static class BossArena
     // "sweet band"; the interior max diagonal ≈ 29.7u keeps overstretch reachable per the tether-geometry note).
     public static readonly TileCoord BossSpawnTile = new(368, 371);
 
+    // BOSS-4 REVIEW (MEDIUM-2): where the boss ROOTS for the P3 Core phase — the interior's true centre. The spawn
+    // tile sits 3 tiles north of centre (chosen for the entry-tile sweet band), which left a permanent beam-safe band
+    // along the south wall in P3. From here the farthest interior corner is ~15.6u, which the sweep-beam length
+    // (BeamLengthUnits) must cover so no standing spot is ever permanently beam-safe.
+    public static readonly TileCoord CoreRootTile = new(368, 368);
+
     // True iff a tile is inside the walkable interior (NOT the wall ring). The load-bearing membership test: it
     // decides whether a /boss issuer is inside (→ leave) or outside (→ enter), and whether a participant is still
     // present in the arena (walked out / respawned-to-town → no longer present).
