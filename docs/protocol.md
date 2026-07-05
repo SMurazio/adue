@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `49` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `50` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -109,6 +109,15 @@ World snapshots should fit in a single UDP packet for the current channel target
   plated (Laws 4/7 legibility). Reliable-ordered. The plating damage MODIFIER is a server-side monster-damage-seam
   hook (no wire), the fusion-shatter is a `SkillshotEngine` fusion-event callback (no wire), and the interposer drone
   is a new `interposer` monster type + behavior (rides the existing `EntitySpawn`/snapshot paths).
+- v50 (TELEGRAPH SHAPES WEDGE+LINE, exp/duo-abilities — EXPERIMENT branch): the ground-telegraph + midpoint-charge
+  shape body gains two new KINDS beyond `Circle`. The shape body is now `{byte kind, Q12.4 origin, Q12.4 ushort radius,
+  THEN kind-specific extras}`: a **Wedge** appends `{ushort aim, ushort halfAngle}` (both `AimAngle`-quantized,
+  2π/65536); a **Line** appends `{ushort aim, Q12.4 ushort halfWidth}` (the `radius` slot carries the line LENGTH). A
+  **Circle** appends nothing — its wire bytes are UNCHANGED from v49, so every existing circle telegraph/charge is
+  byte-identical; only the version gate + the two new kinds differ. The kind byte is range-validated on decode (a bad
+  kind is a `ProtocolException`). Membership is center-point at tick T, server-side, and the decal draws the exact wire
+  shape (drawn == hit test). Content: the Sunderer's Cleave is now a 130° wedge slam and its Lunge a telegraphed line
+  charge (`TelegraphScheduler` resolves by shape kind; no engine change beyond the shape). No new message types.
 
 ## Client Messages
 
@@ -148,7 +157,7 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
 - `SpawnerMarker` / `SpawnerMarkerMessage` (v34): a SPAWNER's red-tile marker — the persistent leash/respawn anchor, keyed by a stable spawner id with an `Active` flag (true on AOI-entry, false on AOI-exit); survives monster death/respawn. Reliable.
 - `CorpseContents` / `CorpseContentsMessage` (v35): server→owner contents of an OPEN corpse (template key + quantity + rarity per stack), re-sent after each take/loot-all; `Open=false` closes the window. Owner-only + reliable-ordered.
 - `PlayerCollisionSetting` (v43): the authoritative player↔player collision flag (`bool`). Sent on login + broadcast on every change (global, not AOI-scoped) so every client's obstacle gather matches the server integrator's. Reliable-ordered.
-- `Telegraph` / `TelegraphMessage` (v44): a scheduled ground telegraph — `ulong` telegraph id, the LOCKED cast-time shape (`byte` kind — circle only at v44; origin as Q12.4 fixed-point like snapshot positions; radius as a Q12.4 `ushort`), and the two absolute server ticks `startTick`/`resolveTick`. The client renders the fill as `(estimatedNow − start)/(resolve − start)` clamped [0,1] against its **cosmetic** server-clock estimate (EMA of the snapshot-header tick — presentation only, never simulation) and self-resolves at T, so every viewer's fill completes at the same wall-clock instant and a late AOI joiner shows the correct remaining fill. Membership is **center-point at tick T, server-side** (the drawn circle IS the hit rule — the decal renders the exact wire radius). No resolve/cancel message exists. Reliable-ordered, AOI-scoped per recipient by the known-id diff pass (schedule-time send and mid-windup AOI-enter are the same path).
+- `Telegraph` / `TelegraphMessage` (v44; shapes v50): a scheduled ground telegraph — `ulong` telegraph id, the LOCKED cast-time shape, and the two absolute server ticks `startTick`/`resolveTick`. The shape body is `{byte kind, origin as Q12.4 fixed-point like snapshot positions, radius as a Q12.4 ushort}` followed by kind-specific extras: **Circle** (kind 1) appends nothing; **Wedge** (kind 2 — reach = radius) appends `{ushort aim, ushort halfAngle}` (both `AimAngle`-quantized 2π/65536); **Line** (kind 3 — length = radius) appends `{ushort aim, Q12.4 ushort halfWidth}`. The client renders the fill as `(estimatedNow − start)/(resolve − start)` clamped [0,1] against its **cosmetic** server-clock estimate (EMA of the snapshot-header tick — presentation only, never simulation) and self-resolves at T, so every viewer's fill completes at the same wall-clock instant and a late AOI joiner shows the correct remaining fill. Membership is **center-point at tick T, server-side** (the drawn shape IS the hit rule — the decal renders the exact wire shape, no padding/shrink; ambiguity errs player-favorable). No resolve/cancel message exists. Reliable-ordered, AOI-scoped per recipient by the known-id diff pass (schedule-time send and mid-windup AOI-enter are the same path).
 - `RegionEcology` / `RegionEcologyMessage` (v45, docs/ecology-v1-design.md): server→client replication of ONE
   authored ecology region's current legible state — region id, display name, its inclusive tile rect, and one
   `{typeId, state}` entry per hosted monster type (`state` the D5 five-state enum; no stock/pressure number ever

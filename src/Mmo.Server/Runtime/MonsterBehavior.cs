@@ -95,4 +95,11 @@ public readonly record struct MonsterAiTunables(
     // ChargeEnabled/SlamEnabled "0/false = inert" convention above. NEVER gates Chasing/Returning/SlamChanneling (see
     // BasicRoamerBehavior's dormancy section) — only Idle/Roaming are eligible, so a committed action always runs to
     // completion regardless of who is or isn't nearby.
-    double DormancyRadius = 0d);
+    double DormancyRadius = 0d,
+    // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md, the Sunderer's Lunge): true iff this type's
+    // charge is a TELEGRAPHED LINE. When true the brain's charge trigger (out of melee, within the trigger range) casts
+    // a line "Lunge" (schedule → root → dash-on-resolve, damage rides the telegraph) via the shared slam channel instead
+    // of the instant dash; false (the default, every non-lunger — the gnoll) keeps the instant charge byte-identical. The
+    // cooldown reuses ChargeCooldownTicks, gated brain-side (the lunge leap is not the executor's Charge action). Default
+    // false → inert for every positional construction (tests/perf), matching the ChargeEnabled/SlamEnabled convention.
+    bool LungeEnabled = false);

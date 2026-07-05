@@ -486,8 +486,7 @@ public sealed class MmoClient : IDisposable
         {
             if (estimatedTick is not { } estimate)
             {
-                destination.Add(new TelegraphDecalState(
-                    telegraphId, telegraph.Shape.Kind, telegraph.Shape.Origin, telegraph.Shape.Radius, Progress: 0d, Resolved: false));
+                destination.Add(ToDecalState(telegraphId, telegraph.Shape, Progress: 0d, Resolved: false));
                 continue;
             }
 
@@ -498,13 +497,7 @@ public sealed class MmoClient : IDisposable
             }
 
             var progress = TelegraphFill.Progress(estimate, telegraph.StartTick, telegraph.ResolveTick);
-            destination.Add(new TelegraphDecalState(
-                telegraphId,
-                telegraph.Shape.Kind,
-                telegraph.Shape.Origin,
-                telegraph.Shape.Radius,
-                progress,
-                Resolved: estimate >= telegraph.ResolveTick));
+            destination.Add(ToDecalState(telegraphId, telegraph.Shape, progress, Resolved: estimate >= telegraph.ResolveTick));
         }
 
         foreach (var telegraphId in _expiredTelegraphScratch)
@@ -520,6 +513,12 @@ public sealed class MmoClient : IDisposable
     }
 
     private readonly List<ulong> _expiredTelegraphScratch = [];
+
+    // WEDGE+LINE (S-telegraph-shapes-wedge-line): project a locked wire shape into a render-ready decal state, carrying
+    // EVERY shape param so the Godot pass draws the exact drawn=hit shape from the wire fields alone (circle leaves the
+    // wedge/line params 0). One helper so the two call sites (pre-clock and normal) stay identical.
+    private static TelegraphDecalState ToDecalState(ulong telegraphId, TelegraphShape shape, double Progress, bool Resolved) =>
+        new(telegraphId, shape.Kind, shape.Origin, shape.Radius, Progress, Resolved, shape.AimRadians, shape.HalfAngleRadians, shape.HalfWidth);
 
     // CONTINUOUS MIGRATION (Phase 4): the predicted RENDER position for the LOCAL player when a predictor is attached,
     // else null (raw render). The predictor lives on this outer class, so the render-state builders inject its smooth

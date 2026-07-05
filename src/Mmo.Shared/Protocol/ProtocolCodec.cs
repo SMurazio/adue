@@ -119,7 +119,15 @@ public static class ProtocolCodec
     // v49 — BOSS-2 (exp/duo-abilities, docs/boss-encounter-sunderer-design.md P1 HUSK): ONE additive message,
     // server->client BossPlatingMessage {uint BossNetworkId, bool PlatingActive} — the Sunderer's cold-steel plating
     // state (up / shattered / crumbled) for the client's steel-grey boss tint (Laws 4/7). AOI-scoped, reliable-ordered.
-    public const byte Version = 49;
+    // v50 — TELEGRAPH SHAPES WEDGE+LINE (exp/duo-abilities, docs/boss-encounter-sunderer-design.md): the ground
+    // telegraph (TelegraphMessage) + the midpoint-charge marker (MidpointChargeMessage) gain two new shape KINDS beyond
+    // Circle. The shape body is now {kind byte, Q12.4 origin, Q12.4 ushort radius, THEN kind-specific extras}: a WEDGE
+    // appends {aim ushort, halfAngle ushort} (both AimAngle-quantized, 2π/65536); a LINE appends {aim ushort, Q12.4
+    // ushort halfWidth} (Radius carries the line LENGTH). A CIRCLE appends NOTHING — its wire bytes are UNCHANGED from
+    // v49, so every existing circle telegraph/charge is byte-identical (only the version gate + the two new kinds
+    // differ). The kind byte is range-validated on decode (a bad kind is a ProtocolException, never a shape the client
+    // draws-but-can't-hit-test). Server + every in-repo client flip together (old-client behavior stays hard-refuse).
+    public const byte Version = 50;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -739,11 +747,7 @@ public static class ProtocolCodec
     private static void WriteTelegraph(BinaryWriter writer, TelegraphMessage value)
     {
         writer.Write(value.TelegraphId);
-        writer.Write((byte)value.Shape.Kind);
-        var (qx, qy) = PositionEncoding.Encode(value.Shape.Origin);
-        writer.Write(qx);
-        writer.Write(qy);
-        writer.Write(QuantizeTelegraphRadius(value.Shape.Radius));
+        WriteTelegraphShape(writer, value.Shape);
         writer.Write(value.StartTick);
         writer.Write(value.ResolveTick);
     }
@@ -751,12 +755,52 @@ public static class ProtocolCodec
     private static TelegraphMessage ReadTelegraph(BinaryReader reader)
     {
         var telegraphId = reader.ReadUInt64();
+        var shape = ReadTelegraphShape(reader);
+        var startTick = reader.ReadUInt32();
+        var resolveTick = reader.ReadUInt32();
+        return new TelegraphMessage(telegraphId, shape, startTick, resolveTick);
+    }
+
+    // TELEGRAPH SHAPES (v50): the SHARED shape body used by BOTH the telegraph announcement and the midpoint-charge
+    // marker, so the two can never diverge. Wire order: kind byte, Q12.4 origin (two shorts via PositionEncoding — the
+    // decal lands exactly where the wire says entities stand), Q12.4 ushort radius (circle radius / wedge reach / line
+    // length), THEN kind-specific extras — a WEDGE appends {aim, halfAngle} as AimAngle ushorts (the SAME 2π/65536
+    // quantization the attack/heading aims use), a LINE appends {aim ushort, Q12.4 ushort halfWidth}. A CIRCLE appends
+    // nothing (byte-identical to v49). Quantize on SEND only — the server's authoritative double shape is never rounded
+    // back by this; TelegraphScheduler.QuantizeToWire mirrors this EXACTLY so resolve, wire, and decal see one shape.
+    private static void WriteTelegraphShape(BinaryWriter writer, TelegraphShape shape)
+    {
+        writer.Write((byte)shape.Kind);
+        var (qx, qy) = PositionEncoding.Encode(shape.Origin);
+        writer.Write(qx);
+        writer.Write(qy);
+        writer.Write(QuantizeTelegraphRadius(shape.Radius));
+        switch (shape.Kind)
+        {
+            case TelegraphShapeKind.Wedge:
+                writer.Write(AimAngle.Quantize(shape.AimRadians));
+                writer.Write(AimAngle.Quantize(shape.HalfAngleRadians));
+                break;
+            case TelegraphShapeKind.Line:
+                writer.Write(AimAngle.Quantize(shape.AimRadians));
+                writer.Write(QuantizeTelegraphRadius(shape.HalfWidth));
+                break;
+        }
+    }
+
+    private static TelegraphShape ReadTelegraphShape(BinaryReader reader)
+    {
         var kind = ReadTelegraphShapeKind(reader);
         var origin = PositionEncoding.Decode(reader.ReadInt16(), reader.ReadInt16());
         var radius = reader.ReadUInt16() / PositionEncoding.Scale;
-        var startTick = reader.ReadUInt32();
-        var resolveTick = reader.ReadUInt32();
-        return new TelegraphMessage(telegraphId, new TelegraphShape(kind, origin, radius), startTick, resolveTick);
+        return kind switch
+        {
+            TelegraphShapeKind.Wedge => TelegraphShape.Wedge(
+                origin, radius, AimAngle.ToRadians(reader.ReadUInt16()), AimAngle.ToRadians(reader.ReadUInt16())),
+            TelegraphShapeKind.Line => TelegraphShape.Line(
+                origin, radius, AimAngle.ToRadians(reader.ReadUInt16()), reader.ReadUInt16() / PositionEncoding.Scale),
+            _ => TelegraphShape.Circle(origin, radius),
+        };
     }
 
     // TELEGRAPH T2 (v44): quantize the shape radius to a Q12.4 ushort. A non-finite/negative radius encodes as 0 and
@@ -774,13 +818,13 @@ public static class ProtocolCodec
         return (ushort)clamped;
     }
 
-    // TELEGRAPH T2 (v44): range-validate the shape-kind byte (mirroring ReadAttackKind) so a hostile/corrupt packet
-    // can't smuggle an unknown kind into the client's decal renderer — an unknown kind is a ProtocolException, not a
-    // shape that Contains() nothing but still draws something.
+    // TELEGRAPH T2 (v44) / SHAPES (v50): range-validate the shape-kind byte (mirroring ReadAttackKind) so a hostile/
+    // corrupt packet can't smuggle an unknown kind into the client's decal renderer — an unknown kind is a
+    // ProtocolException, not a shape that Contains() nothing but still draws something. Accepts Circle/Wedge/Line.
     private static TelegraphShapeKind ReadTelegraphShapeKind(BinaryReader reader)
     {
         var value = reader.ReadByte();
-        if (value != (byte)TelegraphShapeKind.Circle)
+        if (value < (byte)TelegraphShapeKind.Circle || value > (byte)TelegraphShapeKind.Line)
         {
             throw new ProtocolException($"Invalid TelegraphShapeKind value: {value}.");
         }
@@ -794,11 +838,7 @@ public static class ProtocolCodec
     private static void WriteMidpointCharge(BinaryWriter writer, MidpointChargeMessage value)
     {
         writer.Write(value.ChargeId);
-        writer.Write((byte)value.Shape.Kind);
-        var (qx, qy) = PositionEncoding.Encode(value.Shape.Origin);
-        writer.Write(qx);
-        writer.Write(qy);
-        writer.Write(QuantizeTelegraphRadius(value.Shape.Radius));
+        WriteTelegraphShape(writer, value.Shape);
         writer.Write(value.StartTick);
         writer.Write(value.ResolveTick);
         writer.Write(value.Active);
@@ -807,13 +847,11 @@ public static class ProtocolCodec
     private static MidpointChargeMessage ReadMidpointCharge(BinaryReader reader)
     {
         var chargeId = reader.ReadUInt64();
-        var kind = ReadTelegraphShapeKind(reader);
-        var origin = PositionEncoding.Decode(reader.ReadInt16(), reader.ReadInt16());
-        var radius = reader.ReadUInt16() / PositionEncoding.Scale;
+        var shape = ReadTelegraphShape(reader);
         var startTick = reader.ReadUInt32();
         var resolveTick = reader.ReadUInt32();
         var active = reader.ReadBoolean();
-        return new MidpointChargeMessage(chargeId, new TelegraphShape(kind, origin, radius), startTick, resolveTick, active);
+        return new MidpointChargeMessage(chargeId, shape, startTick, resolveTick, active);
     }
 
     // DUO-WAVE2 (v48): range-validate the co-op ability discriminator bytes (mirroring ReadAttackKind) so a malformed/

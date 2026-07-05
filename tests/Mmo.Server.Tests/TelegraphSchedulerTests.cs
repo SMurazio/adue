@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Mmo.Server.Runtime;
 using Mmo.Shared.Domain;
 using Mmo.Shared.Domain.Actions;
+using Mmo.Shared.Protocol;
 using Xunit;
 
 namespace Mmo.Server.Tests;
@@ -416,5 +417,100 @@ public sealed class TelegraphSchedulerTests
         Assert.Equal("a", landed[0].Source);
         Assert.Equal("b", landed[1].Source);
         Assert.Equal("c", landed[2].Source);
+    }
+
+    // ================= TELEGRAPH SHAPES WEDGE+LINE (S-telegraph-shapes-wedge-line) =================
+
+    [Fact]
+    public void WedgeMembership_WithinReachAndArc_IsInclusive_ErrsPlayerFavorable()
+    {
+        // A 90° wedge (half-angle 45°) with APEX at (10,10), aimed east (+X, aim 0), reach 3.
+        var half = 45d * Math.PI / 180d;
+        var shape = TelegraphShape.Wedge(new WorldVector(10d, 10d), 3d, aimRadians: 0d, halfAngleRadians: half);
+
+        Assert.True(shape.Contains(new WorldVector(10d, 10d)));       // the apex — inside
+        Assert.True(shape.Contains(new WorldVector(12d, 10d)));       // straight ahead, in reach
+        Assert.True(shape.Contains(new WorldVector(13d, 10d)));       // exactly on the reach rim (dist 3) — INCLUSIVE
+        Assert.False(shape.Contains(new WorldVector(13.01d, 10d)));   // just past the reach
+        Assert.False(shape.Contains(new WorldVector(8d, 10d)));       // directly BEHIND — outside the arc
+        // On the arc edge (exactly 45° off the aim, within reach) — inclusive.
+        Assert.True(shape.Contains(new WorldVector(10d + (2d * Math.Cos(half)), 10d + (2d * Math.Sin(half)))));
+        // Just OUTSIDE the arc (47°): CENTER-POINT membership, player-favorable — no body widening (unlike free-aim).
+        Assert.False(shape.Contains(new WorldVector(10d + (2d * Math.Cos(half + 0.035d)), 10d + (2d * Math.Sin(half + 0.035d)))));
+        Assert.Equal(3d, shape.BoundingRadius, 9);
+    }
+
+    [Fact]
+    public void LineMembership_WithinLengthAndWidth_IsInclusive_ErrsPlayerFavorable()
+    {
+        // A 2u-wide (half-width 1) corridor from origin (10,10), length 8, aimed east (+X).
+        var shape = TelegraphShape.Line(new WorldVector(10d, 10d), length: 8d, aimRadians: 0d, halfWidth: 1d);
+
+        Assert.True(shape.Contains(new WorldVector(10d, 10d)));       // the near edge (along 0)
+        Assert.True(shape.Contains(new WorldVector(14d, 10.9d)));     // inside the corridor
+        Assert.True(shape.Contains(new WorldVector(14d, 11d)));       // exactly on the side edge (perp 1) — INCLUSIVE
+        Assert.False(shape.Contains(new WorldVector(14d, 11.01d)));   // just past the side edge
+        Assert.True(shape.Contains(new WorldVector(18d, 10d)));       // exactly on the far edge (along 8) — INCLUSIVE
+        Assert.False(shape.Contains(new WorldVector(18.01d, 10d)));   // just past the far edge
+        Assert.False(shape.Contains(new WorldVector(9.99d, 10d)));    // BEHIND the near edge (along < 0)
+        Assert.Equal(Math.Sqrt(64d + 1d), shape.BoundingRadius, 9);   // sqrt(length² + halfWidth²)
+    }
+
+    [Fact]
+    public void WedgeResolve_PlayerInArc_IsHit_PlayerBehind_IsNot()
+    {
+        var world = new WorldState();
+        var front = world.AddTransient(1, EntityKind.Player, "Front", new TileCoord(12, 10), Direction8.S);
+        var behind = world.AddTransient(2, EntityKind.Player, "Behind", new TileCoord(8, 10), Direction8.S);
+        var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
+
+        var half = 45d * Math.PI / 180d;
+        scheduler.Schedule(999, TelegraphShape.Wedge(new WorldVector(10d, 10d), 3d, 0d, half), startTick: 10, resolveTick: 20, damage: 25, source: "Cleave");
+        scheduler.ResolveDue(20);
+
+        var hit = Assert.Single(landed);
+        Assert.Same(front, hit.Victim);
+        Assert.Equal(75, front.Stats.Health);   // in-arc, in reach → hit
+        Assert.Equal(100, behind.Stats.Health);  // behind the apex → outside the arc → untouched
+    }
+
+    [Fact]
+    public void LineResolve_PlayerInCorridor_IsHit_PlayerBeside_IsNot()
+    {
+        var world = new WorldState();
+        var inside = world.AddTransient(1, EntityKind.Player, "In", new TileCoord(14, 10), Direction8.S);
+        var beside = world.AddTransient(2, EntityKind.Player, "Beside", new TileCoord(14, 13), Direction8.S);
+        var (scheduler, _, landed) = CreateEngine(world, CreateExecutor(world));
+
+        scheduler.Schedule(999, TelegraphShape.Line(new WorldVector(10d, 10d), 8d, 0d, 1d), startTick: 10, resolveTick: 20, damage: 20, source: "Lunge");
+        scheduler.ResolveDue(20);
+
+        var hit = Assert.Single(landed);
+        Assert.Same(inside, hit.Victim);
+        Assert.Equal(80, inside.Stats.Health);   // in the corridor → hit
+        Assert.Equal(100, beside.Stats.Health);   // 3u off the centreline (half-width 1) → untouched
+    }
+
+    [Fact]
+    public void ScheduleQuantizesWedgeAndLine_WireAndResolveSeeTheSameShape()
+    {
+        // The honest-telegraph pillar for the new kinds: the shape the scheduler holds (and resolves Contains against)
+        // is the EXACT wire shape. Schedule OFF-GRID wedge + line; CopyActiveTo yields the quantized shape the wire
+        // ships; encoding+decoding THAT shape is a FIXPOINT (survives the wire byte-identically) — so client decal ==
+        // server resolve. QuantizeToWire (scheduler) and WriteTelegraphShape/ReadTelegraphShape (codec) must agree.
+        var world = new WorldState();
+        var (scheduler, _, _) = CreateEngine(world, CreateExecutor(world));
+        scheduler.Schedule(1, TelegraphShape.Wedge(new WorldVector(10.04d, -3.03d), 2.77d, 1.1234d, 1.14d), 10, 20, 25, "Cleave");
+        scheduler.Schedule(2, TelegraphShape.Line(new WorldVector(-1.53d, 4.71d), 7.96d, 2.41d, 0.97d), 10, 20, 20, "Lunge");
+
+        var active = new List<TelegraphScheduler.ActiveTelegraph>();
+        scheduler.CopyActiveTo(active);
+        Assert.Equal(2, active.Count);
+        foreach (var t in active)
+        {
+            var decoded = (TelegraphMessage)ProtocolCodec.Decode(
+                ProtocolCodec.Encode(new TelegraphMessage(t.Id, t.Shape, t.StartTick, t.ResolveTick)));
+            Assert.Equal(t.Shape, decoded.Shape);
+        }
     }
 }

@@ -67,6 +67,16 @@ public sealed class MonsterTypeRegistry
     private const double MaxChargeDistanceUnits = 16d;
     private const double MinChargeTriggerRangeUnits = 0d;
     private const double MaxChargeTriggerRangeUnits = 64d;
+    // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Lunge): the charge-telegraph bounds (behavior-specific data, clamped
+    // on load like the charge trio). Windup 0 (instant dash — no telegraph) .. 10 s (mirrors the slam windup bound);
+    // damage 0 .. 10000 (the attack-damage bounds); width 0 (hairline — a mis-authored lunge can't hit) .. 16 units.
+    // MIN 0 throughout for the round-trip reason the charge/slam mins document: 0 is the value every NON-lunger carries.
+    private const int MinChargeWindupMs = 0;
+    private const int MaxChargeWindupMs = 10000;
+    private const int MinChargeDamage = 0;
+    private const int MaxChargeDamage = 10000;
+    private const double MinChargeWidthUnits = 0d;
+    private const double MaxChargeWidthUnits = 16d;
     // TELEGRAPH T1 slam bounds (ability data, clamped on load + via TryApply like the charge trio). Cooldown 0 (no
     // slam) .. 60 s; radius 0 (disabled) .. 16 units; windup 0 .. 10 s (the ~1.5-3 s fairness floor of the design is
     // content tuning, T3 — a short windup stays legal for dev testing); damage 0 .. 10000 (the attack-damage bounds).
@@ -82,6 +92,11 @@ public sealed class MonsterTypeRegistry
     private const int MaxSlamWindupMs = 10000;
     private const int MinSlamDamage = 0;
     private const int MaxSlamDamage = 10000;
+    // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Cleave): the wedge-slam TOTAL arc bounds (behavior-specific data,
+    // clamped on load). 0 (a degenerate zero-width wedge — a mis-authored wedge simply can't hit, player-favorable) ..
+    // 360° (a full ring). A real cleave authors ~130.
+    private const double MinSlamWedgeAngleDeg = 0d;
+    private const double MaxSlamWedgeAngleDeg = 360d;
     // MONSTER-BEHAVIOR P6 render-scale bounds: 0.25× (a quarter size) .. 4× (clearly large). A nonsense author value
     // is clamped, never honoured, so the data file cannot author an invisible or world-filling placeholder visual.
     private const double MinRenderScale = 0.25d;
@@ -356,6 +371,23 @@ public sealed class MonsterTypeRegistry
                     Math.Clamp(dto.ChargeTriggerRangeUnits.Value, MinChargeTriggerRangeUnits, MaxChargeTriggerRangeUnits);
             }
 
+            // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Lunge): the charge-telegraph tuning — set directly + clamped
+            // like the charge trio (behavior-specific data, NOT a live F1 field); omitted -> 0 (instant dash, no line).
+            if (dto.ChargeWindupMs.HasValue)
+            {
+                type.ChargeWindupMs = Math.Clamp(dto.ChargeWindupMs.Value, MinChargeWindupMs, MaxChargeWindupMs);
+            }
+
+            if (dto.ChargeDamage.HasValue)
+            {
+                type.ChargeDamage = Math.Clamp(dto.ChargeDamage.Value, MinChargeDamage, MaxChargeDamage);
+            }
+
+            if (dto.ChargeWidthUnits.HasValue)
+            {
+                type.ChargeWidthUnits = Math.Clamp(dto.ChargeWidthUnits.Value, MinChargeWidthUnits, MaxChargeWidthUnits);
+            }
+
             // TELEGRAPH T1: the slam ability tuning — set directly + clamped like the charge trio above (behavior/
             // ability-specific data with contextual F1 exposure); omitted -> 0 (no slam), the field default.
             if (dto.SlamCooldownMs.HasValue)
@@ -376,6 +408,19 @@ public sealed class MonsterTypeRegistry
             if (dto.SlamDamage.HasValue)
             {
                 type.SlamDamage = Math.Clamp(dto.SlamDamage.Value, MinSlamDamage, MaxSlamDamage);
+            }
+
+            // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Cleave): the slam SHAPE selector is STORED verbatim (non-blank;
+            // an omitted/blank value keeps the MonsterType default "circle"), like locomotionId/behaviorId — GameServer
+            // resolves it at cast (unknown -> circle). The wedge angle is set directly + clamped (behavior-specific data).
+            if (!string.IsNullOrWhiteSpace(dto.SlamShape))
+            {
+                type.SlamShape = dto.SlamShape;
+            }
+
+            if (dto.SlamWedgeAngleDeg.HasValue)
+            {
+                type.SlamWedgeAngleDeg = Math.Clamp(dto.SlamWedgeAngleDeg.Value, MinSlamWedgeAngleDeg, MaxSlamWedgeAngleDeg);
             }
 
             // MONSTER-BEHAVIOR P6: the placeholder per-type VISUAL. RenderTint is authored as a friendly "#RRGGBB" hex
@@ -450,10 +495,15 @@ public sealed class MonsterTypeRegistry
         ChargeCooldownMs: t.ChargeCooldownMs,
         ChargeDistanceUnits: t.ChargeDistanceUnits,
         ChargeTriggerRangeUnits: t.ChargeTriggerRangeUnits,
+        ChargeWindupMs: t.ChargeWindupMs,
+        ChargeDamage: t.ChargeDamage,
+        ChargeWidthUnits: t.ChargeWidthUnits,
         SlamCooldownMs: t.SlamCooldownMs,
         SlamRadiusUnits: t.SlamRadiusUnits,
         SlamWindupMs: t.SlamWindupMs,
         SlamDamage: t.SlamDamage,
+        SlamShape: t.SlamShape,
+        SlamWedgeAngleDeg: t.SlamWedgeAngleDeg,
         MaxHealth: t.MaxHealth,
         FleeHealthPct: t.FleeHealthPct,
         MoveSpeedMultiplier: t.MoveSpeedMultiplier,
@@ -547,11 +597,20 @@ public sealed class MonsterTypeRegistry
         int? ChargeCooldownMs,
         double? ChargeDistanceUnits,
         double? ChargeTriggerRangeUnits,
+        // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Lunge): the charge-telegraph tuning (omitted -> 0 = instant dash,
+        // no line telegraph — the gnoll). ChargeWindupMs > 0 turns the charge into a telegraphed line "Lunge".
+        int? ChargeWindupMs,
+        int? ChargeDamage,
+        double? ChargeWidthUnits,
         // TELEGRAPH T1: the slam ability tuning (ability-specific data like the charge trio; omitted -> 0 = no slam).
         int? SlamCooldownMs,
         double? SlamRadiusUnits,
         int? SlamWindupMs,
         int? SlamDamage,
+        // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Cleave): the slam SHAPE selector (stored verbatim; omitted ->
+        // "circle") + the wedge TOTAL arc in degrees (omitted -> 0). Only a "wedge" slam reads the angle.
+        string? SlamShape,
+        double? SlamWedgeAngleDeg,
         int? MaxHealth,
         double? FleeHealthPct,
         double? MoveSpeedMultiplier,
@@ -626,7 +685,11 @@ public sealed class MonsterTypeRegistry
         // enforces it — a scheduled world event has no executor cooldown clock). Radius/windup/damage stay on the
         // TYPE (GameServer's TryBeginMonsterSlam reads them at cast) — the brain only needs the WHEN.
         SlamEnabled: SlamEnabled(type),
-        SlamCooldownTicks: SlamCooldownTicks(type));
+        SlamCooldownTicks: SlamCooldownTicks(type),
+        // TELEGRAPH SHAPES WEDGE+LINE: whether the charge trigger routes through the telegraphed line-lunge channel (the
+        // Sunderer) vs the instant dash (the gnoll). The windup/damage/width/length stay on the TYPE — GameServer's
+        // TryBeginMonsterLunge reads them at cast; the brain only needs the WHEN + which path.
+        LungeEnabled: LungeEnabled(type));
 
     // ~0.5 s aggro-scan cadence in ticks (floored at 1) — tick-rate-only, throttling the spatial scan.
     public uint AggroScanIntervalTicks =>
@@ -821,6 +884,18 @@ public sealed class MonsterTypeRegistry
     // without tuning — is inert; the brain reads the derived MonsterAiTunables.SlamEnabled, never these directly.
     public static bool SlamEnabled(MonsterType type) =>
         type.SlamCooldownMs > 0 && type.AbilityIds.Contains("slam", StringComparer.OrdinalIgnoreCase);
+
+    // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Lunge): true iff this type's charge is a TELEGRAPHED LINE — it composed
+    // "charge" (case-insensitive) AND authored a positive charge WINDUP. When true the brain routes the charge trigger
+    // through the line-lunge channel (schedule → root → dash-on-resolve, damage rides the telegraph) instead of the
+    // instant dash; false (the gnoll, ChargeWindupMs 0) keeps the instant charge byte-identical. Cooldown is shared with
+    // the charge (ChargeCooldownTicks), gated brain-side (NextLungeTick) since the lunge leap is not the executor's Charge.
+    public static bool LungeEnabled(MonsterType type) =>
+        type.ChargeWindupMs > 0 && type.AbilityIds.Contains("charge", StringComparer.OrdinalIgnoreCase);
+
+    // TELEGRAPH SHAPES WEDGE+LINE: this type's charge/lunge WINDUP (cast → resolve deadline) in TICKS (Ceiling, >= 1 —
+    // the cooldown convention). Read fresh at each cast (GameServer.TryBeginMonsterLunge) so a retune applies next cast.
+    public uint ChargeWindupTicks(MonsterType type) => CooldownMsToTicks(type.ChargeWindupMs);
 
     // TELEGRAPH T1: this type's slam WINDUP (cast → resolve deadline) and re-cast cooldown in TICKS (Ceiling, >= 1 —
     // the cooldown convention, so even a tiny authored ms yields at least one telegraphed tick before resolve). Read

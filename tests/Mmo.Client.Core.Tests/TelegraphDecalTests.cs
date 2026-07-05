@@ -148,6 +148,35 @@ public sealed class TelegraphDecalTests
         Assert.Contains(decals, d => d.TelegraphId == 2);
     }
 
+    // TELEGRAPH SHAPES WEDGE+LINE: the projection carries EVERY shape param through to the decal state, so the Godot
+    // pass can draw the exact drawn=hit shape (wedge/line) from the wire fields alone. A wedge ships its aim + half-angle;
+    // a line ships its aim + half-width (with Radius carrying the length). Circle leaves the extra params 0 (see above).
+    [Fact]
+    public void ProjectionCarriesWedgeAndLineShapeParams()
+    {
+        using var client = CreateAnchoredClient();
+        var decals = new List<TelegraphDecalState>();
+
+        client.HandleMessageForTests(new TelegraphMessage(
+            10, TelegraphShape.Wedge(new WorldVector(4d, 5d), 2.75d, aimRadians: 1.0d, halfAngleRadians: 0.5d), 1000, 1030));
+        client.HandleMessageForTests(new TelegraphMessage(
+            11, TelegraphShape.Line(new WorldVector(-2d, 3d), length: 8d, aimRadians: 2.0d, halfWidth: 1d), 1000, 1030));
+
+        client.CopyTelegraphDecalsTo(decals, Ms(5000));
+
+        var wedge = Assert.Single(decals, d => d.TelegraphId == 10);
+        Assert.Equal(TelegraphShapeKind.Wedge, wedge.Kind);
+        Assert.Equal(2.75d, wedge.Radius, 6);
+        Assert.Equal(1.0d, wedge.AimRadians, 3);
+        Assert.Equal(0.5d, wedge.HalfAngleRadians, 3);
+
+        var line = Assert.Single(decals, d => d.TelegraphId == 11);
+        Assert.Equal(TelegraphShapeKind.Line, line.Kind);
+        Assert.Equal(8d, line.Radius, 6);           // Radius carries the line length
+        Assert.Equal(2.0d, line.AimRadians, 3);
+        Assert.Equal(1d, line.HalfWidth, 6);
+    }
+
     // Before any snapshot lands there is no clock estimate — a telegraph renders at progress 0 (empty ring, no
     // guess, no prune) instead of throwing or filling blind. Contrived ordering (the login snapshot precedes any
     // cast in practice) but the projection must not depend on it.

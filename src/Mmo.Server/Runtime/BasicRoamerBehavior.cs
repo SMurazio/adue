@@ -133,6 +133,11 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // owns this clock (the charge instead leans on the executor's CanStart cooldown).
         public uint NextSlamTick;
 
+        // TELEGRAPH SHAPES WEDGE+LINE: the monster's OWN lunge-cast cooldown gate (mirrors NextSlamTick). The telegraphed
+        // lunge dashes via the shared slam-leap (ActionId.Jump), NOT the executor's Charge action, so its cooldown is
+        // gated here brain-side rather than by the executor's CanStart (which the instant charge leans on).
+        public uint NextLungeTick;
+
         // SLIME-SLAM ROOT+LEAP: the live channel bookkeeping while Phase == SlamChanneling (meaningless otherwise).
         // SlamOrigin is the LOCKED wire-quantized telegraph center the leap aims at; SlamLeapStartTick is when the
         // leap fires (GameServer's timing: land exactly on SlamResolveTick); SlamLeapStarted latches the one leap
@@ -202,6 +207,11 @@ public class BasicRoamerBehavior : IMonsterBehavior
     // Resolved to a non-null delegate in the ctor so the StepChase trigger can call it unguarded.
     private readonly TrySlamDelegate _trySlam;
 
+    // TELEGRAPH SHAPES WEDGE+LINE: the LUNGE trigger (a telegraphed line charge) — same shape as the slam trigger (it
+    // schedules a telegraph LOCKED at cast + hands back a SlamCast the shared channel roots+dashes through), so it reuses
+    // TrySlamDelegate. Default no-op returns false → never lunge (the charge falls through to its instant-dash path).
+    private readonly TrySlamDelegate _tryLunge;
+
     // SLIME-SLAM ROOT+LEAP: the slam-leap starter (default a no-op that returns false → never leap; the channel then
     // just roots in place). See BeginSlamLeapDelegate. Resolved non-null in the ctor for unguarded calls.
     private readonly BeginSlamLeapDelegate _beginSlamLeap;
@@ -264,7 +274,8 @@ public class BasicRoamerBehavior : IMonsterBehavior
         AttackDelegate attack,
         TryChargeDelegate? tryCharge = null,
         TrySlamDelegate? trySlam = null,
-        BeginSlamLeapDelegate? beginSlamLeap = null)
+        BeginSlamLeapDelegate? beginSlamLeap = null,
+        TrySlamDelegate? tryLunge = null)
     {
         _random = new Random(seed);
         _isWalkable = isWalkable;
@@ -274,6 +285,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
         _tryCharge = tryCharge ?? ((WorldEntity _, WorldVector _, double _, uint _) => false);
         _trySlam = trySlam ?? NeverSlam;
         _beginSlamLeap = beginSlamLeap ?? ((WorldEntity _, WorldVector _, uint _, uint _) => false);
+        _tryLunge = tryLunge ?? NeverSlam;
     }
 
     // The "never slam" default dep — a named method (not a lambda) because the out param needs a body.
@@ -301,6 +313,7 @@ public class BasicRoamerBehavior : IMonsterBehavior
             TargetPresent = false,
             NextAttackTick = serverTick,
             NextSlamTick = serverTick, // TELEGRAPH T1: like the attack, the first slam may cast immediately.
+            NextLungeTick = serverTick, // TELEGRAPH SHAPES: like the slam, the first lunge may cast immediately.
             NextAggroScanTick = serverTick + stagger,
             LastProgressTick = serverTick,
         };
@@ -528,16 +541,35 @@ public class BasicRoamerBehavior : IMonsterBehavior
         // a started one returns for this tick — the executor now owns the dash and the glide self-guards (no double-move)
         // until it ends. Count a started charge as progress so the no-progress watchdog never trips on the dash. When
         // ChargeEnabled is false (every BasicRoamer/slime + a non-charger gnoll) this block is INERT → byte-identical.
-        if (t.ChargeEnabled && distToTarget > t.AttackRangeUnits && distToTarget <= t.ChargeTriggerRangeUnits)
+        if ((t.ChargeEnabled || t.LungeEnabled) && distToTarget > t.AttackRangeUnits && distToTarget <= t.ChargeTriggerRangeUnits)
         {
             var dirToTarget = (targetPos - monster.Position).Normalized();
-            // Pass the GAP so the dash clamps to it (BeginMonsterCharge caps at the distance to target) — entities don't
-            // collide with each other, so an unclamped fixed dash would carry the monster THROUGH and PAST a nearer
-            // target and leave it behind them. Clamping lands it on/adjacent the target (collision keeps body separation).
-            if (dirToTarget != WorldVector.Zero && _tryCharge(monster, dirToTarget, distToTarget, serverTick))
+            if (dirToTarget != WorldVector.Zero)
             {
-                state.LastProgressTick = serverTick;
-                return false;
+                // TELEGRAPH SHAPES WEDGE+LINE (the Sunderer's Lunge): a TELEGRAPHED line charge takes precedence over the
+                // instant dash. On its own cooldown, CAST the line telegraph (GameServer locks it along the bearing to the
+                // target, length = the planned dash distance) — a successful cast hands back the CAST PLAN and COMMITS the
+                // monster to the shared slam channel (rooted through the windup, then the dash executes on resolve and the
+                // damage rides the telegraph). LungeEnabled is false for every non-lunger, so this block is inert there and
+                // the instant charge below is byte-identical.
+                if (t.LungeEnabled && serverTick >= state.NextLungeTick
+                    && _tryLunge(monster, state.TargetId, targetPos, serverTick, out var lungeCast))
+                {
+                    state.NextLungeTick = serverTick + Math.Max(1u, t.ChargeCooldownTicks);
+                    state.LastProgressTick = serverTick;
+                    BeginSlamChannel(monster, ref state, serverTick, lungeCast);
+                    return false;
+                }
+
+                // Instant CHARGE (MONSTER-BEHAVIOR P5, the gnoll): pass the GAP so the dash clamps to it (BeginMonsterCharge
+                // caps at the distance to target) — entities don't collide with each other, so an unclamped fixed dash would
+                // carry the monster THROUGH and PAST a nearer target and leave it behind them. Clamping lands it on/adjacent
+                // the target (collision keeps body separation).
+                if (t.ChargeEnabled && _tryCharge(monster, dirToTarget, distToTarget, serverTick))
+                {
+                    state.LastProgressTick = serverTick;
+                    return false;
+                }
             }
         }
 

@@ -90,11 +90,53 @@ public sealed class TelegraphScheduler
     // aim the slam LEAP at the EXACT wire origin the circle renders/resolves at. Idempotent (quantizing a quantized
     // shape is a no-op), so Schedule re-applying it to a pre-quantized shape changes nothing — resolve semantics are
     // untouched.
+    //
+    // WEDGE+LINE (S-telegraph-shapes-wedge-line): mirrors ProtocolCodec.WriteTelegraphShape EXACTLY per kind so server
+    // RESOLVE == wire == client decal (the honest-telegraph pillar): origin via PositionEncoding, radius/half-width to
+    // sixteenths (the Q12.4 ushort clamp), aim/half-angle through the AimAngle 2π/65536 round-trip. A CIRCLE quantizes
+    // only origin+radius (byte-identical to the pre-shapes path). Pinned by tests that assert QuantizeToWire(shape) ==
+    // Decode(Encode(TelegraphMessage(shape))).Shape.
     internal static TelegraphShape QuantizeToWire(TelegraphShape shape)
     {
-        var (qx, qy) = PositionEncoding.Encode(shape.Origin);
-        var radius = Math.Round(shape.Radius * PositionEncoding.Scale, MidpointRounding.AwayFromZero) / PositionEncoding.Scale;
-        return shape with { Origin = PositionEncoding.Decode(qx, qy), Radius = radius };
+        var origin = QuantizeOriginToWire(shape.Origin);
+        var radius = QuantizeSixteenthsToWire(shape.Radius);
+        return shape.Kind switch
+        {
+            TelegraphShapeKind.Wedge => shape with
+            {
+                Origin = origin,
+                Radius = radius,
+                AimRadians = AimAngle.ToRadians(AimAngle.Quantize(shape.AimRadians)),
+                HalfAngleRadians = AimAngle.ToRadians(AimAngle.Quantize(shape.HalfAngleRadians)),
+            },
+            TelegraphShapeKind.Line => shape with
+            {
+                Origin = origin,
+                Radius = radius,
+                AimRadians = AimAngle.ToRadians(AimAngle.Quantize(shape.AimRadians)),
+                HalfWidth = QuantizeSixteenthsToWire(shape.HalfWidth),
+            },
+            _ => shape with { Origin = origin, Radius = radius },
+        };
+    }
+
+    private static WorldVector QuantizeOriginToWire(WorldVector origin)
+    {
+        var (qx, qy) = PositionEncoding.Encode(origin);
+        return PositionEncoding.Decode(qx, qy);
+    }
+
+    // The EXACT Q12.4 ushort round-trip ProtocolCodec.QuantizeTelegraphRadius applies (non-finite/negative → 0; clamped
+    // to the ushort ceiling), so a quantized value here decodes byte-identically on the client.
+    private static double QuantizeSixteenthsToWire(double value)
+    {
+        if (!double.IsFinite(value) || value <= 0d)
+        {
+            return 0d;
+        }
+
+        var sixteenths = Math.Round(value * PositionEncoding.Scale, MidpointRounding.AwayFromZero);
+        return Math.Clamp(sixteenths, 0d, ushort.MaxValue) / PositionEncoding.Scale;
     }
 
     // TELEGRAPH T2: copy the wire projection of every still-pending telegraph into `destination` (cleared first; the

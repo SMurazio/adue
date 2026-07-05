@@ -599,7 +599,11 @@ public sealed class GameServer
             TryBeginMonsterSlam,
             // SLIME-SLAM ROOT+LEAP: the slam-LEAP dep — the ballistic jump to the locked telegraph origin the brain
             // fires at the plan's leap-start tick (only ever reached after a successful TryBeginMonsterSlam).
-            BeginMonsterSlamLeap);
+            BeginMonsterSlamLeap,
+            // TELEGRAPH SHAPES WEDGE+LINE: the LUNGE dep — a telegraphed line charge (schedule line + hand back the cast
+            // plan the shared slam channel roots+dashes through). Both brains get it; the per-type LungeEnabled tunable
+            // gates whether a lunge ever casts (only the Sunderer authors a charge windup), so non-lungers are unchanged.
+            TryBeginMonsterLunge);
         _behaviors = new Dictionary<string, IMonsterBehavior>(StringComparer.OrdinalIgnoreCase)
         {
             ["basicRoamer"] = _defaultBehavior,
@@ -611,7 +615,8 @@ public sealed class GameServer
                 ApplyMonsterAttack,
                 TryBeginMonsterCharge,
                 TryBeginMonsterSlam,
-                BeginMonsterSlamLeap),
+                BeginMonsterSlamLeap,
+                TryBeginMonsterLunge),
             // BOSS-2 (P1): the interposer drone's minimal midline-seek brain. Its interpose target (the pair's segment
             // midpoint, or the boss<->player midpoint solo) is the Sunderer encounter's authority; the drone stays
             // encounter-agnostic behind this delegate. Inert for any non-drone (only the "interposer" type selects it).
@@ -5662,14 +5667,41 @@ public sealed class GameServer
             return false;
         }
 
-        // Reachability gate (see the header): decline a cast whose leap would exceed the type's hop range.
-        if ((targetPosition - monster.Position).Length > type.HopDistanceUnits)
+        // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md): pick the slam SHAPE + the LEAP target by
+        // the type's SlamShape selector. CIRCLE (the slime, default): the telegraph is LOCKED at the TARGET's cast
+        // position and the leap lands ONTO it (unchanged — byte-identical). WEDGE (the Sunderer's Cleave): a 130° arc
+        // whose APEX is the CASTER, aimed at the target's bearing at cast time — the boss stands and cleaves in front, so
+        // the leap target is the caster's OWN position (an in-place hop). The reachability gate + cast plan below are
+        // shared: cast.Origin is the quantized shape origin either way (leap-onto-target for the circle, leap-in-place
+        // for the wedge), so the drawn shape, the resolve, and the landing all agree.
+        var isWedge = string.Equals(type.SlamShape, "wedge", StringComparison.OrdinalIgnoreCase);
+        TelegraphShape rawShape;
+        WorldVector leapTarget;
+        if (isWedge)
+        {
+            var toTarget = targetPosition - monster.Position;
+            var aim = toTarget.LengthSquared > 0d
+                ? Math.Atan2(toTarget.Y, toTarget.X)
+                : Math.Atan2(monster.Facing.ToUnitVector().Y, monster.Facing.ToUnitVector().X);
+            var halfAngle = type.SlamWedgeAngleDeg * 0.5d * Math.PI / 180d;
+            rawShape = TelegraphShape.Wedge(monster.Position, type.SlamRadiusUnits, aim, halfAngle);
+            leapTarget = monster.Position; // in-place cleave: the boss stands and swings, no lunge.
+        }
+        else
+        {
+            rawShape = TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits);
+            leapTarget = targetPosition;
+        }
+
+        // Reachability gate (see the header): decline a cast whose leap would exceed the type's hop range. For the wedge
+        // the leap target is the caster itself (distance 0), so a wedge cleave is never declined for reach.
+        if ((leapTarget - monster.Position).Length > type.HopDistanceUnits)
         {
             return false;
         }
 
         // GROUNDED gate (independent review of this change): a chasing slime can close to trigger range MID-HOP-ARC;
-        // casting airborne would let the in-flight arc keep moving it for the remaining ticks AFTER the circle locks
+        // casting airborne would let the in-flight arc keep moving it for the remaining ticks AFTER the shape locks
         // — up to ~300 ms of drift inside the "rooted" channel. Decline and let the brain re-try next tick (it lands
         // within ≤6 ticks), so the root is literal: cast only ever happens standing still. Mirrors the leap's own
         // grounded requirement (the executor rejects a start while an action is active).
@@ -5679,8 +5711,8 @@ public sealed class GameServer
         }
 
         // Pre-quantize the shape to the EXACT wire/resolve geometry (Schedule re-quantizes — an idempotent no-op)
-        // so the leap aims at the same center the client draws and the resolver tests: landing and circle agree.
-        var shape = TelegraphScheduler.QuantizeToWire(TelegraphShape.Circle(targetPosition, type.SlamRadiusUnits));
+        // so the leap aims at the same center the client draws and the resolver tests: landing and shape agree.
+        var shape = TelegraphScheduler.QuantizeToWire(rawShape);
         var windupTicks = _monsterTypes.SlamWindupTicks(type);
         var resolveTick = serverTick + windupTicks;
         var telegraphId = _telegraphs.Schedule(
@@ -5698,6 +5730,64 @@ public sealed class GameServer
             $"Monster {monster.NetworkId} ({type.Id}) cast slam #{telegraphId} at "
                 + $"{shape.Origin.X:F2},{shape.Origin.Y:F2} r={type.SlamRadiusUnits} resolving at tick {resolveTick} "
                 + $"(target #{targetId}, leap at tick {cast.LeapStartTick}).");
+        return true;
+    }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md, the Sunderer's Lunge): the brain's LUNGE
+    // trigger — CAST a telegraphed LINE charge. Schedules a LINE telegraph LOCKED at the caster's cast position along the
+    // bearing to the target (length = the planned dash distance = min(ChargeDistanceUnits, gap-to-target), half-width =
+    // ChargeWidthUnits/2), resolving after ChargeWindupMs against positions AT the resolve tick, dealing ChargeDamage to
+    // players still inside the corridor. Hands back a SlamCast whose Origin is the FAR END of the line: the SHARED slam
+    // channel roots through the windup, then the leap DASHES the boss along the line to that far end, landing ON the
+    // resolve tick — so the drawn corridor IS the swept path AND the hit test (honest), and the ~ChargeDamage rides the
+    // telegraph RESOLVE (positions at T, line membership), never the dash body. Reuses BeginMonsterSlamLeap (the slam
+    // leap) verbatim — a longer forward hop-arc — so no new motion primitive is needed; the reachability cap is skipped
+    // (a lunge dash is longer than the hop range). Only called for LungeEnabled types; resolves defensively like the slam.
+    private bool TryBeginMonsterLunge(WorldEntity monster, ulong targetId, WorldVector targetPosition, uint serverTick, out SlamCast cast)
+    {
+        cast = default;
+        if (!_monsterTypeOf.TryGetValue(monster.Id, out var type))
+        {
+            type = _monsterTypes.Default;
+        }
+
+        if (!MonsterTypeRegistry.LungeEnabled(type))
+        {
+            return false;
+        }
+
+        // Grounded gate (like the slam): cast only while standing still so the LOCKED line matches the caster's position.
+        if (_actionExecutor.IsActive(monster))
+        {
+            return false;
+        }
+
+        var toTarget = targetPosition - monster.Position;
+        var distance = toTarget.Length;
+        if (distance <= 0d)
+        {
+            return false; // target on top of the caster — no line direction; the brain falls through to its approach.
+        }
+
+        var aim = Math.Atan2(toTarget.Y, toTarget.X);
+        var length = Math.Min(type.ChargeDistanceUnits, distance); // the planned dash distance (up to the type's reach).
+        var halfWidth = type.ChargeWidthUnits * 0.5d;
+        var shape = TelegraphScheduler.QuantizeToWire(TelegraphShape.Line(monster.Position, length, aim, halfWidth));
+        var windupTicks = _monsterTypes.ChargeWindupTicks(type);
+        var resolveTick = serverTick + windupTicks;
+        var telegraphId = _telegraphs.Schedule(
+            monster.Id, shape, serverTick, resolveTick, type.ChargeDamage, $"{type.DisplayName} lunge");
+
+        // The leap DASHES to the FAR END of the LOCKED line (origin + aim·length, computed off the QUANTIZED shape so the
+        // dash target sits on the drawn line's far edge), landing exactly ON the resolve tick: leapStart = resolve − D + 1,
+        // D = min(HopAirborneTicks, windup) — the same landing math as the slam leap.
+        var farEnd = shape.Origin + (new WorldVector(Math.Cos(shape.AimRadians), Math.Sin(shape.AimRadians)) * shape.Radius);
+        var leapDurationTicks = Math.Min(_monsterTypes.HopAirborneTicks(type), windupTicks);
+        cast = new SlamCast(farEnd, LeapStartTick: resolveTick - leapDurationTicks + 1, ResolveTick: resolveTick);
+        Log.Info(
+            $"Monster {monster.NetworkId} ({type.Id}) cast lunge #{telegraphId} from "
+                + $"{shape.Origin.X:F2},{shape.Origin.Y:F2} len={shape.Radius:F2} w={type.ChargeWidthUnits} "
+                + $"resolving at tick {resolveTick} (target #{targetId}, leap at tick {cast.LeapStartTick}).");
         return true;
     }
 

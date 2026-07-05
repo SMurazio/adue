@@ -37,8 +37,9 @@ public sealed class SkirmisherBehavior : BasicRoamerBehavior
         AttackDelegate attack,
         TryChargeDelegate? tryCharge = null,
         TrySlamDelegate? trySlam = null,
-        BeginSlamLeapDelegate? beginSlamLeap = null)
-        : base(seed, isWalkable, findTarget, tryResolveTarget, attack, tryCharge, trySlam, beginSlamLeap)
+        BeginSlamLeapDelegate? beginSlamLeap = null,
+        TrySlamDelegate? tryLunge = null)
+        : base(seed, isWalkable, findTarget, tryResolveTarget, attack, tryCharge, trySlam, beginSlamLeap, tryLunge)
     {
     }
 

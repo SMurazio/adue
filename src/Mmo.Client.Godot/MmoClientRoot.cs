@@ -4373,8 +4373,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private static readonly StandardMaterial3D TelegraphFillMaterial = MarkerMaterial(new Color(0.95f, 0.16f, 0.08f, 0.45f));
 	private static readonly StandardMaterial3D TelegraphFlashMaterial = MarkerMaterial(new Color(1.00f, 0.93f, 0.65f, 0.85f));
 
-	// The two pooled nodes of one decal (created together, freed together, keyed by telegraph id).
-	private sealed record TelegraphDecalNodes(MeshInstance3D Zone, MeshInstance3D Fill);
+	// The two pooled nodes of one decal (created together, freed together, keyed by telegraph id). Kind selects how the
+	// FILL animates (circle/wedge scale uniformly from the origin; a line grows its LENGTH only) — see UpdateTelegraphDecals.
+	private sealed record TelegraphDecalNodes(MeshInstance3D Zone, MeshInstance3D Fill, TelegraphShapeKind Kind);
 
 	private readonly Dictionary<ulong, TelegraphDecalNodes> _telegraphDecals = [];
 	private readonly List<TelegraphDecalState> _telegraphDecalScratch = [];
@@ -4398,46 +4399,65 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			if (!_telegraphDecals.TryGetValue(decal.TelegraphId, out var nodes))
 			{
-				// The decal seam is shape-generic (Kind rides the state), but this phase renders CIRCLE only — the
-				// only kind the codec admits at v44. A future cone/line adds its own mesh path here.
+				// WEDGE+LINE (S-telegraph-shapes-wedge-line): the decal mesh is built PER KIND from the LOCKED wire
+				// shape (drawn == hit test). A circle reuses the shared unit disc scaled by radius; a wedge/line bakes
+				// its exact geometry into a per-telegraph ArrayMesh (apex/edge at the origin, authored along +X) and is
+				// yawed to the aim bearing — so the fill can grow the reach (wedge) or the length (line) by scaling.
+				var mesh = BuildTelegraphMesh(decal);
 				nodes = new TelegraphDecalNodes(
 					new MeshInstance3D
 					{
 						Name = $"TelegraphZone_{decal.TelegraphId}",
-						Mesh = TelegraphDiscMesh,
+						Mesh = mesh,
 						MaterialOverride = TelegraphZoneMaterial,
 					},
 					new MeshInstance3D
 					{
 						Name = $"TelegraphFill_{decal.TelegraphId}",
-						Mesh = TelegraphDiscMesh,
+						Mesh = mesh,
 						MaterialOverride = TelegraphFillMaterial,
-					});
+					},
+					decal.Kind);
 				_worldRoot.AddChild(nodes.Zone);
 				_worldRoot.AddChild(nodes.Fill);
 				_telegraphDecals[decal.TelegraphId] = nodes;
 
-				// The origin is LOCKED at cast and the zone radius never changes — position + scale once on create.
-				// Heights: zone at 0.02, fill a hair above (0.035) so the growing fill always wins their z-overlap;
-				// both sit under the debug server-position markers (0.06) so diagnostics stay readable on top.
+				// The origin/aim are LOCKED at cast and the zone extent never changes — position + rotation + the
+				// STATIC zone scale are set once on create. Heights: zone at 0.02, fill a hair above (0.035) so the
+				// growing fill always wins their z-overlap; both sit under the debug server-position markers (0.06) so
+				// diagnostics stay readable on top. A +Y yaw of -aim maps the mesh's authored +X to the world bearing
+				// (the FlashAimWedge convention); circle is rotation-agnostic (yaw 0 is harmless).
+				var yaw = new Vector3(0f, -(float)decal.AimRadians, 0f);
 				nodes.Zone.Position = new Vector3((float)decal.Origin.X, 0.02f, (float)decal.Origin.Y);
-				nodes.Zone.Scale = new Vector3((float)decal.Radius, 1f, (float)decal.Radius);
+				nodes.Zone.Rotation = yaw;
 				nodes.Fill.Position = new Vector3((float)decal.Origin.X, 0.035f, (float)decal.Origin.Y);
+				nodes.Fill.Rotation = yaw;
+				// Circle bakes a UNIT disc (scaled by radius); wedge/line bake their true size (scaled by 1). Set the
+				// zone's static scale accordingly.
+				nodes.Zone.Scale = decal.Kind == TelegraphShapeKind.Circle
+					? new Vector3((float)decal.Radius, 1f, (float)decal.Radius)
+					: Vector3.One;
 			}
 
-			// The fill disc is the per-frame animated half: radius × progress while winding up (reaching the TRUE
-			// edge exactly at T), then the full-radius resolve flash. The tiny floor keeps the scale non-singular at
-			// progress 0 without ever reading as a visible disc.
+			// The fill is the per-frame animated half: it grows to the TRUE edge exactly at T, then the resolve flash.
+			// Circle/wedge grow UNIFORMLY from the origin (the disc radius / the wedge reach); a line grows its LENGTH
+			// only (from the origin edge along the bearing), its width fixed. A tiny floor keeps the scale non-singular
+			// at progress 0 without ever reading as a visible shape.
+			var progress = decal.Resolved ? 1f : Mathf.Max((float)decal.Progress, 0f);
 			if (decal.Resolved)
 			{
 				nodes.Fill.MaterialOverride = TelegraphFlashMaterial;
-				nodes.Fill.Scale = new Vector3((float)decal.Radius, 1f, (float)decal.Radius);
 			}
-			else
+
+			nodes.Fill.Scale = decal.Kind switch
 			{
-				var fillRadius = Mathf.Max((float)(decal.Radius * decal.Progress), 0.01f);
-				nodes.Fill.Scale = new Vector3(fillRadius, 1f, fillRadius);
-			}
+				// Line: grow x (length) only; y/z fixed so the corridor width stays true throughout the windup.
+				TelegraphShapeKind.Line => new Vector3(Mathf.Max(progress, 0.001f), 1f, 1f),
+				// Wedge: uniform reach growth (baked at true size → scale is the progress fraction).
+				TelegraphShapeKind.Wedge => new Vector3(Mathf.Max(progress, 0.001f), 1f, Mathf.Max(progress, 0.001f)),
+				// Circle: baked as a UNIT disc → scale by radius × progress (the historical path, unchanged).
+				_ => new Vector3(Mathf.Max((float)(decal.Radius * progress), 0.01f), 1f, Mathf.Max((float)(decal.Radius * progress), 0.01f)),
+			};
 		}
 
 		// Free decals whose telegraph left the projection (flash window over — the core pruned it).
@@ -4470,6 +4490,69 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				_telegraphDecals.Remove(id);
 			}
 		}
+	}
+
+	// WEDGE+LINE (S-telegraph-shapes-wedge-line): build the decal mesh for one telegraph's LOCKED wire shape. Circle
+	// reuses the shared unit disc (scaled by radius at the call site); wedge/line bake their EXACT geometry authored in
+	// the XZ plane pointing along +X (apex/near-edge at the local origin), so yawing the MeshInstance by -aim maps +X to
+	// the world bearing — the drawn shape is the resolve shape, no padding/shrink (the honest-telegraph rule).
+	private static Mesh BuildTelegraphMesh(TelegraphDecalState decal) => decal.Kind switch
+	{
+		TelegraphShapeKind.Wedge => BuildTelegraphWedgeMesh((float)decal.Radius, (float)decal.HalfAngleRadians),
+		TelegraphShapeKind.Line => BuildTelegraphLineMesh((float)decal.Radius, (float)decal.HalfWidth),
+		_ => TelegraphDiscMesh,
+	};
+
+	// A flat pie-slice (apex at local origin, +X centreline) spanning [-halfAngle, +halfAngle] out to `radius`. A
+	// triangle fan from the apex — the same construction as the free-aim wedge, but sized from the telegraph's own
+	// half-angle/reach (radians in) rather than the combat tuning. The fill scales this uniformly to grow the reach.
+	private static ArrayMesh BuildTelegraphWedgeMesh(float radius, float halfAngleRadians)
+	{
+		const int segments = 24;
+		var verts = new Godot.Collections.Array();
+		verts.Resize((int)Mesh.ArrayType.Max);
+
+		var points = new System.Collections.Generic.List<Vector3>(segments + 2) { Vector3.Zero };
+		for (var i = 0; i <= segments; i++)
+		{
+			var a = -halfAngleRadians + (2f * halfAngleRadians * i / segments);
+			points.Add(new Vector3(Mathf.Cos(a) * radius, 0f, Mathf.Sin(a) * radius));
+		}
+
+		var vertexArray = new Vector3[segments * 3];
+		var v = 0;
+		for (var i = 1; i <= segments; i++)
+		{
+			// Wind so the triangle faces up (+Y); the material is double-sided anyway.
+			vertexArray[v++] = points[0];
+			vertexArray[v++] = points[i + 1];
+			vertexArray[v++] = points[i];
+		}
+
+		verts[(int)Mesh.ArrayType.Vertex] = vertexArray;
+		var mesh = new ArrayMesh();
+		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, verts);
+		return mesh;
+	}
+
+	// A flat oriented rectangle: x in [0, length] (the near edge at the local origin, extending along +X), z in
+	// [-halfWidth, +halfWidth]. Two triangles. The fill scales local X (only) to grow the length toward the far edge.
+	private static ArrayMesh BuildTelegraphLineMesh(float length, float halfWidth)
+	{
+		var verts = new Godot.Collections.Array();
+		verts.Resize((int)Mesh.ArrayType.Max);
+
+		var a = new Vector3(0f, 0f, -halfWidth);
+		var b = new Vector3(length, 0f, -halfWidth);
+		var c = new Vector3(length, 0f, halfWidth);
+		var d = new Vector3(0f, 0f, halfWidth);
+		// Two triangles (a,c,b) + (a,d,c), wound to face +Y (double-sided material regardless).
+		var vertexArray = new[] { a, c, b, a, d, c };
+
+		verts[(int)Mesh.ArrayType.Vertex] = vertexArray;
+		var mesh = new ArrayMesh();
+		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, verts);
+		return mesh;
 	}
 
 	// FREEAIM FEEL KNOBS (client telegraph). COMBAT-TUNING: the half-angle/radius the wedge is drawn from are no

@@ -334,6 +334,17 @@ public sealed class MonsterTypeManifestTests
         Assert.Equal(c.ChargeCooldownMs, d.ChargeCooldownMs);
         Assert.Equal(c.ChargeDistanceUnits, d.ChargeDistanceUnits, 6);
         Assert.Equal(c.ChargeTriggerRangeUnits, d.ChargeTriggerRangeUnits, 6);
+        // TELEGRAPH SHAPES WEDGE+LINE: the slime authors NO wedge/line shaping — its slam is a plain CIRCLE and it has
+        // no charge/lunge, so the shape selector defaults to "circle" and the charge-telegraph fields are 0 in both the
+        // data file and the code seed (they must not drift).
+        Assert.Equal(c.SlamShape, d.SlamShape);
+        Assert.Equal("circle", d.SlamShape);
+        Assert.Equal(c.SlamWedgeAngleDeg, d.SlamWedgeAngleDeg, 6);
+        Assert.Equal(0d, d.SlamWedgeAngleDeg, 6);
+        Assert.Equal(c.ChargeWindupMs, d.ChargeWindupMs);
+        Assert.Equal(0, d.ChargeWindupMs);
+        Assert.Equal(c.ChargeDamage, d.ChargeDamage);
+        Assert.Equal(c.ChargeWidthUnits, d.ChargeWidthUnits, 6);
         Assert.Equal(c.MaxHealth, d.MaxHealth);
         Assert.Equal(c.MoveSpeedMultiplier, d.MoveSpeedMultiplier, 6);
         Assert.Equal(c.RoamRadius, d.RoamRadius, 6);
@@ -394,6 +405,32 @@ public sealed class MonsterTypeManifestTests
         // so it renders visibly bigger + tinted vs the (default white / 1.0) slime, with NO art assets.
         Assert.Equal(0xB5651Du, g.RenderTintRgb);
         Assert.Equal(1.4d, g.RenderScale, 6);
+    }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md): the shipped Sunderer loads its SHAPED kit —
+    // Cleave as a 130° WEDGE slam, Lunge as a telegraphed LINE charge (chargeWindupMs > 0 → LungeEnabled). Pins the
+    // content wiring + the enable predicates so the boss actually casts the new shapes.
+    [Fact]
+    public void ShippedManifestLoadsTheSundererShapedKit()
+    {
+        var json = ReadShippedManifest();
+        var registry = MonsterTypeRegistry.FromManifestJson(TickRate, json);
+
+        Assert.True(registry.TryGet("sunderer", out var s), "shipped manifest must carry the Sunderer boss.");
+        // CLEAVE — a wedge slam.
+        Assert.Equal(new[] { "slam", "charge" }, s.AbilityIds);
+        Assert.Equal("wedge", s.SlamShape);
+        Assert.Equal(130d, s.SlamWedgeAngleDeg, 6);
+        Assert.Equal(2.8d, s.SlamRadiusUnits, 6);
+        Assert.Equal(800, s.SlamWindupMs);
+        Assert.Equal(25, s.SlamDamage);
+        Assert.True(MonsterTypeRegistry.SlamEnabled(s));
+        // LUNGE — a telegraphed line charge.
+        Assert.Equal(900, s.ChargeWindupMs);
+        Assert.Equal(20, s.ChargeDamage);
+        Assert.Equal(2.0d, s.ChargeWidthUnits, 6);
+        Assert.Equal(8.0d, s.ChargeDistanceUnits, 6);
+        Assert.True(MonsterTypeRegistry.LungeEnabled(s));
     }
 
     // MONSTER-BEHAVIOR P6: the "#RRGGBB" render-tint authoring string parses to the packed 0xRRGGBB uint; a leading '#'
@@ -563,6 +600,16 @@ public sealed class MonsterTypeManifestTests
             Assert.Equal(e.ChargeCooldownMs, a.ChargeCooldownMs);
             Assert.Equal(e.ChargeDistanceUnits, a.ChargeDistanceUnits, 6);
             Assert.Equal(e.ChargeTriggerRangeUnits, a.ChargeTriggerRangeUnits, 6);
+            // TELEGRAPH SHAPES WEDGE+LINE: the charge-telegraph (Lunge) + slam-shape (Cleave) fields must survive Save.
+            Assert.Equal(e.ChargeWindupMs, a.ChargeWindupMs);
+            Assert.Equal(e.ChargeDamage, a.ChargeDamage);
+            Assert.Equal(e.ChargeWidthUnits, a.ChargeWidthUnits, 6);
+            Assert.Equal(e.SlamCooldownMs, a.SlamCooldownMs);
+            Assert.Equal(e.SlamRadiusUnits, a.SlamRadiusUnits, 6);
+            Assert.Equal(e.SlamWindupMs, a.SlamWindupMs);
+            Assert.Equal(e.SlamDamage, a.SlamDamage);
+            Assert.Equal(e.SlamShape, a.SlamShape);
+            Assert.Equal(e.SlamWedgeAngleDeg, a.SlamWedgeAngleDeg, 6);
             Assert.Equal(e.MaxHealth, a.MaxHealth);
             Assert.Equal(e.FleeHealthPct, a.FleeHealthPct, 6);
             Assert.Equal(e.MoveSpeedMultiplier, a.MoveSpeedMultiplier, 6);

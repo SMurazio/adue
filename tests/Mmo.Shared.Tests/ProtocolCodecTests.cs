@@ -509,11 +509,12 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyNine()
+    public void ProtocolVersionIsFifty()
     {
-        // BOSS-2 (v49, exp/duo-abilities): the additive BossPlatingMessage on top of v48 (DUO-WAVE2). Pin it so a
-        // change is caught.
-        Assert.Equal(49, ProtocolCodec.Version);
+        // TELEGRAPH SHAPES WEDGE+LINE (v50, exp/duo-abilities): the telegraph/midpoint shape body gains the Wedge + Line
+        // kinds on top of v49 (BOSS-2). Circle wire bytes are unchanged; the version bump is the atomic old-client
+        // refuse. Pin it so a change is caught.
+        Assert.Equal(50, ProtocolCodec.Version);
     }
 
     // DUO-WAVE2 (v48): the co-op ability wire messages round-trip, and every discriminator byte is hostile-input
@@ -645,6 +646,64 @@ public sealed class ProtocolCodecTests
         Assert.Equal(10.0625d, decoded.Shape.Origin.X, 6);   // round(10.04·16 = 160.64) = 161 → 10.0625
         Assert.Equal(-10.0625d, decoded.Shape.Origin.Y, 6);  // symmetric away-from-zero
         Assert.Equal(2.0625d, decoded.Shape.Radius, 6);      // round(2.04·16 = 32.64) = 33 → 2.0625
+    }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (v50): a WEDGE telegraph round-trips its kind + origin (Q12.4) + reach (Q12.4 ushort)
+    // + aim + half-angle (AimAngle ushorts). The aim/half-angle are chosen ON the 2π/65536 grid so the equality is
+    // exact (the round-trip quantizes to that grid; ProtocolCodec.WriteTelegraphShape mirrors the scheduler exactly).
+    [Fact]
+    public void TelegraphWedgeRoundTrips()
+    {
+        var aim = AimAngle.ToRadians(AimAngle.Quantize(1.1d));
+        var halfAngle = AimAngle.ToRadians(AimAngle.Quantize(65d * System.Math.PI / 180d));
+        var original = new TelegraphMessage(
+            5UL,
+            TelegraphShape.Wedge(new WorldVector(8.5d, -3.25d), 2.75d, aim, halfAngle),
+            StartTick: 200,
+            ResolveTick: 216);
+
+        var decoded = Assert.IsType<TelegraphMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(TelegraphShapeKind.Wedge, decoded.Shape.Kind);
+        Assert.Equal(new WorldVector(8.5d, -3.25d), decoded.Shape.Origin);
+        Assert.Equal(2.75d, decoded.Shape.Radius, 6);
+        Assert.Equal(aim, decoded.Shape.AimRadians, 6);
+        Assert.Equal(halfAngle, decoded.Shape.HalfAngleRadians, 6);
+    }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (v50): a LINE telegraph round-trips its kind + origin + length (Radius, Q12.4 ushort)
+    // + aim (AimAngle ushort) + half-width (Q12.4 ushort). Values on-grid so the equality is exact.
+    [Fact]
+    public void TelegraphLineRoundTrips()
+    {
+        var aim = AimAngle.ToRadians(AimAngle.Quantize(2.4d));
+        var original = new TelegraphMessage(
+            6UL,
+            TelegraphShape.Line(new WorldVector(-1.5d, 4.75d), 8d, aim, 1d),
+            StartTick: 300,
+            ResolveTick: 318);
+
+        var decoded = Assert.IsType<TelegraphMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(original)));
+
+        Assert.Equal(TelegraphShapeKind.Line, decoded.Shape.Kind);
+        Assert.Equal(new WorldVector(-1.5d, 4.75d), decoded.Shape.Origin);
+        Assert.Equal(8d, decoded.Shape.Radius, 6);     // Radius carries the line length
+        Assert.Equal(aim, decoded.Shape.AimRadians, 6);
+        Assert.Equal(1d, decoded.Shape.HalfWidth, 6);
+    }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (v50): a corrupt shape-kind byte in a telegraph packet is a hostile-input Protocol
+    // exception (mirrors ReadAttackKind), never a shape the client draws but can't hit-test. The kind byte sits right
+    // after the header (magic 4 + version 1 + type 2 + telegraph id 8 = offset 15).
+    [Fact]
+    public void TelegraphKindByte_HostileInputValidated()
+    {
+        var bytes = ProtocolCodec.Encode(new TelegraphMessage(
+            1UL, TelegraphShape.Circle(new WorldVector(1d, 1d), 2d), 10u, 20u));
+        bytes[15] = 0;   // 0 is below Circle(1)
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(bytes));
+        bytes[15] = 4;   // 4 is above Line(3)
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(bytes));
     }
 
     // ECOLOGY E4 (v45): a region hosting TWO monster types (mirrors The Verge) round-trips its id, display name,

@@ -3,19 +3,27 @@ using Mmo.Shared.Domain;
 namespace Mmo.Client.Core;
 
 // TELEGRAPH T2 (docs/ability-telegraph-sync-design.md): the client-side view of one active ground telegraph, built
-// for the render layer by MmoClient.CopyTelegraphDecalsTo. Kind/Origin/Radius are the LOCKED wire shape (HONEST
-// TELEGRAPH — user decision 2026-07-03: the drawn circle IS the hit rule, so the renderer must draw EXACTLY this
-// radius, no padding/shrink/edge bias; membership is deliberately CENTER-POINT — a body clipping the rim is NOT hit —
-// so blurring the true edge would lie in both directions). Progress is the deadline-form fill fraction in [0,1]
-// (1 == the resolve instant arrived); Resolved flips true AT estimated T and stays true through the brief flash
-// window, after which the entry is pruned and the decal despawns.
+// for the render layer by MmoClient.CopyTelegraphDecalsTo. The shape fields are the LOCKED wire shape (HONEST
+// TELEGRAPH — user decision 2026-07-03: the drawn shape IS the hit rule, so the renderer must draw EXACTLY this shape,
+// no padding/shrink/edge bias; membership is deliberately CENTER-POINT — a body clipping the edge is NOT hit — so
+// blurring the true edge would lie in both directions). Progress is the deadline-form fill fraction in [0,1] (1 == the
+// resolve instant arrived); Resolved flips true AT estimated T and stays true through the brief flash window, after
+// which the entry is pruned and the decal despawns.
+//
+// WEDGE+LINE (S-telegraph-shapes-wedge-line): the shape params ride here so the Godot decal pass draws the right mesh
+// PER KIND from the wire fields ALONE — Radius is the circle radius / wedge reach / line length; AimRadians is the
+// wedge/line bearing; HalfAngleRadians is the wedge half-angle; HalfWidth is the line half-width. Circle ignores the
+// three trailing params (they are 0), so its decal is unchanged.
 public readonly record struct TelegraphDecalState(
     ulong TelegraphId,
     TelegraphShapeKind Kind,
     WorldVector Origin,
     double Radius,
     double Progress,
-    bool Resolved);
+    bool Resolved,
+    double AimRadians = 0d,
+    double HalfAngleRadians = 0d,
+    double HalfWidth = 0d);
 
 // The deadline-form fill arithmetic, kept as a pure function so the headless suite pins it without a client. All in
 // SERVER TICKS: `estimatedServerTick` is the cosmetic clock's fractional "now"; start/resolve are the two absolute

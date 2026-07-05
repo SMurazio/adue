@@ -10,7 +10,10 @@
   // `locomotionId` (P1, the id of this type's locomotion "body"; "hop"/"glide" registered today) and
   // `behaviorId` (P3, the id of this type's "brain"; "basicRoamer"/"skirmisher" registered today) — an
   // unknown id falls back loud-but-safe to the default — plus `abilityIds` (P5/T1, the abilities this type
-  // composes; "charge" + "slam" are the primitives today) + their charge*/slam* tuning. The remaining selector
+  // composes; "charge" + "slam" are the primitives today) + their charge*/slam* tuning. TELEGRAPH SHAPES
+  // WEDGE+LINE (S-telegraph-shapes-wedge-line): the slam may author `slamShape` ("circle" default / "wedge") +
+  // `slamWedgeAngleDeg` (a wedge cleave), and the charge may author `chargeWindupMs`/`chargeDamage`/
+  // `chargeWidthUnits` (a telegraphed line "Lunge"; windup 0 = the instant dash). The remaining selector
   // (visualId) arrives in a later phase and will extend this schema; do not add it yet. Optional fields may
   // be omitted and fall back to the field default; every tunable is clamped to the same bounds the F1 live
   // tuning uses.
@@ -104,21 +107,23 @@
       // and chases with the shared basicRoamer brain. maxHealth 1200 here is the DUO baseline; the encounter engine
       // OVERRIDES it per participant count at spawn (1200 duo / 700 solo) via SpawnMonsterCore's maxHealthOverride.
       //
-      // BASELINE KIT (BOSS-1 scaffold — reuses the existing ability seams, NO new telegraph shapes / NO protocol
-      // change):
-      //   * CLEAVE = the "slam" ability (a CIRCLE telegraph): radius 2.8u, 0.8s windup, 25 dmg, ~5s cadence, cast in
-      //     melee range. NOTE (deviation): the design's Cleave is a 130-degree WEDGE, but TelegraphShape supports only
-      //     Circle today — a Wedge is a shared-shape + wire-codec (protocol) change, surfaced as a fork, so BOSS-1
-      //     ships a circle placeholder. The slam's root+leap makes it read as a short lunging cleave onto the target.
-      //   * LUNGE = the "charge" ability (a fast forward dash out of melee range, ~8u, ~8s cadence): the gap-closer
-      //     MOTION only. Its line telegraph + ~20 dmg are DEFERRED with the Wedge/Line telegraph-shape protocol work
-      //     (the charge seam carries no telegraph/damage) — surfaced as a fork, not invented here.
+      // BASELINE KIT (docs/boss-encounter-sunderer-design.md "Boss stats" — the SHAPED telegraphs, S-telegraph-shapes-
+      // wedge-line, protocol v50):
+      //   * CLEAVE = the "slam" ability with a WEDGE telegraph (slamShape "wedge"): a 130° arc from the boss aimed at the
+      //     target's bearing at cast time, reach 2.8u (slamRadiusUnits), 0.8s windup, 25 dmg, ~5s cadence, cast in melee
+      //     range. The wedge apex is the caster (it stands and cleaves in front); the slam's root+in-place-hop reads as
+      //     the swing. Honest: the drawn wedge IS the hit test (center-point membership, resolved at T).
+      //   * LUNGE = the "charge" ability with a LINE telegraph (chargeWindupMs > 0 turns the dash into a telegraphed
+      //     Lunge): a 2u-wide corridor (chargeWidthUnits) locked along the bearing to the target, length = the planned
+      //     dash distance (min(chargeDistanceUnits 8, gap)), 0.9s windup, 20 dmg (chargeDamage), ~8s cadence, cast out of
+      //     melee range. The telegraph PRECEDES the dash: the boss roots through the windup, then the dash sweeps the
+      //     corridor landing on the resolve tick, and the damage rides the telegraph RESOLVE (not the dash body).
       //
       // attackDamage 0 = NO untelegraphed chip melee (the Cleave/slam is the sole melee damage; a 0 fallthrough swing
       // is a no-op — ApplyDamage(0) changes nothing). aggro/leash are arena-wide so the boss engages any participant
       // instantly and never leashes inside the 22-tile room; roamRadius 0 = it never wanders (the engine owns it).
       // renderTint/renderScale make the boss obviously distinct + large with no art. moveSpeedMultiplier 0.55 =
-      // 2.2u/s at the 4u/s base (1000/StepCooldownMs). hop* knobs size the slam-leap (reach = min(attackRange,hop)).
+      // 2.2u/s at the 4u/s base (1000/StepCooldownMs). hop* knobs size the slam-leap (in-place for the wedge cleave).
       "id": "sunderer",
       "displayName": "The Sunderer",
       "lootTableId": "",
@@ -127,6 +132,8 @@
       "renderTint": "#8A2BE2",
       "renderScale": 2.0,
       "abilityIds": ["slam", "charge"],
+      "slamShape": "wedge",
+      "slamWedgeAngleDeg": 130,
       "slamRadiusUnits": 2.8,
       "slamWindupMs": 800,
       "slamDamage": 25,
@@ -134,6 +141,9 @@
       "chargeCooldownMs": 8000,
       "chargeDistanceUnits": 8.0,
       "chargeTriggerRangeUnits": 8.0,
+      "chargeWindupMs": 900,
+      "chargeDamage": 20,
+      "chargeWidthUnits": 2.0,
       "maxHealth": 1200,
       "moveSpeedMultiplier": 0.55,
       "roamRadius": 0.5,

@@ -78,6 +78,18 @@ public sealed class MonsterType
     public double ChargeDistanceUnits { get; set; }
     public double ChargeTriggerRangeUnits { get; set; }
 
+    // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md, the Sunderer's Lunge): the charge becomes a
+    // TELEGRAPHED LINE ("Lunge") when ChargeWindupMs > 0 — the brain schedules a LINE telegraph LOCKED along the bearing
+    // to the target (length = the planned dash distance, half-width = ChargeWidthUnits/2), roots through the windup, then
+    // the existing dash executes and the ~ChargeDamage rides the telegraph RESOLVE (not the dash body — honest: the drawn
+    // line IS the hit test). ChargeWindupMs 0 (the default, and the gnoll) = the INSTANT dash, unchanged (no telegraph, no
+    // line damage). Behavior-specific DATA clamped on load like the charge trio — NOT a live F1 tunable / NOT replicated /
+    // NOT on the wire. ChargeWidthUnits 0 collapses the corridor to a hairline (a mis-authored lunge simply can't hit —
+    // player-favorable), so a real Lunge authors a positive width.
+    public int ChargeWindupMs { get; set; }
+    public int ChargeDamage { get; set; }
+    public double ChargeWidthUnits { get; set; }
+
     // TELEGRAPH T1 (docs/ability-telegraph-sync-design.md): the SLAM ability tuning — the first TELEGRAPHED attack.
     // On cast the brain schedules a CIRCLE of SlamRadiusUnits LOCKED at the target's position AT CAST TIME, resolving
     // SlamWindupMs later against positions AT the resolve tick (locked origin + resolve-time membership = dodgeable),
@@ -90,6 +102,17 @@ public sealed class MonsterType
     public double SlamRadiusUnits { get; set; }
     public int SlamWindupMs { get; set; }
     public int SlamDamage { get; set; }
+
+    // TELEGRAPH SHAPES WEDGE+LINE (docs/boss-encounter-sunderer-design.md, the Sunderer's Cleave): the slam telegraph
+    // SHAPE selector — "circle" (the default; the slime's slam, LOCKED at the target's cast position + leap-onto) or
+    // "wedge" (a 130° cleave from the CASTER, aimed at the target's bearing at cast time — the boss stands and cleaves in
+    // front). A STORED string selector like locomotionId/behaviorId (the loader keeps it verbatim; GameServer resolves it
+    // at cast, an unknown value falling back to circle). SlamWedgeAngleDeg is the TOTAL wedge arc in degrees (half-angle =
+    // /2); it is meaningful only for a wedge slam and is behavior-specific DATA clamped on load (NOT a live F1 tunable).
+    // The reach + windup + damage + cooldown stay the shared Slam* quartet above (a wedge cleave reuses SlamRadiusUnits as
+    // its reach). Omitted → "circle" + 0 → the pre-shapes circle slam, byte-identical.
+    public string SlamShape { get; set; } = "circle";
+    public double SlamWedgeAngleDeg { get; set; }
 
     // INTERNAL-ONLY (no longer user-tunable / shown on the F1 Monster tab — the confusing "move speed (x)" knob was
     // retired in favour of the intuitive RANGE / HEIGHT / AIRBORNE / DELAY hop knobs). This is still the multiplier of
