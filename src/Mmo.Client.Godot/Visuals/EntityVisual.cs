@@ -166,6 +166,14 @@ void fragment() {
 
         UpdateHealthBar(state);
 
+        // BOSS-2 (P1 HUSK): apply the boss-plating steel tint on a STATE EDGE only (not every frame — a rebuild clones
+        // a material). White/no-op for every non-boss entity, which never carries PlatingActive=true.
+        if (state.PlatingActive != _platingApplied)
+        {
+            _platingApplied = state.PlatingActive;
+            OnPlatingChanged(state.PlatingActive);
+        }
+
         OnUpdate(state, now);
     }
 
@@ -211,6 +219,10 @@ void fragment() {
     {
         var s = state.RenderScale > 0f ? state.RenderScale : 1f;
         Scale = new Vector3(s, s, s);
+        // BOSS-2 (P1): clear any pooled plating override BEFORE the P6 tint (a reused visual must not inherit the prior
+        // entity's steel tint), then apply the per-type tint. UpdateFrom re-applies live plating on the next edge.
+        _platingApplied = false;
+        OnPlatingChanged(false);
         ApplyRenderTint(ColorFromRgb(state.TintRgb));
     }
 
@@ -227,6 +239,13 @@ void fragment() {
     // with a tintable body (BoxVisual — how monsters render today) override it. Real per-type monster models replace
     // this mapping later; the replicated hook (EntityRenderState.TintRgb) stays.
     protected virtual void ApplyRenderTint(Color tint) { }
+
+    // BOSS-2 (P1 HUSK): the boss-plating steel tint toggled (BossPlatingMessage → EntityRenderState.PlatingActive).
+    // Called on a state EDGE only (UpdateFrom gates it). Default no-op; only BoxVisual (the monster body) overrides it.
+    protected virtual void OnPlatingChanged(bool active) { }
+
+    // BOSS-2 (P1): the last-applied plating state, so UpdateFrom only rebuilds the material on a real change.
+    private bool _platingApplied;
 
     // ---- subclass extension points -----------------------------------------------------------------
     protected virtual void OnAcquire(EntityRenderState state) { }

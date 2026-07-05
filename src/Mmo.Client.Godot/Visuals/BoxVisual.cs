@@ -40,6 +40,17 @@ public sealed partial class BoxVisual : EntityVisual
     // off the SHARED static materials (mutating those would tint every entity that shares them).
     private StandardMaterial3D? _tintedMaterial;
 
+    // BOSS-2 (P1 HUSK): the shared (untinted) base material this box picked in ApplyMaterial — the fixed starting point
+    // every tint rebuild derives from (so re-tinting never compounds a prior clone). `_baseTint` is the P6 replicated
+    // per-type tint (white = none); `_platingActive` is the live steel-plating override. RebuildTint composes the two.
+    private StandardMaterial3D? _sharedBaseMaterial;
+    private Color _baseTint = Colors.White;
+    private bool _platingActive;
+
+    // BOSS-2 (P1): the cold steel-grey the Sunderer's body reads as while its plating is up (a flat albedo override,
+    // NOT a modulate of the base, so it is unambiguously "steel" regardless of the boss's purple P6 tint).
+    private static readonly Color PlatingSteelTint = new(0.56f, 0.60f, 0.66f);
+
     protected override float LabelHeight => _isResource ? 1.3f : (_isCorpse ? 0.6f : 0.9f);
 
     private bool _isResource;
@@ -87,28 +98,56 @@ public sealed partial class BoxVisual : EntityVisual
     // _body.MaterialOverride is already the chosen shared material. Placeholder — real per-type models replace it later.
     protected override void ApplyRenderTint(Color tint)
     {
-        if (tint == Colors.White)
+        // MONSTER-BEHAVIOR P6 + BOSS-2: remember the per-type tint and rebuild from the SHARED base (never from the
+        // current override — that would compound clones once the plating override starts re-tinting per state edge).
+        _baseTint = tint;
+        RebuildTint();
+    }
+
+    // BOSS-2 (P1 HUSK): the boss-plating steel override changed — recompose the body material. Base drives it back to
+    // the P6 tint; a rebuild is only ever triggered on a state EDGE (EntityVisual gates it), so this never runs per frame.
+    protected override void OnPlatingChanged(bool active)
+    {
+        _platingActive = active;
+        RebuildTint();
+    }
+
+    // Compose the body's material from the shared base + (plating steel override > P6 tint). Plating wins as a FLAT
+    // steel albedo; otherwise the P6 tint MODULATES the base (white = no-op → the shared material unchanged).
+    private void RebuildTint()
+    {
+        if (_sharedBaseMaterial is null)
         {
             return;
         }
 
-        if (_body.MaterialOverride is not StandardMaterial3D baseMaterial)
+        if (_platingActive)
         {
+            _tintedMaterial = (StandardMaterial3D)_sharedBaseMaterial.Duplicate();
+            _tintedMaterial.AlbedoColor = PlatingSteelTint;
+            _body.MaterialOverride = _tintedMaterial;
             return;
         }
 
-        _tintedMaterial = (StandardMaterial3D)baseMaterial.Duplicate();
-        _tintedMaterial.AlbedoColor = baseMaterial.AlbedoColor * tint;
+        if (_baseTint == Colors.White)
+        {
+            _body.MaterialOverride = _sharedBaseMaterial;
+            return;
+        }
+
+        _tintedMaterial = (StandardMaterial3D)_sharedBaseMaterial.Duplicate();
+        _tintedMaterial.AlbedoColor = _sharedBaseMaterial.AlbedoColor * _baseTint;
         _body.MaterialOverride = _tintedMaterial;
     }
 
     private void ApplyMaterial(EntityRenderState state)
     {
-        _body.MaterialOverride = _isProjectile
+        _sharedBaseMaterial = _isProjectile
             ? ProjectileMaterial
             : (_isResource
                 ? ResourceAvailableMaterial
                 : (_isCorpse ? CorpseMaterial : (state.IsLocal ? LocalEntityMaterial : RemoteEntityMaterial)));
+        _body.MaterialOverride = _sharedBaseMaterial;
     }
 
     private static StandardMaterial3D Material(Color color)

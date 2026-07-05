@@ -249,6 +249,11 @@ public sealed class MmoClient : IDisposable
     // The set of currently-shielded entities (network id -> bubble). The renderer draws a translucent sphere around each.
     public IReadOnlyDictionary<uint, ShieldVisual> Shields => _shields;
 
+    // BOSS-2 (P1 HUSK): the set of boss network ids whose cold-steel PLATING is currently up (BossPlatingMessage).
+    // ToRenderState threads membership onto the boss's EntityRenderState.PlatingActive so the renderer tints it steel
+    // grey while plated; a false / shatter / crumble message drops the id. Tiny set (one boss); a HashSet is plenty.
+    private readonly HashSet<uint> _platedBossIds = new();
+
     // The active tether (null = none). State Broken is a brief "snapped" flag before the following Off clears it.
     public TetherVisual? ActiveTether { get; private set; }
 
@@ -442,7 +447,9 @@ public sealed class MmoClient : IDisposable
 
     public IReadOnlyList<EntityRenderState> GetRenderStates(TimeSpan now)
     {
-        return _entities.Values.Select(entity => entity.ToRenderState(now, LocalRenderOverride(entity))).ToArray();
+        return _entities.Values
+            .Select(entity => entity.ToRenderState(now, LocalRenderOverride(entity), _platedBossIds.Contains(entity.NetworkId)))
+            .ToArray();
     }
 
     public void CopyRenderStatesTo(ICollection<EntityRenderState> destination, TimeSpan now)
@@ -450,7 +457,9 @@ public sealed class MmoClient : IDisposable
         destination.Clear();
         foreach (var entity in _entities.Values)
         {
-            destination.Add(entity.ToRenderState(now, LocalRenderOverride(entity)));
+            // BOSS-2 (P1): thread the boss-plating flag from the plated-id set (constant across the entity, driven by
+            // the wire) — the same pattern as TintRgb/Moving, but sourced from the outer set, not the entity itself.
+            destination.Add(entity.ToRenderState(now, LocalRenderOverride(entity), _platedBossIds.Contains(entity.NetworkId)));
         }
     }
 
@@ -722,6 +731,8 @@ public sealed class MmoClient : IDisposable
         _pendingEchoCues.Clear();
         ActiveTether = null;
         ActiveCharge = null;
+        // BOSS-2 (P1): drop the boss-plating tint state too, so a stale plated id can't linger past a logout.
+        _platedBossIds.Clear();
         DuoVisualVersion++;
     }
 
@@ -1349,6 +1360,19 @@ public sealed class MmoClient : IDisposable
                         (uint)charge.ChargeId, charge.Shape.Origin, charge.Shape.Radius, charge.StartTick, charge.ResolveTick)
                     : null;
                 DuoVisualVersion++;
+                break;
+            case BossPlatingMessage plating:
+                // BOSS-2 (P1 HUSK): adopt/drop the boss's plating tint. Active=true → the steel shell is up (tint the
+                // boss steel grey); Active=false → shattered / crumbled (drop the tint). ToRenderState reads the set.
+                if (plating.PlatingActive)
+                {
+                    _platedBossIds.Add(plating.BossNetworkId);
+                }
+                else
+                {
+                    _platedBossIds.Remove(plating.BossNetworkId);
+                }
+
                 break;
         }
     }
@@ -2212,7 +2236,7 @@ public sealed class MmoClient : IDisposable
         // (Tile) ALWAYS stays the confirmed tile — targeting/harvest reads it and must NEVER see the
         // predicted/interpolated position (S53 invariant). Only the rendered Position moves. (The vertical hop arc
         // is retired — every remote kind, including the slime, glides flat between tiles.)
-        public EntityRenderState ToRenderState(TimeSpan now, LocalRenderState? localOverride = null)
+        public EntityRenderState ToRenderState(TimeSpan now, LocalRenderState? localOverride = null, bool platingActive = false)
         {
             var position = IsLocal && localOverride.HasValue
                 ? localOverride.Value.Position
@@ -2252,7 +2276,9 @@ public sealed class MmoClient : IDisposable
                 TintRgb: TintRgb,
                 RenderScale: RenderScale,
                 // N (entity-collision walk anim): the coherent MOVING signal (predicted for local, replicated for remote).
-                Moving: moving);
+                Moving: moving,
+                // BOSS-2 (P1): the boss-plating flag from the outer plated-id set (false for every non-boss entity).
+                PlatingActive: platingActive);
         }
     }
 

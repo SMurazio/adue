@@ -50,6 +50,11 @@ public static class FreeAimSectorResolver
     // Overload that ALSO appends each victim whose HP actually changed to `damagedScratch` (cleared first when
     // non-null) so the caller can emit a cosmetic damage event per real hit. Behaviour and return value are otherwise
     // identical to the parameterless-collection overload — the existing resolver tests exercise that one unchanged.
+    // BOSS-2 (P1): `damageModifier` (optional) is the per-victim damage-taken hook GameServer threads the boss
+    // encounter's plating modifier through, so a plated Sunderer takes reduced MELEE damage at THIS seam — the same
+    // uniform modifier the projectile/tether/detonation path applies. Null = no modification (the default; every
+    // existing caller and the resolver's own tests are byte-identical). Applied to `damage` PER victim BEFORE
+    // ApplyDamage, so the recorded DamagedVictim.Amount (→ the cosmetic damage number) matches the HP actually removed.
     public static int ResolveAndDamage(
         WorldState world,
         WorldEntity attacker,
@@ -58,7 +63,8 @@ public static class FreeAimSectorResolver
         double radiusUnits,
         int damage,
         List<WorldEntity> candidateScratch,
-        List<DamagedVictim>? damagedScratch)
+        List<DamagedVictim>? damagedScratch,
+        Func<WorldEntity, int, int>? damageModifier = null)
     {
         damagedScratch?.Clear();
 
@@ -101,10 +107,11 @@ public static class FreeAimSectorResolver
                 continue;
             }
 
-            if (candidate.ApplyDamage(damage))
+            var applied = damageModifier is null ? damage : damageModifier(candidate, damage);
+            if (applied > 0 && candidate.ApplyDamage(applied))
             {
                 hits++;
-                damagedScratch?.Add(new DamagedVictim(candidate, damage));
+                damagedScratch?.Add(new DamagedVictim(candidate, applied));
             }
         }
 

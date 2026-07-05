@@ -147,6 +147,32 @@
       "hopAirborneMs": 300,
       "hopDelayMs": 400,
       "respawnMs": 5000
+    },
+    {
+      // BOSS-2 (docs/boss-encounter-sunderer-design.md P1 HUSK): THE INTERPOSER DRONE — the Sunderer's P1 add,
+      // spawned/despawned by the BossEncounterEngine (NOT a spawner; respawnMs is inert — the engine owns the 5 s
+      // first-spawn / 6 s respawn cadence). It WALKS (glide) at 1.6 u/s (moveSpeedMultiplier 0.4 × the 4 u/s base) and
+      // runs the minimal "interposer" brain (InterposerBehavior): each think-tick it steers to the pair's segment
+      // midpoint (duo) / the boss<->player midpoint (solo) to BODY-BLOCK fusion crossings — the B1 contest. It has NO
+      // attack (attackDamage 0) and does not aggro/leash (the interposer brain ignores those tunables; the small
+      // aggro/roam/leash values here only satisfy the registry clamps). 40 HP, dies to anything (the tether melts it),
+      // lootTableId "" = no loot/corpse. renderTint a cold steel grey + renderScale 0.7 (small, clearly an add).
+      "id": "interposer",
+      "displayName": "Interposer Drone",
+      "lootTableId": "",
+      "locomotionId": "glide",
+      "behaviorId": "interposer",
+      "renderTint": "#5F6A72",
+      "renderScale": 0.7,
+      "maxHealth": 40,
+      "moveSpeedMultiplier": 0.4,
+      "roamRadius": 0.5,
+      "aggroRadius": 0.5,
+      "chaseLeash": 0.5,
+      "attackDamage": 0,
+      "attackCooldownMs": 1000,
+      "attackRangeUnits": 0.5,
+      "respawnMs": 5000
     }
   ]
 }

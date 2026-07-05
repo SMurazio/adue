@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `48` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `49` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -102,6 +102,13 @@ World snapshots should fit in a single UDP packet for the current channel target
   dedups by id + self-resolves a LOCKED origin, which resists per-tick origin updates), reliable. Damage-absorption
   is applied INSIDE the `PlayerDamageGate` (between the i-frame check and `ApplyDamage`); the tether-overstretch and
   monster-slow effects reuse the existing player-damage gate and `MovementSpeedChanged` speed-modifier paths.
+- v49 (BOSS-2, exp/duo-abilities — EXPERIMENT branch): the Sunderer P1 "Husk" phase. ONE additive message,
+  server→client `BossPlatingMessage` (`uint BossNetworkId`, `bool PlatingActive`) — the boss's cold-steel plating
+  state (up = damage reduced 75% duo / 40% solo; false = shattered by a fusion / crumbled below 70%), broadcast
+  AOI-scoped on plating-on (spawn), shatter, reform, and permanent-off, so the client tints the boss steel grey while
+  plated (Laws 4/7 legibility). Reliable-ordered. The plating damage MODIFIER is a server-side monster-damage-seam
+  hook (no wire), the fusion-shatter is a `SkillshotEngine` fusion-event callback (no wire), and the interposer drone
+  is a new `interposer` monster type + behavior (rides the existing `EntitySpawn`/snapshot paths).
 
 ## Client Messages
 

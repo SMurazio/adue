@@ -45,7 +45,12 @@ public readonly record struct EntityRenderState(
     // CatoSpriteVisual) drive off this (with a short anti-flicker hold), so a player pinned against a wall / monster /
     // another player goes IDLE just like a flat wall already does, while a walk or a slide keeps animating. Defaults
     // false so a default-constructed (test) state and any velocity-less entity read idle. Presentation-only.
-    bool Moving = false)
+    bool Moving = false,
+    // BOSS-2 (P1 HUSK): true while this entity is the Sunderer AND its cold-steel plating is UP (BossPlatingMessage).
+    // The renderer tints the boss steel grey while plated and drops the tint when it shatters / crumbles. Threaded in
+    // MmoClient.ToRenderState from the plated-boss id set (a discrete state edge from the wire, NOT the per-frame
+    // snapshot). Defaults false → every non-boss entity (and a default-constructed test state) renders unchanged.
+    bool PlatingActive = false)
 {
     // True when this entity carries public HP (a dummy or another player). Resources/trees replicate 0/0,
     // so the overhead bar is hidden for them.

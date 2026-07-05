@@ -69,6 +69,18 @@ public sealed class SkillshotEngine
     // Whether the two shooter entities are mutually PAIRED (the fusion gate — only paired partners' shots fuse).
     public delegate bool ArePairedDelegate(ulong shooterEntityIdA, ulong shooterEntityIdB);
 
+    // BOSS-2 (P1): report a FUSION merge with its tier — the SAME injected-seam style as the delegates above. The
+    // BossEncounterEngine subscribes so a fused skillshot SHATTERS the Sunderer's plating (any tier; the fusion need
+    // NOT hit the boss — the merge itself is the gate). Optional (null = no subscriber); default no-op.
+    public delegate void FusionReportDelegate(ProjectileTier tier, uint serverTick);
+
+    // BOSS-2 (P1): report a skillshot HIT on a monster (any monster — this engine doesn't know which is the boss; the
+    // encounter filters). Fires once per monster actually struck along a projectile's per-tick segment. The
+    // BossEncounterEngine counts boss hits for the SOLO 3-in-6 s shatter fallback (no fusion possible solo). Reporting
+    // hits here — rather than at the shared monster-damage seam — keeps tether/detonation damage (which share that
+    // seam) from being miscounted as skillshot hits. Optional (null = no subscriber); default no-op.
+    public delegate void MonsterHitReportDelegate(ulong monsterId, uint serverTick);
+
     private sealed class Projectile
     {
         public ulong EntityId;
@@ -89,17 +101,23 @@ public sealed class SkillshotEngine
     private readonly GatherCandidatesDelegate _gather;
     private readonly DamageMonsterDelegate _damage;
     private readonly ArePairedDelegate _arePaired;
+    private readonly FusionReportDelegate _onFusion;
+    private readonly MonsterHitReportDelegate _onMonsterHit;
 
     private readonly List<Projectile> _projectiles = [];
     private readonly List<WorldEntity> _candidateScratch = [];
 
+    // BOSS-2 (P1): the fusion/monster-hit report seams default to no-ops so every existing construction (the flight/
+    // fusion tests) is byte-identical; GameServer injects the real BossEncounterEngine hooks.
     public SkillshotEngine(
         SpawnProjectileDelegate spawn,
         MoveProjectileDelegate move,
         DespawnProjectileDelegate despawn,
         GatherCandidatesDelegate gather,
         DamageMonsterDelegate damage,
-        ArePairedDelegate arePaired)
+        ArePairedDelegate arePaired,
+        FusionReportDelegate? onFusion = null,
+        MonsterHitReportDelegate? onMonsterHit = null)
     {
         _spawn = spawn ?? throw new ArgumentNullException(nameof(spawn));
         _move = move ?? throw new ArgumentNullException(nameof(move));
@@ -107,6 +125,8 @@ public sealed class SkillshotEngine
         _gather = gather ?? throw new ArgumentNullException(nameof(gather));
         _damage = damage ?? throw new ArgumentNullException(nameof(damage));
         _arePaired = arePaired ?? throw new ArgumentNullException(nameof(arePaired));
+        _onFusion = onFusion ?? ((ProjectileTier _, uint _) => { });
+        _onMonsterHit = onMonsterHit ?? ((ulong _, uint _) => { });
     }
 
     // The in-flight projectile count — the tick-loop gate (skip Step when 0) and the tests' observation window.
@@ -146,7 +166,7 @@ public sealed class SkillshotEngine
             return;
         }
 
-        ResolveFusions(dtSeconds);
+        ResolveFusions(serverTick, dtSeconds);
         AdvanceAndHit(serverTick, dtSeconds);
     }
 
@@ -154,7 +174,7 @@ public sealed class SkillshotEngine
     // and merge each into one fused projectile. Only Solo projectiles fuse (a fused shot never re-fuses — no partner
     // pairing for it, and it prevents cascades). Restart the scan after each merge (it mutates the list); the in-flight
     // set is tiny, so the O(n²) rescan is negligible.
-    private void ResolveFusions(double dtSeconds)
+    private void ResolveFusions(uint serverTick, double dtSeconds)
     {
         var fusedSomething = true;
         while (fusedSomething)
@@ -188,6 +208,9 @@ public sealed class SkillshotEngine
                     }
 
                     Fuse(a, b, evaluation);
+                    // BOSS-2 (P1): report the fusion + tier so the boss encounter can shatter the plating. The merge
+                    // itself is the gate (receiver-forgives) — reported here regardless of whether it later hits.
+                    _onFusion(evaluation.Tier, serverTick);
                     fusedSomething = true;
                     break;
                 }
@@ -310,6 +333,8 @@ public sealed class SkillshotEngine
         foreach (var (monster, _) in _monsterHitScratch)
         {
             projectile.HitMonsters.Add(monster.Id);
+            // BOSS-2 (P1): report the skillshot hit (the encounter counts boss hits for the solo shatter fallback).
+            _onMonsterHit(monster.Id, serverTick);
             var killed = _damage(monster, DamageFor(projectile.Tier), projectile.ShooterEntityId, projectile.ShooterCharacterId, serverTick);
             projectile.HitsRemaining--;
 

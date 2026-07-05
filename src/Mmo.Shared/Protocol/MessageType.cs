@@ -145,5 +145,12 @@ public enum MessageType : ushort
     // origin, Q12.4 ushort radius, uint StartTick, uint ResolveTick, bool Active}. A LIVE-TRACKING variant of the
     // telegraph decal: sent EACH charge tick with the current midpoint origin (the pair aims by repositioning), and
     // once with Active=false at resolve. Reliable-ordered. See MidpointChargeMessage. Tag 127 is the next free tag.
-    MidpointCharge = 126
+    MidpointCharge = 126,
+    // BOSS-2 (v49, docs/boss-encounter-sunderer-design.md P1 HUSK): server->client boss PLATING state — {uint
+    // BossNetworkId, bool PlatingActive}. PlatingActive=true when the Sunderer's cold steel shell is up (damage
+    // reduced — the client tints the boss steel grey), false when it has SHATTERED (a vulnerability window is open) or
+    // permanently CRUMBLED below 70% (drop the tint). Broadcast AOI-scoped on plating-on (spawn), shatter, reform, and
+    // permanent-off (Laws 4/7 legibility). Reliable-ordered (discrete state edges). See BossPlatingMessage. Tag 128 is
+    // the next free server->client tag.
+    BossPlating = 127
 }

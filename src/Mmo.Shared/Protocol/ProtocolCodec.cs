@@ -116,7 +116,10 @@ public static class ProtocolCodec
     // reused Telegraph — the telegraph client path dedups by id + self-resolves a LOCKED origin, resisting the per-tick
     // origin updates this ability needs). The Ability/Cue/State bytes are range-validated on decode (hostile-input
     // safe, mirroring AttackKind). Server + every in-repo client flip together.
-    public const byte Version = 48;
+    // v49 — BOSS-2 (exp/duo-abilities, docs/boss-encounter-sunderer-design.md P1 HUSK): ONE additive message,
+    // server->client BossPlatingMessage {uint BossNetworkId, bool PlatingActive} — the Sunderer's cold-steel plating
+    // state (up / shattered / crumbled) for the client's steel-grey boss tint (Laws 4/7). AOI-scoped, reliable-ordered.
+    public const byte Version = 49;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -267,6 +270,11 @@ public static class ProtocolCodec
             case MidpointChargeMessage value:
                 // DUO-WAVE2 (v48): the live-tracking blast marker — id, Q12.4 shape, the charge window, active flag.
                 WriteMidpointCharge(writer, value);
+                break;
+            case BossPlatingMessage value:
+                // BOSS-2 (v49): boss plating state — the boss net id + the active flag. Mirrored in the decode.
+                writer.Write(value.BossNetworkId);
+                writer.Write(value.PlatingActive);
                 break;
             case PlayerCollisionSettingMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
@@ -484,6 +492,8 @@ public static class ProtocolCodec
             MessageType.EchoCue => new EchoCueMessage(reader.ReadUInt32(), ReadEchoCueKind(reader)),
             MessageType.TetherStatus => new TetherStatusMessage(reader.ReadUInt32(), reader.ReadUInt32(), ReadTetherState(reader)),
             MessageType.MidpointCharge => ReadMidpointCharge(reader),
+            // BOSS-2 (v49): boss plating state — mirror the encode order (boss net id + active flag).
+            MessageType.BossPlating => new BossPlatingMessage(reader.ReadUInt32(), reader.ReadBoolean()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),

@@ -509,11 +509,11 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFortyEight()
+    public void ProtocolVersionIsFortyNine()
     {
-        // DUO-WAVE2 (v48, exp/duo-abilities): DuoAbility + ShieldStatus + EchoCue + TetherStatus + MidpointCharge on
-        // top of v47 (duo foundation). Pin it so a change is caught.
-        Assert.Equal(48, ProtocolCodec.Version);
+        // BOSS-2 (v49, exp/duo-abilities): the additive BossPlatingMessage on top of v48 (DUO-WAVE2). Pin it so a
+        // change is caught.
+        Assert.Equal(49, ProtocolCodec.Version);
     }
 
     // DUO-WAVE2 (v48): the co-op ability wire messages round-trip, and every discriminator byte is hostile-input
@@ -574,6 +574,19 @@ public sealed class ProtocolCodecTests
         Assert.Equal(100u, decoded.StartTick);
         Assert.Equal(116u, decoded.ResolveTick);
         Assert.True(decoded.Active);
+    }
+
+    [Fact]
+    public void BossPlatingMessageRoundTrips()
+    {
+        // BOSS-2 (v49): the boss plating state — {uint BossNetworkId, bool PlatingActive}.
+        foreach (var active in new[] { true, false })
+        {
+            var decoded = Assert.IsType<BossPlatingMessage>(
+                ProtocolCodec.Decode(ProtocolCodec.Encode(new BossPlatingMessage(4242u, active))));
+            Assert.Equal(4242u, decoded.BossNetworkId);
+            Assert.Equal(active, decoded.PlatingActive);
+        }
     }
 
     [Fact]

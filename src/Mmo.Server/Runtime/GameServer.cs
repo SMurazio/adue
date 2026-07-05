@@ -513,13 +513,17 @@ public sealed class GameServer
         // DUO-SKILLSHOT: the fusion-skillshot engine, wired to the SAME spatial gather AOI/combat use and the SAME
         // monster-damage path the melee routes through (ApplyProjectileDamage → ApplyDamage + cosmetic event +
         // contribution ledger + KillMonster). Spawn/move/despawn go through Zone; the pairing gate reads the sessions.
+        // BOSS-2 (P1): the fusion-shatter + solo boss-hit-count hooks the Sunderer encounter subscribes to (no-ops for
+        // every non-boss fight — the engine filters to its own boss id and ignores events off-encounter).
         _skillshots = new SkillshotEngine(
             SpawnProjectileEntity,
             MoveProjectileEntity,
             DespawnProjectileEntity,
             _zone.World.GatherInterestCandidates,
             ApplyProjectileDamage,
-            AreEntitiesPaired);
+            AreEntitiesPaired,
+            onFusion: (tier, tick) => _bossEncounter.OnFusion(tier, tick),
+            onMonsterHit: (monsterId, tick) => _bossEncounter.OnSkillshotMonsterHit(monsterId, tick));
         // DUO-WAVE2 ability 3 (Laser Tether): the beam stepper — same spatial gather, the shared monster-damage +
         // monster-slow seams, the player-damage choke point for the overstretch DoT, and the tether-status wire relay.
         _tether = new TetherEngine(
@@ -608,6 +612,11 @@ public sealed class GameServer
                 TryBeginMonsterCharge,
                 TryBeginMonsterSlam,
                 BeginMonsterSlamLeap),
+            // BOSS-2 (P1): the interposer drone's minimal midline-seek brain. Its interpose target (the pair's segment
+            // midpoint, or the boss<->player midpoint solo) is the Sunderer encounter's authority; the drone stays
+            // encounter-agnostic behind this delegate. Inert for any non-drone (only the "interposer" type selects it).
+            ["interposer"] = new InterposerBehavior((WorldEntity drone, out WorldVector target) =>
+                _bossEncounter.TryGetInterposeTarget(out target)),
         };
         // BOSS-1 (docs/boss-encounter-sunderer-design.md): the Sunderer encounter engine. Every world touch is an
         // injected seam so the engine is headlessly testable and GameServer stays the single wiring point: spawn the
@@ -635,7 +644,18 @@ public sealed class GameServer
                 {
                     SendSystem(session, text);
                 }
-            });
+            },
+            // BOSS-2 (P1): spawn the interposer drone (the "interposer" type — glide body, interposer brain, 40 HP, no
+            // loot) at `tile`, like the boss via SpawnMonsterCore (NOT a spawner — the engine owns the respawn cadence).
+            spawnDrone: tile =>
+            {
+                var type = _monsterTypes.TryGet("interposer", out var interposer) ? interposer : _monsterTypes.Default;
+                return SpawnMonsterCore(type, tile, maxHealthOverride: null, renderScaleOverride: null);
+            },
+            // BOSS-2 (P1): tear down an encounter ADD (the drone) through the SAME leak-free by-id path the boss uses.
+            despawnAdd: DespawnBossEntity,
+            // BOSS-2 (P1): broadcast the boss's plating state to AOI viewers (Laws 4/7 legibility).
+            broadcastPlating: BroadcastBossPlating);
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         SpawnAuthoredProps();
@@ -3187,6 +3207,11 @@ public sealed class GameServer
     // monster died this hit (drives the Perfect pierce). Mirrors HandleAttack's post-hit tail.
     private bool ApplyProjectileDamage(WorldEntity monster, int amount, ulong shooterEntityId, Guid shooterCharacterId, uint serverTick)
     {
+        // BOSS-2 (P1): the boss PLATING damage-taken modifier — the uniform hook covering EVERY non-melee source
+        // (skillshot + tether + midpoint blast all funnel here). A no-op for any non-boss monster / when the plating is
+        // down. Applied BEFORE the damage number so the floated "-N" matches the HP actually removed. (The melee path
+        // applies the same modifier inside FreeAimSectorResolver — the two damage-application seams, one modifier.)
+        amount = _bossEncounter.ModifyIncomingDamage(monster.Id, amount);
         if (!monster.ApplyDamage(amount))
         {
             return false;
@@ -3279,6 +3304,8 @@ public sealed class GameServer
     // corpse/loot roll (a reset/abandon, not a kill). Idempotent: a no-op if the boss is already gone — a PLAYER kill
     // runs KillMonster first (which despawns it), so the encounter's victory path only calls this defensively. The
     // boss belongs to NEITHER spawner map, so there is nothing else to unhook.
+    // BOSS-2 (P1): this is generic by id, so it is ALSO the encounter-ADD teardown (the interposer drone) — wired as
+    // both `despawnBoss` and `despawnAdd` on the engine, keeping the "adds cleaned everywhere the boss is" invariant.
     private void DespawnBossEntity(ulong bossId)
     {
         if (!_zone.Despawn(bossId, out var removed))
@@ -3515,6 +3542,34 @@ public sealed class GameServer
             }
 
             if (IsEntityInInterest(viewerEntity, entity, session, _tuning.InterestRadius))
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
+        }
+    }
+
+    // BOSS-2 (P1) LEGIBILITY (Laws 4/7): the boss-plating wire relay (BossEncounterEngine seam). Resolve the boss
+    // entity by id (a no-op if it is already gone) and broadcast its plating state AOI-scoped to every viewer that
+    // knows it and has it in interest — the SAME fanout BroadcastDamageEvent uses (world state, no owner session).
+    // Reliable-ordered: plating on/shatter/reform/off are discrete edges a dropped packet would desync.
+    private void BroadcastBossPlating(ulong bossId, bool platingActive)
+    {
+        if (!_zone.World.TryGet(bossId, out var boss))
+        {
+            return;
+        }
+
+        var message = new BossPlatingMessage(boss.NetworkId, platingActive);
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.IsAuthenticated
+                || !session.KnowsEntity(boss.NetworkId)
+                || !TryGetSessionEntity(session, out var viewerEntity))
+            {
+                continue;
+            }
+
+            if (IsEntityInInterest(viewerEntity, boss, session, _tuning.InterestRadius))
             {
                 TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
             }
@@ -4541,7 +4596,10 @@ public sealed class GameServer
             _tuning.FreeAimRadiusTiles,
             damage,
             _attackCandidateScratch,
-            _damagedVictimScratch);
+            _damagedVictimScratch,
+            // BOSS-2 (P1): the boss PLATING modifier — the SAME uniform hook the projectile/tether/detonation seam
+            // (ApplyProjectileDamage) applies, so a plated Sunderer takes reduced MELEE damage too. Inert for non-boss.
+            (victim, dmg) => _bossEncounter.ModifyIncomingDamage(victim.Id, dmg));
         if (hits > 0)
         {
             // COMBAT-QOL: float a cosmetic damage number over each victim that actually lost HP. AOI-gated to the

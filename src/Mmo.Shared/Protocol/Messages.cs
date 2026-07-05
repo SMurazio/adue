@@ -547,6 +547,16 @@ public sealed record MidpointChargeMessage(ulong ChargeId, TelegraphShape Shape,
     public MessageType Type => MessageType.MidpointCharge;
 }
 
+// BOSS-2 (protocol v49) P1 HUSK: server->client boss PLATING state. BossNetworkId is the Sunderer's entity id;
+// PlatingActive=true when the cold steel shell is up (damage reduced — the client tints the boss steel grey),
+// false when it has SHATTERED (a vulnerability window is open) or permanently CRUMBLED below 70% (drop the tint).
+// Broadcast AOI-scoped on plating-on (boss spawn), shatter (window open), reform (window close), and permanent-off at
+// 70% (Laws 4/7 legibility). Reliable-ordered — these are discrete state edges a dropped packet would desync.
+public sealed record BossPlatingMessage(uint BossNetworkId, bool PlatingActive) : IProtocolMessage
+{
+    public MessageType Type => MessageType.BossPlating;
+}
+
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatBroadcast;
