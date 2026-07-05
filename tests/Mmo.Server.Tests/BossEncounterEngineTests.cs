@@ -389,7 +389,7 @@ public sealed class BossEncounterEngineTests
         var pop = h.PlayerDamage[^1];
         Assert.Equal(players[0].Id, pop.Id);
         Assert.Equal("Splinter", pop.Source);
-        Assert.Equal(12, pop.Amount);
+        Assert.Equal(18, pop.Amount); // feel-test tune: pop 12→18 (splinters were too weak/slow).
         Assert.Contains(splinter.Id, h.AddDespawns);
         Assert.Equal(5, h.Engine.AddCount); // popped splinter left the ledger.
     }

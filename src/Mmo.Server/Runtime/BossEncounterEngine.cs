@@ -186,15 +186,18 @@ public sealed class BossEncounterEngine
     // SplinterCountDuo (solo: SplinterCountSolo) splinters spawn evenly on a radius-SplinterRingRadiusUnits ring around
     // the boss + creep toward the nearest living participant (SplinterBehavior); a splinter within SplinterPopRangeUnits
     // of one POPS for SplinterPopDamage (through the gate) + despawns. The tether orbit-sweep clears the ring — its
-    // showcase moment. The splinter's 15 HP / 1.2 u/s / no-attack stats + the seek brain are the "splinter" monster
-    // type; this engine owns the WHEN (ring cadence) + the POP.
+    // showcase moment. FEEL-TEST TUNE (2026-07-05, user: "the waves are not very dangerous as they are quite slow"):
+    // the splinter's move-speed multiplier was raised 0.3→0.65 (~2.6 u/s, still kiteable/sweepable but now it actually
+    // CLOSES on you) and the pop damage 12→18, so ignoring the ring instead of sweeping it genuinely bleeds the pair.
+    // The 15 HP / no-attack stats + the seek brain are the "splinter" monster type; this engine owns the WHEN (ring
+    // cadence) + the POP.
     private const double RingFirstDelaySeconds = 8d;
     private const double RingIntervalSeconds = 20d;
     private const double SplinterRingRadiusUnits = 7d;
     private const int SplinterCountDuo = 6;
     private const int SplinterCountSolo = 3;
     private const double SplinterPopRangeUnits = 1d;
-    private const int SplinterPopDamage = 12;
+    private const int SplinterPopDamage = 18;
 
     // STAGGER-BY-CONSTRUCTION (task contract): with these constants @20 Hz, relative to the crumble anchor T0, a field
     // RESOLVES at T0 + 144t (≡ T0+4 mod 10), a ring SPAWNS at T0 + 160t (≡ T0+0 mod 10), and each lash PULSE lands at
