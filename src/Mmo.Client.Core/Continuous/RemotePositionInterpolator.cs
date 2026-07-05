@@ -68,6 +68,16 @@ public sealed class RemotePositionInterpolator
     // smoothing a long visible slide. Normal per-sample errors are ~0.01-0.15u; one unit is far beyond them.
     private const double MaxCorrectionUnits = 1.0d;
 
+    // BOSS-1 (docs/boss-encounter-sunderer-design.md): a confirmed position this far from the previous one is a
+    // server-authoritative TELEPORT (the /boss arena jump), not motion — hard-RESET onto it (clear the playout
+    // buffer, snap) instead of bracket-lerping a slide across the whole map (or hitting the extrapolation cap and
+    // freezing-then-popping). The LOCAL predictor already snaps a teleport (SnapThresholdUnits 4u); a REMOTE entity
+    // (a teleported partner seen from another client) had NO such snap — Confirm just appended the far sample. This is
+    // that missing snap. Threshold well above any legitimate per-sample delta (a walker at 4u/s over a ~50ms snapshot
+    // is ~0.2u; a bounded dash/leap a few u) so it never trips on real movement, but far below a cross-map jump (tens
+    // to hundreds of u). Same intent as the local predictor's SnapThresholdUnits, one domain over.
+    private const double TeleportSnapUnits = 8.0d;
+
     // Correction offset still being blended out (render = raw + correction), its decay clock, and the newest sample
     // the previous frame's STARVATION branch extrapolated from. A re-base is the discrete event where the newest
     // sample CHANGES while the render is in the starvation (extrapolate) regime — the only regime whose raw output
@@ -158,6 +168,20 @@ public sealed class RemotePositionInterpolator
     {
         if (_samples.Count > 0 && receivedAt <= _samples[^1].ReceivedAt)
         {
+            return;
+        }
+
+        // BOSS-1 teleport snap: a jump beyond TeleportSnapUnits from the last known position is a server teleport,
+        // not motion — Reset onto it (clear the buffer + snap the render/anchor) rather than sliding to it. Compare
+        // against the newest buffered sample, or the live render position when the buffer is empty (Reset leaves
+        // _renderPosition ON the snapped position, so a subsequent normal confirm from the destination won't re-trip
+        // this). No buffer to lerp after a Reset ⇒ Sample HOLDs on the snapped anchor until fresh confirms age in.
+        var reference = _samples.Count > 0 ? _samples[^1].Position : _renderPosition;
+        var jumpX = position.X - reference.X;
+        var jumpY = position.Y - reference.Y;
+        if (((jumpX * jumpX) + (jumpY * jumpY)) > TeleportSnapUnits * TeleportSnapUnits)
+        {
+            Reset(position);
             return;
         }
 

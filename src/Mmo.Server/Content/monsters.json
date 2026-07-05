@@ -97,6 +97,56 @@
       "attackCooldownMs": 1200,
       "attackRangeUnits": 1.5,
       "fleeHealthPct": 0.3
+    },
+    {
+      // BOSS-1 (docs/boss-encounter-sunderer-design.md): THE SUNDERER — the duo-encounter boss, spawned/despawned by
+      // the BossEncounterEngine (NOT a world/region spawner), so its respawnMs is inert. It WALKS (glide) at 2.2u/s
+      // and chases with the shared basicRoamer brain. maxHealth 1200 here is the DUO baseline; the encounter engine
+      // OVERRIDES it per participant count at spawn (1200 duo / 700 solo) via SpawnMonsterCore's maxHealthOverride.
+      //
+      // BASELINE KIT (BOSS-1 scaffold — reuses the existing ability seams, NO new telegraph shapes / NO protocol
+      // change):
+      //   * CLEAVE = the "slam" ability (a CIRCLE telegraph): radius 2.8u, 0.8s windup, 25 dmg, ~5s cadence, cast in
+      //     melee range. NOTE (deviation): the design's Cleave is a 130-degree WEDGE, but TelegraphShape supports only
+      //     Circle today — a Wedge is a shared-shape + wire-codec (protocol) change, surfaced as a fork, so BOSS-1
+      //     ships a circle placeholder. The slam's root+leap makes it read as a short lunging cleave onto the target.
+      //   * LUNGE = the "charge" ability (a fast forward dash out of melee range, ~8u, ~8s cadence): the gap-closer
+      //     MOTION only. Its line telegraph + ~20 dmg are DEFERRED with the Wedge/Line telegraph-shape protocol work
+      //     (the charge seam carries no telegraph/damage) — surfaced as a fork, not invented here.
+      //
+      // attackDamage 0 = NO untelegraphed chip melee (the Cleave/slam is the sole melee damage; a 0 fallthrough swing
+      // is a no-op — ApplyDamage(0) changes nothing). aggro/leash are arena-wide so the boss engages any participant
+      // instantly and never leashes inside the 22-tile room; roamRadius 0 = it never wanders (the engine owns it).
+      // renderTint/renderScale make the boss obviously distinct + large with no art. moveSpeedMultiplier 0.55 =
+      // 2.2u/s at the 4u/s base (1000/StepCooldownMs). hop* knobs size the slam-leap (reach = min(attackRange,hop)).
+      "id": "sunderer",
+      "displayName": "The Sunderer",
+      "lootTableId": "",
+      "locomotionId": "glide",
+      "behaviorId": "basicRoamer",
+      "renderTint": "#8A2BE2",
+      "renderScale": 2.0,
+      "abilityIds": ["slam", "charge"],
+      "slamRadiusUnits": 2.8,
+      "slamWindupMs": 800,
+      "slamDamage": 25,
+      "slamCooldownMs": 5000,
+      "chargeCooldownMs": 8000,
+      "chargeDistanceUnits": 8.0,
+      "chargeTriggerRangeUnits": 8.0,
+      "maxHealth": 1200,
+      "moveSpeedMultiplier": 0.55,
+      "roamRadius": 0.5,
+      "aggroRadius": 30,
+      "chaseLeash": 60,
+      "attackDamage": 0,
+      "attackCooldownMs": 1000,
+      "attackRangeUnits": 2.8,
+      "hopDistanceUnits": 2.8,
+      "hopHeightUnits": 0.3,
+      "hopAirborneMs": 300,
+      "hopDelayMs": 400,
+      "respawnMs": 5000
     }
   ]
 }

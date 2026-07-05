@@ -184,7 +184,12 @@ public sealed class NodeCatalogTests
     // 3500->6500 @ spacing 2, Plant 500->800; an INTENTIONAL catalogue change, moved in this same commit).
     // NEVER retune this literal to make an UNINTENTIONAL change green: a silently moved value hard-fails
     // every deployed client's ZoneInfo catalogue-drift check.
-    private const ulong ShippedRealMapSeedZeroCatalogHash = 3248313660449061649UL;
+    // BOSS-1 REPIN: the Sunderer arena stamps its 22x22 interior as DungeonStone (a NON-grass surface), which masks
+    // the Grass-only node scatter out of those tiles — an INTENTIONAL catalogue change that moves this hash by
+    // construction. The literal below is STALE; the orchestrator runs the gate once, reads the actual computed hash
+    // from this assertion's failure, and pastes it in (the M3 F1 process). Do NOT guess a value or delete the test.
+    // REPINNED 2026-07-05 from the BOSS-1 gate run's actual computed value.
+    private const ulong ShippedRealMapSeedZeroCatalogHash = 12785798352589360190UL;
 
     [Fact]
     public void CatalogHashForRealMapSeedZero_IsPinnedToShippedLiteral()

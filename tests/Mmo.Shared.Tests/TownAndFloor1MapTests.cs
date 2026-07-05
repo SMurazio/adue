@@ -18,7 +18,12 @@ public sealed class TownAndFloor1MapTests
     // revert the accidental map/hash change, or — for a DELIBERATE map edit — ship it consciously as
     // the new world (one commit, client+server together) and recompute this pin as part of that
     // decision (M1 review F1).
-    private const ulong ShippedTownAndFloor1ContentHash = 0x323B2EBD502EA05EUL;
+    // BOSS-1 REPIN: the Sunderer arena stamp (AuthoredMaps.BuildTownAndFloor1) is a DELIBERATE map edit that moves
+    // this hash by construction. The implementer has no test-runner access to compute it — the literal below is STALE;
+    // the orchestrator runs the gate once, reads the actual computed hash from this assertion's failure, and pastes it
+    // in (the M3 F1 process). Do NOT guess a value or delete the test.
+    // REPINNED 2026-07-05 from the BOSS-1 gate run's actual computed value.
+    private const ulong ShippedTownAndFloor1ContentHash = 12881715534524881854UL;
 
     private static readonly AuthoredMap Map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
 
@@ -49,12 +54,29 @@ public sealed class TownAndFloor1MapTests
         // The §4 no-orphan-pockets invariant on the REAL map. House footprints are blocked tiles
         // (M1 review F4), so this flood-fill genuinely sees house collision, the wall+gate, the
         // arena mouths, the pass, and the Verge pockets.
+        //
+        // BOSS-1: ONE deliberate exception — the Sunderer arena is a SEALED, teleport-only pocket (players /boss in,
+        // never walk in), so its 22x22 interior is intentionally unreachable on foot. We assert (a) NO arena interior
+        // tile is reachable (it really is the sealed pocket), and (b) every OTHER walkable tile IS reachable (the
+        // count equals all-walkable minus the arena). An ACCIDENTAL future orphan ANYWHERE ELSE still fails (b).
         Assert.Equal(6, Map.SpawnTiles.Count);
+
+        var arenaInterior = new HashSet<TileCoord>();
+        for (var y = BossArena.InteriorMinY; y <= BossArena.InteriorMaxY; y++)
+        {
+            for (var x = BossArena.InteriorMinX; x <= BossArena.InteriorMaxX; x++)
+            {
+                arenaInterior.Add(new TileCoord(x, y));
+            }
+        }
+
         foreach (var spawn in Map.SpawnTiles)
         {
-            Assert.True(
-                Map.AllWalkableReachableFrom(spawn),
-                $"Orphan walkable pocket: not all walkable tiles reachable from spawn {spawn}.");
+            var reached = Map.FloodFillWalkableFrom(spawn);
+            Assert.False(
+                reached.Any(arenaInterior.Contains),
+                $"The Sunderer arena must be a sealed pocket, but a tile was reachable on foot from spawn {spawn}.");
+            Assert.Equal(Map.WalkableTileCount - arenaInterior.Count, reached.Count);
         }
     }
 
@@ -190,5 +212,41 @@ public sealed class TownAndFloor1MapTests
             .ToArray();
 
         Assert.Equal(new[] { 191, 192, 193, 194 }, walkableXs);
+    }
+
+    [Fact]
+    public void SundererArenaIsASealedDungeonStonePocket()
+    {
+        // BOSS-1: the far-NE Sunderer arena — a 1-tile wall ring around a 22x22 DungeonStone floor (the non-grass
+        // surface masks the node scatter out for free), with NO mouth. Pins the stamp (AuthoredMaps + BossArena): the
+        // ring is fully blocked, the interior is all walkable dungeon stone, and the fixed entry tiles + boss-spawn
+        // centre the engine teleports to are walkable interior tiles.
+        for (var x = BossArena.ExteriorMinX; x <= BossArena.ExteriorMaxX; x++)
+        {
+            Assert.True(Map.IsBlocked(new TileCoord(x, BossArena.ExteriorMinY)), $"arena south wall gap at x={x}");
+            Assert.True(Map.IsBlocked(new TileCoord(x, BossArena.ExteriorMaxY)), $"arena north wall gap at x={x}");
+        }
+
+        for (var y = BossArena.ExteriorMinY; y <= BossArena.ExteriorMaxY; y++)
+        {
+            Assert.True(Map.IsBlocked(new TileCoord(BossArena.ExteriorMinX, y)), $"arena west wall gap at y={y}");
+            Assert.True(Map.IsBlocked(new TileCoord(BossArena.ExteriorMaxX, y)), $"arena east wall gap at y={y}");
+        }
+
+        for (var y = BossArena.InteriorMinY; y <= BossArena.InteriorMaxY; y++)
+        {
+            for (var x = BossArena.InteriorMinX; x <= BossArena.InteriorMaxX; x++)
+            {
+                var tile = new TileCoord(x, y);
+                Assert.True(Map.IsWalkable(tile), $"arena interior tile {tile} is not walkable");
+                Assert.Equal(SurfaceCategory.DungeonStone, Map.CategoryAt(tile));
+            }
+        }
+
+        foreach (var tile in new[] { BossArena.IssuerEntryTile, BossArena.PartnerEntryTile, BossArena.BossSpawnTile })
+        {
+            Assert.True(Map.IsWalkable(tile), $"arena landmark {tile} must be walkable interior");
+            Assert.True(BossArena.ContainsInterior(tile), $"arena landmark {tile} must be inside the interior");
+        }
     }
 }

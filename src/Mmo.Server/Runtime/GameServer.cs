@@ -240,6 +240,13 @@ public sealed class GameServer
     // over the world's spatial gather + the gate).
     private readonly TelegraphScheduler _telegraphs;
 
+    // BOSS-1 (docs/boss-encounter-sunderer-design.md): the Sunderer encounter lifecycle engine (Step() runs each tick
+    // in TickCore, right after _telegraphs.ResolveDue). Owns the arena state machine — /boss enter/leave, the
+    // countdown, boss spawn (HP scaled by participant count) + despawn, and the reset/victory rules — through injected
+    // seams (SpawnMonsterCore / a leak-free despawn / Zone.Teleport / SendSystem). Constructed after _monsterTypes +
+    // _zone + the behavior registry (its spawn delegate resolves the "sunderer" type + registers its behavior).
+    private readonly BossEncounterEngine _bossEncounter;
+
     // DUO-SKILLSHOT (exp/duo-abilities): the fusion-skillshot engine (Step() runs each tick in TickCore, a sibling of
     // _telegraphs.ResolveDue). Constructed after _zone + _contributionLedger since it closes over the projectile
     // spawn/move/despawn seams, the world's spatial gather, the shared monster-damage path, and the pairing gate.
@@ -602,6 +609,33 @@ public sealed class GameServer
                 TryBeginMonsterSlam,
                 BeginMonsterSlamLeap),
         };
+        // BOSS-1 (docs/boss-encounter-sunderer-design.md): the Sunderer encounter engine. Every world touch is an
+        // injected seam so the engine is headlessly testable and GameServer stays the single wiring point: spawn the
+        // boss via SpawnMonsterCore with a per-participant HP override (NOT a spawner — no auto-respawn); despawn it
+        // leak-free (DespawnBossEntity, no corpse/loot); resolve entity ids; teleport a player (Zone.Teleport + clear
+        // its held move intent so it doesn't walk off the entry tile); and chat a participant via its session.
+        _bossEncounter = new BossEncounterEngine(
+            options.TickRate,
+            spawnBoss: (tile, maxHealth) =>
+            {
+                var type = _monsterTypes.TryGet("sunderer", out var sunderer) ? sunderer : _monsterTypes.Default;
+                return SpawnMonsterCore(type, tile, maxHealthOverride: maxHealth, renderScaleOverride: null);
+            },
+            despawnBoss: DespawnBossEntity,
+            tryResolve: id => _zone.World.TryGet(id, out var entity) ? entity : null,
+            teleport: (player, tile) =>
+            {
+                _zone.Teleport(player, tile);
+                player.OwnerSession?.ClearMoveIntent();
+            },
+            notify: (entityId, text) =>
+            {
+                var session = SessionByEntity(entityId);
+                if (session is not null)
+                {
+                    SendSystem(session, text);
+                }
+            });
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         SpawnAuthoredProps();
@@ -1172,6 +1206,11 @@ public sealed class GameServer
             // judged against positions AT tick T, and BEFORE BroadcastSnapshot so the damage/HP change replicates
             // this same tick. ~free while nothing is pending (the common case).
             _telegraphs.ResolveDue(_serverTick);
+            // BOSS-1: pump the Sunderer encounter lifecycle (countdown → boss spawn; victory / wipe / empty resets).
+            // Placed right AFTER ResolveDue so a boss Cleave (slam) telegraph that just killed the last participant is
+            // seen as a WIPE this same tick — before RespawnPlayers (the Other block) teleports the bodies to town. It
+            // spawns/despawns the boss directly (bounded work; no per-tick cost when Idle).
+            _bossEncounter.Step(_serverTick);
             // DUO-SKILLSHOT: step in-flight skillshots (fusion merge + straight-line flight + monster hits) after all
             // movement, BEFORE BroadcastSnapshot so a fusion merge, a projectile move, and a hit's HP change all
             // replicate this same tick. Fixed dt = 1/TickRate (the tick cadence). ~free when nothing is in flight.
@@ -2720,8 +2759,8 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
-                : "commands: /help, /role, /rumors, /pair <name>, /unpair. Admin commands require role Admin.");
+                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /boss, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                : "commands: /help, /role, /rumors, /pair <name>, /unpair, /boss. Admin commands require role Admin.");
             return;
         }
 
@@ -2750,6 +2789,15 @@ public sealed class GameServer
         if (command == "unpair")
         {
             HandleUnpairCommand(sender);
+            return;
+        }
+
+        // BOSS-1 (docs/boss-encounter-sunderer-design.md): /boss is a co-op gameplay verb — available to EVERY player
+        // (resolved BEFORE the admin gate, like /pair). Outside the arena it enters (pulls in a duo partner too);
+        // inside, it leaves.
+        if (command == "boss")
+        {
+            HandleBossCommand(sender);
             return;
         }
 
@@ -3185,6 +3233,72 @@ public sealed class GameServer
         }
 
         return null;
+    }
+
+    // BOSS-1 (docs/boss-encounter-sunderer-design.md): /boss enter/leave. Inside the arena interior → LEAVE (the
+    // engine teleports the issuer back to its stored return tile). Outside → ENTER, pulling in the issuer's duo
+    // partner when paired AND online (the engine gives the partner its own chat line — no consent flow, the branch's
+    // decision); works solo with no partner. The engine returns the ISSUER's chat line either way.
+    private void HandleBossCommand(ClientSession sender)
+    {
+        if (!TryGetSessionEntity(sender, out var issuer))
+        {
+            SendSystem(sender, "boss: no controllable entity.");
+            return;
+        }
+
+        if (BossArena.ContainsInterior(issuer.TileCoord))
+        {
+            if (_bossEncounter.TryLeave(issuer, out var leaveMessage))
+            {
+                SendSystem(sender, leaveMessage);
+                return;
+            }
+
+            // Inside the arena but not a tracked participant — defensive only (the arena is a sealed pocket, so this
+            // is unreachable in normal play). Eject to a spawn anchor so the player is never stranded off-map.
+            _zone.Teleport(issuer, _zone.NextSpawnTile());
+            sender.ClearMoveIntent();
+            SendSystem(sender, "You leave the Sunderer's arena.");
+            return;
+        }
+
+        WorldEntity? partner = null;
+        if (sender.PartnerSession is { IsAuthenticated: true } partnerSession
+            && TryGetSessionEntity(partnerSession, out var partnerEntity))
+        {
+            partner = partnerEntity;
+        }
+
+        _bossEncounter.TryBegin(issuer, partner, _serverTick, out var message);
+        SendSystem(sender, message);
+    }
+
+    // BOSS-1: despawn + fully clean up the encounter boss — the SAME leak-free teardown KillMonster /
+    // HandleClearSpawnersCommand run (action cooldowns, contribution ledger, brain, type map, network id) but with NO
+    // corpse/loot roll (a reset/abandon, not a kill). Idempotent: a no-op if the boss is already gone — a PLAYER kill
+    // runs KillMonster first (which despawns it), so the encounter's victory path only calls this defensively. The
+    // boss belongs to NEITHER spawner map, so there is nothing else to unhook.
+    private void DespawnBossEntity(ulong bossId)
+    {
+        if (!_zone.Despawn(bossId, out var removed))
+        {
+            return;
+        }
+
+        _actionExecutor.ClearEntity(bossId);
+        _contributionLedger.Forget(bossId);
+        if (_monsterTypeOf.TryGetValue(bossId, out var typeToForget))
+        {
+            ResolveBehavior(typeToForget).Forget(bossId);
+        }
+        else
+        {
+            _defaultBehavior.Forget(bossId);
+        }
+
+        _monsterTypeOf.Remove(bossId);
+        _networkIds.Return(removed.NetworkId);
     }
 
     // DUO-SKILLSHOT: the Direction8 a continuous unit heading points toward (nearest of 8), for the projectile's

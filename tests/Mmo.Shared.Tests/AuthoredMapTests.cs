@@ -155,10 +155,31 @@ public sealed class AuthoredMapTests
         {
             var map = AuthoredMap.Parse(rows);
             Assert.NotEmpty(map.SpawnTiles);
+
+            // BOSS-1: the real genVersion 2 map now has ONE deliberate exception — the sealed, teleport-only Sunderer
+            // arena — so its interior is intentionally unreachable on foot. Subtract that sealed pocket from the
+            // expected reachable count (0 tiles on the small alphabet grids, whose bounds don't contain the arena).
+            var sealedPocket = 0;
+            for (var y = BossArena.InteriorMinY; y <= BossArena.InteriorMaxY; y++)
+            {
+                for (var x = BossArena.InteriorMinX; x <= BossArena.InteriorMaxX; x++)
+                {
+                    if (map.IsWalkable(new TileCoord(x, y)))
+                    {
+                        sealedPocket++;
+                    }
+                }
+            }
+
             foreach (var spawn in map.SpawnTiles)
             {
-                Assert.True(map.AllWalkableReachableFrom(spawn), $"Orphan walkable pocket: not all walkable tiles reachable from spawn {spawn}.");
-                Assert.Equal(map.WalkableTileCount, map.FloodFillWalkableFrom(spawn).Count);
+                var reached = map.FloodFillWalkableFrom(spawn);
+                foreach (var tile in reached)
+                {
+                    Assert.False(BossArena.ContainsInterior(tile), $"Sealed Sunderer arena tile {tile} reachable from spawn {spawn}.");
+                }
+
+                Assert.Equal(map.WalkableTileCount - sealedPocket, reached.Count);
             }
         }
     }

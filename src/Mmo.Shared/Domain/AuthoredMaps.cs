@@ -177,6 +177,19 @@ public static class AuthoredMaps
             map.FillRect(cx, cy, cx + 1, cy + 1, '#');
         }
 
+        // BOSS-1 (docs/boss-encounter-sunderer-design.md): THE SUNDERER ARENA — a 24x24 sealed room in the far
+        // north-east corner (open grass today; north of the wings/cross-band, east of the Verge, diagonally opposite
+        // town). A 1-tile wall ring (authored-stamp collision, predicted on both sides) around a 22x22 DungeonStone
+        // floor. The floor is '-' (a NON-grass surface) ON PURPOSE: the node scatter classes are all Grass-only, so
+        // authoring the interior as dungeon stone masks every resource node out of the arena for free (no explicit
+        // exclusion rect) — flat, empty floor. The room is DELIBERATELY unconnected to the rest of the map (no mouth):
+        // players only ever /boss-teleport in, so the reachability invariant carves this interior out (a sealed pocket
+        // by design, pinned in TownAndFloor1MapTests). Coords live in BossArena so the server engine + this stamp + the
+        // test can never drift. This edit moves the genVersion 2 ContentHash (re-pinned in the same commit) and — via
+        // the masked-out interior tiles — the NodeCatalog CatalogHash (likewise re-pinned).
+        map.Border(BossArena.ExteriorMinX, BossArena.ExteriorMinY, BossArena.ExteriorMaxX, BossArena.ExteriorMaxY, 1, '#');
+        map.FillRect(BossArena.InteriorMinX, BossArena.InteriorMinY, BossArena.InteriorMaxX, BossArena.InteriorMaxY, '-');
+
         return map.Emit();
     }
 }
