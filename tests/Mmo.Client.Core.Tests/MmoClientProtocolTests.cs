@@ -184,6 +184,25 @@ public sealed class MmoClientProtocolTests
     }
 
     [Fact]
+    public void PlatingMembershipDiesWithTheEntity_ARecycledNetworkIdStartsClean()
+    {
+        // BOSS-2 REVIEW HIGH-2: server network ids are POOLED and recycled FIFO, and the server's encounter-reset
+        // paths despawn a still-plated boss WITHOUT a plating-off edge. The plated-id set must therefore die with the
+        // entity — otherwise whatever entity next rents the id renders steel grey until relog.
+        using var client = CreateClient(out _);
+        client.HandleMessageForTests(new EntitySpawnMessage(50, Guid.Empty, EntityKind.Monster, "The Sunderer", new TileCoord(10, 10), Direction8.S, StepCooldownMs: 140));
+        client.HandleMessageForTests(new BossPlatingMessage(50, true));
+        Assert.Contains(client.GetRenderStates(TimeSpan.Zero), s => s.NetworkId == 50 && s.PlatingActive);
+
+        // Party wipe: the boss despawns while still plated (no plating-off message on this path).
+        client.HandleMessageForTests(new EntityDespawnMessage(3, 50));
+
+        // A different entity rents the recycled id — it must start clean.
+        client.HandleMessageForTests(new EntitySpawnMessage(50, Guid.Empty, EntityKind.Monster, "Gnoll", new TileCoord(11, 10), Direction8.S, StepCooldownMs: 140));
+        Assert.Contains(client.GetRenderStates(TimeSpan.Zero), s => s.NetworkId == 50 && !s.PlatingActive);
+    }
+
+    [Fact]
     public void MovementDebugTraceRecordsSentAndConfirmedTileWhenEnabled()
     {
         var lines = new List<string>();

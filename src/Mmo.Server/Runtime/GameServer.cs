@@ -1699,6 +1699,18 @@ public sealed class GameServer
                 scaleMilli);
             TrySend(recipient.Peer, packet, DeliveryMethod.ReliableOrdered, MessageType.EntitySpawn);
             recipient.RememberKnownEntity(entity.NetworkId);
+
+            // BOSS-2 REVIEW HIGH-1/MEDIUM-1: plating is edge-broadcast (BroadcastBossPlating), and every edge is
+            // gated on KnowsEntity — but the spawn-time "plating up" edge fires inside the encounter Step, BEFORE
+            // this method has introduced the boss to anyone, so it was dropped for every viewer on every fight (the
+            // boss rendered unplated exactly when players must learn the mechanic). The fix is STATE-SYNC at the
+            // introduction point: whoever just learned the boss entity also learns its current plating state. This
+            // covers the spawn tick AND every late viewer (approach mid-fight, reconnect) — the same known-id-diff
+            // pattern the spawner markers and telegraphs use.
+            if (_bossEncounter.BossSpawned && entity.Id == _bossEncounter.BossId && _bossEncounter.PlatingActive)
+            {
+                TrySend(recipient.Peer, new BossPlatingMessage(entity.NetworkId, true), DeliveryMethod.ReliableOrdered);
+            }
         }
 
         // LIVING-ENEMIES P3: the red anchor is now the persistent SPAWNER (not the transient monster), replicated via

@@ -1196,6 +1196,10 @@ public sealed class MmoClient : IDisposable
                 // LIVING-ENEMIES P3: spawner markers are keyed by spawner id (not monster network id) and are dropped by
                 // an explicit SpawnerMarker(Active=false), so an entity despawn no longer clears a marker — a killed
                 // monster despawns but its spawner's red tile persists until the spawner itself leaves AOI.
+                // BOSS-2 REVIEW HIGH-2: the plated-id set must NOT outlive the entity — network ids are POOLED and
+                // recycled FIFO, and the server's reset paths despawn a still-plated boss with no plating-off edge, so
+                // a stale membership would tint whatever entity next rents this id steel grey until relog.
+                _platedBossIds.Remove(despawn.NetworkId);
                 if (LocalNetworkId == despawn.NetworkId)
                 {
                     ClearLocalEntity();
@@ -1710,6 +1714,8 @@ public sealed class MmoClient : IDisposable
                 _entities.Remove(networkId);
                 // LIVING-ENEMIES P3: spawner markers are keyed by spawner id + dropped by an explicit Active=false, so a
                 // snapshot prune of stale ENTITIES no longer touches them.
+                // BOSS-2 REVIEW HIGH-2: drop any plating membership with the entity (pooled ids — see the despawn case).
+                _platedBossIds.Remove(networkId);
                 if (LocalNetworkId == networkId)
                 {
                     ClearLocalEntity();
@@ -1799,6 +1805,8 @@ public sealed class MmoClient : IDisposable
         foreach (var networkId in _staleEntityScratch)
         {
             _entities.Remove(networkId);
+            // BOSS-2 REVIEW HIGH-2: drop any plating membership with the entity (pooled ids — see the despawn case).
+            _platedBossIds.Remove(networkId);
             if (LocalNetworkId == networkId)
             {
                 ClearLocalEntity();
