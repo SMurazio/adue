@@ -10,9 +10,6 @@ work them only after the user has played with a pad and the mapping survives con
   to keep hot-plug free). Cache the first device id once per `_Process` (or refresh on Godot's
   `JoyConnectionChanged` signal) — micro-GC, measure-first culture says confirm it even registers
   before bothering.
-- **No aim-ownership cue.** `_aimSourceIsController` flips silently (right stick claims, mouse motion
-  reclaims); a player alternating devices has no HUD indicator of which owns aim. Small icon or
-  crosshair-style change when controller aim is live.
 - **Facing-octant flicker at boundaries.** Analog stick heading → `NearestDirection8` facing has no
   hysteresis (mouse `CursorHeading` has boundary hysteresis); dwelling on a 45° boundary can flicker
   the sprite facing. Reuse the mouse hysteresis if it shows up in play.

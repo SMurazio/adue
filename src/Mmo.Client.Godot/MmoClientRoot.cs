@@ -347,6 +347,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private bool _aimSourceIsController;
 	private bool _controllerLeftTriggerHeld;
 	private bool _prevRightTriggerHeld;
+	// CONTROLLER AIM-FACING (2026-07-05 feel-test): true only while the right stick is past its deadzone THIS
+	// frame (refreshed every PollControllerAim) — the "actively aiming" predicate for the local facing override,
+	// deliberately distinct from the persistent _aimSourceIsController (which stays true long after the stick
+	// recentres and would pin the facing to a stale aim while walking).
+	private bool _controllerAimStickActive;
 
 	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
 	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
@@ -548,6 +553,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateAimWedge();
 		UpdateSkillshotAim(now);
 		UpdateDuoVisuals();
+		UpdateControllerAimArrow();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
 		UpdateOverlay(now);
@@ -881,7 +887,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// server by ~RTT along the same path, and the reconcile keeps it glued unless the server rejects. The launch
 	// HEADING is the cursor aim (or the discrete facing), quantized via the SAME shared AimAngle the attack aim uses,
 	// so client predict + server execute decode the identical unit heading (for the dodge-roll too — a roll goes
-	// where you aim, the minimal dev binding; a roll-along-held-WASD variant is Phase E UX). SendAction returns null
+	// where you aim, the minimal dev binding; a roll-along-held-WASD variant is Phase E UX). CONTROLLER (2026-07-05):
+	// on pad, a deflected LEFT stick overrides that — the action follows the movement bearing (see the in-body
+	// comment); keyboard+mouse resolution is unchanged when the stick is centered. SendAction returns null
 	// when the trigger is DECLINED locally (one-at-a-time / mirrored cooldown) — nothing was sent and we show no
 	// feedback, mirroring the server's can-act reject.
 	private void TryMovementAction(ActionId actionId, string feedback)
@@ -891,11 +899,28 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
-		// Aim the action along the cursor when available (so the dash/arc goes where the player is looking), else
-		// fall back to the discrete facing — exactly the aim source TryAttack uses, so the heading is always defined.
-		var headingRadians = TryGetAimToCursor(out var cursorAim)
-			? cursorAim
-			: LocalFacingRadians();
+		// CONTROLLER (2026-07-05 feel-test): while the LEFT (movement) stick is deflected, the action heading is
+		// the stick's continuous bearing — a dash goes where you're STEERING, not where you aim (a pad user aiming
+		// right while running left expects the roll to follow the run; "dash toward aim" read wrong in play). The
+		// twin-stick split is deliberate: the left stick launches the action while facing stays on the RIGHT-stick
+		// aim (shoot one way, roll another — see UpdateLocalContinuousFacing). Stick centered (or no pad) -> the
+		// existing aim-seam resolution below, verbatim, so keyboard+mouse behavior is untouched.
+		float headingRadians;
+		if (CurrentControllerMoveHeading() is WorldVector stickHeading)
+		{
+			// World bearing of the unit stick vector (+X east, +Y south) — the same atan2(dz, dx) convention
+			// TryGetAimToCursor produces, so AimAngle.Quantize decodes it identically on both sides.
+			headingRadians = Mathf.Atan2((float)stickHeading.Y, (float)stickHeading.X);
+		}
+		else
+		{
+			// Aim the action along the cursor when available (so the dash/arc goes where the player is looking),
+			// else fall back to the discrete facing — exactly the aim source TryAttack uses, so the heading is
+			// always defined.
+			headingRadians = TryGetAimToCursor(out var cursorAim)
+				? cursorAim
+				: LocalFacingRadians();
+		}
 
 		if (_client.SendAction((byte)actionId, AimAngle.Quantize(headingRadians)) is not null)
 		{
@@ -1024,15 +1049,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// CONTROLLER (2026-07-04): poll the first connected joypad's RIGHT stick for aim, once per frame (called from
 	// _Process, UNGATED by chat focus — a stick tilt can't type text). Beyond the shared radial deadzone, the
 	// stick's direction becomes the persistent aim direction (normalized) and claims aim-source ownership from the
-	// mouse (see TryGetAimWorldPoint); inside the deadzone this is a no-op — the LAST aim source stays in effect,
-	// same "dead-zone holds the previous heading" idea the mouse path already uses (CursorHeading).
+	// mouse (see TryGetAimWorldPoint); inside the deadzone the AIM state is a no-op — the LAST aim source stays in
+	// effect, same "dead-zone holds the previous heading" idea the mouse path already uses (CursorHeading).
+	// CONTROLLER AIM-FACING (2026-07-05): additionally refreshes _controllerAimStickActive every frame (true only
+	// while the stick is deflected NOW) — the momentary predicate the local facing override keys off, as opposed
+	// to the persistent ownership flag above.
 	private void PollControllerAim()
 	{
 		if (!TryGetJoyAxisVector(JoyAxis.RightX, JoyAxis.RightY, out var rightX, out var rightY))
 		{
+			_controllerAimStickActive = false;
 			return;
 		}
 
+		_controllerAimStickActive = true;
 		_controllerAimDirection = new WorldVector(rightX, rightY).Normalized();
 		_aimSourceIsController = true;
 	}
@@ -4884,10 +4914,92 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		_chargeDecal.Visible = true;
 	}
 
+	// ---- CONTROLLER aim arrow (2026-07-05 feel-test): the aim-ownership cue ----
+
+	// A small ground-level arrow at the local player pointing along the CONTINUOUS pad aim bearing (the raw
+	// _controllerAimDirection, not the octant the facing snaps to). Visible ONLY while the controller owns aim
+	// (_aimSourceIsController) and gone the moment mouse motion reclaims it — visible-in-pad-mode IS the toggle
+	// (live-toggle discipline; no launch flag, no settings row). This intentionally closes the
+	// "no aim-ownership cue" follow-up: alternating devices, the arrow is the tell for which one owns aim.
+	// Kept deliberately small + translucent (a cue, not a skillshot telegraph — that's the cyan preview line).
+
+	// Pale gold, faint, unshaded — reads on the dark ground and collides with none of the existing overlay
+	// colours (cyan skillshot preview, red attack wedge, magenta blast charge, blue/amber/red tether).
+	private static readonly StandardMaterial3D ControllerAimArrowMaterial = MarkerMaterial(new Color(1.00f, 0.85f, 0.35f, 0.45f));
+
+	private MeshInstance3D? _controllerAimArrow;
+	private ArrayMesh? _controllerAimArrowMesh;
+
+	// Per-frame (cheap): lazily build the arrow node once (the tether-beam pattern), then only reposition/yaw and
+	// flip Visible — no per-frame allocation. Anchored at the player's render position each frame so it tracks the
+	// avatar exactly like the swing wedge does; yawed so the mesh's +X maps onto the world aim bearing (θ = -aim,
+	// the same mapping PlacePreviewLine uses).
+	private void UpdateControllerAimArrow()
+	{
+		if (_worldRoot is null)
+		{
+			return;
+		}
+
+		if (_controllerAimArrow is null)
+		{
+			// The arrow mesh, built ONCE at final size pointing +X in the ground plane: a thin shaft quad
+			// (x 0.30→0.90, so it starts just outside the cat's body instead of under its feet) plus a head
+			// triangle (x 0.90→1.15) — ~0.85u of visible arrow. Same raw-ArrayMesh idiom as the skillshot
+			// preview line's unit quad.
+			var vertices = new Godot.Collections.Array();
+			vertices.Resize((int)Mesh.ArrayType.Max);
+			vertices[(int)Mesh.ArrayType.Vertex] = new Vector3[]
+			{
+				// Shaft (two triangles).
+				new(0.30f, 0f, -0.045f), new(0.90f, 0f, -0.045f), new(0.90f, 0f, 0.045f),
+				new(0.30f, 0f, -0.045f), new(0.90f, 0f, 0.045f), new(0.30f, 0f, 0.045f),
+				// Head (one triangle, wider than the shaft, tip at +X).
+				new(0.90f, 0f, -0.13f), new(1.15f, 0f, 0f), new(0.90f, 0f, 0.13f),
+			};
+			_controllerAimArrowMesh = new ArrayMesh();
+			_controllerAimArrowMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, vertices);
+
+			_controllerAimArrow = new MeshInstance3D
+			{
+				Name = "ControllerAimArrow",
+				Mesh = _controllerAimArrowMesh,
+				MaterialOverride = ControllerAimArrowMaterial,
+				Visible = false,
+			};
+			_worldRoot.AddChild(_controllerAimArrow);
+		}
+
+		if (!_aimSourceIsController || _client?.IsLoggedIn != true
+			|| !TryGetLocalRenderPosition(out var px, out var pz))
+		{
+			_controllerAimArrow.Visible = false;
+			return;
+		}
+
+		// World bearing of the raw aim vector (+X east, +Y south) — the continuous direction the seam projects
+		// from, so the arrow and the synthetic aim point always agree.
+		var bearing = Mathf.Atan2((float)_controllerAimDirection.Y, (float)_controllerAimDirection.X);
+		_controllerAimArrow.Position = new Vector3(px, 0.07f, pz);
+		_controllerAimArrow.Rotation = new Vector3(0f, -bearing, 0f);
+		_controllerAimArrow.Visible = true;
+	}
+
 	// FREEAIM: continuous local facing. Render-only, local-only, NOT replicated — the local player's visual yaws
 	// smoothly toward the cursor's ground point each frame so the avatar "looks where you aim". The server still
 	// only knows the discrete movement facing; this is pure presentation layered over it. No-op when the cursor pick
 	// fails or the local visual isn't spawned yet.
+	//
+	// CONTROLLER AIM-FACING (2026-07-05 feel-test): this is the narrowest seam where the LOCAL player's visual
+	// facing is chosen (the SetContinuousYaw/ClearContinuousYaw override PlayerVisual.ApplyFacing prefers over the
+	// discrete movement Facing), so the pad branch lives here. On pad, facing follows AIM only while ACTIVELY
+	// aiming — right stick past its deadzone THIS frame (_controllerAimStickActive, NOT the persistent ownership
+	// flag, which would pin facing to a stale aim while walking) OR the LT skillshot hold (you're aiming a shot;
+	// the character faces it even if the stick momentarily recentres). The facing is the aim's OCTANT
+	// (NearestDirection8 — the 8-way sprite convention, per the user's feel-test call), not the raw bearing.
+	// Otherwise the override is dropped and facing falls back to the movement-derived octant exactly as a
+	// no-aim mouse frame does. Purely cosmetic and local: nothing sent to the server changes; remote players
+	// still see the movement-derived facing (accepted mismatch for this experiment).
 	private void UpdateLocalContinuousFacing()
 	{
 		if (_renderer is null || _client?.LocalNetworkId is not uint localId)
@@ -4897,6 +5009,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		if (!_renderer.TryGetActiveVisual(localId, out var visual))
 		{
+			return;
+		}
+
+		if (_aimSourceIsController)
+		{
+			if (_controllerAimStickActive || _controllerLeftTriggerHeld)
+			{
+				// CONTINUOUS pad aim facing (orchestrator revision of the octant-snap first cut): the mouse
+				// FREEAIM path below yaws the model smoothly toward the raw cursor bearing, and the avatar is a
+				// 3D model, not an 8-way sprite — the pad matches it. _controllerAimDirection is already the unit
+				// (dx east, dz south) the mouse branch derives via cos/sin, so it feeds the identical
+				// atan2(-dx,-dz) model-forward math (see the comment on the mouse branch below).
+				visual.SetContinuousYaw(Mathf.Atan2(-(float)_controllerAimDirection.X, -(float)_controllerAimDirection.Y));
+			}
+			else
+			{
+				// Pad owns aim but isn't aiming right now: movement-derived facing, exactly as today.
+				visual.ClearContinuousYaw();
+			}
+
 			return;
 		}
 
