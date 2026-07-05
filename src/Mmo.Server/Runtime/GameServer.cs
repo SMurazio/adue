@@ -3422,15 +3422,15 @@ public sealed class GameServer
         // strictly less protection than one coordinated Perfect (40+40 on one shared cooldown).
     }
 
-    // DUO-WAVE2 ability 2: arm one player's shield + shared cooldown and push the bubble to that player AND their
-    // partner (both render it). ArmShield keeps the stronger of any live pool and the new strength (a solo→shared upgrade).
+    // DUO-WAVE2 ability 2: arm one player's shield + shared cooldown and replicate the bubble. ArmShield keeps the
+    // stronger of any live pool and the new strength (a solo→shared upgrade).
     private void ApplyShield(ClientSession session, WorldEntity entity, int strength, uint expiryTick, uint cooldownUntil)
     {
         session.ArmShield(strength, expiryTick, _serverTick);
         session.SetShieldCooldownUntil(cooldownUntil);
         var pool = session.ShieldRemainingAt(_serverTick);
         var message = new ShieldStatusMessage(entity.NetworkId, (ushort)Math.Clamp(pool, 0, ushort.MaxValue), expiryTick, pool > 0);
-        SendToSelfAndPartner(session, message, DeliveryMethod.ReliableOrdered);
+        BroadcastShieldStatus(session, entity, message);
     }
 
     // DUO-WAVE2 ability 2: per-tick shield-expiry pass. For each session whose shield just lapsed, push a single
@@ -3442,7 +3442,7 @@ public sealed class GameServer
         {
             if (session.IsAuthenticated && session.TryExpireShield(serverTick) && TryGetSessionEntity(session, out var entity))
             {
-                SendToSelfAndPartner(session, new ShieldStatusMessage(entity.NetworkId, 0, 0, false), DeliveryMethod.ReliableOrdered);
+                BroadcastShieldStatus(session, entity, new ShieldStatusMessage(entity.NetworkId, 0, 0, false));
             }
         }
     }
@@ -3461,7 +3461,7 @@ public sealed class GameServer
         {
             var pool = session.ShieldRemainingAt(serverTick);
             var message = new ShieldStatusMessage(victim.NetworkId, (ushort)Math.Clamp(pool, 0, ushort.MaxValue), session.ShieldExpiryTick, pool > 0);
-            SendToSelfAndPartner(session, message, DeliveryMethod.ReliableOrdered);
+            BroadcastShieldStatus(session, victim, message);
         }
 
         return absorbed;
@@ -3493,13 +3493,31 @@ public sealed class GameServer
         _detonation.PressDetonate(self, partnerEntity, _serverTick);
     }
 
-    // DUO-WAVE2: send `message` to a session AND its partner (both render shared visuals like the shield bubble).
-    private void SendToSelfAndPartner(ClientSession session, IProtocolMessage message, DeliveryMethod delivery)
+    // LIVE FIX (2026-07-05, user repro: "shields on characters seem to not be replicated... when not paired"): the
+    // bubble used to go to self + partner ONLY (SendToSelfAndPartner, now retired) — a world-visible visual scoped
+    // like a pair-private signal, so an UNPAIRED player's shield never reached anyone else's screen (and even a
+    // paired shield was invisible to third parties). The bubble is world state: broadcast it like BroadcastDamageEvent
+    // — the owner always, plus every authenticated session that knows the entity and has it in interest. Reliable-
+    // ordered (shield edges are discrete state, not a lossy stream). Known shared limitation with damage events: a
+    // viewer entering AOI AFTER the arm misses the event (worst case a bubble absent for its <=4s life) — acceptable
+    // for the experiment; the fix if it matters is shield-in-snapshot, not a bigger event fanout.
+    private void BroadcastShieldStatus(ClientSession owner, WorldEntity entity, ShieldStatusMessage message)
     {
-        TrySend(session.Peer, message, delivery);
-        if (session.PartnerSession is { IsAuthenticated: true } partner)
+        TrySend(owner.Peer, message, DeliveryMethod.ReliableOrdered);
+        foreach (var session in _sessions.Values)
         {
-            TrySend(partner.Peer, message, delivery);
+            if (ReferenceEquals(session, owner)
+                || !session.IsAuthenticated
+                || !session.KnowsEntity(entity.NetworkId)
+                || !TryGetSessionEntity(session, out var viewerEntity))
+            {
+                continue;
+            }
+
+            if (IsEntityInInterest(viewerEntity, entity, session, _tuning.InterestRadius))
+            {
+                TrySend(session.Peer, message, DeliveryMethod.ReliableOrdered);
+            }
         }
     }
 
