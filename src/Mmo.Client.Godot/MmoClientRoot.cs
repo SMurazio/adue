@@ -966,15 +966,45 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				continue;
 			}
 
+			// BOSS legibility (2026-07-05 feel-test): the server EXCLUDES the attacker from its own DamageEventMessage
+			// broadcast for a melee hit (BroadcastDamageEvent's excludeSession — see GameServer.cs), so for the
+			// attacker's OWN swing this predicted pop is the ONLY feedback that ever arrives, in EITHER protected phase
+			// (P1 plating still reduces to a real server chip number, but that number never reaches the attacker; P3
+			// ward sends no DamageEvent to anyone at all). This predictor has no way to know the server's true reduced
+			// P1 amount without a protocol change (out of scope here), so a protected victim always shows "IMMUNE"
+			// rather than guess a number that might be wrong — the honest signal is "your swing didn't land," not a
+			// possibly-fabricated chip number. A non-protected victim is unaffected (full predicted amount, as before).
+			var deflect = _client.IsBossProtected(state.NetworkId);
+			// BOSS legibility: which protected phase this is, so the predicted deflect says the honest word — P3 ward
+			// (<= the split) shows "IMMUNE" (truly 0), P1 plating shows "TURNED" (chip still lands; a false "IMMUNE"
+			// would contradict the boss's dropping health bar). Same 0.5 split the teach label uses (the two protected
+			// windows are >70% and <=40%, so they never overlap around it).
+			var warded = state.HealthFraction <= 0.5f;
+
 			// Pop the number at the victim's live visual (same path/position as the server-driven number). Fall back
 			// to the render-state XZ if no visual is bound this frame, so the prediction still shows.
 			if (_renderer.TryGetActiveVisual(state.NetworkId, out var visual))
 			{
-				_floatingText.Spawn(visual.Position, tuning.Damage);
+				if (deflect)
+				{
+					_floatingText.SpawnDeflected(visual.Position, 0, warded);
+				}
+				else
+				{
+					_floatingText.Spawn(visual.Position, tuning.Damage);
+				}
 			}
 			else
 			{
-				_floatingText.Spawn(new Vector3((float)state.Position.X, 0f, (float)state.Position.Y), tuning.Damage);
+				var fallbackPosition = new Vector3((float)state.Position.X, 0f, (float)state.Position.Y);
+				if (deflect)
+				{
+					_floatingText.SpawnDeflected(fallbackPosition, 0, warded);
+				}
+				else
+				{
+					_floatingText.Spawn(fallbackPosition, tuning.Damage);
+				}
 			}
 		}
 	}
@@ -2393,7 +2423,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			{
 				if (_renderer.TryGetActiveVisual(damage.NetworkId, out var visual))
 				{
-					_floatingText.Spawn(visual.Position, damage.Amount);
+					// BOSS legibility (2026-07-05 feel-test): a hit that reaches a currently-PROTECTED boss (P1 plating
+					// / P3 ward) must read as "bounced off," never "chip damage" — route it to the deflected render
+					// instead of a normal red number. Every non-boss victim (and a non-protected boss) is untouched.
+					if (_client.IsBossProtected(damage.NetworkId))
+					{
+						_floatingText.SpawnDeflected(visual.Position, damage.Amount);
+					}
+					else
+					{
+						_floatingText.Spawn(visual.Position, damage.Amount);
+					}
 				}
 			}
 		}

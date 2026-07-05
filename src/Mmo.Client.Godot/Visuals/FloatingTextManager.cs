@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using Godot;
 
 namespace Mmo.Client.Godot.Visuals;
@@ -25,6 +26,13 @@ public sealed class FloatingTextManager
     // Hard cap on simultaneously-active numbers. Plenty for normal play; bounds memory under a hostile/burst flood.
     private const int MaxActive = 64;
 
+    // BOSS legibility (2026-07-05 feel-test): the "deflected" colour family — the SAME desaturated steel-grey as
+    // BoxVisual.PlatingSteelTint (lightened slightly for text contrast), so a bounced-off number visually matches the
+    // boss's own plating tint instead of reading as a normal (red) hit.
+    private static readonly Color DeflectedColor = new(0.72f, 0.75f, 0.80f, 1f);
+    private const string ImmuneText = "IMMUNE"; // P3 ward — genuinely 0 damage.
+    private const string TurnedText = "TURNED"; // P1 plating — reduced (chip still lands), never a false "IMMUNE".
+
     private readonly Node3D _parent;
     private readonly List<Active> _active = new();
     private readonly Stack<Label3D> _pool = new();
@@ -47,6 +55,32 @@ public sealed class FloatingTextManager
     // number if the cap is reached so the buffer never grows unbounded.
     public void Spawn(Vector3 worldPosition, int amount)
     {
+        var label = SpawnCore(worldPosition);
+        label.Text = "-" + amount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        label.Modulate = new Color(1f, 0.25f, 0.2f, 1f); // red, fully opaque to start.
+    }
+
+    // BOSS legibility (2026-07-05 feel-test): spawn a "deflected" indicator — the hit bounced off a PROTECTED boss
+    // (P1 plating or P3 ward) instead of landing normally. `amount > 0` (a P1 chip hit did get a reduced number from
+    // the server) renders the number struck-through in steel-grey so it still reads as a real-but-blunted hit;
+    // `amount == 0` (no true amount to show — the LOCAL predicted path, since the attacker's own swing is never echoed
+    // back with a server number) renders a WORD keyed to the phase: `warded` → "IMMUNE" (P3 ward, genuinely 0 damage),
+    // else "TURNED" (P1 plating — the boss IS still taking chip, so a false "IMMUNE" would contradict its dropping
+    // health bar; "TURNED" matches the "plating turns your blows" fiction and reads as reduced, not nullified). Same
+    // pooled/rise/fade lifecycle as a normal number — only the text + colour differ.
+    public void SpawnDeflected(Vector3 worldPosition, int amount, bool warded = false)
+    {
+        var label = SpawnCore(worldPosition);
+        label.Text = amount > 0
+            ? Strikethrough("-" + amount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            : (warded ? ImmuneText : TurnedText);
+        label.Modulate = DeflectedColor;
+    }
+
+    // Shared spawn plumbing: recycle-if-at-cap, rent a pooled label, reset its outline alpha, anchor + show it, and
+    // register it as active. Callers set Text/Modulate for their own look immediately after.
+    private Label3D SpawnCore(Vector3 worldPosition)
+    {
         if (_active.Count >= MaxActive)
         {
             // Recycle the oldest (index 0) rather than allocating beyond the cap.
@@ -56,13 +90,27 @@ public sealed class FloatingTextManager
         }
 
         var label = Rent();
-        label.Text = "-" + amount.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        label.Modulate = new Color(1f, 0.25f, 0.2f, 1f);     // red, fully opaque to start.
-        label.OutlineModulate = new Color(0f, 0f, 0f, 1f);   // reset the outline alpha (a recycled label may have faded).
+        label.OutlineModulate = new Color(0f, 0f, 0f, 1f); // reset the outline alpha (a recycled label may have faded).
         label.Position = worldPosition + new Vector3(0f, BaseHeight, 0f);
         label.Visible = true;
 
         _active.Add(new Active { Label = label, Anchor = worldPosition, Age = 0f });
+        return label;
+    }
+
+    // Fakes a strikethrough by interleaving the Unicode combining long-stroke-overlay (U+0336) after every character
+    // — Label3D has no native strikethrough style, and this reads clearly at the small on-screen size a floating
+    // number renders at.
+    private static string Strikethrough(string text)
+    {
+        var builder = new StringBuilder(text.Length * 2);
+        foreach (var c in text)
+        {
+            builder.Append(c);
+            builder.Append('̶'); // combining long stroke overlay
+        }
+
+        return builder.ToString();
     }
 
     // Advance every active number by `delta` seconds: rise + fade, and recycle any that have outlived LifetimeSeconds.

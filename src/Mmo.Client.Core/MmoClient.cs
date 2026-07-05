@@ -254,6 +254,13 @@ public sealed class MmoClient : IDisposable
     // grey while plated; a false / shatter / crumble message drops the id. Tiny set (one boss); a HashSet is plenty.
     private readonly HashSet<uint> _platedBossIds = new();
 
+    // BOSS legibility (2026-07-05 feel-test): true while `networkId` is a currently-PROTECTED boss (P1 plating OR P3
+    // ward — the wire reuses the same BossPlatingMessage/PlatingActive flag for both, per the boss encounter's own
+    // "ward up = plating-message true" convention). The presentation layer reads this at every damage-number spawn
+    // site (the server-driven drain AND the local melee predict) to route a hit into the "deflected" render instead
+    // of a normal number, so a plated/warded boss always reads as "bounced off."
+    public bool IsBossProtected(uint networkId) => _platedBossIds.Contains(networkId);
+
     // The active tether (null = none). State Broken is a brief "snapped" flag before the following Off clears it.
     public TetherVisual? ActiveTether { get; private set; }
 

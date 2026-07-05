@@ -174,6 +174,11 @@ void fragment() {
             OnPlatingChanged(state.PlatingActive);
         }
 
+        // BOSS legibility (2026-07-05 feel-test): the calm teach label — see UpdateProtectionLabel. Runs every frame
+        // (cheap: a Text/Visible check-then-set) so the HP-fraction phase line can flip once the boss crosses 50%
+        // between two protected windows without waiting for a fresh PlatingActive edge.
+        UpdateProtectionLabel(state);
+
         OnUpdate(state, now);
     }
 
@@ -246,6 +251,88 @@ void fragment() {
 
     // BOSS-2 (P1): the last-applied plating state, so UpdateFrom only rebuilds the material on a real change.
     private bool _platingApplied;
+
+    // ---- BOSS legibility (2026-07-05 feel-test) teach label ------------------------------------------
+
+    // Feel-test findings: "it's not evident that there is something that needs to be destroyed" (P1 plating) and
+    // "p3 is unclear what I had to do to remove the immunity" (P3 ward). The mechanics already work; the ASK just
+    // wasn't drawn in the world. This is a calm (NOT flashing) billboarded label that rides the SAME PlatingActive
+    // edge as the steel tint — shown while a boss is protected, hidden the instant it drops (shatter/burst window).
+    // Parented to the wrapper like the name label / HP bar, so it tracks the boss for free (no per-frame position
+    // code needed — the wrapper's own per-frame Position assignment in UpdateFrom carries every child along).
+    private Label3D? _protectionLabel;
+
+    // Copy matches the voice of the encounter's own AnnounceAll lines (BossEncounterEngine.cs, e.g. "The Sunderer's
+    // plating turns your blows!" / "its core seals!").
+    private const string PlatingTeachText = "PLATED — cross your skillshots to shatter!";
+    private const string WardTeachText = "CORE SEALED — detonate at its heart!";
+
+    // The HP-fraction split between the two lines. Safe without reading server state: P1 plating only exists above
+    // 70% HP and P3 ward only at/below 40% HP (BossEncounterEngine.PlatingHealthFraction / the P3 arm threshold), so
+    // the two protected windows never overlap around this midpoint.
+    private const float ProtectionPhaseSplitFraction = 0.5f;
+
+    // Calm pale cyan-white — legible over any terrain, deliberately NOT the alarming red of a damage number and NOT
+    // flashing/animated (a persistent, readable teaching cue, not an alert).
+    private static readonly Color ProtectionLabelColor = new(0.80f, 0.92f, 0.96f);
+
+    // A touch above the name label so the two never overlap.
+    private float ProtectionLabelHeight => LabelHeight + 0.45f;
+
+    // Called every frame from UpdateFrom. Hides the label the instant PlatingActive drops (or the entity is
+    // released — Release() hides the whole wrapper, which cascades to every child including this one); while active,
+    // picks the phase line from the live HP fraction and only writes Text on a real change.
+    private void UpdateProtectionLabel(EntityRenderState state)
+    {
+        if (!state.PlatingActive)
+        {
+            if (_protectionLabel is { Visible: true })
+            {
+                _protectionLabel.Visible = false;
+            }
+
+            return;
+        }
+
+        EnsureProtectionLabel();
+        if (_protectionLabel is null)
+        {
+            return;
+        }
+
+        var text = state.HealthFraction > ProtectionPhaseSplitFraction ? PlatingTeachText : WardTeachText;
+        if (_protectionLabel.Text != text)
+        {
+            _protectionLabel.Text = text;
+        }
+
+        _protectionLabel.Visible = true;
+    }
+
+    // Lazily builds the teach label (only ever needed for the one boss that carries PlatingActive=true).
+    private void EnsureProtectionLabel()
+    {
+        if (_protectionLabel is not null)
+        {
+            return;
+        }
+
+        _protectionLabel = new Label3D
+        {
+            Name = "ProtectionTeach",
+            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
+            FixedSize = true,
+            PixelSize = Tuning.LabelPixelSize,
+            FontSize = VisualTuning.LabelFontSize,
+            OutlineSize = VisualTuning.LabelOutlineSize,
+            OutlineModulate = VisualTuning.LabelOutlineColor,
+            NoDepthTest = true,
+            Modulate = ProtectionLabelColor,
+            Position = new Vector3(0f, ProtectionLabelHeight, 0f),
+            Visible = false,
+        };
+        AddChild(_protectionLabel);
+    }
 
     // ---- subclass extension points -----------------------------------------------------------------
     protected virtual void OnAcquire(EntityRenderState state) { }
