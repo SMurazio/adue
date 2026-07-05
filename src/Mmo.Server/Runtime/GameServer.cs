@@ -534,12 +534,17 @@ public sealed class GameServer
             SendTetherStatus);
         // DUO-WAVE2 ability 4 (Midpoint Detonation): the charge/blast stepper — same gather + monster-damage + slow
         // seams, plus the echo-cue relay and the live-tracking charge-marker relay.
+        // BOSS-4 (P3 Ward break): report every resolved blast's centre to the Sunderer encounter — a detonation within
+        // the ward-break radius of the boss opens the burst window (the onFusion pattern; a no-op off-encounter, and the
+        // engine filters by phase + distance). Reads _bossEncounter at CALL time (constructed just below), the same
+        // late-bound pattern the SkillshotEngine onFusion/onMonsterHit wiring above uses.
         _detonation = new MidpointDetonationEngine(
             _zone.World.GatherInterestCandidates,
             ApplyDuoMonsterDamage,
             SlowMonster,
             SendEchoCueTo,
-            SendMidpointCharge);
+            SendMidpointCharge,
+            onBlast: (center, tick) => _bossEncounter.OnMidpointBlast(center, tick));
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
         // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
         // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop
@@ -689,7 +694,20 @@ public sealed class GameServer
             // BOSS-3 (P2 Repel/Bind): schedule the field's VISUAL as a NO-DAMAGE telegraph ring (damage 0) — reuse the
             // decal wire; the field RESOLVE is encounter-side on pair distance, so the ring carries zero gameplay weight.
             scheduleFieldVisual: (center, radius, startTick, resolveTick) =>
-                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Circle(center, radius), startTick, resolveTick, damage: 0, source: "Sunder field"));
+                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Circle(center, radius), startTick, resolveTick, damage: 0, source: "Sunder field"),
+            // BOSS-4 (P3 root): re-centre the boss ONCE at the 40% edge — Zone.Teleport (bumps StateRevision → the snap
+            // rides the snapshot), cancel any in-flight action (a lunge dash mid-cast), and zero its velocity so the
+            // glider stops extrapolating. The ONGOING chase suppression is the IsBossRooted gate in StepMonsterAi.
+            rootBoss: (boss, tile) =>
+            {
+                _zone.Teleport(boss, tile);
+                _actionExecutor.ClearEntity(boss.Id);
+                boss.StopMovement();
+            },
+            // BOSS-4 (P3 rotating sweep beam): schedule a LINE telegraph from the boss through the scheduler's NORMAL gate
+            // path (real damage, dodgeable at resolve) — the SAME player-damage choke point the field/monster melee use.
+            scheduleBeam: (origin, length, aim, halfWidth, damage, startTick, resolveTick) =>
+                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Line(origin, length, aim, halfWidth), startTick, resolveTick, damage, source: "Sunder beam"));
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         SpawnAuthoredProps();
@@ -5392,6 +5410,16 @@ public sealed class GameServer
             if (!_monsterTypeOf.TryGetValue(entity.Id, out var type))
             {
                 type = _monsterTypes.Default;
+            }
+
+            // BOSS-4 (P3 root): the rooted Sunderer HOLDS at the arena centre — skip its chase brain entirely and zero
+            // its velocity so the glider never walks/extrapolates. The encounter teleported it to centre at the P3 edge
+            // and owns its position; the beam/knockback are the P3 kit (its melee is dormant while rooted). Inert for
+            // every non-boss monster and for the boss before P3.
+            if (_bossEncounter.IsBossRooted(entity.Id))
+            {
+                ResolveLocomotion(type).Stop(entity);
+                continue;
             }
 
             // SLIME-FEEL-POLISH: the monster's HOP CADENCE (time between hop STARTS) is HopAirborneTicks + HopDelayTicks,

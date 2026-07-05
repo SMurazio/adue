@@ -105,6 +105,19 @@ public sealed class BossEncounterEngine
     // pair "a field is charging on you." `center`/`radiusUnits` size one ring; the engine calls it once per participant.
     public delegate void ScheduleFieldVisualDelegate(WorldVector center, double radiusUnits, uint startTick, uint resolveTick);
 
+    // BOSS-4 (P3 CORE, docs/boss-encounter-sunderer-design.md "P3 — CORE"): ROOT the boss at the arena centre at the
+    // 40% edge — teleport it to `tile` ONCE, cancel any in-flight action (a lunge dash mid-cast), and zero its velocity.
+    // The ONGOING chase suppression is GameServer's IsBossRooted gate in StepMonsterAi (it skips the boss's brain +
+    // re-zeroes velocity each tick), so this delegate is the one-shot re-centre; the engine owns WHEN (the P3 arm edge).
+    public delegate void RootBossDelegate(WorldEntity boss, TileCoord tile);
+
+    // BOSS-4 (P3 rotating sweep beam): schedule a LINE telegraph from the boss through the scheduler's NORMAL gate path
+    // (real damage, dodgeable at the resolve tick — NOT the damage-0 field visual). GameServer wires
+    // TelegraphScheduler.Schedule(bossId, TelegraphShape.Line(origin, length, aim, halfWidth), start, resolve, damage,
+    // "Sunder beam"), so the beam rides the SAME player-damage choke point (i-frames + shield absorb apply for free).
+    public delegate void ScheduleBeamDelegate(
+        WorldVector origin, double lengthUnits, double aimRadians, double halfWidthUnits, int damage, uint startTick, uint resolveTick);
+
     // HP scaled at spawn by participant count (design "Boss stats"): 1200 duo / 700 solo.
     public const int DuoBossHealth = 1200;
     public const int SoloBossHealth = 700;
@@ -189,6 +202,60 @@ public sealed class BossEncounterEngine
     // 20s=400), so those residues never shift — the three resolve streams occupy DISJOINT residue classes {4},{0},{5}
     // mod 10 for ANY anchor, i.e. no two ever resolve on the same tick. (StaggerConstants_… pins this empirically.)
 
+    // ==== BOSS-4 (P3 CORE, docs/boss-encounter-sunderer-design.md "P3 — CORE") ====
+    // P3 is live while the encounter is Active AND the boss's HP has crossed <=40% (the P3HealthFraction edge P2 disarms
+    // at). At that edge the boss ROOTS at centre and gains the CORE WARD: ALL damage to it is reduced to ZERO
+    // (ModifyIncomingDamage returns 0) UNLESS a burst window is open. A midpoint DETONATION whose blast centre lands
+    // within WardBreakRadius of the boss BREAKS the ward → an 8 s burst window (full damage) → then it REFORMS. Fusion
+    // does NOT break the ward (verbs stay distinct — that is the P1 gate). The phase's contest is the ROTATING SWEEP
+    // BEAM (sequential line telegraphs) + KNOCKBACK PULSES (radial shoves that move the pair's midpoint while they aim
+    // the detonation — the S3 contest).
+
+    // CORE WARD break (design "Ward break"): a midpoint blast centre within this radius of the boss breaks the ward.
+    // Duo 2.5u; solo 3.5u (receiver-forgives generosity, Law 3). The mode is fixed at spawn (_participantsAtSpawn).
+    public const double WardBreakRadiusDuoUnits = 2.5d;
+    public const double WardBreakRadiusSoloUnits = 3.5d;
+    private const double BurstWindowSeconds = 8d;
+
+    // ROTATING SWEEP BEAM (line telegraphs — the honest-telegraph form of a rotating beam). The first beam BeamFirstDelay
+    // after the root, then every BeamInterval, a line from the boss (length BeamLengthUnits reaches the walls from centre,
+    // half-width BeamHalfWidthUnits, BeamWindup windup, BeamDamage through the scheduler's gate) at a bearing that ADVANCES
+    // BeamBearingAdvance per beam in a CONSISTENT rotation direction (players learn to walk WITH it). Staggered off the
+    // knockback by construction — see the residue note below.
+    private const double BeamFirstDelaySeconds = 4d;
+    private const double BeamIntervalSeconds = 3d;
+    private const double BeamWindupSeconds = 1.2d;
+    private const double BeamLengthUnits = 11d;
+    private const double BeamHalfWidthUnits = 1d;
+    private const int BeamDamage = 25;
+    private const double BeamBearingAdvanceRadians = 40d * Math.PI / 180d; // ~40° per beam.
+
+    // KNOCKBACK PULSES (S3 midpoint contest). The first pulse cue PulseFirstDelay after the root, then every
+    // PulseInterval: an announce + a PulseCueLead brace window, then every LIVING participant is shoved PulseShoveUnits
+    // radially AWAY from the boss (wall-swept via DisplaceResolved, NO damage). The interval is FIXED (the soft enrage
+    // scales the beam, not the shove — design), so the shove residue never shifts.
+    private const double PulseFirstDelaySeconds = 6d;
+    private const double PulseIntervalSeconds = 10d;
+    private const double PulseCueLeadSeconds = 1d;
+    private const double PulseShoveUnits = 3d;
+
+    // SOFT ENRAGE (design "below 10%"): once the boss's HP crosses <=10%, the BEAM cadence speeds up by ~30%
+    // (EnrageCadenceScale = 1/1.3 on the interval) and a SPLINTER TRICKLE (one splinter every EnrageTrickleInterval,
+    // reusing the P2 add machinery + pop) begins, with one announce. DEVIATION (documented in the review request): the
+    // design lists "cleave cadence +30%" too, but the rooted boss's melee kit is dormant (its chase is suppressed), so
+    // the enrage scales the BEAM only — the task's explicit fallback ("enrage the BEAM only and note it").
+    private const double EnrageHealthFraction = 0.10d;
+    private const double EnrageCadenceScale = 1d / 1.3d;
+    private const double EnrageTrickleIntervalSeconds = 10d;
+
+    // STAGGER-BY-CONSTRUCTION (task contract, the BOSS-3 residue pattern). @20 Hz relative to the P3 arm anchor T0: the
+    // first beam CASTS at T0+80 and RESOLVES at T0+104, then every 60t → resolves ≡ 4 mod 10 for ANY anchor (60 is a
+    // whole multiple of 10, so the residue never shifts). The first pulse SHOVES at T0+140 (cue T0+120 + 20t lead),
+    // then every 200t → shoves ≡ 0 mod 10. {4} and {0} are DISJOINT, so a beam resolve and a shove never share a tick.
+    // (Pinned by BeamAndPulse_StaggerByConstruction_NeverShareATick.) NB: the soft enrage re-paces the beam to a
+    // non-multiple-of-10 interval, so the residue may drift under enrage — HARMLESS (the shove deals no damage, so a
+    // beam+shove coincidence is at worst one tick where a player is both moved and beam-tested, never double damage).
+
     // The chat countdown before the boss spawns, and the grace window after the arena empties before it resets.
     private const double CountdownSeconds = 3d;
     private const double EmptyResetSeconds = 10d;
@@ -213,6 +280,8 @@ public sealed class BossEncounterEngine
     private readonly EchoCueDelegate _echoCue;
     private readonly SpawnSplinterDelegate _spawnSplinter;
     private readonly ScheduleFieldVisualDelegate _scheduleFieldVisual;
+    private readonly RootBossDelegate _rootBoss;
+    private readonly ScheduleBeamDelegate _scheduleBeam;
 
     private readonly uint _countdownTicks;
     private readonly uint _emptyResetTicks;
@@ -231,6 +300,15 @@ public sealed class BossEncounterEngine
     private readonly uint _lashPulseSpacingTicks;
     private readonly uint _ringFirstDelayTicks;
     private readonly uint _ringIntervalTicks;
+    private readonly uint _burstWindowTicks;
+    private readonly uint _beamFirstDelayTicks;
+    private readonly uint _beamIntervalTicks;
+    private readonly uint _enragedBeamIntervalTicks;
+    private readonly uint _beamWindupTicks;
+    private readonly uint _pulseFirstDelayTicks;
+    private readonly uint _pulseIntervalTicks;
+    private readonly uint _pulseCueLeadTicks;
+    private readonly uint _enrageTrickleIntervalTicks;
 
     // A participant: the entity + the tile it should be teleported back to on leave. Value struct, held in a list
     // (never more than 2 — issuer + partner — so a list is cheaper than a dictionary).
@@ -291,6 +369,25 @@ public sealed class BossEncounterEngine
     private uint _nextRingTick;
     private readonly List<ulong> _adds = [];
 
+    // BOSS-4 (P3 CORE) state. `_p3Active` latches ON at the 40% edge (armed by ArmP3, cleared on every end path +
+    // re-init at spawn) — it drives the ward gate (ModifyIncomingDamage), the P3 pump, and IsBossRooted.
+    // `_burstWindowOpen`/`_burstWindowEndTick` are the live ward-break window (full damage). `_beamBearing` is the
+    // rotating sweep beam's current heading (advances a fixed step per beam); `_nextBeamCastTick` schedules the next
+    // beam CAST. `_nextPulseCueTick` schedules the next knockback cue; `_pulsePending`/`_pulseShoveTick` carry the armed
+    // shove to its resolve. `_enraged` latches once HP crosses <=10% (speeds the beam + starts the splinter trickle);
+    // `_nextTrickleTick`/`_trickleAngle` drive the trickle spawn cadence + its spread.
+    private bool _p3Active;
+    private bool _burstWindowOpen;
+    private uint _burstWindowEndTick;
+    private double _beamBearing;
+    private uint _nextBeamCastTick;
+    private uint _nextPulseCueTick;
+    private bool _pulsePending;
+    private uint _pulseShoveTick;
+    private bool _enraged;
+    private uint _nextTrickleTick;
+    private double _trickleAngle;
+
     public BossEncounterEngine(
         int tickRate,
         SpawnBossDelegate spawnBoss,
@@ -305,7 +402,9 @@ public sealed class BossEncounterEngine
         DisplacePlayerDelegate displacePlayer,
         EchoCueDelegate echoCue,
         SpawnSplinterDelegate spawnSplinter,
-        ScheduleFieldVisualDelegate scheduleFieldVisual)
+        ScheduleFieldVisualDelegate scheduleFieldVisual,
+        RootBossDelegate rootBoss,
+        ScheduleBeamDelegate scheduleBeam)
     {
         _tickRate = tickRate;
         _spawnBoss = spawnBoss ?? throw new ArgumentNullException(nameof(spawnBoss));
@@ -321,6 +420,8 @@ public sealed class BossEncounterEngine
         _echoCue = echoCue ?? throw new ArgumentNullException(nameof(echoCue));
         _spawnSplinter = spawnSplinter ?? throw new ArgumentNullException(nameof(spawnSplinter));
         _scheduleFieldVisual = scheduleFieldVisual ?? throw new ArgumentNullException(nameof(scheduleFieldVisual));
+        _rootBoss = rootBoss ?? throw new ArgumentNullException(nameof(rootBoss));
+        _scheduleBeam = scheduleBeam ?? throw new ArgumentNullException(nameof(scheduleBeam));
         _countdownTicks = SecondsToTicks(CountdownSeconds);
         _emptyResetTicks = SecondsToTicks(EmptyResetSeconds);
         _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
@@ -338,6 +439,15 @@ public sealed class BossEncounterEngine
         _lashPulseSpacingTicks = SecondsToTicks(LashPulseSpacingSeconds);
         _ringFirstDelayTicks = SecondsToTicks(RingFirstDelaySeconds);
         _ringIntervalTicks = SecondsToTicks(RingIntervalSeconds);
+        _burstWindowTicks = SecondsToTicks(BurstWindowSeconds);
+        _beamFirstDelayTicks = SecondsToTicks(BeamFirstDelaySeconds);
+        _beamIntervalTicks = SecondsToTicks(BeamIntervalSeconds);
+        _enragedBeamIntervalTicks = SecondsToTicks(BeamIntervalSeconds * EnrageCadenceScale);
+        _beamWindupTicks = SecondsToTicks(BeamWindupSeconds);
+        _pulseFirstDelayTicks = SecondsToTicks(PulseFirstDelaySeconds);
+        _pulseIntervalTicks = SecondsToTicks(PulseIntervalSeconds);
+        _pulseCueLeadTicks = SecondsToTicks(PulseCueLeadSeconds);
+        _enrageTrickleIntervalTicks = SecondsToTicks(EnrageTrickleIntervalSeconds);
     }
 
     // Test/diagnostic visibility (like BasicRoamerBehavior's TryGetPhase) — never drives replication.
@@ -361,6 +471,14 @@ public sealed class BossEncounterEngine
     public bool P2Active => _p2Active;
     public bool P3Reached => _p3Reached;
     public int AddCount => _adds.Count;
+
+    // BOSS-4 (P3) test/diagnostic visibility. P3Active = the CORE phase is live (armed at the 40% edge). WardUp = the
+    // Core Ward is currently sealing (P3 live, no burst window) — the tick the ward zeroes all boss damage. BurstWindow-
+    // Open = a ward-break window is live (full damage). Enraged = HP crossed <=10% (beam sped up + splinter trickle).
+    public bool P3Active => _p3Active;
+    public bool WardUp => _p3Active && !_burstWindowOpen;
+    public bool BurstWindowOpen => _burstWindowOpen;
+    public bool Enraged => _enraged;
 
     // Seconds → ticks, the canonical windup quantization (Math.Ceiling, floored at 1) GameServer uses everywhere.
     private uint SecondsToTicks(double seconds) => (uint)Math.Max(1, (int)Math.Ceiling(seconds * _tickRate));
@@ -530,6 +648,14 @@ public sealed class BossEncounterEngine
         _lashPulsesRemaining = 0;
         _adds.Clear();
 
+        // BOSS-4 (P3): fresh P3 state — the CORE phase arms only at the 40% edge, so it is latched OFF here.
+        _p3Active = false;
+        _burstWindowOpen = false;
+        _pulsePending = false;
+        _enraged = false;
+        _beamBearing = 0d;
+        _trickleAngle = 0d;
+
         _broadcastPlating(_bossId, true);
         AnnounceAll("THE SUNDERER awakens. Break its bond-hunger together!");
     }
@@ -668,6 +794,15 @@ public sealed class BossEncounterEngine
             return rawAmount;
         }
 
+        // BOSS-4 (P3 CORE WARD): below 40% the boss is rooted + sealed — ALL damage is reduced to ZERO unless a burst
+        // window (a midpoint detonation broke the ward) is open, in which case it passes at FULL (no P1 reduction below
+        // 40%). This gate takes precedence over the P1 plating branches (which are moot here — the plating crumbled at
+        // 70%). The one-knob law: fusion does NOT reach here to break the ward; only OnMidpointBlast opens the window.
+        if (_p3Active)
+        {
+            return _burstWindowOpen ? rawAmount : 0;
+        }
+
         if (_platingPermanentlyOff || _windowOpen)
         {
             return rawAmount; // shattered or permanently crumbled → full damage.
@@ -786,8 +921,18 @@ public sealed class BossEncounterEngine
 
         if (_platingPermanentlyOff)
         {
-            // BOSS-3: below 70% the P1 plating + drone are done; pump the P2 SUNDER mechanics instead (until 40% → P3).
-            StepP2(serverTick, boss);
+            // BOSS-3/BOSS-4: below 70% the P1 plating + drone are done. Pump the P2 SUNDER mechanics until the 40% edge,
+            // then (armed at that edge) the P3 CORE mechanics — the two never run on the same tick (the edge disarms P2
+            // and arms P3 in one call; _p3Active flips the pump the following tick).
+            if (_p3Active)
+            {
+                StepP3(serverTick, boss);
+            }
+            else
+            {
+                StepP2(serverTick, boss);
+            }
+
             return;
         }
 
@@ -888,6 +1033,14 @@ public sealed class BossEncounterEngine
         _p2Active = false;
         _fieldPending = false;
         _lashPulsesRemaining = 0;
+        // BOSS-4 (P3): clear the CORE phase so no beam/pulse/ward activity lands after the fight ended (victory / wipe /
+        // empty / countdown-cancel). The scheduled beam telegraphs already in flight are the TelegraphScheduler's to
+        // resolve — but with the boss gone they gather no boss and hit only whoever is still standing where they land;
+        // the encounter stops SCHEDULING new ones here. The on/off latches re-init fresh in SpawnBossNow.
+        _p3Active = false;
+        _burstWindowOpen = false;
+        _pulsePending = false;
+        _enraged = false;
     }
 
     // BOSS-3: despawn EVERY live encounter add (the drone + all splinters) leak-free (idempotent), clear the ledger,
@@ -933,7 +1086,7 @@ public sealed class BossEncounterEngine
         if (_p2Active && boss.Stats.MaxHealth > 0
             && boss.Stats.Health <= (int)Math.Round(boss.Stats.MaxHealth * P3HealthFraction, MidpointRounding.AwayFromZero))
         {
-            DisarmP2();
+            DisarmP2(serverTick, boss);
             return;
         }
 
@@ -948,10 +1101,10 @@ public sealed class BossEncounterEngine
         StepSplinterPops(serverTick);
     }
 
-    // The 40% disarm: stop the P2 mechanics for good, clear every splinter (the ring dies at 40% too), cancel any
-    // pending field/lash so nothing lands after, and chat the P3 teaser. Does NOT reset the encounter — the boss keeps
-    // fighting its baseline kit until BOSS-4's P3 (or death).
-    private void DisarmP2()
+    // The 40% edge (the P2→P3 transition): stop the P2 mechanics for good, clear every splinter (the ring dies at 40%
+    // too), cancel any pending field/lash so nothing lands after, chat the transition, then ARM P3 (root + ward + the
+    // beam/pulse cadences anchored at this tick). Does NOT reset the encounter — the boss lives on into the Core phase.
+    private void DisarmP2(uint serverTick, WorldEntity boss)
     {
         _p2Active = false;
         _p3Reached = true;
@@ -959,6 +1112,164 @@ public sealed class BossEncounterEngine
         _lashPulsesRemaining = 0;
         DespawnAllAdds(); // splinters die at 40% (the drone is already long gone from the crumble).
         AnnounceAll("The Sunderer draws its shattered mass inward...");
+        ArmP3(serverTick, boss);
+    }
+
+    // ==== BOSS-4 (P3 CORE): root + Core Ward + rotating sweep beam + knockback pulses + soft enrage ====
+
+    // Arm the P3 mechanics at the 40% edge (anchor T0). ROOT the boss at centre (teleport once + cancel any in-flight
+    // action + zero velocity — the ongoing chase suppression is GameServer's IsBossRooted gate), raise the CORE WARD
+    // (legibility rides BossPlatingMessage per the orchestrator ruling: ward up = plating-message TRUE = steel tint),
+    // and schedule the first beam / pulse off THIS anchor (the staggered-by-construction first-fire delays).
+    private void ArmP3(uint serverTick, WorldEntity boss)
+    {
+        _p3Active = true;
+        _burstWindowOpen = false;
+        _pulsePending = false;
+        _enraged = false;
+        _beamBearing = 0d;
+        _trickleAngle = 0d;
+        _nextBeamCastTick = serverTick + _beamFirstDelayTicks;
+        _nextPulseCueTick = serverTick + _pulseFirstDelayTicks;
+        _rootBoss(boss, BossArena.BossSpawnTile);
+        _broadcastPlating(_bossId, true); // ward SEALS → steel tint (ward up = plating-message true).
+        AnnounceAll("The Sunderer roots — its core seals!");
+    }
+
+    // The per-tick P3 pump (called from StepPlatingAndAdds once P3 is armed). Order: ward-window expiry → enrage edge →
+    // beam → knockback pulse → splinter trickle + pops. The beam RESOLVE and the pulse SHOVE occupy disjoint tick
+    // residues by construction (see the stagger note), so no two ever land on the same tick at the base cadence.
+    private void StepP3(uint serverTick, WorldEntity boss)
+    {
+        // (1) Burst-window expiry → the ward REFORMS (broadcast steel tint back on + chat). The victory branch fires
+        // FIRST in StepActive, so a boss killed during the window never reaches here.
+        if (_burstWindowOpen && serverTick >= _burstWindowEndTick)
+        {
+            _burstWindowOpen = false;
+            _broadcastPlating(_bossId, true);
+            AnnounceAll("The core reseals — break it open again!");
+        }
+
+        // (2) SOFT ENRAGE edge: the first tick HP is at/below 10%, speed the beam + start the splinter trickle + chat.
+        if (!_enraged && boss.Stats.MaxHealth > 0
+            && boss.Stats.Health <= (int)Math.Round(boss.Stats.MaxHealth * EnrageHealthFraction, MidpointRounding.AwayFromZero))
+        {
+            _enraged = true;
+            _nextTrickleTick = serverTick + _enrageTrickleIntervalTicks;
+            AnnounceAll("The Sunderer rages!");
+        }
+
+        StepBeam(serverTick, boss);
+        StepKnockbackPulse(serverTick, boss);
+        if (_enraged)
+        {
+            StepSplinterTrickle(serverTick, boss);
+        }
+
+        // Trickle splinters POP like the P2 ring (within 1u of their nearest participant → damage + despawn); the drone
+        // id is 0 in P3 so StepSplinterPops treats every ledger entry as a splinter. A no-op when the ledger is empty.
+        StepSplinterPops(serverTick);
+    }
+
+    // ROTATING SWEEP BEAM: on cadence, schedule a LINE telegraph from the boss's CURRENT position at the current bearing
+    // (real damage through the scheduler's gate), then advance the bearing a fixed step (consistent rotation) and arm
+    // the next cast — the interval speeds up under enrage. The line resolves BeamWindup later at positions AT that tick
+    // (dodgeable — walk with the rotation).
+    private void StepBeam(uint serverTick, WorldEntity boss)
+    {
+        if (serverTick < _nextBeamCastTick)
+        {
+            return;
+        }
+
+        _scheduleBeam(boss.Position, BeamLengthUnits, _beamBearing, BeamHalfWidthUnits, BeamDamage, serverTick, serverTick + _beamWindupTicks);
+        _beamBearing = WrapTwoPi(_beamBearing + BeamBearingAdvanceRadians);
+        _nextBeamCastTick = serverTick + (_enraged ? _enragedBeamIntervalTicks : _beamIntervalTicks);
+    }
+
+    // KNOCKBACK PULSES: on cadence, announce the brace cue + arm the shove; PulseCueLead later, shove EVERY living
+    // participant PulseShoveUnits radially away from the boss (wall-swept, no damage — the S3 midpoint contest). The
+    // interval is FIXED (the enrage scales the beam, not the shove), so the shove residue never shifts.
+    private void StepKnockbackPulse(uint serverTick, WorldEntity boss)
+    {
+        if (!_pulsePending && serverTick >= _nextPulseCueTick)
+        {
+            AnnounceAll("The Sunderer heaves — brace, the floor throws you outward!");
+            _pulsePending = true;
+            _pulseShoveTick = serverTick + _pulseCueLeadTicks;
+            _nextPulseCueTick = serverTick + _pulseIntervalTicks;
+        }
+
+        if (_pulsePending && serverTick >= _pulseShoveTick)
+        {
+            foreach (var e in GetLivingParticipants())
+            {
+                var away = DirectionApart(e.Position, boss.Position);
+                _displacePlayer(e, e.Position + away * PulseShoveUnits);
+            }
+
+            _pulsePending = false;
+        }
+    }
+
+    // SOFT-ENRAGE splinter trickle: one splinter every EnrageTrickleInterval, spawned on the P2 ring radius at a rotating
+    // angle (spread), tracked in the shared add ledger + creeping toward the nearest participant (SplinterBehavior) and
+    // popping via StepSplinterPops — the "straggler splinters that trickle in below 10%" the tether clears.
+    private void StepSplinterTrickle(uint serverTick, WorldEntity boss)
+    {
+        if (serverTick < _nextTrickleTick)
+        {
+            return;
+        }
+
+        var point = boss.Position + new WorldVector(Math.Cos(_trickleAngle), Math.Sin(_trickleAngle)) * SplinterRingRadiusUnits;
+        var splinter = _spawnSplinter(ClampToArenaInterior(point));
+        _adds.Add(splinter.Id);
+        _trickleAngle = WrapTwoPi(_trickleAngle + BeamBearingAdvanceRadians); // reuse the 40° step for an even spread.
+        _nextTrickleTick = serverTick + _enrageTrickleIntervalTicks;
+    }
+
+    // BOSS-4 (P3 Ward break): MidpointDetonationEngine reports EVERY resolved blast here (center + tick). A blast whose
+    // center lands within WardBreakRadius of the boss BREAKS the ward → an 8 s burst window (full damage). IGNORED
+    // unless P3 is live (a blast during P1/P2/idle is a no-op — the fusion-ignored precedent) or while a window is
+    // already open (no re-open/extend — one detonation, one window). The radius is the fixed duo/solo mode.
+    public void OnMidpointBlast(WorldVector center, uint serverTick)
+    {
+        if (_state != EncounterState.Active || !_bossSpawned || !_p3Active || _burstWindowOpen)
+        {
+            return;
+        }
+
+        if (_tryResolve(_bossId) is not { } boss)
+        {
+            return;
+        }
+
+        var radius = _participantsAtSpawn >= 2 ? WardBreakRadiusDuoUnits : WardBreakRadiusSoloUnits;
+        if ((center - boss.Position).Length > radius)
+        {
+            return;
+        }
+
+        _burstWindowOpen = true;
+        _burstWindowEndTick = serverTick + _burstWindowTicks;
+        _broadcastPlating(_bossId, false); // ward BROKEN → tint off (burst = plating-message false).
+        AnnounceAll("The core is EXPOSED — burn it!");
+    }
+
+    // BOSS-4 (P3): whether `monsterId` is THIS run's boss AND it is currently rooted (P3 live). GameServer's StepMonsterAi
+    // queries this to SKIP the boss's chase brain + zero its velocity each tick, so the boss holds at the centre it was
+    // teleported to at the P3 edge (its melee kit is dormant — the beam/pulse are the P3 contest). False otherwise, so a
+    // non-boss monster / a pre-P3 boss steps normally.
+    public bool IsBossRooted(ulong monsterId) =>
+        _p3Active && _bossSpawned && _state == EncounterState.Active && monsterId == _bossId;
+
+    // Reduce an angle to [0, 2π) so the rotating bearing never grows unbounded across a long fight.
+    private static double WrapTwoPi(double radians)
+    {
+        var twoPi = 2d * Math.PI;
+        radians %= twoPi;
+        return radians < 0d ? radians + twoPi : radians;
     }
 
     // Repel/Bind fields: resolve a pending field at its telegraph deadline (distance-judged), then fire the next when

@@ -51,6 +51,14 @@ public sealed class MidpointDetonationEngine
         WorldEntity initiator, WorldEntity partner, ulong chargeId, WorldVector origin, double radiusUnits,
         uint startTick, uint resolveTick, bool active);
 
+    // BOSS-4 (P3 CORE, docs/boss-encounter-sunderer-design.md "Ward break"): report a RESOLVED blast's final CENTER +
+    // tick to an encounter listener — the injected seam the Sunderer's BossEncounterEngine subscribes to so a midpoint
+    // detonation can break the Core Ward (the SkillshotEngine onFusion pattern). OPTIONAL (default no-op): a duo
+    // detonation with no encounter listening simply reports into the void. EVERY resolved blast reports (duo charge
+    // AND the solo self-blast); the listener filters by phase + distance-to-boss (a blast off-encounter or outside P3
+    // is ignored — the fusion-ignored precedent), so this engine stays encounter-agnostic behind the delegate.
+    public delegate void BlastReportDelegate(WorldVector center, uint serverTick);
+
     private enum Phase { Pending, Charging }
 
     private sealed class Detonation
@@ -74,6 +82,7 @@ public sealed class MidpointDetonationEngine
     private readonly SlowMonsterDelegate _slowMonster;
     private readonly EchoCueDelegate _echoCue;
     private readonly ChargeUpdateDelegate _chargeUpdate;
+    private readonly BlastReportDelegate _onBlast;
 
     private readonly List<Detonation> _detonations = [];
     private readonly List<SlowZone> _slowZones = [];
@@ -85,13 +94,16 @@ public sealed class MidpointDetonationEngine
         DamageMonsterDelegate damageMonster,
         SlowMonsterDelegate slowMonster,
         EchoCueDelegate echoCue,
-        ChargeUpdateDelegate chargeUpdate)
+        ChargeUpdateDelegate chargeUpdate,
+        BlastReportDelegate? onBlast = null)
     {
         _gather = gather ?? throw new ArgumentNullException(nameof(gather));
         _damageMonster = damageMonster ?? throw new ArgumentNullException(nameof(damageMonster));
         _slowMonster = slowMonster ?? throw new ArgumentNullException(nameof(slowMonster));
         _echoCue = echoCue ?? throw new ArgumentNullException(nameof(echoCue));
         _chargeUpdate = chargeUpdate ?? throw new ArgumentNullException(nameof(chargeUpdate));
+        // BOSS-4 (P3): optional — a no-op when no encounter is listening (every non-boss detonation).
+        _onBlast = onBlast ?? ((_, _) => { });
     }
 
     public int PendingCount => _detonations.Count;
@@ -218,6 +230,11 @@ public sealed class MidpointDetonationEngine
         }
 
         _slowZones.Add(new SlowZone(center, radiusUnits, serverTick + SlowZoneDurationTicks, attributedTo.Id));
+
+        // BOSS-4 (P3 CORE): report the resolved blast's final CENTER to the encounter listener AFTER the damage loop —
+        // so the ward-break blast's own hit on the boss is still zeroed by the ward (the window this may open takes
+        // effect next tick), keeping the detonation a KEY (opens the burst), not the DPS. A no-op off-encounter.
+        _onBlast(center, serverTick);
     }
 
     // Each lingering slow zone: while alive, slow every attackable monster whose centre is inside it (re-arming the

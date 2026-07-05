@@ -49,6 +49,13 @@ public sealed class BossEncounterEngineTests
         public int SplinterSpawnCount;
         public readonly List<(WorldVector Center, double Radius, uint Start, uint Resolve)> FieldVisuals = [];
 
+        // BOSS-4 (P3): recorders. RootCalls records each root (boss re-centre) at the P3 edge; the root also teleports
+        // the boss so its Position reflects centre for beam-origin / ward-distance math. Beams records each scheduled
+        // sweep-beam LINE telegraph (origin/aim/damage/ticks) — the SEQUENTIAL rotating beam is a recorder here, exactly
+        // as BOSS-3 recorded field visuals (the real TelegraphScheduler gate is pinned by its own suite).
+        public readonly List<(ulong BossId, TileCoord Tile)> RootCalls = [];
+        public readonly List<(WorldVector Origin, double Length, double Aim, double HalfWidth, int Damage, uint Start, uint Resolve)> Beams = [];
+
         private uint _nextNetworkId = 1000;
 
         public Harness()
@@ -119,7 +126,18 @@ public sealed class BossEncounterEngineTests
                     return splinter;
                 },
                 scheduleFieldVisual: (center, radius, start, resolve) =>
-                    FieldVisuals.Add((center, radius, start, resolve)));
+                    FieldVisuals.Add((center, radius, start, resolve)),
+                // BOSS-4 (P3 root): record + perform the re-centre (teleport the boss to `tile` + zero its velocity), so
+                // its Position reflects centre for the beam-origin / ward-distance assertions below.
+                rootBoss: (boss, tile) =>
+                {
+                    RootCalls.Add((boss.Id, tile));
+                    boss.TeleportTo(tile);
+                    boss.StopMovement();
+                },
+                // BOSS-4 (P3 sweep beam): record each scheduled LINE telegraph.
+                scheduleBeam: (origin, length, aim, halfWidth, damage, start, resolve) =>
+                    Beams.Add((origin, length, aim, halfWidth, damage, start, resolve)));
         }
 
         // BOSS-2 (P1): begin a fight and run the 3 s countdown so the boss is spawned + Active. Participants enter at
@@ -155,6 +173,18 @@ public sealed class BossEncounterEngineTests
             boss.ApplyDamage(boss.Stats.Health - target);
             Engine.Step(atTick);
             Assert.True(Engine.P2Active, "test setup: the boss did not enter P2 at the crumble tick.");
+            return atTick;
+        }
+
+        // BOSS-4 (P3): drop the boss through P2 (at atTick-1) then across the 40% edge (at atTick) so P3 ARMS at atTick
+        // (the P3 anchor T0). Leaves the boss at 35% HP (above the 10% enrage edge). Returns T0.
+        public uint CrumbleIntoP3(uint atTick)
+        {
+            CrumbleIntoP2(atTick - 1, fraction: 0.65d);
+            var boss = Boss!;
+            boss.ApplyDamage(boss.Stats.Health - (int)(boss.Stats.MaxHealth * 0.35d)); // to 35%.
+            Engine.Step(atTick);
+            Assert.True(Engine.P3Active, "test setup: the boss did not enter P3 at the edge tick.");
             return atTick;
         }
 
@@ -957,5 +987,315 @@ public sealed class BossEncounterEngineTests
         Assert.Equal(EncounterState.Idle, victory.Engine.State);
         Assert.False(victory.Engine.DroneAlive);
         Assert.Contains(victoryDroneId, victory.AddDespawns);
+    }
+
+    // ==== BOSS-4 (P3 CORE): root + Core Ward + midpoint break + sweep beam + knockback pulses + enrage ====
+
+    [Fact]
+    public void P3_ArmsAtFortyPercent_RootsBoss_AndSealsWard()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var bossId = h.Engine.BossId;
+
+        // Above 40%: P3 never armed (the boss is full HP, only just spawned).
+        Assert.False(h.Engine.P3Active);
+        Assert.False(h.Engine.IsBossRooted(bossId));
+
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+        Assert.True(h.Engine.P3Active);
+        Assert.True(h.Engine.WardUp);
+        // The boss was re-centred (rooted) ONCE at the edge, and IsBossRooted now gates ONLY this boss.
+        Assert.Single(h.RootCalls, r => r.BossId == bossId && r.Tile == BossArena.BossSpawnTile);
+        Assert.True(h.Engine.IsBossRooted(bossId));
+        Assert.False(h.Engine.IsBossRooted(bossId + 999));
+        Assert.Contains(h.Announcements, a => a.Text.Contains("core seals"));
+        // WARD legibility rides BossPlatingMessage: sealing broadcasts plating TRUE (steel tint).
+        Assert.True(h.PlatingBroadcasts[^1].BossId == bossId && h.PlatingBroadcasts[^1].Active);
+    }
+
+    [Fact]
+    public void Ward_ZeroesAllDamage_UnlessABurstWindowIsOpen()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var bossId = h.Engine.BossId;
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // Ward up → ALL damage to the boss is zeroed (the uniform ModifyIncomingDamage hook every source funnels through).
+        Assert.Equal(0, h.Engine.ModifyIncomingDamage(bossId, 100));
+        Assert.Equal(0, h.Engine.ModifyIncomingDamage(bossId, 999));
+        // A non-boss monster is never modified.
+        Assert.Equal(100, h.Engine.ModifyIncomingDamage(bossId + 999, 100));
+
+        // Break the ward with an on-centre blast → full damage during the 8 s window.
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        Assert.True(h.Engine.BurstWindowOpen);
+        Assert.False(h.Engine.WardUp);
+        Assert.Equal(100, h.Engine.ModifyIncomingDamage(bossId, 100));
+
+        // Window = 8 s = 160 ticks: still open at +160 (opened at t0+1 → ends t0+161), reforms exactly at t0+161.
+        h.StepThrough(t0 + 2, t0 + 160);
+        Assert.True(h.Engine.BurstWindowOpen);
+        Assert.Equal(100, h.Engine.ModifyIncomingDamage(bossId, 100));
+        h.Engine.Step(t0 + 161);
+        Assert.False(h.Engine.BurstWindowOpen);
+        Assert.True(h.Engine.WardUp);
+        Assert.Equal(0, h.Engine.ModifyIncomingDamage(bossId, 100)); // ward zeroes again.
+        Assert.Contains(h.Announcements, a => a.Text.Contains("reseals"));
+    }
+
+    [Fact]
+    public void WardBreak_HonoursTheRadiusThreshold_DuoTwoAndAHalf_SoloThreeAndAHalf()
+    {
+        // Duo: 2.5u. Inside breaks; just outside does not.
+        var inside = new Harness();
+        inside.BeginAndSpawnBoss(duo: true);
+        var i0 = inside.CrumbleIntoP3(atTick: 200);
+        inside.Engine.OnMidpointBlast(inside.Boss!.Position + new WorldVector(2.4d, 0d), i0 + 1);
+        Assert.True(inside.Engine.BurstWindowOpen);
+
+        var outside = new Harness();
+        outside.BeginAndSpawnBoss(duo: true);
+        var o0 = outside.CrumbleIntoP3(atTick: 200);
+        outside.Engine.OnMidpointBlast(outside.Boss!.Position + new WorldVector(2.6d, 0d), o0 + 1);
+        Assert.False(outside.Engine.BurstWindowOpen);
+
+        // Solo: the receiver-forgiving 3.5u. A blast at 3.4u breaks it; 3.6u does not.
+        var soloIn = new Harness();
+        soloIn.BeginAndSpawnBoss(duo: false);
+        var s0 = soloIn.CrumbleIntoP3(atTick: 200);
+        soloIn.Engine.OnMidpointBlast(soloIn.Boss!.Position + new WorldVector(3.4d, 0d), s0 + 1);
+        Assert.True(soloIn.Engine.BurstWindowOpen);
+
+        var soloOut = new Harness();
+        soloOut.BeginAndSpawnBoss(duo: false);
+        var so0 = soloOut.CrumbleIntoP3(atTick: 200);
+        soloOut.Engine.OnMidpointBlast(soloOut.Boss!.Position + new WorldVector(3.6d, 0d), so0 + 1);
+        Assert.False(soloOut.Engine.BurstWindowOpen);
+    }
+
+    [Fact]
+    public void WardBreak_BroadcastsPlating_OnBurstAndReform()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var bossId = h.Engine.BossId;
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        Assert.True(h.PlatingBroadcasts[^1].BossId == bossId && !h.PlatingBroadcasts[^1].Active); // burst → tint OFF.
+        Assert.Contains(h.Announcements, a => a.Text.Contains("EXPOSED"));
+
+        h.StepThrough(t0 + 2, t0 + 161);
+        Assert.True(h.PlatingBroadcasts[^1].BossId == bossId && h.PlatingBroadcasts[^1].Active); // reform → tint ON.
+    }
+
+    [Fact]
+    public void Blast_DuringP1P2OrIdle_IsIgnored()
+    {
+        // Idle: never began.
+        var idle = new Harness();
+        idle.Engine.OnMidpointBlast(WorldVector.Zero, 0);
+        Assert.False(idle.Engine.BurstWindowOpen);
+
+        // P1 (above 70%): a blast on the boss does nothing (fusion is the P1 gate; the detonation is inert until P3).
+        var p1 = new Harness();
+        p1.BeginAndSpawnBoss(duo: true);
+        p1.Engine.OnMidpointBlast(p1.Boss!.Position, 61);
+        Assert.False(p1.Engine.BurstWindowOpen);
+
+        // P2 (40–70%): still no ward to break — the detonation reports are ignored until P3.
+        var p2 = new Harness();
+        p2.BeginAndSpawnBoss(duo: true);
+        var t0 = p2.CrumbleIntoP2(atTick: 100);
+        p2.Engine.OnMidpointBlast(p2.Boss!.Position, t0 + 1);
+        Assert.False(p2.Engine.BurstWindowOpen);
+    }
+
+    [Fact]
+    public void SweepBeam_AdvancesBearingConsistently_OnCadence()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // First beam 4 s (80 t) after the root; none before.
+        h.StepThrough(t0 + 1, t0 + 79);
+        Assert.Empty(h.Beams);
+        h.Engine.Step(t0 + 80);
+        Assert.Single(h.Beams);
+        var first = h.Beams[0];
+        Assert.Equal(t0 + 80u, first.Start);
+        Assert.Equal(t0 + 104u, first.Resolve); // 1.2 s windup = 24 t.
+        Assert.Equal(25, first.Damage);
+        Assert.Equal(11d, first.Length);
+        Assert.Equal(1d, first.HalfWidth);
+
+        // Next beams every 3 s (60 t), each advancing the bearing a consistent ~40°.
+        h.StepThrough(t0 + 81, t0 + 260);
+        Assert.True(h.Beams.Count >= 3);
+        var step = 40d * System.Math.PI / 180d;
+        for (var i = 1; i < h.Beams.Count; i++)
+        {
+            Assert.Equal(60u, h.Beams[i].Start - h.Beams[i - 1].Start); // base cadence.
+            var delta = NormalizePi(h.Beams[i].Aim - h.Beams[i - 1].Aim);
+            Assert.Equal(step, System.Math.Abs(delta), 3);
+        }
+    }
+
+    [Fact]
+    public void KnockbackPulse_ShovesAllLivingParticipants_RadiallyAwayFromBoss()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+        var boss = h.Boss!;
+
+        // First pulse cue 6 s (120 t) after the root; the shove lands 1 s (20 t) later at +140. Nothing before.
+        h.StepThrough(t0 + 1, t0 + 139);
+        Assert.Empty(h.Displacements);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("brace"));
+
+        // Capture each participant's pre-shove distance from the boss, then step the shove tick.
+        var preDist = players.ToDictionary(p => p.Id, p => (p.Position - boss.Position).Length);
+        h.Engine.Step(t0 + 140);
+        Assert.Equal(2, h.Displacements.Count); // both living participants shoved.
+        foreach (var player in players)
+        {
+            var shove = h.Displacements.First(d => d.Id == player.Id);
+            // Shoved 3u radially AWAY: the target sits exactly PulseShoveUnits farther from the boss than before.
+            Assert.Equal(preDist[player.Id] + 3d, (shove.To - boss.Position).Length, 3);
+        }
+    }
+
+    [Fact]
+    public void Enrage_BelowTenPercent_SpeedsTheBeam_TricklesSplinters_AndAnnouncesOnce()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // Drop to exactly 10% (120/1200) so the enrage edge fires on the next Step.
+        h.Boss!.ApplyDamage(h.Boss!.Stats.Health - 120);
+        h.Engine.Step(t0 + 1);
+        Assert.True(h.Engine.Enraged);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("rages"));
+
+        // Beams now fire on the enraged cadence (3 s / 1.3 ≈ 47 t) — faster than the 60 t base. Step to just before the
+        // first splinter trickle (which lands 10 s = 200 t after the enrage edge at t0+1 → t0+201).
+        h.StepThrough(t0 + 2, t0 + 200);
+        Assert.True(h.Beams.Count >= 2);
+        Assert.Equal(47u, h.Beams[1].Start - h.Beams[0].Start);
+        Assert.Equal(0, h.SplinterSpawnCount); // no trickle yet.
+
+        // The trickle: one splinter at t0+201, tracked in the shared add ledger.
+        h.Engine.Step(t0 + 201);
+        Assert.Equal(1, h.SplinterSpawnCount);
+        Assert.Equal(1, h.Engine.AddCount);
+    }
+
+    [Fact]
+    public void P3Activity_StopsOnEveryEndPath()
+    {
+        // WIPE: both die in-arena → immediate reset; no P3 activity after.
+        var wipe = new Harness();
+        var wp = wipe.BeginAndSpawnBoss(duo: true);
+        var w0 = wipe.CrumbleIntoP3(atTick: 200);
+        wp[0].ApplyDamage(wp[0].Stats.Health);
+        wp[1].ApplyDamage(wp[1].Stats.Health);
+        wipe.Engine.Step(w0 + 1);
+        Assert.Equal(EncounterState.Idle, wipe.Engine.State);
+        Assert.False(wipe.Engine.P3Active);
+        var beamsAfterWipe = wipe.Beams.Count;
+        wipe.StepThrough(w0 + 2, w0 + 300);
+        Assert.Equal(beamsAfterWipe, wipe.Beams.Count); // no new beams after the reset.
+
+        // LEAVE → empty → grace reset stops P3.
+        var leave = new Harness();
+        var lp = leave.BeginAndSpawnBoss(duo: false);
+        var l0 = leave.CrumbleIntoP3(atTick: 200);
+        Assert.True(leave.Engine.TryLeave(lp[0], out _));
+        leave.StepThrough(l0 + 1, l0 + 1 + 200); // arm + 10 s grace.
+        Assert.Equal(EncounterState.Idle, leave.Engine.State);
+        Assert.False(leave.Engine.P3Active);
+
+        // VICTORY (boss killed) → back to Idle, P3 stops, victors retained.
+        var victory = new Harness();
+        victory.BeginAndSpawnBoss(duo: true);
+        var v0 = victory.CrumbleIntoP3(atTick: 200);
+        Assert.True(victory.World.Remove(victory.Engine.BossId, out _));
+        victory.Engine.Step(v0 + 1);
+        Assert.Equal(EncounterState.Idle, victory.Engine.State);
+        Assert.False(victory.Engine.P3Active);
+        Assert.Contains(victory.Announcements, a => a.Text.Contains("Victory"));
+        Assert.Equal(2, victory.Engine.ParticipantCount); // victors retained.
+    }
+
+    [Fact]
+    public void VictoryDuringBurstWindow_StillWins()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+        // Break the ward, then kill the boss WHILE the burst window is open (the intended kill path).
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        Assert.True(h.Engine.BurstWindowOpen);
+        Assert.True(h.World.Remove(h.Engine.BossId, out _));
+        h.Engine.Step(t0 + 2);
+        Assert.Equal(EncounterState.Idle, h.Engine.State);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("Victory"));
+        Assert.False(h.Engine.P3Active);
+    }
+
+    [Fact]
+    public void BeamResolve_AndPulseShove_NeverShareATick_ByConstruction()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 137); // an arbitrary (odd) anchor — disjointness must hold for ANY anchor.
+        foreach (var player in players)
+        {
+            player.SetMaxHealthFull(10_000_000); // tanky; the boss stays at 35% so no enrage re-paces the beam.
+        }
+
+        var shoveTicks = new List<uint>();
+        var shovesSeen = 0;
+        for (var t = t0 + 1; t <= t0 + 1200; t++) // 60 s of P3.
+        {
+            // Re-centre both each tick so the repeated 3u shoves never push them out of the arena (which would empty it).
+            h.MoveTo(players[0], ArenaCentre + new WorldVector(-1d, 0d));
+            h.MoveTo(players[1], ArenaCentre + new WorldVector(1d, 0d));
+            h.Engine.Step(t);
+            if (h.Displacements.Count > shovesSeen)
+            {
+                shoveTicks.Add(t);
+                shovesSeen = h.Displacements.Count;
+            }
+        }
+
+        var beamResolveTicks = h.Beams.Select(b => b.Resolve).Distinct().ToHashSet();
+        var shoveSet = shoveTicks.ToHashSet();
+        Assert.NotEmpty(beamResolveTicks);
+        Assert.NotEmpty(shoveSet);
+        Assert.False(h.Engine.Enraged); // base cadence throughout (residues stay disjoint by construction).
+        Assert.Empty(beamResolveTicks.Intersect(shoveSet));
+    }
+
+    // Principal-range angle difference (mirrors TelegraphShape's helper) for the beam-bearing advance assertion.
+    private static double NormalizePi(double radians)
+    {
+        var twoPi = 2d * System.Math.PI;
+        radians %= twoPi;
+        if (radians <= -System.Math.PI)
+        {
+            radians += twoPi;
+        }
+        else if (radians > System.Math.PI)
+        {
+            radians -= twoPi;
+        }
+
+        return radians;
     }
 }
