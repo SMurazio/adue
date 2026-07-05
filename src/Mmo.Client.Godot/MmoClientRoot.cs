@@ -1063,7 +1063,14 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		_controllerAimStickActive = true;
-		_controllerAimDirection = new WorldVector(rightX, rightY).Normalized();
+		// LIVE FEEL FIX (2026-07-05, user repro: "the art of the character is not facing the correct direction"):
+		// the right stick's axes are SCREEN-relative, exactly like the left stick's — so they need the SAME 45°
+		// screen->world isometric rotation CurrentControllerMoveHeading applies (worldDx = x+y, worldDz = y-x).
+		// The first cut fed the raw stick vector in as if it were already world-space, leaving every aim consumer
+		// (facing, arrow, attack wedge, skillshot) rotated 45° from where the stick pointed on screen. The mouse
+		// path never has this problem: the cursor raycast goes through the camera projection, which IS the
+		// screen->world transform.
+		_controllerAimDirection = new WorldVector(rightX + rightY, rightY - rightX).Normalized();
 		_aimSourceIsController = true;
 	}
 
