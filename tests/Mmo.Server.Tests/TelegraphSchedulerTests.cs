@@ -441,6 +441,26 @@ public sealed class TelegraphSchedulerTests
     }
 
     [Fact]
+    public void WedgeMembership_AimedWest_HandlesThePiSeam()
+    {
+        // TELEGRAPH-SHAPES REVIEW (LOW): a wedge aimed due WEST puts the aim bearing at the atan2 ±π seam — targets
+        // slightly north/south of straight-behind sit at bearings near -π and +π, and the angular delta must wrap
+        // through NormalizePi instead of reading as ~2π. Half-angle 45°, apex (10,10), reach 3, aim = π.
+        var half = 45d * Math.PI / 180d;
+        var shape = TelegraphShape.Wedge(new WorldVector(10d, 10d), 3d, aimRadians: Math.PI, halfAngleRadians: half);
+
+        Assert.True(shape.Contains(new WorldVector(8d, 10d)));         // straight west — dead center of the arc
+        Assert.True(shape.Contains(new WorldVector(8d, 10.05d)));      // a hair south of west (bearing ≈ +π - ε)
+        Assert.True(shape.Contains(new WorldVector(8d, 9.95d)));       // a hair north of west (bearing ≈ -π + ε)
+        // 44° off-aim on BOTH sides of the seam — inside; 46° — outside. (cos/sin of π±θ, radius 2.)
+        Assert.True(shape.Contains(new WorldVector(10d + (2d * Math.Cos(Math.PI - 0.7679d)), 10d + (2d * Math.Sin(Math.PI - 0.7679d)))));
+        Assert.True(shape.Contains(new WorldVector(10d + (2d * Math.Cos(Math.PI + 0.7679d)), 10d + (2d * Math.Sin(Math.PI + 0.7679d)))));
+        Assert.False(shape.Contains(new WorldVector(10d + (2d * Math.Cos(Math.PI - 0.8029d)), 10d + (2d * Math.Sin(Math.PI - 0.8029d)))));
+        Assert.False(shape.Contains(new WorldVector(10d + (2d * Math.Cos(Math.PI + 0.8029d)), 10d + (2d * Math.Sin(Math.PI + 0.8029d)))));
+        Assert.False(shape.Contains(new WorldVector(12d, 10d)));       // straight EAST (directly behind the aim)
+    }
+
+    [Fact]
     public void LineMembership_WithinLengthAndWidth_IsInclusive_ErrsPlayerFavorable()
     {
         // A 2u-wide (half-width 1) corridor from origin (10,10), length 8, aimed east (+X).

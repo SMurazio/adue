@@ -565,7 +565,11 @@ public class BasicRoamerBehavior : IMonsterBehavior
                 // caps at the distance to target) — entities don't collide with each other, so an unclamped fixed dash would
                 // carry the monster THROUGH and PAST a nearer target and leave it behind them. Clamping lands it on/adjacent
                 // the target (collision keeps body separation).
-                if (t.ChargeEnabled && _tryCharge(monster, dirToTarget, distToTarget, serverTick))
+                // TELEGRAPH-SHAPES REVIEW (MEDIUM): a LUNGE type never falls back to the INSTANT dash — the two ride
+                // separate cooldown clocks (brain NextLungeTick vs the executor's charge action), so without this gate a
+                // lunge-cooldown gap fired an untelegraphed dash between telegraphed lunges (double cadence, no dodge
+                // window). Lunge REPLACES the instant dash, exactly as the manifest fields document.
+                if (t.ChargeEnabled && !t.LungeEnabled && _tryCharge(monster, dirToTarget, distToTarget, serverTick))
                 {
                     state.LastProgressTick = serverTick;
                     return false;
