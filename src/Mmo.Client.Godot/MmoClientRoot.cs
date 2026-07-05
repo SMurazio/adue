@@ -331,6 +331,23 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// F1 Movement-tab checkbox (no restart, no round-trip). Facing stays an 8-way sprite (nearest Direction8) in both.
 	private bool _freeAngleMovement;
 
+	// CONTROLLER (2026-07-04): Xbox/XInput support — Godot 4 handles XInput + hot-plug natively on Windows, so
+	// this is "read the first connected joypad" with no manual device-arrival wiring. One radial deadzone shared
+	// by both sticks (movement + aim): compared on VECTOR LENGTH, not per-axis, so it stays circular instead of
+	// a smaller effective square. `_controllerAimDirection`/`_aimSourceIsController` back the single aim-source
+	// seam (TryGetAimWorldPoint, near TryGetAimToCursor) that every cursor-aim call site already funnels through;
+	// mouse motion reclaims aim in _UnhandledInput, the right stick reclaims it in PollControllerAim (_Process).
+	// `_controllerLeftTriggerHeld`/`_prevRightTriggerHeld` back the per-frame trigger poll (PollControllerTriggers,
+	// near UpdateSkillshotAim) — LT/RT are AXES on XInput pads, not buttons, so they can't arrive as
+	// InputEventJoypadButton and must be polled like the sticks.
+	private const float ControllerStickDeadzone = 0.25f;
+	private const float ControllerTriggerThreshold = 0.5f;
+	private const float ControllerAimProjectDistance = 8f; // world units; see TryGetAimWorldPoint
+	private WorldVector _controllerAimDirection = new(1d, 0d); // default east; inert until _aimSourceIsController
+	private bool _aimSourceIsController;
+	private bool _controllerLeftTriggerHeld;
+	private bool _prevRightTriggerHeld;
+
 	// S56: mouse control is hold-to-walk-toward-cursor (UO), not click-a-destination. While the RIGHT mouse
 	// button is held, each frame we ray the cursor to the ground plane and hold the MoveIntent heading from
 	// the PREDICTED local tile toward the cursor tile (CursorHeading) — exactly the keyboard path, re-aimed
@@ -488,6 +505,13 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var now = TimeSpan.FromSeconds(_elapsedSeconds);
 		SampleFrameTiming(delta);
 
+		// CONTROLLER (2026-07-04): poll aim (right stick) BEFORE movement/triggers so RT's edge-triggered
+		// TryAttack() below (PollControllerTriggers) reads this frame's fresh aim, and left-stick movement
+		// (SendHeldMovement, via CurrentControllerMoveHeading) sees this frame's fresh stick state too. Both are
+		// ungated by chat focus / login — see each method's own comment.
+		PollControllerAim();
+		PollControllerTriggers();
+
 		// CONTINUOUS MIGRATION (Phase 3, v36): send THIS frame's continuous MoveIntent (raw direction + this frame's
 		// dt). One input per render frame — the server integrates each by its dt. No prediction this phase (the render
 		// is the raw decoded server position).
@@ -568,6 +592,57 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
+		// CONTROLLER (2026-07-04): any deliberate mouse move reclaims aim for the mouse (see PollControllerAim,
+		// which reclaims it back for the right stick). Not consumed/returned — motion isn't a "handled" gesture,
+		// it just updates which device the aim seam (TryGetAimWorldPoint) reads from this frame onward.
+		if (@event is InputEventMouseMotion)
+		{
+			_aimSourceIsController = false;
+		}
+
+		// CONTROLLER (2026-07-04): discrete joypad buttons. Ignores chat focus entirely (a physical button can't
+		// type text, unlike the keyboard bindings below, which keep their own _chatInput guards untouched).
+		// LT/RT are AXES on XInput pads, not buttons, so RT (attack) and LT (skillshot hold) are polled per-frame
+		// instead (PollControllerTriggers, near UpdateSkillshotAim) — they never arrive as InputEventJoypadButton.
+		if (@event is InputEventJoypadButton { Pressed: true } joyButton)
+		{
+			switch (joyButton.ButtonIndex)
+			{
+				case JoyButton.A: // mirrors Space (dodge-roll)
+					TryMovementAction(ActionId.DodgeRoll, "Roll!");
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.B: // mirrors J (jump)
+					TryMovementAction(ActionId.Jump, "Jump!");
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.Y: // mirrors K (charge)
+					TryMovementAction(ActionId.Charge, "Charge!");
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.X: // context interact: loot-all (mirrors F) if a loot window is open, else harvest (mirrors E)
+					ControllerContextInteract();
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.LeftShoulder: // mirrors R (Unison Shield)
+					SendDuoAbilityIfReady(DuoAbilityKind.Shield);
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.RightShoulder: // mirrors G (Laser Tether toggle)
+					SendDuoAbilityIfReady(DuoAbilityKind.TetherToggle);
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.DpadDown: // mirrors V (Midpoint Detonation)
+					SendDuoAbilityIfReady(DuoAbilityKind.Detonate);
+					GetViewport().SetInputAsHandled();
+					return;
+				case JoyButton.Start: // mirrors Tab (toggle inventory)
+					_hud?.ToggleInventory();
+					GetViewport().SetInputAsHandled();
+					return;
+			}
+		}
+
 		// S56: mouse movement is now hold-to-walk-toward-cursor (UO control), polled every frame in
 		// SendHeldMovement off Input.IsMouseButtonPressed — NOT an event-driven click-a-destination. So the
 		// right mouse button is intentionally not consumed here; the old HandleClickToMove path is retired.
@@ -713,8 +788,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// skill inputs). R = Unison Shield (ability 2), G = Laser Tether toggle (ability 3), V = Midpoint Detonation
 		// initiate/confirm (ability 4). Each is a discrete press routed to the server's DuoAbility stream (server-
 		// authoritative — no client prediction). Not while typing in chat.
-		if (_client is not null && _client.IsLoggedIn && _chatInput?.HasFocus() != true
-			&& key.Keycode is Key.R or Key.G or Key.V)
+		if (_chatInput?.HasFocus() != true && key.Keycode is Key.R or Key.G or Key.V)
 		{
 			var ability = key.Keycode switch
 			{
@@ -722,7 +796,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				Key.G => DuoAbilityKind.TetherToggle,
 				_ => DuoAbilityKind.Detonate,
 			};
-			_client.SendDuoAbility(ability);
+			SendDuoAbilityIfReady(ability);
 			GetViewport().SetInputAsHandled();
 			return;
 		}
@@ -731,6 +805,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			FocusChatInput();
 			GetViewport().SetInputAsHandled();
+		}
+	}
+
+	// Shared by the R/G/V keyboard bindings (above) and the LB/RB/D-pad-Down controller bindings: send a duo-
+	// ability intent when a client is attached and logged in. Keyboard callers additionally gate on chat focus
+	// themselves (unchanged behaviour); joypad callers don't — a shoulder-button press can't type text.
+	private void SendDuoAbilityIfReady(DuoAbilityKind ability)
+	{
+		if (_client is not null && _client.IsLoggedIn)
+		{
+			_client.SendDuoAbility(ability);
 		}
 	}
 
@@ -874,6 +959,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// login, when there is no local render position yet, or when the ground ray misses; in the dead-zone (cursor on
 	// the player) it still returns a (possibly noisy) bearing — an attack always has an aim, unlike movement which
 	// stops in the dead-zone.
+	//
+	// CONTROLLER (2026-07-04): this is THE single aim-source seam every cursor-aim caller already shares (melee
+	// attack, movement-action heading, skillshot hold-aim) — it now asks TryGetAimWorldPoint for the point to aim
+	// at instead of raycasting the mouse cursor directly, so all of them pick up controller aim for free.
 	private bool TryGetAimToCursor(out float radians)
 	{
 		radians = 0f;
@@ -887,8 +976,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return false;
 		}
 
-		var screenPosition = GetViewport().GetMousePosition();
-		if (!TryPickGroundPoint(screenPosition, out var hit))
+		if (!TryGetAimWorldPoint(out var hit))
 		{
 			return false;
 		}
@@ -902,6 +990,51 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		radians = Mathf.Atan2(dz, dx);
 		return true;
+	}
+
+	// CONTROLLER (2026-07-04): the aim-source seam. Mouse mode (the right stick hasn't aimed since the last mouse
+	// move, or never has): the existing cursor -> ground-plane raycast, byte-identical to the pre-controller
+	// behaviour. Controller mode (the right stick last moved past its deadzone, see PollControllerAim): a
+	// SYNTHETIC point — the local player's world position + _controllerAimDirection * ControllerAimProjectDistance
+	// — so this always hands back an actual world point, the same shape TryGetAimToCursor's caller (above) already
+	// consumes (a player -> point bearing). Distance is otherwise inert for an angle-only consumer (atan2 cancels a
+	// uniform scale) but keeping the seam POINT-shaped, not angle-shaped, mirrors the mouse branch's real primitive.
+	// Returns false when controller mode has no local render position yet, or mouse mode's ground ray misses.
+	private bool TryGetAimWorldPoint(out Vector3 point)
+	{
+		if (_aimSourceIsController)
+		{
+			if (!TryGetLocalRenderPosition(out var px, out var pz))
+			{
+				point = default;
+				return false;
+			}
+
+			point = new Vector3(
+				px + ((float)_controllerAimDirection.X * ControllerAimProjectDistance),
+				0f,
+				pz + ((float)_controllerAimDirection.Y * ControllerAimProjectDistance));
+			return true;
+		}
+
+		var screenPosition = GetViewport().GetMousePosition();
+		return TryPickGroundPoint(screenPosition, out point);
+	}
+
+	// CONTROLLER (2026-07-04): poll the first connected joypad's RIGHT stick for aim, once per frame (called from
+	// _Process, UNGATED by chat focus — a stick tilt can't type text). Beyond the shared radial deadzone, the
+	// stick's direction becomes the persistent aim direction (normalized) and claims aim-source ownership from the
+	// mouse (see TryGetAimWorldPoint); inside the deadzone this is a no-op — the LAST aim source stays in effect,
+	// same "dead-zone holds the previous heading" idea the mouse path already uses (CursorHeading).
+	private void PollControllerAim()
+	{
+		if (!TryGetJoyAxisVector(JoyAxis.RightX, JoyAxis.RightY, out var rightX, out var rightY))
+		{
+			return;
+		}
+
+		_controllerAimDirection = new WorldVector(rightX, rightY).Normalized();
+		_aimSourceIsController = true;
 	}
 
 	// Fallback aim when the cursor pick fails: the local player's discrete 8-way facing as a world bearing (same
@@ -966,6 +1099,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			// Nothing adjacent: give immediate local feedback rather than a silent no-op. This is the one
 			// place the client "knows" without the server, and it never mutates state — purely a hint.
 			ShowInteractFeedback("No resource node in reach.");
+		}
+	}
+
+	// CONTROLLER (2026-07-04): X = context interact — one button standing in for the two keyboard bindings that
+	// already key off "is the loot window open" (F = loot-all) vs not (E = harvest); mirrors both bodies byte for
+	// byte. Its own helper (rather than reusing E/F's handlers directly) because the controller has one button
+	// where keyboard has two independent keys — E and F stay untouched.
+	private void ControllerContextInteract()
+	{
+		if (_hud?.Loot is { IsOpen: true } lootWindow)
+		{
+			lootWindow.RaiseLootAllRequested();
+		}
+		else
+		{
+			TryHarvest();
 		}
 	}
 
@@ -3324,7 +3473,18 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// don't drive the avatar while typing. Priority: real keyboard input (WASD) > mouse hold-to-move
 		// heading > injected (debug-channel) direction. A held WASD key overrides the mouse heading while it is down.
 		var chatFocused = _chatInput?.HasFocus() == true;
-		var keyboard = chatFocused ? null : CurrentDirection();
+
+		// CONTROLLER (2026-07-04): the left stick is TRUE ANALOG 360° — a raw unit WorldVector at any bearing
+		// (orchestrator ruling on the 8-way-vs-analog fork: an octant-snapped stick reads as notchy; the server
+		// already accepts arbitrary unit bearings via the mouse free-angle path). UNCONDITIONAL — not gated on
+		// _freeAngleMovement (that checkbox is a MOUSE-mode toggle in the admin-only F1 panel; a controller
+		// player would never see it). Read UNGATED by chat focus (unlike the plain keyboard fallback below) — a
+		// stick tilt can't type text, so it keeps steering even while the chat box has focus. When active it
+		// occupies the SAME priority tier as WASD (replaces the keyboard vector for the frame; the mouse block
+		// and the injected fallback below gate on it exactly as they gate on `keyboard`). Centered stick -> the
+		// ordinary chat-gated keyboard read, unchanged.
+		var controllerFree = CurrentControllerMoveHeading();
+		var keyboard = controllerFree.HasValue || chatFocused ? null : CurrentDirection();
 
 		// Resolve the MOUSE hold-to-walk contribution. 8-dir mode (default): the nearest-of-8 octant (Direction8),
 		// exactly as before. FREE-ANGLE mode: the RAW player->cursor unit heading (any angle). Only one is active
@@ -3332,7 +3492,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// mirrors CurrentMouseHeading). WASD (keyboard) is unaffected by the mode — it is inherently 8-way.
 		Direction8? mouseDir = null;   // 8-dir mode: the octant heading
 		WorldVector? mouseFree = null; // free-angle mode: the raw unit heading
-		if (!keyboard.HasValue && !chatFocused)
+		if (!controllerFree.HasValue && !keyboard.HasValue && !chatFocused)
 		{
 			if (_freeAngleMovement)
 			{
@@ -3345,17 +3505,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var mouseActive = mouseDir.HasValue || mouseFree.HasValue;
-		var injected = keyboard.HasValue || mouseActive || chatFocused ? null : CurrentInjectedDirection();
+		var injected = controllerFree.HasValue || keyboard.HasValue || mouseActive || chatFocused
+			? null
+			: CurrentInjectedDirection();
 
 		// The heading the client SENDS + the predictor consumes: a unit WorldVector (null = stopped). Priority
-		// keyboard > mouse > injected, unchanged. In 8-dir mode every source is a Direction8 whose ToUnitVector() is
-		// byte-identical to the pre-free-angle code (keyboard ?? mouseDir ?? injected -> .ToUnitVector()). In
-		// free-angle mode ONLY the mouse contributes a raw off-octant vector; WASD/injected stay 8-way. `headingOctant`
-		// is the nearest Direction8 of that heading — it drives the 8-way sprite facing / HUD (facing stays 8-way in
-		// both modes by design); for an 8-dir source it IS the source octant, so 8-dir facing is unchanged.
+		// controller stick / keyboard (one tier — the stick replaces WASD when active) > mouse > injected. In 8-dir
+		// mode every source is a Direction8 whose ToUnitVector() is byte-identical to the pre-free-angle code
+		// (keyboard ?? mouseDir ?? injected -> .ToUnitVector()). The RAW off-octant vectors are the stick (always)
+		// and the mouse (free-angle mode only); WASD/injected stay 8-way. `headingOctant` is the nearest Direction8
+		// of that heading — it drives the 8-way sprite facing / HUD (facing stays 8-way in both modes by design);
+		// for an 8-dir source it IS the source octant, so 8-dir facing is unchanged.
 		WorldVector? heading;
 		Direction8? headingOctant;
-		if (keyboard.HasValue)
+		if (controllerFree.HasValue)
+		{
+			heading = controllerFree.Value;
+			headingOctant = CursorHeading.NearestDirection8(controllerFree.Value.X, controllerFree.Value.Y);
+		}
+		else if (keyboard.HasValue)
 		{
 			heading = keyboard.Value.ToUnitVector();
 			headingOctant = keyboard.Value;
@@ -3910,6 +4078,57 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		return ScreenRelativeDirectionMapper.FromInputAxes(x, y);
 	}
 
+	// CONTROLLER (2026-07-04): the left-stick counterpart to CurrentDirection() above — but TRUE ANALOG: the
+	// stick's raw bearing becomes a unit WorldVector at ANY angle (the free-angle mouse heading's shape), not an
+	// octant. The stick axes are SCREEN-relative (up on the stick = up on screen), the same frame WASD's x/y
+	// axes live in, and the camera is fixed isometric — so the axes go through the SAME 45° screen->world
+	// rotation ScreenRelativeDirectionMapper.FromInputAxes encodes, just continuously instead of via the 8-entry
+	// sign table: worldDx = x + y, worldDz = y - x (verified against all 8 FromInputAxes rows: each sign combo's
+	// rotated vector normalizes to exactly that row's Direction8 unit vector — the stick pushed to a WASD corner
+	// moves identically to holding those keys, and every bearing in between is now reachable). Normalized to
+	// length 1 (speed is fixed server-side; only direction is analog). Called from SendHeldMovement UNGATED by
+	// chat focus — a stick tilt can't type text, so it keeps steering even while the chat box has focus;
+	// SendHeldMovement falls back to the (chat-gated) keyboard read only when this is null (centered stick).
+	private static WorldVector? CurrentControllerMoveHeading()
+	{
+		if (!TryGetJoyAxisVector(JoyAxis.LeftX, JoyAxis.LeftY, out var stickX, out var stickY))
+		{
+			return null;
+		}
+
+		var worldDx = stickX + stickY;
+		var worldDz = stickY - stickX;
+		return new WorldVector(worldDx, worldDz).Normalized();
+	}
+
+	// CONTROLLER (2026-07-04): the first connected joypad's raw value for a single axis, or 0 if none is
+	// connected. Re-queries GetConnectedJoypads() every call — no cached device id, so a mid-session hot-plug
+	// (Godot/XInput handles the detection natively on Windows) is picked up on the very next poll.
+	private static float GetFirstJoyAxis(JoyAxis axis)
+	{
+		var joypads = Input.GetConnectedJoypads();
+		return joypads.Count == 0 ? 0f : Input.GetJoyAxis(joypads[0], axis);
+	}
+
+	// CONTROLLER (2026-07-04): shared by the left stick (movement, above) and the right stick (aim,
+	// PollControllerAim) — reads both axes of the first connected joypad and applies the shared RADIAL deadzone
+	// (compared on vector length, not per-axis, so the dead zone is circular rather than a smaller effective
+	// square). Returns false — and leaves x/y at 0 — when no joypad is connected or the pair sits within the
+	// deadzone.
+	private static bool TryGetJoyAxisVector(JoyAxis axisX, JoyAxis axisY, out float x, out float y)
+	{
+		x = GetFirstJoyAxis(axisX);
+		y = GetFirstJoyAxis(axisY);
+		if ((x * x) + (y * y) < ControllerStickDeadzone * ControllerStickDeadzone)
+		{
+			x = 0f;
+			y = 0f;
+			return false;
+		}
+
+		return true;
+	}
+
 	private static Vector3 TileToWorld(TileCoord tile, float y = 0f)
 	{
 		return new Vector3(tile.X, y, tile.Y);
@@ -4373,6 +4592,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private float _skillshotAimRadians;
 	private ulong _lastPreviewSentMs;
 
+	// CONTROLLER (2026-07-04): per-frame trigger read — LT/RT are AXES on XInput pads (0..1), not buttons, so
+	// they can't arrive as InputEventJoypadButton and are instead polled here alongside the sticks. RT is an
+	// EDGE (press-only) read: it mirrors the LMB _UnhandledInput handler exactly (same TryAttack() call; aim
+	// comes from the seam, see TryGetAimWorldPoint), so a held trigger doesn't spam attacks every frame. LT is a
+	// LEVEL (HELD) read — OR'd into UpdateSkillshotAim's own `held` computation below — because holding LT IS
+	// the "aim the skillshot" gesture, mirroring Q; both ignore chat focus entirely (see the controller spec's
+	// chat-focus rule).
+	private void PollControllerTriggers()
+	{
+		var rightTriggerHeld = GetFirstJoyAxis(JoyAxis.TriggerRight) >= ControllerTriggerThreshold;
+		if (rightTriggerHeld && !_prevRightTriggerHeld)
+		{
+			TryAttack();
+		}
+
+		_prevRightTriggerHeld = rightTriggerHeld;
+		_controllerLeftTriggerHeld = GetFirstJoyAxis(JoyAxis.TriggerLeft) >= ControllerTriggerThreshold;
+	}
+
 	// Per-frame: poll Q (hold-to-aim, release-to-fire). While held, resolve the player→cursor aim, throttle-relay it to
 	// the partner (so they can line up an intercept), and draw the local preview line. On release, fire the skillshot
 	// toward the last aim and tell the partner to stop drawing. Chat focus cancels an in-progress aim WITHOUT firing
@@ -4385,7 +4623,11 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		}
 
 		var chatFocused = _chatInput?.HasFocus() == true;
-		var held = !chatFocused && _client.IsLoggedIn && Input.IsKeyPressed(SkillshotFireKey);
+
+		// CONTROLLER (2026-07-04): LT (a HELD level, polled in PollControllerTriggers) is OR'd in and ignores
+		// chat focus — a physical trigger can't type text. The keyboard term keeps its original chatFocused
+		// guard untouched, so Q's behaviour is byte-identical to before this feature.
+		var held = _client.IsLoggedIn && (_controllerLeftTriggerHeld || (!chatFocused && Input.IsKeyPressed(SkillshotFireKey)));
 
 		if (held)
 		{
