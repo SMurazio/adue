@@ -240,6 +240,38 @@ public sealed class BossEncounterEngineTests
     }
 
     [Fact]
+    public void VictorsWhoNeverLeave_AreEjectedHomeAfterTheGraceWindow_FreeingTheArena()
+    {
+        // Review BOSS-1 (MEDIUM): the arena is shared and non-instanced — a connected victor who idles inside must
+        // NOT hold /boss hostage forever. 15 s after victory, stragglers are teleported to their stored return tiles
+        // and the arena frees up.
+        var h = new Harness();
+        var a = h.AddPlayer("A", TownA);
+        var b = h.AddPlayer("B", TownB);
+        h.Engine.TryBegin(a, b, serverTick: 0, out _);
+        h.StepThrough(1, 60);
+        Assert.True(h.World.Remove(h.Boss!.Id, out _)); // player kill → victory on the next Step.
+        h.Engine.Step(61);
+        Assert.Equal(2, h.Engine.ParticipantCount);
+
+        // Just before the 15 s deadline (armed at tick 61 → deadline 61 + 15*20 = 361): still retained.
+        h.StepThrough(62, 360);
+        Assert.Equal(2, h.Engine.ParticipantCount);
+        Assert.Equal(BossArena.IssuerEntryTile, a.TileCoord);
+
+        // Deadline reached: both stragglers are sent to their ORIGINAL return tiles and the arena clears.
+        h.Engine.Step(361);
+        Assert.Equal(0, h.Engine.ParticipantCount);
+        Assert.Equal(TownA, a.TileCoord);
+        Assert.Equal(TownB, b.TileCoord);
+
+        // The arena is genuinely free again: a fresh /boss starts a new countdown.
+        var c = h.AddPlayer("C", TownA);
+        Assert.True(h.Engine.TryBegin(c, partner: null, serverTick: 362, out _));
+        Assert.Equal(EncounterState.Countdown, h.Engine.State);
+    }
+
+    [Fact]
     public void TryLeave_ReturnsEachPlayerToItsStoredTile()
     {
         var h = new Harness();

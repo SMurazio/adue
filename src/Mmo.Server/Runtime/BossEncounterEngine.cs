@@ -68,6 +68,12 @@ public sealed class BossEncounterEngine
     private const double CountdownSeconds = 3d;
     private const double EmptyResetSeconds = 10d;
 
+    // REVIEW BOSS-1 (MEDIUM): the arena is one shared, non-instanced room, and a fresh /boss is refused while any
+    // participant lingers — so a connected victor who never types /boss would soft-lock the encounter for the whole
+    // server. Victory therefore arms a bounded grace window: victors get this long to savor/loot-nothing/walk out,
+    // then anyone still inside is teleported home and the arena clears. Mirrors the EmptyResetSeconds pattern.
+    private const double VictoryEjectSeconds = 15d;
+
     private readonly int _tickRate;
     private readonly SpawnBossDelegate _spawnBoss;
     private readonly DespawnBossDelegate _despawnBoss;
@@ -77,6 +83,7 @@ public sealed class BossEncounterEngine
 
     private readonly uint _countdownTicks;
     private readonly uint _emptyResetTicks;
+    private readonly uint _victoryEjectTicks;
 
     // A participant: the entity + the tile it should be teleported back to on leave. Value struct, held in a list
     // (never more than 2 — issuer + partner — so a list is cheaper than a dictionary).
@@ -94,6 +101,9 @@ public sealed class BossEncounterEngine
     private bool _emptyTimerArmed;
     private uint _emptyStartTick;
 
+    private bool _victoryEjectArmed;
+    private uint _victoryEjectDeadlineTick;
+
     public BossEncounterEngine(
         int tickRate,
         SpawnBossDelegate spawnBoss,
@@ -110,6 +120,7 @@ public sealed class BossEncounterEngine
         _notify = notify ?? throw new ArgumentNullException(nameof(notify));
         _countdownTicks = SecondsToTicks(CountdownSeconds);
         _emptyResetTicks = SecondsToTicks(EmptyResetSeconds);
+        _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
     }
 
     // Test/diagnostic visibility (like BasicRoamerBehavior's TryGetPhase) — never drives replication.
@@ -197,6 +208,28 @@ public sealed class BossEncounterEngine
                     PruneDepartedParticipants();
                 }
 
+                if (_participants.Count == 0)
+                {
+                    _victoryEjectArmed = false;
+                }
+                else if (_victoryEjectArmed && serverTick >= _victoryEjectDeadlineTick)
+                {
+                    // Victory-eject deadline (review BOSS-1 MEDIUM): teleport every remaining victor back to its
+                    // stored return tile — the same trip /boss-inside takes, just no longer optional — and clear the
+                    // list so the shared arena frees up for the next pair.
+                    foreach (var participant in _participants)
+                    {
+                        if (_tryResolve(participant.EntityId) is { } straggler)
+                        {
+                            _notify(participant.EntityId, "The arena's magic fades and returns you home.");
+                            _teleport(straggler, participant.ReturnTile);
+                        }
+                    }
+
+                    _participants.Clear();
+                    _victoryEjectArmed = false;
+                }
+
                 break;
 
             case EncounterState.Countdown:
@@ -264,6 +297,10 @@ public sealed class BossEncounterEngine
             _bossId = 0;
             _state = EncounterState.Idle;
             _emptyTimerArmed = false;
+            // Bounded straggler window (see VictoryEjectSeconds): victors who don't /boss out are sent home when it
+            // elapses, so the shared arena can never be held indefinitely.
+            _victoryEjectArmed = true;
+            _victoryEjectDeadlineTick = serverTick + _victoryEjectTicks;
             return;
         }
 
