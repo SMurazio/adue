@@ -610,7 +610,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// type text, unlike the keyboard bindings below, which keep their own _chatInput guards untouched).
 		// LT/RT are AXES on XInput pads, not buttons, so RT (attack) and LT (skillshot hold) are polled per-frame
 		// instead (PollControllerTriggers, near UpdateSkillshotAim) — they never arrive as InputEventJoypadButton.
-		if (@event is InputEventJoypadButton { Pressed: true } joyButton)
+		if (@event is InputEventJoypadButton { Pressed: true } joyButton && GetWindow().HasFocus())
 		{
 			switch (joyButton.ButtonIndex)
 			{
@@ -4126,7 +4126,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// length 1 (speed is fixed server-side; only direction is analog). Called from SendHeldMovement UNGATED by
 	// chat focus — a stick tilt can't type text, so it keeps steering even while the chat box has focus;
 	// SendHeldMovement falls back to the (chat-gated) keyboard read only when this is null (centered stick).
-	private static WorldVector? CurrentControllerMoveHeading()
+	private WorldVector? CurrentControllerMoveHeading()
 	{
 		if (!TryGetJoyAxisVector(JoyAxis.LeftX, JoyAxis.LeftY, out var stickX, out var stickY))
 		{
@@ -4152,8 +4152,20 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// (compared on vector length, not per-axis, so the dead zone is circular rather than a smaller effective
 	// square). Returns false — and leaves x/y at 0 — when no joypad is connected or the pair sits within the
 	// deadzone.
-	private static bool TryGetJoyAxisVector(JoyAxis axisX, JoyAxis axisY, out float x, out float y)
+	// LIVE FIX (2026-07-05, user repro: "it's moving both players at the same time"): unlike keyboard/mouse (which
+	// the OS routes to the FOCUSED window only), Godot polls joypads GLOBALLY — two clients on one machine both
+	// obey the same pad. ALL controller input is therefore focus-gated: this method (both sticks — movement + aim),
+	// PollControllerTriggers (RT/LT), and the InputEventJoypadButton branch in _UnhandledInput each require
+	// GetWindow().HasFocus(). Instance method (not static) for exactly that reason.
+	private bool TryGetJoyAxisVector(JoyAxis axisX, JoyAxis axisY, out float x, out float y)
 	{
+		if (!GetWindow().HasFocus())
+		{
+			x = 0f;
+			y = 0f;
+			return false;
+		}
+
 		x = GetFirstJoyAxis(axisX);
 		y = GetFirstJoyAxis(axisY);
 		if ((x * x) + (y * y) < ControllerStickDeadzone * ControllerStickDeadzone)
@@ -4638,6 +4650,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// chat-focus rule).
 	private void PollControllerTriggers()
 	{
+		// Focus gate (see TryGetJoyAxisVector): an unfocused window must not attack or hold a skillshot aim off a
+		// pad another client instance owns. Clearing LT here while unfocused makes UpdateSkillshotAim's `held` drop;
+		// its release branch treats the focus loss as a CANCEL, not a fire.
+		if (!GetWindow().HasFocus())
+		{
+			_prevRightTriggerHeld = false;
+			_controllerLeftTriggerHeld = false;
+			return;
+		}
+
 		var rightTriggerHeld = GetFirstJoyAxis(JoyAxis.TriggerRight) >= ControllerTriggerThreshold;
 		if (rightTriggerHeld && !_prevRightTriggerHeld)
 		{
@@ -4684,8 +4706,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_skillshotAiming = false;
 
 			// Fire on RELEASE (not on a chat-focus cancel). A chat-focus steal leaves `held` false but `chatFocused`
-			// true — treat that as a cancel so opening chat mid-hold doesn't fire.
-			if (!chatFocused)
+			// true — treat that as a cancel so opening chat mid-hold doesn't fire. A WINDOW-focus loss mid-LT-hold
+			// (alt-tab / the two-clients-one-pad case) is the same kind of steal — cancel, don't loose the shot.
+			if (!chatFocused && GetWindow().HasFocus())
 			{
 				_client.SendFireSkillshot(AimAngle.Quantize(_skillshotAimRadians));
 			}
