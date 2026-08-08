@@ -552,7 +552,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateTelegraphDecals();
 		UpdateAimWedge();
 		UpdateSkillshotAim(now);
-		UpdateDuoVisuals();
+		UpdateDuoVisuals(delta);
 		UpdateControllerAimArrow();
 		UpdateLocalContinuousFacing();
 		var t3 = Time.GetTicksUsec();
@@ -4936,18 +4936,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private MeshInstance3D? _chargeDecal;
 
 	// Per-frame: mirror MmoClient's replicated duo state into pooled world nodes. Pure presentation — the server owns
-	// every effect; this only draws. Echo cues are drained (a future flash+ring hook; bounded in the core meanwhile).
-	private void UpdateDuoVisuals()
+	// every effect; this only draws.
+	private void UpdateDuoVisuals(double delta)
 	{
 		if (_worldRoot is null || _client is null)
 		{
 			return;
 		}
 
-		// Drain echo cues (flash + expanding ring is a deferred polish hook — the core bounds the queue meanwhile).
-		while (_client.TryDequeueEchoCue(out _))
+		// S-duo-grill-echo-cue-render: spawn a ring flash for every cue the core drained this frame (Unison Shield's
+		// press-relay AND the Sunderer's Echo Lash windup both ride this one wire — see EchoCueEvent), then advance
+		// the active flashes. The core bounds the PENDING queue (32); SpawnEchoCue bounds the ACTIVE-ON-SCREEN set
+		// separately (EchoCueMaxActive) so a burst of cues can't grow the scene tree unbounded either.
+		while (_client.TryDequeueEchoCue(out var cue))
 		{
+			SpawnEchoCue(cue);
 		}
+
+		UpdateEchoCues(delta);
 
 		UpdateShieldBubbles();
 		UpdateTetherBeam();
@@ -5065,6 +5071,145 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var radius = Mathf.Max((float)charge.RadiusUnits, 0.05f);
 		_chargeDecal.Scale = new Vector3(radius, 1f, radius);
 		_chargeDecal.Visible = true;
+	}
+
+	// ---- S-duo-grill-echo-cue-render: the echo-cue ring flash ----
+	//
+	// The sync signal for Unison Shield (100ms Perfect / 300ms Good windows) and the Sunderer's Echo Lash windup
+	// was landing in the core's queue and being drained into nothing ("a future flash+ring hook" — see the prior
+	// comment on UpdateDuoVisuals git-blame). That left the cue as a CHAT LINE, violating the honest-telegraph
+	// rule (Law 7: "the preview is part of the mechanic, not polish"). This renders it: a filled ring that pops
+	// small, expands, and fades on the ground under the cued entity — reusing the ground-telegraph disc mesh (the
+	// same "something is happening HERE" idiom already established by UpdateTelegraphDecals/UpdateChargeDecal)
+	// rather than inventing a new shape. EchoCueEvent.NetworkId already resolves to whoever should react — the
+	// partner for a Unison Shield press-relay, or the viewer's OWN id for the Echo Lash windup (see
+	// GameServer.SendEchoCueTo's "flash a brief cue on the target's own client") — so this renders at that
+	// network id's position uniformly, no self/partner branch needed.
+	//
+	// Cosmetic only: does NOT touch timing windows, tiers, or any server behaviour (out of scope for this task —
+	// see the todo).
+	private const float EchoCueLifetimeSeconds = 0.45f;
+	private const float EchoCueStartRadius = 0.5f;
+	private const float EchoCueEndRadius = 1.8f;
+	private const int EchoCueMaxActive = 8;
+
+	// Gold = "raise your shield now" (ShieldPress, reused verbatim for Echo Lash). Magenta family = the ability-4
+	// detonate cues, matching MidpointChargeMaterial's magenta so they read as "the same duo-sync family" —
+	// Confirm brighter than Initiate so the two edges (start charging / lock it in) are distinguishable at a glance.
+	private static readonly Color EchoCueShieldColor = new(1.00f, 0.85f, 0.20f, 0.95f);
+	private static readonly Color EchoCueDetonateInitiateColor = new(0.90f, 0.30f, 1.00f, 0.95f);
+	private static readonly Color EchoCueDetonateConfirmColor = new(1.00f, 0.60f, 1.00f, 0.95f);
+
+	private struct ActiveEchoCue
+	{
+		public MeshInstance3D Node;
+		public StandardMaterial3D Material;
+		public uint NetworkId;
+		public Color BaseColor;
+		public float Age;
+	}
+
+	private readonly List<ActiveEchoCue> _activeEchoCues = new();
+	private readonly Stack<MeshInstance3D> _echoCuePool = new();
+
+	// Spawn one ring flash for a drained cue. Silently dropped if the cued entity isn't currently resolvable (not
+	// in the render-state buffer — e.g. the partner briefly out of AOI); this mirrors the shield-bubble/tether
+	// idiom of skipping when the anchor is unknown rather than guessing a position. A screen-edge fallback for an
+	// off-screen partner is deferred (see the review-request's known gaps) — in practice a paired partner is
+	// expected in AOI during duo play.
+	private void SpawnEchoCue(MmoClient.EchoCueEvent cue)
+	{
+		if (!TryGetRenderPosition(cue.NetworkId, out var x, out var z))
+		{
+			return;
+		}
+
+		if (_activeEchoCues.Count >= EchoCueMaxActive)
+		{
+			// Recycle the oldest (index 0) rather than growing past the cap (the FloatingTextManager idiom).
+			var oldest = _activeEchoCues[0];
+			_activeEchoCues.RemoveAt(0);
+			ReturnEchoCueToPool(oldest.Node);
+		}
+
+		var node = RentEchoCueNode();
+		var color = cue.Cue switch
+		{
+			EchoCueKind.DetonateInitiate => EchoCueDetonateInitiateColor,
+			EchoCueKind.DetonateConfirm => EchoCueDetonateConfirmColor,
+			_ => EchoCueShieldColor,
+		};
+
+		var material = (StandardMaterial3D)node.MaterialOverride!;
+		material.AlbedoColor = color;
+		node.Position = new Vector3(x, 0.09f, z);
+		node.Scale = new Vector3(EchoCueStartRadius, 1f, EchoCueStartRadius);
+		node.Visible = true;
+
+		_activeEchoCues.Add(new ActiveEchoCue { Node = node, Material = material, NetworkId = cue.NetworkId, BaseColor = color, Age = 0f });
+	}
+
+	private MeshInstance3D RentEchoCueNode()
+	{
+		if (_echoCuePool.Count > 0)
+		{
+			return _echoCuePool.Pop();
+		}
+
+		var node = new MeshInstance3D
+		{
+			Name = "EchoCue",
+			Mesh = TelegraphDiscMesh,
+			MaterialOverride = MarkerMaterial(EchoCueShieldColor), // colour overwritten per spawn.
+			Visible = false,
+		};
+		_worldRoot!.AddChild(node);
+		return node;
+	}
+
+	private void ReturnEchoCueToPool(MeshInstance3D node)
+	{
+		node.Visible = false;
+		_echoCuePool.Push(node);
+	}
+
+	// Advance every active ring: grow radius + fade alpha over EchoCueLifetimeSeconds, then recycle. Re-resolves
+	// the anchor's live position each frame (the cued entity may be mid-move during the windup) — if it drops out
+	// of AOI mid-flash, the ring just holds its last known spot rather than disappearing abruptly.
+	private void UpdateEchoCues(double delta)
+	{
+		if (_activeEchoCues.Count == 0)
+		{
+			return;
+		}
+
+		var dt = (float)delta;
+		for (var i = _activeEchoCues.Count - 1; i >= 0; i--)
+		{
+			var entry = _activeEchoCues[i];
+			entry.Age += dt;
+			if (entry.Age >= EchoCueLifetimeSeconds)
+			{
+				ReturnEchoCueToPool(entry.Node);
+				_activeEchoCues.RemoveAt(i);
+				continue;
+			}
+
+			if (TryGetRenderPosition(entry.NetworkId, out var x, out var z))
+			{
+				entry.Node.Position = new Vector3(x, 0.09f, z);
+			}
+
+			var t = entry.Age / EchoCueLifetimeSeconds;
+			var radius = Mathf.Lerp(EchoCueStartRadius, EchoCueEndRadius, t);
+			entry.Node.Scale = new Vector3(radius, 1f, radius);
+
+			var color = entry.BaseColor;
+			color.A = entry.BaseColor.A * (1f - t);
+			entry.Material.AlbedoColor = color;
+
+			_activeEchoCues[i] = entry;
+		}
 	}
 
 	// ---- CONTROLLER aim arrow (2026-07-05 feel-test): the aim-ownership cue ----

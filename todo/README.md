@@ -39,6 +39,9 @@ The old tile-era order (S41/S36b/S42) is long shipped or obsolete. Active order:
 
 ## Waiting on the HUMAN (not agent-workable; ask, don't block)
 
+- **Feel-tests pending (duo-grill fixes):** the echo-cue ring flash (gold = shield press/Echo
+  Lash, magenta = detonate initiate/confirm) — is it unmissable in combat?; the P3 ward-break
+  duo rule (Good/Perfect blast + >=4u pair separation — the 4u number is untuned).
 - **Feel-tests pending:** walk-anim-idles-when-blocked (`31ab750`), free-angle movement
   (`825d0ba`), movement speed multipliers (`ea15bea`), monster behaviors P2/P4/P5 (gnoll
   glide/flee/charge), AgX tonemapping (`5c2823d`), player charge/dodge-roll (K/L, Phase D),
