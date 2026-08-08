@@ -534,17 +534,18 @@ public sealed class GameServer
             SendTetherStatus);
         // DUO-WAVE2 ability 4 (Midpoint Detonation): the charge/blast stepper — same gather + monster-damage + slow
         // seams, plus the echo-cue relay and the live-tracking charge-marker relay.
-        // BOSS-4 (P3 Ward break): report every resolved blast's centre to the Sunderer encounter — a detonation within
-        // the ward-break radius of the boss opens the burst window (the onFusion pattern; a no-op off-encounter, and the
-        // engine filters by phase + distance). Reads _bossEncounter at CALL time (constructed just below), the same
-        // late-bound pattern the SkillshotEngine onFusion/onMonsterHit wiring above uses.
+        // BOSS-4 (P3 Ward break): report every resolved blast's centre + tier + pair separation to the Sunderer
+        // encounter — a detonation within the ward-break radius of the boss opens the burst window (the onFusion
+        // pattern; a no-op off-encounter, and the engine filters by phase + distance + duo-mode tier/separation).
+        // Reads _bossEncounter at CALL time (constructed just below), the same late-bound pattern the SkillshotEngine
+        // onFusion/onMonsterHit wiring above uses.
         _detonation = new MidpointDetonationEngine(
             _zone.World.GatherInterestCandidates,
             ApplyDuoMonsterDamage,
             SlowMonster,
             SendEchoCueTo,
             SendMidpointCharge,
-            onBlast: (center, tick) => _bossEncounter.OnMidpointBlast(center, tick));
+            onBlast: (center, tick, tier, pairSeparationUnits) => _bossEncounter.OnMidpointBlast(center, tick, tier, pairSeparationUnits));
         // LIVING-ENEMIES P1 + CONTINUOUS MIGRATION (Phase 8) + MOVEMENT-ACTIONS (Phase C): seed the monster roam AI off
         // the map seed so a given world replays the same roaming (deterministic for repro/tests). Navigation is CONTINUOUS
         // (Euclidean ranges, sub-tile targets); movement is now a REAL ballistic Jump — the HopLocomotion DECIDES the hop

@@ -1031,7 +1031,7 @@ public sealed class BossEncounterEngineTests
         Assert.Equal(100, h.Engine.ModifyIncomingDamage(bossId + 999, 100));
 
         // Break the ward with an on-centre blast → full damage during the 8 s window.
-        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.True(h.Engine.BurstWindowOpen);
         Assert.False(h.Engine.WardUp);
         Assert.Equal(100, h.Engine.ModifyIncomingDamage(bossId, 100));
@@ -1050,31 +1050,65 @@ public sealed class BossEncounterEngineTests
     [Fact]
     public void WardBreak_HonoursTheRadiusThreshold_DuoTwoAndAHalf_SoloThreeAndAHalf()
     {
-        // Duo: 2.5u. Inside breaks; just outside does not.
+        // Duo: 2.5u. Inside breaks; just outside does not. A qualifying duo-tier blast (Perfect, well-separated pair)
+        // is used throughout so the radius is the only variable under test — the tier/separation gate is pinned
+        // separately below (WardBreak_DuoMode_RequiresPairedTierAndMinimumSeparation).
         var inside = new Harness();
         inside.BeginAndSpawnBoss(duo: true);
         var i0 = inside.CrumbleIntoP3(atTick: 200);
-        inside.Engine.OnMidpointBlast(inside.Boss!.Position + new WorldVector(2.4d, 0d), i0 + 1);
+        inside.Engine.OnMidpointBlast(inside.Boss!.Position + new WorldVector(2.4d, 0d), i0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.True(inside.Engine.BurstWindowOpen);
 
         var outside = new Harness();
         outside.BeginAndSpawnBoss(duo: true);
         var o0 = outside.CrumbleIntoP3(atTick: 200);
-        outside.Engine.OnMidpointBlast(outside.Boss!.Position + new WorldVector(2.6d, 0d), o0 + 1);
+        outside.Engine.OnMidpointBlast(outside.Boss!.Position + new WorldVector(2.6d, 0d), o0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.False(outside.Engine.BurstWindowOpen);
 
-        // Solo: the receiver-forgiving 3.5u. A blast at 3.4u breaks it; 3.6u does not.
+        // Solo: the receiver-forgiving 3.5u. A blast at 3.4u breaks it; 3.6u does not. Solo mode is ungated by
+        // tier/separation (< 2 participants at spawn), so this passes PairTier.None/0d — the exact report shape the
+        // solo degradation self-blast produces (see MidpointDetonationEngineTests.SoloDegradation_...).
         var soloIn = new Harness();
         soloIn.BeginAndSpawnBoss(duo: false);
         var s0 = soloIn.CrumbleIntoP3(atTick: 200);
-        soloIn.Engine.OnMidpointBlast(soloIn.Boss!.Position + new WorldVector(3.4d, 0d), s0 + 1);
+        soloIn.Engine.OnMidpointBlast(soloIn.Boss!.Position + new WorldVector(3.4d, 0d), s0 + 1, PairTier.None, 0d);
         Assert.True(soloIn.Engine.BurstWindowOpen);
 
         var soloOut = new Harness();
         soloOut.BeginAndSpawnBoss(duo: false);
         var so0 = soloOut.CrumbleIntoP3(atTick: 200);
-        soloOut.Engine.OnMidpointBlast(soloOut.Boss!.Position + new WorldVector(3.6d, 0d), so0 + 1);
+        soloOut.Engine.OnMidpointBlast(soloOut.Boss!.Position + new WorldVector(3.6d, 0d), so0 + 1, PairTier.None, 0d);
         Assert.False(soloOut.Engine.BurstWindowOpen);
+    }
+
+    [Fact]
+    public void WardBreak_DuoMode_RequiresPairedTierAndMinimumSeparation()
+    {
+        // EXPLOIT 1 (Fable design-grill CRITICAL-1): a stacked pair — both players shoved the same radial direction by
+        // a knockback pulse, so their midpoint barely moved — still earns a Good/Perfect confirm (tier requirement met)
+        // but the pair separation at resolve is tiny. Must NOT break the ward: satisfying the tier alone isn't enough.
+        var stacked = new Harness();
+        stacked.BeginAndSpawnBoss(duo: true);
+        var st0 = stacked.CrumbleIntoP3(atTick: 200);
+        stacked.Engine.OnMidpointBlast(stacked.Boss!.Position, st0 + 1, PairTier.Good, pairSeparationUnits: 0.4d);
+        Assert.False(stacked.Engine.BurstWindowOpen);
+
+        // EXPLOIT 2: one player presses V and lets the 1.5 s confirm window lapse — the degraded solo self-blast
+        // (PairTier.None) breaks the ward alone even at a generous separation value. Must NOT break it in duo mode:
+        // a solo self-blast is never a substitute for the duo contest.
+        var soloSelf = new Harness();
+        soloSelf.BeginAndSpawnBoss(duo: true);
+        var so0 = soloSelf.CrumbleIntoP3(atTick: 200);
+        soloSelf.Engine.OnMidpointBlast(soloSelf.Boss!.Position, so0 + 1, PairTier.None, pairSeparationUnits: 99d);
+        Assert.False(soloSelf.Engine.BurstWindowOpen);
+
+        // The intended play: a confirmed Good/Perfect blast landed with the pair spread >= MinPairSeparationUnits
+        // apart at resolve DOES break the ward.
+        var separated = new Harness();
+        separated.BeginAndSpawnBoss(duo: true);
+        var se0 = separated.CrumbleIntoP3(atTick: 200);
+        separated.Engine.OnMidpointBlast(separated.Boss!.Position, se0 + 1, PairTier.Good, BossEncounterEngine.MinPairSeparationUnits);
+        Assert.True(separated.Engine.BurstWindowOpen);
     }
 
     [Fact]
@@ -1085,7 +1119,7 @@ public sealed class BossEncounterEngineTests
         var bossId = h.Engine.BossId;
         var t0 = h.CrumbleIntoP3(atTick: 200);
 
-        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.True(h.PlatingBroadcasts[^1].BossId == bossId && !h.PlatingBroadcasts[^1].Active); // burst → tint OFF.
         Assert.Contains(h.Announcements, a => a.Text.Contains("EXPOSED"));
 
@@ -1096,22 +1130,23 @@ public sealed class BossEncounterEngineTests
     [Fact]
     public void Blast_DuringP1P2OrIdle_IsIgnored()
     {
-        // Idle: never began.
+        // Idle: never began. A qualifying duo-tier/separation report is used throughout this test so the phase gate
+        // (not the DUO-GRILL tier/separation gate) is the only variable under test.
         var idle = new Harness();
-        idle.Engine.OnMidpointBlast(WorldVector.Zero, 0);
+        idle.Engine.OnMidpointBlast(WorldVector.Zero, 0, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.False(idle.Engine.BurstWindowOpen);
 
         // P1 (above 70%): a blast on the boss does nothing (fusion is the P1 gate; the detonation is inert until P3).
         var p1 = new Harness();
         p1.BeginAndSpawnBoss(duo: true);
-        p1.Engine.OnMidpointBlast(p1.Boss!.Position, 61);
+        p1.Engine.OnMidpointBlast(p1.Boss!.Position, 61, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.False(p1.Engine.BurstWindowOpen);
 
         // P2 (40–70%): still no ward to break — the detonation reports are ignored until P3.
         var p2 = new Harness();
         p2.BeginAndSpawnBoss(duo: true);
         var t0 = p2.CrumbleIntoP2(atTick: 100);
-        p2.Engine.OnMidpointBlast(p2.Boss!.Position, t0 + 1);
+        p2.Engine.OnMidpointBlast(p2.Boss!.Position, t0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.False(p2.Engine.BurstWindowOpen);
     }
 
@@ -1241,7 +1276,7 @@ public sealed class BossEncounterEngineTests
         h.BeginAndSpawnBoss(duo: true);
         var t0 = h.CrumbleIntoP3(atTick: 200);
         // Break the ward, then kill the boss WHILE the burst window is open (the intended kill path).
-        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1);
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1, PairTier.Perfect, BossEncounterEngine.MinPairSeparationUnits);
         Assert.True(h.Engine.BurstWindowOpen);
         Assert.True(h.World.Remove(h.Engine.BossId, out _));
         h.Engine.Step(t0 + 2);

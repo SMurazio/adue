@@ -126,15 +126,19 @@ public sealed class MidpointDetonationEngineTests
     // BOSS-4 REVIEW (LOW-2): the onBlast report is the ONLY way the Sunderer's Core ward is broken — if a refactor
     // ever reported from the duo branch only, the SOLO fight would become an unkillable boss with no red test. Pin
     // that ResolveBlast reports the blast CENTRE + tick from BOTH resolve paths, exactly once per blast.
+    // DUO-GRILL (S-duo-grill-ward-break-separation): also pins the TIER + PAIR SEPARATION each path reports — the
+    // duo path reports the confirmed tier (never None) and the initiator↔confirmer distance at the final midpoint;
+    // the solo degradation path reports PairTier.None (no confirmer exists) so a duo-mode listener can tell the two
+    // paths apart and refuse to treat a solo self-blast as a paired one.
     [Fact]
     public void BlastReport_FiresOncePerBlast_ForDuoAndSoloPaths_AtTheBlastCentre()
     {
-        // ---- DUO: initiate + confirm + charge to resolution -> reports the final midpoint. ----
+        // ---- DUO: initiate + confirm + charge to resolution -> reports the final midpoint + tier + separation. ----
         var duoWorld = new WorldState();
         var a = duoWorld.AddTransient(1, EntityKind.Player, "A", new TileCoord(10, 10), Direction8.S);
         var b = duoWorld.AddTransient(2, EntityKind.Player, "B", new TileCoord(14, 10), Direction8.S);
-        var duoBlasts = new List<(WorldVector Center, uint Tick)>();
-        var duoEngine = CreateEngineWithBlastReport(duoWorld, (c, t) => duoBlasts.Add((c, t)));
+        var duoBlasts = new List<(WorldVector Center, uint Tick, PairTier Tier, double Separation)>();
+        var duoEngine = CreateEngineWithBlastReport(duoWorld, (c, t, tier, sep) => duoBlasts.Add((c, t, tier, sep)));
 
         duoEngine.PressDetonate(a, b, 0);
         duoEngine.PressDetonate(b, a, 2); // Perfect confirm; charge ends at tick 18.
@@ -147,12 +151,14 @@ public sealed class MidpointDetonationEngineTests
         var expectedMid = (a.Position + b.Position) * 0.5d;
         Assert.Equal(expectedMid.X, duoBlast.Center.X, 6);
         Assert.Equal(expectedMid.Y, duoBlast.Center.Y, 6);
+        Assert.Equal(PairTier.Perfect, duoBlast.Tier);
+        Assert.Equal((a.Position - b.Position).Length, duoBlast.Separation, 6); // A/B never moved -> initial spread.
 
-        // ---- SOLO: initiate, never confirm -> the degradation self-blast STILL reports, at the initiator. ----
+        // ---- SOLO: initiate, never confirm -> the degradation self-blast STILL reports, at the initiator, tier=None. ----
         var soloWorld = new WorldState();
         var solo = soloWorld.AddTransient(1, EntityKind.Player, "S", new TileCoord(10, 10), Direction8.S);
-        var soloBlasts = new List<(WorldVector Center, uint Tick)>();
-        var soloEngine = CreateEngineWithBlastReport(soloWorld, (c, t) => soloBlasts.Add((c, t)));
+        var soloBlasts = new List<(WorldVector Center, uint Tick, PairTier Tier, double Separation)>();
+        var soloEngine = CreateEngineWithBlastReport(soloWorld, (c, t, tier, sep) => soloBlasts.Add((c, t, tier, sep)));
 
         soloEngine.PressDetonate(solo, partner: null, serverTick: 0);
         for (uint tick = 0; tick <= MidpointDetonationEngine.ConfirmWindowTicks; tick++)
@@ -163,6 +169,7 @@ public sealed class MidpointDetonationEngineTests
         var soloBlast = Assert.Single(soloBlasts);
         Assert.Equal(solo.Position.X, soloBlast.Center.X, 6);
         Assert.Equal(solo.Position.Y, soloBlast.Center.Y, 6);
+        Assert.Equal(PairTier.None, soloBlast.Tier); // no confirmer -> never a paired tier.
     }
 
     private static MidpointDetonationEngine CreateEngineWithBlastReport(
@@ -175,6 +182,35 @@ public sealed class MidpointDetonationEngineTests
             (_, _) => { },
             (_, _, _, _, _, _, _, _) => { },
             onBlast);
+
+    // DUO-GRILL: a stacked pair (both players at the SAME position when the charge resolves — e.g. shoved together by
+    // a knockback pulse) still earns a confirmed tier, but the reported pair separation is ~0. This is the wiring half
+    // of the ward-break-separation fix; BossEncounterEngineTests.WardBreak_DuoMode_RequiresPairedTierAndMinimumSeparation
+    // pins that the boss-side gate then refuses to open on a near-zero separation report.
+    [Fact]
+    public void StackedPair_ReportsNearZeroSeparation_AtResolve()
+    {
+        var world = new WorldState();
+        var a = world.AddTransient(1, EntityKind.Player, "A", new TileCoord(10, 10), Direction8.S);
+        var b = world.AddTransient(2, EntityKind.Player, "B", new TileCoord(14, 10), Direction8.S);
+        var blasts = new List<(WorldVector Center, uint Tick, PairTier Tier, double Separation)>();
+        var engine = CreateEngineWithBlastReport(world, (c, t, tier, sep) => blasts.Add((c, t, tier, sep)));
+
+        engine.PressDetonate(a, b, 0);
+        engine.PressDetonate(b, a, 2); // Perfect confirm; charge ends at tick 18.
+
+        // Stack B onto A BEFORE resolve (the knockback-pulse exploit: both players end up on top of each other).
+        MoveTo(world, b, a.Position);
+
+        for (uint tick = 2; tick <= 18; tick++)
+        {
+            engine.Step(tick);
+        }
+
+        var blast = Assert.Single(blasts);
+        Assert.Equal(PairTier.Perfect, blast.Tier);   // the confirm timing still earned a duo tier...
+        Assert.Equal(0d, blast.Separation, 6);         // ...but the reported separation is zero — the stack is caught.
+    }
 
     [Fact]
     public void SlowZone_LingersAndSlowsMonstersInside_ThenExpires()

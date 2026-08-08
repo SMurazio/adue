@@ -57,7 +57,11 @@ public sealed class MidpointDetonationEngine
     // detonation with no encounter listening simply reports into the void. EVERY resolved blast reports (duo charge
     // AND the solo self-blast); the listener filters by phase + distance-to-boss (a blast off-encounter or outside P3
     // is ignored — the fusion-ignored precedent), so this engine stays encounter-agnostic behind the delegate.
-    public delegate void BlastReportDelegate(WorldVector center, uint serverTick);
+    // DUO-GRILL (S-duo-grill-ward-break-separation): also carries `tier` (None for the degraded solo self-blast, Good/
+    // Perfect for a confirmed charge — never None off the charging path) and `pairSeparationUnits` (the initiator↔
+    // confirmer distance AT RESOLVE; 0 and meaningless for a solo blast, which has no confirmer) so a duo-mode listener
+    // can require an actual paired, spread-out blast rather than a stacked pair or a lone V-press.
+    public delegate void BlastReportDelegate(WorldVector center, uint serverTick, PairTier tier, double pairSeparationUnits);
 
     private enum Phase { Pending, Charging }
 
@@ -103,7 +107,7 @@ public sealed class MidpointDetonationEngine
         _echoCue = echoCue ?? throw new ArgumentNullException(nameof(echoCue));
         _chargeUpdate = chargeUpdate ?? throw new ArgumentNullException(nameof(chargeUpdate));
         // BOSS-4 (P3): optional — a no-op when no encounter is listening (every non-boss detonation).
-        _onBlast = onBlast ?? ((_, _) => { });
+        _onBlast = onBlast ?? ((_, _, _, _) => { });
     }
 
     public int PendingCount => _detonations.Count;
@@ -181,8 +185,9 @@ public sealed class MidpointDetonationEngine
             {
                 if (serverTick - op.InitiateTick >= ConfirmWindowTicks)
                 {
-                    // DEGRADATION: no confirm in the window — a small blast centred on the initiator.
-                    ResolveBlast(op.Initiator.Position, SoloRadiusUnits, SoloDamage, op.Initiator, serverTick);
+                    // DEGRADATION: no confirm in the window — a small blast centred on the initiator. No confirmer, so
+                    // tier=None + separation=0 — the duo-mode ward-break gate reads tier=None as "not a paired blast".
+                    ResolveBlast(op.Initiator.Position, SoloRadiusUnits, SoloDamage, op.Initiator, serverTick, PairTier.None, 0d);
                     _detonations.RemoveAt(index);
                 }
 
@@ -195,7 +200,10 @@ public sealed class MidpointDetonationEngine
             if (serverTick >= op.ChargeEndTick)
             {
                 _chargeUpdate(op.Initiator, op.Confirmer, op.Id, midpoint, radius, op.ConfirmTick, op.ChargeEndTick, false);
-                ResolveBlast(midpoint, radius, damage, op.Initiator, serverTick);
+                // DUO-GRILL: pair separation is read AT RESOLVE (final positions), not lock-in — a stacked pair whose
+                // midpoint barely moved under a knockback pulse reports a small separation and fails the duo gate.
+                var separation = (op.Initiator.Position - op.Confirmer.Position).Length;
+                ResolveBlast(midpoint, radius, damage, op.Initiator, serverTick, op.Tier, separation);
                 _detonations.RemoveAt(index);
             }
             else
@@ -208,8 +216,11 @@ public sealed class MidpointDetonationEngine
     }
 
     // Resolve a blast: damage every attackable monster whose CENTRE is inside the circle (the telegraph center-point
-    // rule), and leave a lingering slow zone at the same centre.
-    private void ResolveBlast(WorldVector center, double radiusUnits, int damage, WorldEntity attributedTo, uint serverTick)
+    // rule), and leave a lingering slow zone at the same centre. `tier` + `pairSeparationUnits` ride through to the
+    // BOSS-4 blast report untouched (this engine doesn't interpret them — see BlastReportDelegate).
+    private void ResolveBlast(
+        WorldVector center, double radiusUnits, int damage, WorldEntity attributedTo, uint serverTick,
+        PairTier tier, double pairSeparationUnits)
     {
         var shape = TelegraphShape.Circle(center, radiusUnits);
         var gatherRadius = System.Math.Max(1, (int)System.Math.Ceiling(shape.BoundingRadius) + 1);
@@ -234,7 +245,7 @@ public sealed class MidpointDetonationEngine
         // BOSS-4 (P3 CORE): report the resolved blast's final CENTER to the encounter listener AFTER the damage loop —
         // so the ward-break blast's own hit on the boss is still zeroed by the ward (the window this may open takes
         // effect next tick), keeping the detonation a KEY (opens the burst), not the DPS. A no-op off-encounter.
-        _onBlast(center, serverTick);
+        _onBlast(center, serverTick, tier, pairSeparationUnits);
     }
 
     // Each lingering slow zone: while alive, slow every attackable monster whose centre is inside it (re-arming the

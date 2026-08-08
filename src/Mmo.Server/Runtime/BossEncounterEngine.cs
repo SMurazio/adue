@@ -218,6 +218,13 @@ public sealed class BossEncounterEngine
     // Duo 2.5u; solo 3.5u (receiver-forgives generosity, Law 3). The mode is fixed at spawn (_participantsAtSpawn).
     public const double WardBreakRadiusDuoUnits = 2.5d;
     public const double WardBreakRadiusSoloUnits = 3.5d;
+    // DUO-GRILL (S-duo-grill-ward-break-separation, Fable design-grill CRITICAL-1): in DUO MODE ONLY, the ward break
+    // additionally requires a confirmed duo-tier blast (Good/Perfect — PairTier.None, the degraded solo self-blast,
+    // no longer qualifies) AND the pair at least this far apart at resolve, so a stacked pair (whose midpoint barely
+    // moves under a knockback pulse) can't cheese the gate — the phase's contest ("aim the midpoint through the
+    // shoves") has to actually be played. Solo/degraded runs (< 2 participants at spawn) are unaffected — any
+    // resolved blast within radius still breaks the ward (degradation-everywhere discipline).
+    public const double MinPairSeparationUnits = 4d;
     private const double BurstWindowSeconds = 8d;
 
     // ROTATING SWEEP BEAM (line telegraphs — the honest-telegraph form of a rotating beam). The first beam BeamFirstDelay
@@ -1236,11 +1243,13 @@ public sealed class BossEncounterEngine
         _nextTrickleTick = serverTick + _enrageTrickleIntervalTicks;
     }
 
-    // BOSS-4 (P3 Ward break): MidpointDetonationEngine reports EVERY resolved blast here (center + tick). A blast whose
-    // center lands within WardBreakRadius of the boss BREAKS the ward → an 8 s burst window (full damage). IGNORED
-    // unless P3 is live (a blast during P1/P2/idle is a no-op — the fusion-ignored precedent) or while a window is
-    // already open (no re-open/extend — one detonation, one window). The radius is the fixed duo/solo mode.
-    public void OnMidpointBlast(WorldVector center, uint serverTick)
+    // BOSS-4 (P3 Ward break): MidpointDetonationEngine reports EVERY resolved blast here (center + tick + tier + pair
+    // separation). A blast whose center lands within WardBreakRadius of the boss BREAKS the ward → an 8 s burst window
+    // (full damage). IGNORED unless P3 is live (a blast during P1/P2/idle is a no-op — the fusion-ignored precedent)
+    // or while a window is already open (no re-open/extend — one detonation, one window). The radius is the fixed
+    // duo/solo mode. DUO-GRILL: in duo mode the blast must ALSO be a confirmed duo-tier blast (not the solo self-
+    // blast) with the pair spread >= MinPairSeparationUnits at resolve — see the constant's comment.
+    public void OnMidpointBlast(WorldVector center, uint serverTick, PairTier tier, double pairSeparationUnits)
     {
         if (_state != EncounterState.Active || !_bossSpawned || !_p3Active || _burstWindowOpen)
         {
@@ -1248,6 +1257,11 @@ public sealed class BossEncounterEngine
         }
 
         if (_tryResolve(_bossId) is not { } boss)
+        {
+            return;
+        }
+
+        if (_participantsAtSpawn >= 2 && (tier == PairTier.None || pairSeparationUnits < MinPairSeparationUnits))
         {
             return;
         }

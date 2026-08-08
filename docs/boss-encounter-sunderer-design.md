@@ -90,6 +90,11 @@ detonation does not shatter P1 plating — the phases keep their verbs distinct.
 - Boss roots at center, gains **Core Ward**: immune to ALL damage except during a **burst window**.
 - **Ward break**: a midpoint detonation whose blast center lands within **2.5u** of the boss center
   (3.5u solo — receiver-forgives generosity) breaks the ward: **8s burst window**, then it reforms.
+  **Duo mode additionally requires** (Fable design-grill CRITICAL-1, S-duo-grill-ward-break-separation):
+  a confirmed **Good/Perfect** blast — the degraded solo self-blast no longer qualifies — AND the pair
+  **>= 4u apart** at resolve, so a stacked pair (midpoint barely moved by a knockback pulse) or a lone
+  V-press can't cheese the gate. Solo mode is unaffected — any resolved blast within radius still
+  breaks the ward (degradation-everywhere, Law 2).
 - During the phase: a **rotating sweep beam** (line telegraph, full arena radius, ~25 damage, slow
   rotation — walk with it), plus **knockback pulses** every ~10s (radial 3u shove, no damage): the
   S3 contest — the midpoint is aimed with both players' feet while the floor shoves them. Aim the
