@@ -31,8 +31,12 @@ repo **without discarding the multiplayer work in this one**.
 - Duo repo bootstrap: its own `CLAUDE.md`/`.shared/project.md` (same loop contract, duo-game
   identity), fresh `todo/` seeded from the phases below, fresh memory index.
 
-**User decisions needed:** repo name + location (e.g. `D:\Duo`), private GitHub remote y/n,
-fork before vs after the three S- fixes (recommended: after).
+**User decisions (RESOLVED 2026-08-08):** name **Adue** (title "Adue", logo mark "a2" — the
+score notation for two divided instruments rejoining on a single line), slug/location
+`D:\Adue`, private GitHub repo `SMurazio/adue`, fork AFTER the grill fixes. The fix-then-fork
+set grew to five commits during review: the three grill fixes (c2c03dd ward-break, 6937739
+echo-cue, d1fb411 fusion) + two review-driven: 9ff54ad partner-loss downgrade, 5131d78
+Solo-tier 3s shatter window. Fork point = branch tip once the final review verdict is clean.
 
 ## What carries vs what parks (per the design review, ~60% survives)
 
