@@ -1111,6 +1111,79 @@ public sealed class BossEncounterEngineTests
         Assert.True(separated.Engine.BurstWindowOpen);
     }
 
+    // S-boss-p3-partner-loss-dead-run: c2c03dd's DUO-GRILL gate rejects the solo self-blast (PairTier.None) in duo
+    // mode FOREVER — including for a survivor whose partner disconnected mid-P3, since the survivor can only ever
+    // produce that solo self-blast alone. Fix: the gate now recomputes duo-vs-solo from the LIVE participant count
+    // (not the spawn-fixed one) on every blast, so a run that drops to one live participant falls back to solo ward
+    // rules (no tier/separation requirement, the wider 3.5u radius) — never a permanently-unreachable duo gate.
+    [Fact]
+    public void WardBreak_PartnerDisconnected_DowngradesToSoloRules_AndAnnouncesOnce()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var partner = players[1];
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // Partner disconnects: GameServer's OnPeerDisconnected runs BreakPair then Zone.Despawn — the entity is
+        // fully gone, exactly like this direct World.Remove.
+        Assert.True(h.World.Remove(partner.Id, out _));
+
+        // Step once so StepP3 observes the downgrade this tick and fires the one-shot legibility chat — independent
+        // of whether/when a blast is ever attempted.
+        h.Engine.Step(t0 + 1);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("bond is broken"));
+        var announceCountAfterFirstStep = h.Announcements.Count(a => a.Text.Contains("bond is broken"));
+
+        // Stepping further does not repeat the announce (one-shot latch).
+        h.Engine.Step(t0 + 2);
+        Assert.Equal(announceCountAfterFirstStep, h.Announcements.Count(a => a.Text.Contains("bond is broken")));
+
+        // The survivor's solo self-blast (PairTier.None, zero separation — the exact report shape that was REJECTED
+        // forever pre-fix) now breaks the ward under solo rules: no tier/separation gate, and the wider 3.5u radius
+        // (would have been rejected at 3.4u under the 2.5u duo radius too).
+        h.Engine.OnMidpointBlast(h.Boss!.Position + new WorldVector(3.4d, 0d), t0 + 3, PairTier.None, pairSeparationUnits: 0d);
+        Assert.True(h.Engine.BurstWindowOpen);
+    }
+
+    [Fact]
+    public void WardBreak_PartnerDied_DowngradesToSoloRules_SameAsDisconnect()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var partner = players[1];
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // Partner dies: NOT despawned (no BreakPair for death) — kept in `_participants` as a Health<=0 corpse in
+        // the arena until the town respawn. Still resolvable, just dead — the disconnect case's mirror image.
+        Assert.True(partner.ApplyDamage(partner.Stats.Health));
+        Assert.Equal(0, partner.Stats.Health);
+
+        h.Engine.Step(t0 + 1);
+        // Not a wipe: the issuer is still alive-in-arena (only ALL participants dead triggers the wipe reset).
+        Assert.Equal(EncounterState.Active, h.Engine.State);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("bond is broken"));
+
+        h.Engine.OnMidpointBlast(h.Boss!.Position + new WorldVector(3.4d, 0d), t0 + 2, PairTier.None, pairSeparationUnits: 0d);
+        Assert.True(h.Engine.BurstWindowOpen);
+    }
+
+    // A LIVE duo (both participants alive, spawned duo) is UNAFFECTED — the existing DUO-GRILL exploit gate
+    // (WardBreak_DuoMode_RequiresPairedTierAndMinimumSeparation) still rejects a stacked pair / a lapsed solo self-
+    // blast when BOTH participants are live; this just re-confirms the live-count recompute doesn't loosen anything
+    // while the partner is present.
+    [Fact]
+    public void WardBreak_BothPartnersLive_DuoGateStillApplies()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+
+        // The solo self-blast shape, with both partners still alive → still rejected (the exploit the DUO-GRILL
+        // gate exists to close).
+        h.Engine.OnMidpointBlast(h.Boss!.Position, t0 + 1, PairTier.None, pairSeparationUnits: 99d);
+        Assert.False(h.Engine.BurstWindowOpen);
+    }
+
     [Fact]
     public void WardBreak_BroadcastsPlating_OnBurstAndReform()
     {

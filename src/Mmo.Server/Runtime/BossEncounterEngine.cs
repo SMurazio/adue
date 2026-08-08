@@ -215,15 +215,18 @@ public sealed class BossEncounterEngine
     // the detonation — the S3 contest).
 
     // CORE WARD break (design "Ward break"): a midpoint blast centre within this radius of the boss breaks the ward.
-    // Duo 2.5u; solo 3.5u (receiver-forgives generosity, Law 3). The mode is fixed at spawn (_participantsAtSpawn).
+    // Duo 2.5u; solo 3.5u (receiver-forgives generosity, Law 3). "Duo mode" here is the LIVE mode (S-boss-p3-partner-
+    // loss-dead-run: `_participantsAtSpawn` AND the currently-live participant count both >= 2 — see OnMidpointBlast)
+    // so a run that started duo but has since lost its partner (disconnect/death) falls back to the solo radius +
+    // gate, not a permanently-unreachable duo one.
     public const double WardBreakRadiusDuoUnits = 2.5d;
     public const double WardBreakRadiusSoloUnits = 3.5d;
     // DUO-GRILL (S-duo-grill-ward-break-separation, Fable design-grill CRITICAL-1): in DUO MODE ONLY, the ward break
     // additionally requires a confirmed duo-tier blast (Good/Perfect — PairTier.None, the degraded solo self-blast,
     // no longer qualifies) AND the pair at least this far apart at resolve, so a stacked pair (whose midpoint barely
     // moves under a knockback pulse) can't cheese the gate — the phase's contest ("aim the midpoint through the
-    // shoves") has to actually be played. Solo/degraded runs (< 2 participants at spawn) are unaffected — any
-    // resolved blast within radius still breaks the ward (degradation-everywhere discipline).
+    // shoves") has to actually be played. Solo/degraded runs (< 2 LIVE participants) are unaffected — any resolved
+    // blast within radius still breaks the ward (degradation-everywhere discipline).
     public const double MinPairSeparationUnits = 4d;
     private const double BurstWindowSeconds = 8d;
 
@@ -342,9 +345,12 @@ public sealed class BossEncounterEngine
     private uint _victoryEjectDeadlineTick;
 
     // BOSS-2 (P1) plating/window state. `_participantsAtSpawn` fixes the duo/solo mode for the whole run (Law-2 solo
-    // degradation reads it, not the live count). `_platingPermanentlyOff` latches once HP first crosses <=70% (the
-    // plating never comes back this run). `_windowOpen`/`_windowEndTick` are the live vulnerability window (full
-    // damage). `_platingTauntSaid` is the one-shot "your blows turn" chat latch. `_soloHitTicks` are the recent
+    // degradation reads it, not the live count) — EXCEPT the P3 ward-break gate (OnMidpointBlast), which additionally
+    // requires the LIVE count still be >= 2 (S-boss-p3-partner-loss-dead-run: a duo run down to one live participant
+    // must not be stuck gated on duo-only ward rules it can never again produce). `_platingPermanentlyOff` latches
+    // once HP first crosses <=70% (the plating never comes back this run). `_windowOpen`/`_windowEndTick` are the
+    // live vulnerability window (full damage). `_platingTauntSaid` is the one-shot "your blows turn" chat latch.
+    // `_soloHitTicks` are the recent
     // skillshot-hit ticks on the boss for the solo 3-in-6 s shatter (pruned to the window each hit).
     private int _participantsAtSpawn;
     private bool _platingPermanentlyOff;
@@ -399,6 +405,12 @@ public sealed class BossEncounterEngine
     private bool _enraged;
     private uint _nextTrickleTick;
     private double _trickleAngle;
+
+    // S-boss-p3-partner-loss-dead-run: one-shot latch for the "duo run down to one live participant" announce (fired
+    // once per encounter run, the first StepP3 tick that observes it — see StepP3). Does NOT gate the ward mechanic
+    // itself (OnMidpointBlast recomputes the live count fresh on every blast, so the gate downgrades — and RESTORES,
+    // if the partner returns — for free); this only stops the chat line from repeating every subsequent tick/flap.
+    private bool _duoDowngradeAnnounced;
 
     public BossEncounterEngine(
         int tickRate,
@@ -667,6 +679,7 @@ public sealed class BossEncounterEngine
         _enraged = false;
         _beamBearing = 0d;
         _trickleAngle = 0d;
+        _duoDowngradeAnnounced = false;
 
         _broadcastPlating(_bossId, true);
         AnnounceAll("THE SUNDERER awakens. Break its bond-hunger together!");
@@ -1155,6 +1168,16 @@ public sealed class BossEncounterEngine
     // residues by construction (see the stagger note), so no two ever land on the same tick at the base cadence.
     private void StepP3(uint serverTick, WorldEntity boss)
     {
+        // (0) S-boss-p3-partner-loss-dead-run: the duo run has dropped to one live participant (partner disconnected
+        // — pruned out of `_participants` — or died — kept as a corpse). One-shot legibility chat; the ward gate
+        // itself (OnMidpointBlast) already recomputes the live count on every blast independently of this latch, so
+        // the mechanic degrades (and silently restores if the partner returns) whether or not this has fired yet.
+        if (!_duoDowngradeAnnounced && _participantsAtSpawn >= 2 && CountLivingParticipants() < 2)
+        {
+            _duoDowngradeAnnounced = true;
+            AnnounceAll("Your bond is broken — the ward yields to a lone strike.");
+        }
+
         // (1) Burst-window expiry → the ward REFORMS (broadcast steel tint back on + chat). The victory branch fires
         // FIRST in StepActive, so a boss killed during the window never reaches here.
         if (_burstWindowOpen && serverTick >= _burstWindowEndTick)
@@ -1246,9 +1269,18 @@ public sealed class BossEncounterEngine
     // BOSS-4 (P3 Ward break): MidpointDetonationEngine reports EVERY resolved blast here (center + tick + tier + pair
     // separation). A blast whose center lands within WardBreakRadius of the boss BREAKS the ward → an 8 s burst window
     // (full damage). IGNORED unless P3 is live (a blast during P1/P2/idle is a no-op — the fusion-ignored precedent)
-    // or while a window is already open (no re-open/extend — one detonation, one window). The radius is the fixed
-    // duo/solo mode. DUO-GRILL: in duo mode the blast must ALSO be a confirmed duo-tier blast (not the solo self-
-    // blast) with the pair spread >= MinPairSeparationUnits at resolve — see the constant's comment.
+    // or while a window is already open (no re-open/extend — one detonation, one window). DUO-GRILL: in duo mode the
+    // blast must ALSO be a confirmed duo-tier blast (not the solo self-blast) with the pair spread >=
+    // MinPairSeparationUnits at resolve — see the constant's comment.
+    //
+    // S-boss-p3-partner-loss-dead-run: "duo mode" here is NOT the spawn-fixed `_participantsAtSpawn` alone — it is
+    // recomputed fresh on every call as `effectivelyDuo` below (spawned duo AND the LIVE count still >= 2). A duo
+    // run whose partner has disconnected (BreakPair despawns their entity — PruneDepartedParticipants then drops them from
+    // `_participants` within a tick) or died (kept in `_participants` as a corpse — Stats.Health <= 0 — until their
+    // town respawn) reads as 1 live participant, so the gate + radius silently degrade to solo rules — no dead run.
+    // If the partner reconnects/respawns and returns to the fight, the SAME recompute restores duo rules for free
+    // (no extra state to track/reset). `_participantsAtSpawn` itself still gates boss HP / P1 damage-reduction /
+    // splinter-count etc. unchanged (those are legitimately spawn-fixed, not this ward gate).
     public void OnMidpointBlast(WorldVector center, uint serverTick, PairTier tier, double pairSeparationUnits)
     {
         if (_state != EncounterState.Active || !_bossSpawned || !_p3Active || _burstWindowOpen)
@@ -1261,12 +1293,13 @@ public sealed class BossEncounterEngine
             return;
         }
 
-        if (_participantsAtSpawn >= 2 && (tier == PairTier.None || pairSeparationUnits < MinPairSeparationUnits))
+        var effectivelyDuo = _participantsAtSpawn >= 2 && CountLivingParticipants() >= 2;
+        if (effectivelyDuo && (tier == PairTier.None || pairSeparationUnits < MinPairSeparationUnits))
         {
             return;
         }
 
-        var radius = _participantsAtSpawn >= 2 ? WardBreakRadiusDuoUnits : WardBreakRadiusSoloUnits;
+        var radius = effectivelyDuo ? WardBreakRadiusDuoUnits : WardBreakRadiusSoloUnits;
         if ((center - boss.Position).Length > radius)
         {
             return;
@@ -1505,6 +1538,24 @@ public sealed class BossEncounterEngine
         }
 
         return living;
+    }
+
+    // Alloc-free count of currently-living (Health > 0) tracked participants — the S-boss-p3-partner-loss-dead-run
+    // primitive OnMidpointBlast + StepP3 use to detect a duo run down to one live participant (disconnect prunes the
+    // partner out of `_participants` entirely; death keeps them as a Health<=0 corpse until town respawn — either way
+    // they stop counting here).
+    private int CountLivingParticipants()
+    {
+        var count = 0;
+        foreach (var p in _participants)
+        {
+            if (_tryResolve(p.EntityId) is { Stats.Health: > 0 })
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     // The nearest living participant to `from`, and its distance (double.MaxValue when none). Alloc-free (iterates the
