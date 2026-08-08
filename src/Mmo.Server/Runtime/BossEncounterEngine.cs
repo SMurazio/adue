@@ -857,6 +857,14 @@ public sealed class BossEncounterEngine
     // below 70%, OnFusion is a no-op — see OpenWindow).
     public void OnFusion(ProjectileTier tier, uint serverTick)
     {
+        if (tier != ProjectileTier.Perfect && tier != ProjectileTier.Good && _windowOpen)
+        {
+            // A Solo-tier merge never EXTENDS an open window — OpenWindow max-extends, so without this guard a
+            // point-blank Q-mash at merge cadence (~0.6s) would chain Solo merges into 100% window uptime,
+            // restoring the Good-parity the 3s Solo window exists to remove. Earned tiers still extend.
+            return;
+        }
+
         var windowTicks = tier switch
         {
             ProjectileTier.Perfect => _fusionPerfectWindowTicks,
@@ -1290,8 +1298,10 @@ public sealed class BossEncounterEngine
     // run whose partner has disconnected (BreakPair despawns their entity — PruneDepartedParticipants then drops them from
     // `_participants` within a tick) or died (kept in `_participants` as a corpse — Stats.Health <= 0 — until their
     // town respawn) reads as 1 live participant, so the gate + radius silently degrade to solo rules — no dead run.
-    // If the partner reconnects/respawns and returns to the fight, the SAME recompute restores duo rules for free
-    // (no extra state to track/reset). `_participantsAtSpawn` itself still gates boss HP / P1 damage-reduction /
+    // NOTE (review of 9ff54ad): the recompute is oscillation-proof by shape, but a RESTORE never actually happens —
+    // the arena is a sealed teleport-in pocket with no mid-encounter re-entry, so a lost partner cannot return; the
+    // recompute's real job is classifying the loss modes uniformly. `_participantsAtSpawn` itself still gates boss
+    // HP / P1 damage-reduction /
     // splinter-count etc. unchanged (those are legitimately spawn-fixed, not this ward gate).
     public void OnMidpointBlast(WorldVector center, uint serverTick, PairTier tier, double pairSeparationUnits)
     {

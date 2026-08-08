@@ -859,6 +859,31 @@ public sealed class BossEncounterEngineTests
     }
 
     [Fact]
+    public void SoloFusion_NeverExtendsAnOpenWindow_ButEarnedTiersDo()
+    {
+        // Point-blank Q-mash chains Solo merges every ~0.6s; without the OnFusion guard each one would max-extend
+        // the open window into 100% uptime (review LOW-3 on 5131d78). A mashed Solo merge mid-window must be inert.
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        h.Engine.OnFusion(ProjectileTier.Solo, 61); // window: closes at 121.
+        h.StepThrough(62, 100);
+        h.Engine.OnFusion(ProjectileTier.Solo, 100); // mash mid-window — must NOT extend to 160.
+        h.StepThrough(101, 120);
+        Assert.True(h.Engine.WindowOpen);
+        h.Engine.Step(121);
+        Assert.False(h.Engine.WindowOpen); // still the original close tick.
+
+        // An EARNED tier mid-window still extends (existing OpenWindow max semantics).
+        h.Engine.OnFusion(ProjectileTier.Solo, 130); // closed again -> Solo may OPEN a fresh 3s window...
+        Assert.True(h.Engine.WindowOpen);
+        h.Engine.OnFusion(ProjectileTier.Good, 140); // ...and Good extends it to 140 + 120 = 260.
+        h.StepThrough(141, 259);
+        Assert.True(h.Engine.WindowOpen);
+        h.Engine.Step(260);
+        Assert.False(h.Engine.WindowOpen);
+    }
+
+    [Fact]
     public void SoloShatter_ThreeHitsWithinSixSeconds_Shatters()
     {
         var h = new Harness();
