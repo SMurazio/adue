@@ -131,11 +131,15 @@ public sealed class BossEncounterEngine
     public const double SoloDamageReduction = 0.40d;
 
     // BOSS-2 (P1): a fused skillshot (SkillshotEngine's merge) SHATTERS the plating — a full-damage vulnerability
-    // window whose length is driven by the fusion tier (Law 8, tiered timing): Good = 6 s, Perfect = 9 s. Solo
-    // fallback (Law 2): SoloShatterHitCount skillshot HITS on the boss within SoloShatterWindowSeconds shatter it for
-    // the Good (6 s) window — no fusion is possible solo, so it degrades to a hit-count gate, never nullifies.
+    // window whose length is driven by the fusion tier (Law 8, tiered timing): Good = 6 s, Perfect = 9 s. A
+    // Solo-TIER merge (d1fb411: point-blank cross degraded below the 2u earned-flight bar) still shatters (the
+    // degraded path stays reachable) but only for the short Solo window — point-blank Q-mashing must not work the
+    // gate at Good parity (fusion-review MODERATE). Distinct from the solo-RUN fallback (Law 2): SoloShatterHitCount
+    // skillshot HITS on the boss within SoloShatterWindowSeconds shatter it for the Good (6 s) window — no fusion is
+    // possible with no partner, so that path degrades to a hit-count gate at full reward, never nullifies.
     private const double FusionGoodWindowSeconds = 6d;
     private const double FusionPerfectWindowSeconds = 9d;
+    private const double FusionSoloWindowSeconds = 3d;
     private const int SoloShatterHitCount = 3;
     private const double SoloShatterWindowSeconds = 6d;
 
@@ -303,6 +307,7 @@ public sealed class BossEncounterEngine
     private readonly uint _victoryEjectTicks;
     private readonly uint _fusionGoodWindowTicks;
     private readonly uint _fusionPerfectWindowTicks;
+    private readonly uint _fusionSoloWindowTicks;
     private readonly uint _soloShatterWindowTicks;
     private readonly uint _droneFirstSpawnTicks;
     private readonly uint _droneRespawnTicks;
@@ -451,6 +456,7 @@ public sealed class BossEncounterEngine
         _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
         _fusionGoodWindowTicks = SecondsToTicks(FusionGoodWindowSeconds);
         _fusionPerfectWindowTicks = SecondsToTicks(FusionPerfectWindowSeconds);
+        _fusionSoloWindowTicks = SecondsToTicks(FusionSoloWindowSeconds);
         _soloShatterWindowTicks = SecondsToTicks(SoloShatterWindowSeconds);
         _droneFirstSpawnTicks = SecondsToTicks(DroneFirstSpawnSeconds);
         _droneRespawnTicks = SecondsToTicks(DroneRespawnSeconds);
@@ -844,13 +850,19 @@ public sealed class BossEncounterEngine
         return Math.Max(0, reduced);
     }
 
-    // SkillshotEngine reports a FUSION (its Good/Perfect merge classification) here. A fused skillshot of ANY tier
-    // SHATTERS the plating (Law 3, receiver-forgives: the fusion event itself shatters — it need not hit the boss),
-    // opening a full-damage window whose length is the tier (Law 8): Perfect = 9 s, Good = 6 s. Ignored unless the
-    // plating is live (during countdown/idle, or below 70%, OnFusion is a no-op — see OpenWindow).
+    // SkillshotEngine reports a FUSION (its merge classification) here. A fused skillshot of ANY tier SHATTERS the
+    // plating (Law 3, receiver-forgives: the fusion event itself shatters — it need not hit the boss), opening a
+    // full-damage window whose length is the tier (Law 8): Perfect = 9 s, Good = 6 s, Solo (a point-blank merge
+    // degraded below the earned-flight bar) = 3 s. Ignored unless the plating is live (during countdown/idle, or
+    // below 70%, OnFusion is a no-op — see OpenWindow).
     public void OnFusion(ProjectileTier tier, uint serverTick)
     {
-        var windowTicks = tier == ProjectileTier.Perfect ? _fusionPerfectWindowTicks : _fusionGoodWindowTicks;
+        var windowTicks = tier switch
+        {
+            ProjectileTier.Perfect => _fusionPerfectWindowTicks,
+            ProjectileTier.Good => _fusionGoodWindowTicks,
+            _ => _fusionSoloWindowTicks,
+        };
         OpenWindow(serverTick, windowTicks);
     }
 

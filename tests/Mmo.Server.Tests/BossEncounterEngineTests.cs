@@ -845,6 +845,17 @@ public sealed class BossEncounterEngineTests
         Assert.True(perfect.Engine.WindowOpen); // 9 s = 180 ticks: open through 240.
         perfect.Engine.Step(241);
         Assert.False(perfect.Engine.WindowOpen);
+
+        // A Solo-TIER merge (point-blank cross degraded below the earned-flight bar, d1fb411) still shatters —
+        // the degraded path stays reachable — but only for 3 s, NOT the Good 6 s (point-blank Q-mash must not
+        // work the gate at Good parity). Distinct from the solo-RUN hit-count fallback, which keeps Good.
+        var solo = new Harness();
+        solo.BeginAndSpawnBoss(duo: true);
+        solo.Engine.OnFusion(ProjectileTier.Solo, 61);
+        solo.StepThrough(62, 120);
+        Assert.True(solo.Engine.WindowOpen); // 3 s = 60 ticks: still open at 120, closes exactly at 121 (61 + 60).
+        solo.Engine.Step(121);
+        Assert.False(solo.Engine.WindowOpen);
     }
 
     [Fact]
