@@ -145,20 +145,27 @@ public sealed class SkillshotTests
         Assert.DoesNotContain(ProjectileTier.Good, harness.SpawnedTiers);
     }
 
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1): this used to be "PairedCrossingShots_FuseToPerfect_
+    // AndPierceUpToThreeKills" — the SAME geometry (two parallel same-direction shots 0.4u apart, fused on the very
+    // first tick) but that WAS the mastery-inversion exploit: point-blank shooters, zero flight distance for either
+    // shot, yet it classified Perfect. The earned-geometry gate (SkillshotEngine.MinFusionFlightDistanceUnits) now
+    // caps a same-tick, zero-travel merge to Solo/base — acceptance: "adjacent shooters, immediate cross -> no
+    // Perfect (base/no tier)".
     [Fact]
-    public void PairedCrossingShots_FuseToPerfect_AndPierceUpToThreeKills()
+    public void AdjacentShooters_ImmediateCross_MergesAtSoloTier_NotPerfect()
     {
         var world = new WorldState();
         var monsters = new List<WorldEntity>();
         for (var i = 1; i <= 4; i++)
         {
             var m = world.AddTransient((uint)i, EntityKind.Monster, "M", new TileCoord(i, 0), Direction8.S);
-            m.SetMaxHealthFull(20); // Perfect damage 22 kills in one hit
+            m.SetMaxHealthFull(20);
             monsters.Add(m);
         }
 
         var harness = new EngineHarness(world, paired: true);
-        // Two parallel same-direction shots 0.4 apart (< 0.5) -> Perfect fusion at (0,0) heading +X.
+        // Two parallel same-direction shots 0.4 apart (< 0.5 Perfect distance), fired from the same spot -> the
+        // crossing-window test is satisfied on tick 1, before EITHER projectile has traveled anywhere.
         harness.Engine.Fire(10, Guid.NewGuid(), new WorldVector(0, -0.2), new WorldVector(1, 0));
         harness.Engine.Fire(20, Guid.NewGuid(), new WorldVector(0, 0.2), new WorldVector(1, 0));
 
@@ -167,12 +174,41 @@ public sealed class SkillshotTests
             harness.Engine.Step((uint)(i + 1), Dt);
         }
 
-        Assert.Contains(ProjectileTier.Perfect, harness.SpawnedTiers); // fused to Perfect
-        Assert.Equal(0, monsters[0].Stats.Health);                    // killed
-        Assert.Equal(0, monsters[1].Stats.Health);                    // killed
-        Assert.Equal(0, monsters[2].Stats.Health);                    // killed
-        Assert.Equal(20, monsters[3].Stats.Health);                   // 4th survives (pierce cap 3)
-        Assert.Equal(0, harness.Engine.InFlightCount);                // despawned after the cap
+        Assert.DoesNotContain(ProjectileTier.Perfect, harness.SpawnedTiers);
+        Assert.DoesNotContain(ProjectileTier.Good, harness.SpawnedTiers);
+        // BOSS-2 (P1): the fusion REPORT still fires (any tier opens some shatter window) — the corner-case shatter
+        // path stays reachable even though the merge itself is degraded. Acceptance: "P1 shatter still reachable in
+        // the degraded/solo path."
+        Assert.Contains(ProjectileTier.Solo, harness.FusionReports);
+        Assert.Equal(SkillshotEngine.SoloDamage, harness.TotalDamage);           // base damage, no bonus
+        Assert.Equal(20 - SkillshotEngine.SoloDamage, monsters[0].Stats.Health); // hit, not killed
+        Assert.Equal(20, monsters[1].Stats.Health);                              // no pierce -> untouched
+        Assert.Equal(20, monsters[2].Stats.Health);
+        Assert.Equal(20, monsters[3].Stats.Health);
+        Assert.Equal(0, harness.Engine.InFlightCount);                          // despawned after the single hit
+    }
+
+    // DUO-GRILL-FUSION acceptance: "separated shooters, mid-flight cross -> tiers unchanged from today." Fired 8u
+    // apart on either side and closing head-on (0.4u perpendicular offset, same offset the point-blank test above
+    // uses) — the crossing-window test cannot be satisfied until the pair is genuinely converging, by which point
+    // each projectile has already flown well past MinFusionFlightDistanceUnits (2.0u), so the earned-geometry gate
+    // must be a no-op: whatever EvaluateFusion classifies (unmodified by this fix) rides through untouched.
+    [Fact]
+    public void SeparatedShooters_ConvergeMidFlight_TierNotCappedToSolo()
+    {
+        var world = new WorldState(); // no monsters -- this test is about the TIER, not damage/pierce.
+        var harness = new EngineHarness(world, paired: true);
+        harness.Engine.Fire(10, Guid.NewGuid(), new WorldVector(-8, 0d), new WorldVector(1, 0));
+        harness.Engine.Fire(20, Guid.NewGuid(), new WorldVector(8, 0.4d), new WorldVector(-1, 0));
+
+        for (var i = 0; i < 30 && harness.Engine.InFlightCount > 0; i++)
+        {
+            harness.Engine.Step((uint)(i + 1), Dt);
+        }
+
+        Assert.True(
+            harness.SpawnedTiers.Contains(ProjectileTier.Good) || harness.SpawnedTiers.Contains(ProjectileTier.Perfect),
+            $"expected a Good or Perfect fusion (earned geometry should not suppress it); got [{string.Join(",", harness.SpawnedTiers)}]");
     }
 
     // ---- pairing seam (ClientSession) ----
@@ -209,6 +245,37 @@ public sealed class SkillshotTests
         Assert.True(session.TryConsumeFireSequence(3));
     }
 
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1) acceptance: "fire spam capped by cooldown (test the dedup +
+    // cooldown interaction)." Mirrors the ORDER HandleFireSkillshot applies the two gates — dedup
+    // (TryConsumeFireSequence) first, cooldown (TryConsumeFireCooldown) second — so a resent/duplicate sequence can
+    // never re-arm or bypass the cooldown, and a fresh sequence mid-cooldown is dedup-legal but still fire-rejected.
+    [Fact]
+    public void ClientSession_FireCooldown_GatesRepeatsIndependentlyOfDedup()
+    {
+        var session = new ClientSession(null!);
+        const uint cooldownTicks = 12; // ~0.6s at the default 20 Hz tick rate.
+
+        // First press: fresh sequence, cooldown cold -> both gates pass.
+        Assert.True(session.TryConsumeFireSequence(1));
+        Assert.True(session.TryConsumeFireCooldown(0, cooldownTicks));
+
+        // Mash Q again immediately (same tick): dedup passes (fresh sequence), cooldown is still hot -> rejected.
+        Assert.True(session.TryConsumeFireSequence(2));
+        Assert.False(session.TryConsumeFireCooldown(0, cooldownTicks));
+
+        // A RESEND of that same sequence is now rejected purely by dedup, before the cooldown is even consulted —
+        // it can never re-arm or "refresh" the cooldown window.
+        Assert.False(session.TryConsumeFireSequence(2));
+
+        // Still mashing mid-cooldown with fresh sequences: dedup keeps passing, cooldown keeps rejecting.
+        Assert.True(session.TryConsumeFireSequence(3));
+        Assert.False(session.TryConsumeFireCooldown(cooldownTicks - 1, cooldownTicks));
+
+        // Once the cooldown window fully elapses, a fresh sequence fires again.
+        Assert.True(session.TryConsumeFireSequence(4));
+        Assert.True(session.TryConsumeFireCooldown(cooldownTicks, cooldownTicks));
+    }
+
     // A test harness wiring the engine to fakes: monsters come from a WorldState (gather returns the live set), damage
     // applies the real ApplyDamage (returning killed), and spawn/move/despawn are recorded.
     private sealed class EngineHarness
@@ -222,6 +289,11 @@ public sealed class SkillshotTests
         public List<ProjectileTier> SpawnedTiers { get; } = new();
         public List<ulong> Despawned { get; } = new();
 
+        // DUO-GRILL-FUSION: every tier reported through FusionReportDelegate (BOSS-2's plating-shatter seam) — lets a
+        // test assert the report seam still fires (with whatever tier, including a gate-degraded Solo) without
+        // wiring up BossEncounterEngine.
+        public List<ProjectileTier> FusionReports { get; } = new();
+
         public EngineHarness(WorldState world, bool paired)
         {
             _world = world;
@@ -232,7 +304,8 @@ public sealed class SkillshotTests
                 Despawn,
                 Gather,
                 Damage,
-                ArePaired);
+                ArePaired,
+                onFusion: (tier, _) => FusionReports.Add(tier));
         }
 
         private ulong Spawn(WorldVector position, WorldVector velocity, ProjectileTier tier)

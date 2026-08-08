@@ -102,6 +102,12 @@ public sealed class ClientSession
     // cursor only. Reliable-ordered + low-rate, so a strict monotonic `seq > cursor` gate is all the dedup needed.
     private uint _lastFireSeq;
 
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1): the tick of the last ACCEPTED fire — the cooldown gate,
+    // independent of (and checked AFTER) the dedup cursor above. Null before the first accepted fire. The dedup
+    // cursor alone only rejected REPLAYED sequences; a fresh sequence every keypress always passed it, so a client
+    // could mash Q as fast as it could mint sequence numbers. See TryConsumeFireCooldown.
+    private uint? _lastFireTick;
+
     // DUO-WAVE2 (exp/duo-abilities): the DUO-ABILITY-stream dedup cursor (highest accepted DuoAbilityMessage seq). A
     // FIFTH independent stream alongside move/attack/action/fire — shares NOTHING with any of them (the NET6 "one
     // cursor per stream" lesson). The R/G/V co-op triggers all ride this one stream. Reliable-ordered + low-rate, so a
@@ -385,6 +391,24 @@ public sealed class ClientSession
         }
 
         _lastFireSeq = sequence;
+        return true;
+    }
+
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1): the FIRE cooldown gate. Mirrors TryConsumeInteract's shape —
+    // returns true and arms the cooldown iff a fire is allowed at `serverTick`; false while still inside the
+    // cooldown window (`cooldownTicks` since the last ACCEPTED fire), leaving the armed tick untouched. Callers
+    // check TryConsumeFireSequence FIRST (dedup) so a resent/duplicate sequence can never re-arm or bypass this.
+    // `cooldownTicks` is passed in rather than a local const because it is quantised from SkillshotEngine.
+    // FireCooldownSeconds against the LIVE tick rate (GameServer computes it once at construction — TickRate is
+    // configurable, unlike InteractCooldownTicks' fixed flood-guard tick count).
+    public bool TryConsumeFireCooldown(uint serverTick, uint cooldownTicks)
+    {
+        if (_lastFireTick.HasValue && serverTick - _lastFireTick.Value < cooldownTicks)
+        {
+            return false;
+        }
+
+        _lastFireTick = serverTick;
         return true;
     }
 

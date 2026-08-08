@@ -257,6 +257,12 @@ public sealed class GameServer
     // dropped in the despawn seam. A small transient map (projectiles live < ~1.2s), never leaked.
     private readonly Dictionary<ulong, ProjectileTier> _projectileTierOf = new();
 
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1): SkillshotEngine.FireCooldownSeconds tick-quantised off the live
+    // tick rate ONCE at construction (mirrors _regionSpawnPacingTicks below — TickRate is configurable, so this
+    // can't be a compile-time const). HandleFireSkillshot arms/checks it per-session via ClientSession.
+    // TryConsumeFireCooldown.
+    private readonly uint _fireCooldownTicks;
+
     // DUO-WAVE2 (exp/duo-abilities) ability 3 (Laser Tether) + ability 4 (Midpoint Detonation): the two co-op steppers,
     // siblings of _skillshots (Step() each tick in TickCore, before the snapshot). Both close over the SAME spatial
     // gather, the shared monster-damage seam (ApplyDuoMonsterDamage), the shared monster-slow seam (SlowMonster), and —
@@ -510,6 +516,9 @@ public sealed class GameServer
         // shield soaks a hit at the single choke point before ApplyDamage — no player-damage source can bypass it.
         _playerDamage = new PlayerDamageGate(_actionExecutor.HasActiveIFrames, OnPlayerDamageLanded, AbsorbShield);
         _telegraphs = new TelegraphScheduler(_zone.World.GatherInterestCandidates, _playerDamage.TryDamagePlayer);
+        // DUO-GRILL-FUSION: quantised once here (>= 1 tick so a silly TickRate can't produce a zero-tick "no
+        // cooldown" cooldown), the same pattern as _regionSpawnPacingTicks just above.
+        _fireCooldownTicks = (uint)Math.Max(1d, Math.Round(SkillshotEngine.FireCooldownSeconds * options.TickRate));
         // DUO-SKILLSHOT: the fusion-skillshot engine, wired to the SAME spatial gather AOI/combat use and the SAME
         // monster-damage path the melee routes through (ApplyProjectileDamage → ApplyDamage + cosmetic event +
         // contribution ledger + KillMonster). Spawn/move/despawn go through Zone; the pairing gate reads the sessions.
@@ -3201,12 +3210,19 @@ public sealed class GameServer
     }
 
     // DUO-SKILLSHOT: fire a fusion skillshot from the caller toward `aimAngle`. Dedup on the session's DEDICATED fire
-    // cursor (independent of move/attack/action), resolve the shooter entity, and hand a solo projectile to the engine
-    // (it owns the flight/fusion/hit). No per-entity cooldown this experiment — the fire cadence is the client's key
-    // press. Solo shots fire regardless of pairing; pairing only gates whether two shots FUSE (engine-side).
+    // cursor (independent of move/attack/action) FIRST, then the DUO-GRILL-FUSION cooldown (mirrors HandleAttack's
+    // dedup-then-cooldown order — the dedup cursor still advances on a cooldown reject, so a resent/duplicate
+    // sequence can never re-arm or bypass it), then resolve the shooter entity and hand a solo projectile to the
+    // engine (it owns the flight/fusion/hit). Solo shots fire regardless of pairing; pairing only gates whether two
+    // shots FUSE (engine-side); the earned-geometry tier gate lives in SkillshotEngine.ResolveFusions.
     private void HandleFireSkillshot(ClientSession session, uint sequence, ushort aimAngle)
     {
         if (!session.TryConsumeFireSequence(sequence))
+        {
+            return;
+        }
+
+        if (!session.TryConsumeFireCooldown(_serverTick, _fireCooldownTicks))
         {
             return;
         }

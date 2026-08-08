@@ -41,6 +41,29 @@ public sealed class SkillshotEngine
     public const double GoodFusionDistanceUnits = 1.25d;
     public const int GoodFusionWindowTicks = 4;
 
+    // DUO-GRILL-FUSION (Fable design-grill HIGH-1): the EARNED-GEOMETRY gate on fusion TIER. Without it, two shooters
+    // standing point-blank with a slightly converging aim classified Perfect on the very first tick (zero flight
+    // distance for either shot), making the cinematic long-range cross strictly HARDER than "stand together, mash Q"
+    // for the SAME reward — a mastery inversion. Both projectiles in a crossing pair must have already flown at
+    // least this far before the crossing can rate Good/Perfect; short of that the pair still MERGES (BOSS-2's
+    // plating-shatter gate only cares that a fusion happened — see FusionReportDelegate — so the corner-case shatter
+    // path stays reachable) but the merge is capped to the Solo/base tier (no bonus damage, no pierce). Measured off
+    // the SAME RangeRemaining every projectile already tracks (flown = ProjectileMaxRangeUnits - RangeRemaining) —
+    // no new per-projectile field, and it falls out correctly for staggered fire times too (a fresh shot merging
+    // into an already-well-traveled partner still gates on the FRESH one, since BOTH must clear the bar). Chosen
+    // over the todo's alternative ("minimum shooter separation at fire time") because it reuses state the engine
+    // already has and needs no new field on Projectile; the tradeoff (a partner who WAITS then fires precisely to
+    // intercept an already-traveling shot is also rejected here, even if the shooters were standing far apart when
+    // each pressed fire) is called out in the review-request briefing.
+    public const double MinFusionFlightDistanceUnits = 2.0d;
+
+    // DUO-GRILL-FUSION: the server-side FIRE cooldown (GameServer.HandleFireSkillshot) — the dedup cursor alone only
+    // rejected REPLAYED sequences, not fresh ones, so a client could mash Q as fast as it could mint sequence
+    // numbers. Lives beside the other tunables even though GameServer (not this engine) enforces it, per this file's
+    // "one obvious place" convention. GameServer quantises this to ticks once at construction (options.TickRate may
+    // not be 20) and arms it per-session via ClientSession.TryConsumeFireCooldown.
+    public const double FireCooldownSeconds = 0.6d;
+
     // ---- injected seams (Zone/world/combat plumbing; fakes in tests) ----
 
     // Spawn the replicated projectile WorldEntity at `position` with world `velocity` (units/sec; its direction gives
@@ -93,6 +116,13 @@ public sealed class SkillshotEngine
         public ProjectileTier Tier;
         public int HitsRemaining;                 // monster-hit budget (1 for Solo/Good; PerfectPierceMaxHits for Perfect)
         public readonly HashSet<ulong> HitMonsters = []; // per-projectile hit dedup (a shot never double-hits one body)
+
+        // DUO-GRILL-FUSION: true for a projectile PRODUCED by Fuse() — set even when the earned-geometry gate caps it
+        // to Solo tier. ResolveFusions' "a fused shot never re-fuses" eligibility check used to read Tier != Solo
+        // (every fused shot WAS Good/Perfect, pre-gate); now that a merge can legitimately carry Tier == Solo, the
+        // eligibility check needs this explicit marker instead — otherwise a degraded point-blank merge would look
+        // just like an original Fire()-spawned solo shot and could cascade-fuse again.
+        public bool IsFused;
     }
 
     private readonly SpawnProjectileDelegate _spawn;
@@ -170,10 +200,12 @@ public sealed class SkillshotEngine
         AdvanceAndHit(serverTick, dtSeconds);
     }
 
-    // FUSION pass: find pairs of SOLO projectiles whose shooters are mutually paired and whose paths cross in-window,
-    // and merge each into one fused projectile. Only Solo projectiles fuse (a fused shot never re-fuses — no partner
-    // pairing for it, and it prevents cascades). Restart the scan after each merge (it mutates the list); the in-flight
-    // set is tiny, so the O(n²) rescan is negligible.
+    // FUSION pass: find pairs of never-yet-fused projectiles whose shooters are mutually paired and whose paths cross
+    // in-window, and merge each into one fused projectile. Eligibility is IsFused (not Tier — DUO-GRILL-FUSION: a
+    // gate-degraded merge can carry Tier == Solo just like an original shot, so the fused MARKER, not the tier, is
+    // what excludes it from re-fusing): a fused shot never re-fuses, no partner pairing for it, and it prevents
+    // cascades. Restart the scan after each merge (it mutates the list); the in-flight set is tiny, so the O(n²)
+    // rescan is negligible.
     private void ResolveFusions(uint serverTick, double dtSeconds)
     {
         var fusedSomething = true;
@@ -183,7 +215,7 @@ public sealed class SkillshotEngine
             for (var i = 0; i < _projectiles.Count && !fusedSomething; i++)
             {
                 var a = _projectiles[i];
-                if (a.Tier != ProjectileTier.Solo)
+                if (a.IsFused)
                 {
                     continue;
                 }
@@ -191,7 +223,7 @@ public sealed class SkillshotEngine
                 for (var j = i + 1; j < _projectiles.Count; j++)
                 {
                     var b = _projectiles[j];
-                    if (b.Tier != ProjectileTier.Solo || !_arePaired(a.ShooterEntityId, b.ShooterEntityId))
+                    if (b.IsFused || !_arePaired(a.ShooterEntityId, b.ShooterEntityId))
                     {
                         continue;
                     }
@@ -207,15 +239,36 @@ public sealed class SkillshotEngine
                         continue;
                     }
 
+                    // DUO-GRILL-FUSION: the merge still happens on ANY in-window crossing, but Good/Perfect must be
+                    // EARNED — cap to Solo/base when either shooter hasn't flown MinFusionFlightDistanceUnits yet
+                    // (see the constant's comment; this is what closes the point-blank mash-Q exploit).
+                    if (evaluation.Tier != ProjectileTier.Solo && !HasEarnedFusionTier(a, b))
+                    {
+                        evaluation = evaluation with { Tier = ProjectileTier.Solo };
+                    }
+
                     Fuse(a, b, evaluation);
-                    // BOSS-2 (P1): report the fusion + tier so the boss encounter can shatter the plating. The merge
-                    // itself is the gate (receiver-forgives) — reported here regardless of whether it later hits.
+                    // BOSS-2 (P1): report the fusion + (possibly gate-degraded) tier so the boss encounter can
+                    // shatter the plating. The merge itself is the gate (receiver-forgives) — reported here
+                    // regardless of whether it later hits, and regardless of tier (OnFusion opens SOME window for
+                    // any tier), so the P1 shatter path stays reachable even off the degraded/solo merge.
                     _onFusion(evaluation.Tier, serverTick);
                     fusedSomething = true;
                     break;
                 }
             }
         }
+    }
+
+    // DUO-GRILL-FUSION: true iff BOTH projectiles have already flown at least MinFusionFlightDistanceUnits since
+    // they were fired (RangeRemaining only ever decreases from ProjectileMaxRangeUnits in AdvanceAndHit, so this is
+    // exact — a projectile fused on the very tick it spawned has traveled exactly 0). See the constant's comment for
+    // why this — rather than a shooter-separation-at-fire check — is the gate.
+    private static bool HasEarnedFusionTier(Projectile a, Projectile b)
+    {
+        var flownA = ProjectileMaxRangeUnits - a.RangeRemaining;
+        var flownB = ProjectileMaxRangeUnits - b.RangeRemaining;
+        return flownA >= MinFusionFlightDistanceUnits && flownB >= MinFusionFlightDistanceUnits;
     }
 
     // Merge two solo projectiles into one fused projectile: despawn both, spawn a new entity at the crossing midpoint
@@ -247,6 +300,7 @@ public sealed class SkillshotEngine
             RangeRemaining = Math.Max(a.RangeRemaining, b.RangeRemaining),
             Tier = evaluation.Tier,
             HitsRemaining = hitsRemaining,
+            IsFused = true,
         });
     }
 
