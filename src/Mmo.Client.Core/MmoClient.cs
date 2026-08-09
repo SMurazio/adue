@@ -122,6 +122,10 @@ public sealed class MmoClient : IDisposable
     // its own cursor (the NET6 lesson). SendDuoAbility mints off THIS only; the server dedups on _lastDuoSeq.
     private uint _duoSeq;
 
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the RUN-READY stream's OWN monotonic counter — a sixth
+    // stream, its own cursor (the NET6 lesson). SendRunReady mints off THIS only; the server dedups on _lastRunReadySeq.
+    private uint _runReadySeq;
+
     private Guid _localCharacterId;
     private TileCoord? _loginTile;
     private TimeSpan _currentTime;
@@ -260,6 +264,29 @@ public sealed class MmoClient : IDisposable
     // site (the server-driven drain AND the local melee predict) to route a hit into the "deflected" render instead
     // of a normal number, so a plated/warded boss always reads as "bounced off."
     public bool IsBossProtected(uint networkId) => _platedBossIds.Contains(networkId);
+
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the replicated RUN state the HUD renders. Pure mirror —
+    // the server owns the whole run state machine; the client only shows it and sends ready-up presses.
+    // RunPhase/RunRosterCount/RunReadyCount/RunSelfReady come from RunStatusMessage (edge-driven, so they change only
+    // when the server says so); RunSummary is the END SCREEN payload, set by RunSummaryMessage at a run's end and
+    // cleared the moment the phase leaves Summary (so a stale end screen can never outlive its run). RunVersion bumps
+    // on any change so the presentation layer can rebuild cheaply.
+    public readonly record struct RunSummaryInfo(
+        RunOutcome Outcome, uint DurationSeconds, uint DamageDealt, byte BossHealthPercent, byte Deaths);
+
+    // Named CurrentRunPhase, not RunPhase: a property whose name equals its type's name only compiles by the
+    // "Color Color" rule, which is exactly the kind of subtlety a reader shouldn't have to know.
+    public RunPhase CurrentRunPhase { get; private set; } = RunPhase.Lobby;
+
+    public byte RunRosterCount { get; private set; } = 1;
+
+    public byte RunReadyCount { get; private set; }
+
+    public bool RunSelfReady { get; private set; }
+
+    public RunSummaryInfo? RunSummary { get; private set; }
+
+    public int RunVersion { get; private set; }
 
     // The active tether (null = none). State Broken is a brief "snapped" flag before the following Off clears it.
     public TetherVisual? ActiveTether { get; private set; }
@@ -739,6 +766,14 @@ public sealed class MmoClient : IDisposable
         ActiveCharge = null;
         // BOSS-2 (P1): drop the boss-plating tint state too, so a stale plated id can't linger past a logout.
         _platedBossIds.Clear();
+        // ADUE P1 RUN LOOP: drop the run HUD state so a stale end screen / ready flag can't survive a logout. Login
+        // always re-sends RunStatus, which is the fresh truth.
+        CurrentRunPhase = RunPhase.Lobby;
+        RunRosterCount = 1;
+        RunReadyCount = 0;
+        RunSelfReady = false;
+        RunSummary = null;
+        RunVersion++;
         DuoVisualVersion++;
     }
 
@@ -943,6 +978,17 @@ public sealed class MmoClient : IDisposable
     {
         var sequence = ++_duoSeq;
         Send(new DuoAbilityMessage(sequence, ability), DeliveryMethod.ReliableOrdered);
+        return sequence;
+    }
+
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): ready up (or un-ready) for a run — the chassis' front
+    // door. Mints the next sequence off the DEDICATED _runReadySeq counter and sends RELIABLE-ORDERED (a dropped
+    // ready must never be lost, and the server dedups strictly monotonically). The server owns every rule: whether a
+    // partner is required, whether this starts the run, and whether it dismisses an end screen. Returns the seq sent.
+    public uint SendRunReady(bool ready)
+    {
+        var sequence = ++_runReadySeq;
+        Send(new RunReadyMessage(sequence, ready), DeliveryMethod.ReliableOrdered);
         return sequence;
     }
 
@@ -1383,6 +1429,31 @@ public sealed class MmoClient : IDisposable
                     _platedBossIds.Remove(plating.BossNetworkId);
                 }
 
+                break;
+            case RunStatusMessage runStatus:
+                // ADUE P1 RUN LOOP: adopt the replicated run phase + ready counts. Leaving Summary drops the end
+                // screen — the summary is only ever valid for the phase that produced it, so it is cleared here
+                // rather than being timed out locally.
+                CurrentRunPhase = runStatus.Phase;
+                RunRosterCount = runStatus.RosterCount;
+                RunReadyCount = runStatus.ReadyCount;
+                RunSelfReady = runStatus.SelfReady;
+                if (runStatus.Phase != RunPhase.Summary)
+                {
+                    RunSummary = null;
+                }
+
+                RunVersion++;
+                break;
+            case RunSummaryMessage runSummary:
+                // ADUE P1 RUN LOOP: the END SCREEN payload. Arrives with (or just before) the Summary-phase status.
+                RunSummary = new RunSummaryInfo(
+                    runSummary.Outcome,
+                    runSummary.DurationSeconds,
+                    runSummary.DamageDealt,
+                    runSummary.BossHealthPercent,
+                    runSummary.Deaths);
+                RunVersion++;
                 break;
         }
     }

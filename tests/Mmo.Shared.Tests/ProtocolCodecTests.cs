@@ -509,12 +509,69 @@ public sealed class ProtocolCodecTests
     }
 
     [Fact]
-    public void ProtocolVersionIsFifty()
+    public void ProtocolVersionIsFiftyOne()
     {
-        // TELEGRAPH SHAPES WEDGE+LINE (v50, exp/duo-abilities): the telegraph/midpoint shape body gains the Wedge + Line
-        // kinds on top of v49 (BOSS-2). Circle wire bytes are unchanged; the version bump is the atomic old-client
-        // refuse. Pin it so a change is caught.
-        Assert.Equal(50, ProtocolCodec.Version);
+        // ADUE P1 RUN LOOP (v51): three additive run-chassis messages (RunReady / RunStatus / RunSummary) on top of
+        // v50's telegraph shapes. Nothing existing changed shape — the bump is the atomic old-client refuse. Pin it
+        // so a change is caught.
+        Assert.Equal(51, ProtocolCodec.Version);
+    }
+
+    // ADUE P1 RUN LOOP (v51): the three run-chassis messages round-trip, and both discriminator bytes are
+    // hostile-input validated on decode (a corrupt phase/outcome is a ProtocolException, never a silent
+    // misinterpretation that would put the client's run HUD into a state the server never authorized).
+    [Fact]
+    public void RunReadyMessageRoundTrips()
+    {
+        foreach (var ready in new[] { true, false })
+        {
+            var decoded = Assert.IsType<RunReadyMessage>(ProtocolCodec.Decode(ProtocolCodec.Encode(new RunReadyMessage(9u, ready))));
+            Assert.Equal(9u, decoded.Sequence);
+            Assert.Equal(ready, decoded.Ready);
+        }
+    }
+
+    [Fact]
+    public void RunStatusMessageRoundTrips()
+    {
+        foreach (var phase in new[] { RunPhase.Lobby, RunPhase.Active, RunPhase.Summary })
+        {
+            var decoded = Assert.IsType<RunStatusMessage>(
+                ProtocolCodec.Decode(ProtocolCodec.Encode(new RunStatusMessage(phase, 2, 1, true))));
+            Assert.Equal(phase, decoded.Phase);
+            Assert.Equal(2, decoded.RosterCount);
+            Assert.Equal(1, decoded.ReadyCount);
+            Assert.True(decoded.SelfReady);
+        }
+    }
+
+    [Fact]
+    public void RunSummaryMessageRoundTrips()
+    {
+        foreach (var outcome in new[] { RunOutcome.None, RunOutcome.Clear, RunOutcome.Wipe, RunOutcome.Abandoned })
+        {
+            var decoded = Assert.IsType<RunSummaryMessage>(
+                ProtocolCodec.Decode(ProtocolCodec.Encode(new RunSummaryMessage(outcome, 754u, 12345u, 37, 3))));
+            Assert.Equal(outcome, decoded.Outcome);
+            Assert.Equal(754u, decoded.DurationSeconds);
+            Assert.Equal(12345u, decoded.DamageDealt);
+            Assert.Equal(37, decoded.BossHealthPercent);
+            Assert.Equal(3, decoded.Deaths);
+        }
+    }
+
+    [Fact]
+    public void RunPhaseAndOutcomeBytesAreRangeValidatedOnDecode()
+    {
+        // Corrupt the discriminator byte in an otherwise valid encoding (it is the first payload byte after the
+        // magic + version + message-type envelope) and require a ProtocolException, not a bogus enum value.
+        var status = ProtocolCodec.Encode(new RunStatusMessage(RunPhase.Lobby, 1, 0, false));
+        status[^4] = 99; // Phase is the first of the four payload bytes {phase, roster, ready, selfReady}.
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(status));
+
+        var summary = ProtocolCodec.Encode(new RunSummaryMessage(RunOutcome.Clear, 1u, 1u, 1, 1));
+        summary[^11] = 99; // Outcome precedes {uint, uint, byte, byte} = 10 trailing bytes.
+        Assert.Throws<ProtocolException>(() => ProtocolCodec.Decode(summary));
     }
 
     // DUO-WAVE2 (v48): the co-op ability wire messages round-trip, and every discriminator byte is hostile-input

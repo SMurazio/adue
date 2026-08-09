@@ -557,6 +557,37 @@ public sealed record BossPlatingMessage(uint BossNetworkId, bool PlatingActive) 
     public MessageType Type => MessageType.BossPlating;
 }
 
+// ADUE P1 RUN LOOP (protocol v51, todo/S-adue-p1-run-loop-chassis.md): client->server READY-UP toggle. Sequence is
+// minted off the client's DEDICATED run-ready cursor (never the move/attack/action/fire/duo cursors); Ready=true arms
+// the sender, false disarms. A paired duo starts the run when BOTH are ready; an unpaired player solo-starts on their
+// own ready. Pressed on the END SCREEN it also dismisses the summary (Summary -> Lobby) in the same message, so a pair
+// can chain runs without any other verb. Reliable-ordered (a dropped ready must not be lost).
+public sealed record RunReadyMessage(uint Sequence, bool Ready) : IProtocolMessage
+{
+    public MessageType Type => MessageType.RunReady;
+}
+
+// ADUE P1 RUN LOOP (protocol v51): server->client RUN STATUS — the lobby/ready HUD's whole input. Phase is the run
+// state machine's phase (Lobby/Active/Summary). RosterCount is how many players the ready gate is waiting on for THIS
+// recipient (1 solo, 2 when paired) in Lobby, or the live run roster size in Active. ReadyCount is how many of those
+// are currently ready. SelfReady is the recipient's OWN ready flag (which is why the message is owner-scoped rather
+// than broadcast). Edge-driven: login + every phase/ready change. Reliable-ordered.
+public sealed record RunStatusMessage(RunPhase Phase, byte RosterCount, byte ReadyCount, bool SelfReady) : IProtocolMessage
+{
+    public MessageType Type => MessageType.RunStatus;
+}
+
+// ADUE P1 RUN LOOP (protocol v51): server->client END-OF-RUN SUMMARY (the end screen). Outcome is Clear or Wipe (an
+// Abandoned run has no recipient). DurationSeconds is wall time from run start to the outcome. DamageDealt is the
+// cumulative damage the roster landed on the Sunderer (the boss encounter's own damage-taken counter — no new
+// instrumentation). BossHealthPercent is the boss's remaining HP percent at the end (0 on a clear). Deaths is how many
+// roster deaths the run saw. Sent once per roster member at the end edge; reliable-ordered, owner-scoped.
+public sealed record RunSummaryMessage(
+    RunOutcome Outcome, uint DurationSeconds, uint DamageDealt, byte BossHealthPercent, byte Deaths) : IProtocolMessage
+{
+    public MessageType Type => MessageType.RunSummary;
+}
+
 public sealed record ChatBroadcastMessage(string Sender, string Text) : IProtocolMessage
 {
     public MessageType Type => MessageType.ChatBroadcast;

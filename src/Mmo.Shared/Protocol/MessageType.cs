@@ -57,6 +57,13 @@ public enum MessageType : ushort
     // (_lastDuoSeq), independent of the move/attack/action/fire cursors (the NET6 "one cursor per stream" lesson).
     // Reliable-ordered + low-rate. Tag 21 is the next free client->server tag. See DuoAbilityMessage.
     DuoAbility = 21,
+    // ADUE P1 RUN LOOP (v51, todo/S-adue-p1-run-loop-chassis.md): client->server READY-UP toggle — {uint Sequence,
+    // bool Ready}. The run's front door (the /boss command survives only as a dev shortcut). Its OWN dedup cursor
+    // (_lastRunReadySeq) like every other client->server stream (the NET6 "one cursor per stream" lesson).
+    // Reliable-ordered + very low rate. Deliberately NOT in IsSuppressedWhileDead: a player downed inside a run must
+    // still be able to un-ready / ready for the NEXT run from the end screen. Tag 22 is the next free client->server
+    // tag (8-11 are the deleted tile-step gaps). See RunReadyMessage.
+    RunReady = 22,
 
     ServerHello = 100,
     LoginResult = 101,
@@ -152,5 +159,17 @@ public enum MessageType : ushort
     // permanently CRUMBLED below 70% (drop the tint). Broadcast AOI-scoped on plating-on (spawn), shatter, reform, and
     // permanent-off (Laws 4/7 legibility). Reliable-ordered (discrete state edges). See BossPlatingMessage. Tag 128 is
     // the next free server->client tag.
-    BossPlating = 127
+    BossPlating = 127,
+    // ADUE P1 RUN LOOP (v51): server->client RUN STATUS — {byte Phase, byte RosterCount, byte ReadyCount, bool
+    // SelfReady}. The lobby/ready HUD line and the "a run is live" flag. EDGE-DRIVEN (sent on login and on every
+    // phase/ready change), never per-tick — the run clock is not on this message, so nothing has to be re-sent to
+    // keep it fresh. Owner-scoped (each recipient's SelfReady differs), reliable-ordered. Phase is range-validated
+    // on decode (the ReadAttackKind discipline). See RunStatusMessage. Tag 129 is the next free tag.
+    RunStatus = 128,
+    // ADUE P1 RUN LOOP (v51): server->client END-OF-RUN SUMMARY — {byte Outcome, uint DurationSeconds, uint
+    // DamageDealt, byte BossHealthPercent, byte Deaths}. Sent ONCE per roster member at the moment a run ends
+    // (clear or wipe; an Abandoned run has nobody to tell). Everything on it is a counter the server already keeps
+    // cheaply — no new instrumentation rides this. Owner-scoped, reliable-ordered. Outcome is range-validated on
+    // decode. See RunSummaryMessage. Tag 130 is the next free server->client tag.
+    RunSummary = 129
 }

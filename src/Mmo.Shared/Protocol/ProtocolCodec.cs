@@ -127,7 +127,16 @@ public static class ProtocolCodec
     // v49, so every existing circle telegraph/charge is byte-identical (only the version gate + the two new kinds
     // differ). The kind byte is range-validated on decode (a bad kind is a ProtocolException, never a shape the client
     // draws-but-can't-hit-test). Server + every in-repo client flip together (old-client behavior stays hard-refuse).
-    public const byte Version = 50;
+    // v51 — ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md, docs/duo-standalone-plan.md P1): three additive
+    // messages for the roguelite run chassis. (1) client->server RunReadyMessage {uint Sequence, bool Ready} — the
+    // ready-up toggle that is now the run's front door (the /boss command survives as a dev shortcut only), on its own
+    // dedup cursor. (2) server->client RunStatusMessage {byte Phase, byte RosterCount, byte ReadyCount, bool SelfReady}
+    // — the lobby/ready HUD, EDGE-driven (login + every phase/ready change), never per-tick. (3) server->client
+    // RunSummaryMessage {byte Outcome, uint DurationSeconds, uint DamageDealt, byte BossHealthPercent, byte Deaths} —
+    // the end screen, sent once per roster member at the run's end edge. The Phase/Outcome bytes are range-validated on
+    // decode (the ReadAttackKind discipline). Nothing existing changed shape, so every v50 message is byte-identical;
+    // the bump is the atomic old-client refuse. Server + every in-repo client flip together.
+    public const byte Version = 51;
 
     // REMOTE-WALK Phase 1 (v39): velocity fixed-point scale — 1/256 units/sec precision, ±128 units/sec range over a
     // signed short. Ample for any movement speed (players walk at a few units/sec). round(component * Scale) clamped to
@@ -287,6 +296,26 @@ public static class ProtocolCodec
             case PlayerCollisionSettingMessage value:
                 // PLAYER-COLLISION-TOGGLE (v43): a single bool — the authoritative replicated player↔player collision flag.
                 writer.Write(value.Enabled);
+                break;
+            case RunReadyMessage value:
+                // ADUE P1 RUN LOOP (v51): the ready-up toggle — dedup sequence + the desired ready flag.
+                writer.Write(value.Sequence);
+                writer.Write(value.Ready);
+                break;
+            case RunStatusMessage value:
+                // ADUE P1 RUN LOOP (v51): the lobby/ready HUD line — phase byte + the two counts + the recipient's flag.
+                writer.Write((byte)value.Phase);
+                writer.Write(value.RosterCount);
+                writer.Write(value.ReadyCount);
+                writer.Write(value.SelfReady);
+                break;
+            case RunSummaryMessage value:
+                // ADUE P1 RUN LOOP (v51): the end screen — outcome byte + the four cheap counters.
+                writer.Write((byte)value.Outcome);
+                writer.Write(value.DurationSeconds);
+                writer.Write(value.DamageDealt);
+                writer.Write(value.BossHealthPercent);
+                writer.Write(value.Deaths);
                 break;
             case SnapshotAckMessage value:
                 writer.Write(value.LastSnapshotSequence);
@@ -502,6 +531,12 @@ public static class ProtocolCodec
             MessageType.MidpointCharge => ReadMidpointCharge(reader),
             // BOSS-2 (v49): boss plating state — mirror the encode order (boss net id + active flag).
             MessageType.BossPlating => new BossPlatingMessage(reader.ReadUInt32(), reader.ReadBoolean()),
+            // ADUE P1 RUN LOOP (v51): mirror the encode order for the three run-chassis messages; the Phase/Outcome
+            // discriminator bytes are range-validated (a corrupt phase must never reach the client HUD or the server).
+            MessageType.RunReady => new RunReadyMessage(reader.ReadUInt32(), reader.ReadBoolean()),
+            MessageType.RunStatus => new RunStatusMessage(ReadRunPhase(reader), reader.ReadByte(), reader.ReadByte(), reader.ReadBoolean()),
+            MessageType.RunSummary => new RunSummaryMessage(
+                ReadRunOutcome(reader), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadByte(), reader.ReadByte()),
             MessageType.SnapshotAck => new SnapshotAckMessage(reader.ReadUInt32()),
             MessageType.InteractRequest => new InteractRequestMessage(reader.ReadUInt32()),
             MessageType.InteractResult => new InteractResultMessage(reader.ReadBoolean(), ReadString(reader)),
@@ -887,6 +922,30 @@ public static class ProtocolCodec
         }
 
         return (TetherState)value;
+    }
+
+    // ADUE P1 RUN LOOP (v51): range-validate the run-chassis discriminator bytes, same discipline as the duo selectors
+    // above — a malformed/hostile packet can never smuggle an out-of-range phase/outcome into the client's run HUD.
+    private static RunPhase ReadRunPhase(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)RunPhase.Summary)
+        {
+            throw new ProtocolException($"Invalid RunPhase value: {value}.");
+        }
+
+        return (RunPhase)value;
+    }
+
+    private static RunOutcome ReadRunOutcome(BinaryReader reader)
+    {
+        var value = reader.ReadByte();
+        if (value > (byte)RunOutcome.Abandoned)
+        {
+            throw new ProtocolException($"Invalid RunOutcome value: {value}.");
+        }
+
+        return (RunOutcome)value;
     }
 
     // ECOLOGY E4: one authored region's legible state. Wire order: region id, display name, the four rect bounds

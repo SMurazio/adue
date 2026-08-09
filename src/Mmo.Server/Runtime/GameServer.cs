@@ -247,6 +247,11 @@ public sealed class GameServer
     // _zone + the behavior registry (its spawn delegate resolves the "sunderer" type + registers its behavior).
     private readonly BossEncounterEngine _bossEncounter;
 
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the roguelite run state machine (Step() runs each tick in
+    // TickCore, right after _bossEncounter.Step). Owns the lobby/ready gate, the live run's roster, the end-of-run
+    // summary, and the clean reset; owns nothing inside the arena (that stays the boss encounter's).
+    private readonly RunEngine _run;
+
     // DUO-SKILLSHOT (exp/duo-abilities): the fusion-skillshot engine (Step() runs each tick in TickCore, a sibling of
     // _telegraphs.ResolveDue). Constructed after _zone + _contributionLedger since it closes over the projectile
     // spawn/move/despawn seams, the world's spatial gather, the shared monster-damage path, and the pairing gate.
@@ -720,7 +725,52 @@ public sealed class GameServer
             // BOSS-4 (P3 rotating sweep beam): schedule a LINE telegraph from the boss through the scheduler's NORMAL gate
             // path (real damage, dodgeable at resolve) — the SAME player-damage choke point the field/monster melee use.
             scheduleBeam: (origin, length, aim, halfWidth, damage, startTick, resolveTick) =>
-                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Line(origin, length, aim, halfWidth), startTick, resolveTick, damage, source: "Sunder beam"));
+                _telegraphs.Schedule(_bossEncounter.BossId, TelegraphShape.Line(origin, length, aim, halfWidth), startTick, resolveTick, damage, source: "Sunder beam"),
+            // ADUE P1 RUN LOOP: report the encounter's end edge (victory / wipe / abandon) to the run chassis. Reads
+            // _run at CALL time (constructed just below) — the same late-bound pattern SkillshotEngine/Midpoint use for
+            // _bossEncounter. A bare `/boss` dev run also reports here and is ignored (the chassis is in Lobby).
+            encounterEnded: (result, tick) => _run.OnBossRoomEnded(result, tick));
+        // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the roguelite run state machine — lobby/ready -> run
+        // -> clear-or-wipe -> end screen -> clean reset, no server restart. Every world touch is an injected seam so
+        // the engine is headlessly testable and GameServer stays the single wiring point. The run's boss room IS the
+        // Sunderer arena: `beginBossRoom` is BossEncounterEngine.TryBegin, the exact seam `/boss` uses.
+        _run = new RunEngine(
+            options.TickRate,
+            tryResolve: id => _zone.World.TryGet(id, out var entity) ? entity : null,
+            beginBossRoom: _bossEncounter.TryBegin,
+            // End-of-run settlement for one roster member: revive + refill + teleport back to the town lobby. The SAME
+            // spawn-anchor / RestoreFullHealth / MarkAlive / ClearMoveIntent sequence RespawnPlayers runs — a run's
+            // deferred death debt is paid here, in one place, on both the clear and the wipe path.
+            returnPlayer: player =>
+            {
+                _zone.Teleport(player, _zone.NextSpawnTile());
+                player.RestoreFullHealth();
+                if (player.OwnerSession is { } ownerSession)
+                {
+                    ownerSession.MarkAlive();
+                    ownerSession.ClearMoveIntent();
+                    SendPlayerStats(ownerSession, player);
+                }
+            },
+            notify: (entityId, text) =>
+            {
+                var session = SessionByEntity(entityId);
+                if (session is not null)
+                {
+                    SendSystem(session, text);
+                }
+            },
+            sendSummary: (entityId, summary) =>
+            {
+                var session = SessionByEntity(entityId);
+                if (session is not null)
+                {
+                    SendRunSummary(session, summary);
+                }
+            },
+            // Edge-driven status re-push: a phase or ready-set change is rare, and everyone's lobby HUD depends on it,
+            // so the whole authenticated set is refreshed rather than tracking who needs what.
+            statusChanged: BroadcastRunStatus);
         // LOOT P4a: seed the loot RNG off the map seed (mixed so it's not the roam AI's identical stream).
         _lootRng = new Random(unchecked(options.MapSeed * 31 + 0x100712));
         SpawnAuthoredProps();
@@ -878,6 +928,13 @@ public sealed class GameServer
 
         // DUO-SKILLSHOT: a disconnect unpairs — clear the pair + notify the surviving partner BEFORE despawn.
         BreakPair(session);
+
+        // ADUE P1 RUN LOOP: drop any lobby ready flag this player was holding, so a partner isn't left waiting on a
+        // ghost. A live-run roster entry is dropped by the run engine's own liveness prune on the next tick.
+        if (session.EntityId is { } leavingEntityId)
+        {
+            _run.ForgetPlayer(leavingEntityId);
+        }
 
         if (session.IsAuthenticated)
         {
@@ -1056,6 +1113,12 @@ public sealed class GameServer
                     HandleDuoAbility(session, duo.Sequence, duo.Ability);
                 }
                 break;
+            case RunReadyMessage runReady:
+                if (session.IsAuthenticated)
+                {
+                    HandleRunReady(session, runReady.Sequence, runReady.Ready);
+                }
+                break;
             default:
                 TrySend(peer, new ServerErrorMessage("unsupported_message", $"Unsupported {message.Type}."), DeliveryMethod.ReliableOrdered);
                 break;
@@ -1169,6 +1232,10 @@ public sealed class GameServer
                         // EcologyState, no simulation gated on either.
                         SendRegionEcology(current);
                         SendEcologyLoginRumor(current);
+                        // ADUE P1 RUN LOOP: seed the client's run HUD with the live phase + ready counts, so a player
+                        // joining mid-run sees "a run is under way" and a lobby joiner sees the ready gate immediately
+                        // (the status message is edge-driven afterwards — this is the only unconditional send).
+                        SendRunStatus(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -1296,6 +1363,10 @@ public sealed class GameServer
             // seen as a WIPE this same tick — before RespawnPlayers (the Other block) teleports the bodies to town. It
             // spawns/despawns the boss directly (bounded work; no per-tick cost when Idle).
             _bossEncounter.Step(_serverTick);
+            // ADUE P1 RUN LOOP: pump the run state machine immediately AFTER the encounter, so a boss-room end edge
+            // reported by that Step (victory / wipe / abandon) is turned into the run's ending on the SAME tick — the
+            // revive+return and the end-screen push then ride this tick's snapshot. ~free outside a live run.
+            _run.Step(_serverTick);
             // DUO-SKILLSHOT: step in-flight skillshots (fusion merge + straight-line flight + monster hits) after all
             // movement, BEFORE BroadcastSnapshot so a fusion merge, a projectile move, and a hit's HP change all
             // replicate this same tick. Fixed dt = 1/TickRate (the tick cadence). ~free when nothing is in flight.
@@ -2856,8 +2927,8 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /boss, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
-                : "commands: /help, /role, /rumors, /pair <name>, /unpair, /boss. Admin commands require role Admin.");
+                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                : "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss. Admin commands require role Admin.");
             return;
         }
 
@@ -2895,6 +2966,16 @@ public sealed class GameServer
         if (command == "boss")
         {
             HandleBossCommand(sender);
+            return;
+        }
+
+        // ADUE P1 RUN LOOP: /ready is the run's chat-side front door (the client's ready key sends the RunReady wire
+        // message instead). Available to EVERY player, resolved before the admin gate like /pair and /boss.
+        // "/ready off" un-readies.
+        if (command == "ready")
+        {
+            var wantReady = parts.Length < 2 || !parts[1].Equals("off", StringComparison.OrdinalIgnoreCase);
+            HandleRunReadyRequest(sender, wantReady);
             return;
         }
 
@@ -3150,6 +3231,9 @@ public sealed class GameServer
         SendPairStatus(target, sender);
         SendSystem(sender, $"paired with {target.DisplayName}.");
         SendSystem(target, $"paired with {sender.DisplayName}.");
+        // ADUE P1 RUN LOOP: pairing changes the ready gate's roster (1 -> 2), so both HUDs need a fresh run status.
+        SendRunStatus(sender);
+        SendRunStatus(target);
         Log.Info($"Paired {sender.DisplayName} <-> {target.DisplayName}.");
     }
 
@@ -3193,6 +3277,9 @@ public sealed class GameServer
         partner.SetPartner(null);
         SendPairStatusCleared(session);
         SendPairStatusCleared(partner);
+        // ADUE P1 RUN LOOP: unpairing shrinks the ready gate's roster back to 1 for both sides.
+        SendRunStatus(session);
+        SendRunStatus(partner);
         SendSystem(partner, $"{session.DisplayName} unpaired.");
         Log.Info($"Unpaired {session.DisplayName} <-> {partner.DisplayName}.");
     }
@@ -3381,6 +3468,85 @@ public sealed class GameServer
 
         _bossEncounter.TryBegin(issuer, partner, _serverTick, out var message);
         SendSystem(sender, message);
+    }
+
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the READY-UP wire verb — the run's front door. Dedup on
+    // the session's DEDICATED run-ready cursor (independent of move/attack/action/fire/duo), then hand to the run
+    // engine. Deliberately NOT gated on IsDead: a downed player must be able to ready for the NEXT run off the end
+    // screen (and the run's own rules, not this handler, decide what a mid-run ready means).
+    private void HandleRunReady(ClientSession session, uint sequence, bool ready)
+    {
+        if (!session.TryConsumeRunReadySequence(sequence))
+        {
+            return;
+        }
+
+        HandleRunReadyRequest(session, ready);
+    }
+
+    // Shared by the RunReady wire message and the /ready chat verb: resolve the caller's entity + their online duo
+    // partner (the same pairing resolution /boss uses), run the ready gate, and echo the engine's line back. The
+    // engine pushes any status change itself (its statusChanged seam is BroadcastRunStatus).
+    private void HandleRunReadyRequest(ClientSession session, bool ready)
+    {
+        if (!TryGetSessionEntity(session, out var self))
+        {
+            SendSystem(session, "ready: no controllable entity.");
+            return;
+        }
+
+        WorldEntity? partner = null;
+        if (session.PartnerSession is { IsAuthenticated: true } partnerSession
+            && TryGetSessionEntity(partnerSession, out var partnerEntity))
+        {
+            partner = partnerEntity;
+        }
+
+        _run.TryReady(self, partner, ready, _serverTick, out var message);
+        SendSystem(session, message);
+        // The caller's own status always goes out, even when nothing global changed (an un-ready of an already-
+        // un-ready player), so the client's ready affordance can never drift out of sync with the server.
+        SendRunStatus(session);
+    }
+
+    // ADUE P1 RUN LOOP: push ONE session's run status. Owner-scoped because SelfReady (and, in the lobby, the roster
+    // the ready gate is waiting on) are per-recipient. Reliable-ordered — these are discrete state edges.
+    private void SendRunStatus(ClientSession session)
+    {
+        if (!session.IsAuthenticated || session.EntityId is not { } selfId)
+        {
+            return;
+        }
+
+        ulong? partnerId = session.PartnerSession is { IsAuthenticated: true } partnerSession
+            ? partnerSession.EntityId
+            : null;
+
+        var view = _run.StatusFor(selfId, partnerId);
+        TrySend(
+            session.Peer,
+            new RunStatusMessage(view.Phase, view.RosterCount, view.ReadyCount, view.SelfReady),
+            DeliveryMethod.ReliableOrdered);
+    }
+
+    // ADUE P1 RUN LOOP: re-push run status to EVERY authenticated session. The run engine's statusChanged seam —
+    // edge-driven (a phase flip or a ready change), never per tick, and the set is a co-op session's worth of players.
+    private void BroadcastRunStatus()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            SendRunStatus(session);
+        }
+    }
+
+    // ADUE P1 RUN LOOP: push the end-of-run summary (the end screen) to one player.
+    private void SendRunSummary(ClientSession session, RunEngine.RunSummary summary)
+    {
+        TrySend(
+            session.Peer,
+            new RunSummaryMessage(
+                summary.Outcome, summary.DurationSeconds, summary.DamageDealt, summary.BossHealthPercent, summary.Deaths),
+            DeliveryMethod.ReliableOrdered);
     }
 
     // BOSS-1: despawn + fully clean up the encounter boss — the SAME leak-free teardown KillMonster /
@@ -6009,7 +6175,12 @@ public sealed class GameServer
         // delay elapses, so the gate's dead-guard window is honoured. MarkDead is a no-op if already dead.
         if (target.Stats.Health <= 0 && target.OwnerSession is { } session && session.MarkDead(_serverTick, _tuning.PlayerRespawnTicks))
         {
-            SendSystem(session, "You died.");
+            // ADUE P1 RUN LOOP: count the death for the run summary (a no-op outside a live run). Recorded on the death
+            // EDGE (MarkDead returned true), so it can never double-count a body that keeps being hit.
+            _run.OnPlayerDied(target.Id);
+            SendSystem(session, _run.IsRunParticipant(target.Id)
+                ? "You are down. No respawn until the run ends."
+                : "You died.");
             Log.Info($"{target.DisplayName} died; respawn in {_tuning.PlayerRespawnTicks} ticks.");
         }
     }
@@ -6031,6 +6202,15 @@ public sealed class GameServer
             {
                 // Entity gone (disconnected mid-death) — just clear the flag so we stop polling it.
                 session.MarkAlive();
+                continue;
+            }
+
+            // ADUE P1 RUN LOOP (task item 3 — "no town respawn mid-run"): a player inside a live run does NOT respawn
+            // when their delay elapses. Their body stays down in the arena, which is what lets the boss room read "all
+            // participants dead" as a WIPE (before this, the town teleport raced that check). The debt is settled at
+            // the run's end for everyone at once, via RunEngine's returnPlayer seam (revive + refill + send home).
+            if (_run.IsRunParticipant(entity.Id))
+            {
                 continue;
             }
 

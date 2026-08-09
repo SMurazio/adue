@@ -15,7 +15,7 @@ Movement speed is a continuous stat: the server derives each entity's `SpeedUnit
 Every payload encoded by `ProtocolCodec` starts with:
 
 - `uint32` magic: `0x314F4D4D`
-- `byte` version: `50` (current shipped — keep in sync with `ProtocolCodec.Version`)
+- `byte` version: `51` (current shipped — keep in sync with `ProtocolCodec.Version`)
 - `uint16` message type
 - message-specific payload
 
@@ -118,6 +118,21 @@ World snapshots should fit in a single UDP packet for the current channel target
   kind is a `ProtocolException`). Membership is center-point at tick T, server-side, and the decal draws the exact wire
   shape (drawn == hit test). Content: the Sunderer's Cleave is now a 130° wedge slam and its Lunge a telegraphed line
   charge (`TelegraphScheduler` resolves by shape kind; no engine change beyond the shape). No new message types.
+- v51 (ADUE P1 RUN LOOP, `todo/S-adue-p1-run-loop-chassis.md`, `docs/duo-standalone-plan.md` P1): the roguelite
+  run chassis — lobby/ready → run → clear-or-wipe → end screen → clean reset, no server restart. THREE additive
+  messages, the two discriminator bytes range-validated on decode: client→server `RunReadyMessage`
+  (`uint Sequence`, `bool Ready`) — the ready-up toggle on its own dedup cursor, now the run's front door (the
+  `/boss` chat command survives as a dev shortcut only), reliable-ordered and deliberately NOT suppressed while
+  dead (a downed player must be able to ready for the next run from the end screen); server→client
+  `RunStatusMessage` (`byte Phase` — Lobby/Active/Summary, `byte RosterCount`, `byte ReadyCount`,
+  `bool SelfReady`) — the lobby/ready HUD, owner-scoped and EDGE-driven (login + every phase/ready change), with
+  no run clock on it so nothing needs periodic re-sending; server→client `RunSummaryMessage`
+  (`byte Outcome` — None/Clear/Wipe/Abandoned, `uint DurationSeconds`, `uint DamageDealt`,
+  `byte BossHealthPercent`, `byte Deaths`) — the end screen, sent once per roster member at the run's end edge,
+  carrying only counters the server already keeps. Nothing existing changed shape, so every v50 message is
+  byte-identical; the bump is the atomic old-client refuse. The run state machine itself (`RunEngine`), the
+  no-town-respawn-mid-run rule, and the reuse of the Sunderer arena as the run's boss room are all server-side
+  (no wire).
 
 ## Client Messages
 
@@ -172,6 +187,16 @@ Tags 8-11 are numeric gaps (the deleted v21-v25 tile-step machinery); survivors 
 - `NodeStateBatch` / `NodeStateBatchMessage` (v46, D4): sent once on login — a count-prefixed `ushort[]` of the
   field's currently-DEPLETED indices only (typically a handful among thousands of catalogue entries; untouched
   nodes need no wire representation at all). Reliable-ordered.
+- `RunReady` / `RunReadyMessage` (v51): client→server ready-up toggle (`uint Sequence` off its own dedup cursor,
+  `bool Ready`). A paired duo starts a run when BOTH are ready; an unpaired player solo-starts on their own ready.
+  Pressed while the end screen is up it also dismisses the summary (Summary → Lobby) in the same message, so a pair
+  chains runs without any other verb. Reliable-ordered; never suppressed while the sender is dead.
+- `RunStatus` / `RunStatusMessage` (v51): server→client run phase + ready counts (`byte Phase`, `byte RosterCount`,
+  `byte ReadyCount`, `bool SelfReady`). Owner-scoped (SelfReady differs per recipient) and edge-driven — sent on
+  login and on every phase/ready change, never per tick. Reliable-ordered.
+- `RunSummary` / `RunSummaryMessage` (v51): server→client end-of-run summary (`byte Outcome`,
+  `uint DurationSeconds`, `uint DamageDealt`, `byte BossHealthPercent`, `byte Deaths`). Sent once per roster member
+  at the run's end edge (clear or wipe; an abandoned run has no recipient). Reliable-ordered, owner-scoped.
 - `ServerError`: code and message.
 
 ## Rules

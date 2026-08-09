@@ -41,6 +41,35 @@ public sealed class BossEncounterEngine
         Active = 2,
     }
 
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): how an encounter ENDED. The engine already knew all three
+    // endings internally (the victory branch + the two Reset paths); P1 only makes them OBSERVABLE, because the run
+    // state machine that now wraps the arena must distinguish CLEAR from WIPE and cannot do so by polling (both land
+    // the engine back in Idle on the same tick). Nothing about the encounter's own behaviour changes.
+    public enum EncounterOutcome : byte
+    {
+        // The boss died. The victors are RETAINED in the arena by the victory branch (they /boss out, or the
+        // victory-eject window sends them home).
+        Victory = 0,
+
+        // Every participant was dead in the arena at once. The engine has already torn the encounter down.
+        Wipe = 1,
+
+        // Nobody is left to fight: the countdown was cancelled (all entrants bailed pre-spawn), or the arena emptied
+        // and the grace window elapsed.
+        Abandoned = 2,
+    }
+
+    // The end-edge payload: the outcome plus the two cheap stats the engine already has on hand (it is the only thing
+    // that sees every point of damage the boss takes, and it still holds the boss entity at the end edge). Read by the
+    // run chassis for its end screen; nothing inside the encounter consumes it.
+    public readonly record struct EncounterResult(
+        EncounterOutcome Outcome, long BossDamageTaken, int BossHealthPercentRemaining);
+
+    // Fired ONCE per encounter run, on whichever end edge comes first. OPTIONAL (null when no run chassis is wired —
+    // the engine's own headless suite, or a bare `/boss` dev run), which is why it is a TRAILING OPTIONAL ctor
+    // parameter rather than a required seam: no existing construction site has to change.
+    public delegate void EncounterEndedDelegate(EncounterResult result, uint serverTick);
+
     // Spawn the boss at `tile` with `maxHealth` (scaled by participant count) and return its entity. GameServer wires
     // SpawnMonsterCore(sunderer type, tile, maxHealth) — NOT a world/region spawner, so the boss has no auto-respawn.
     public delegate WorldEntity SpawnBossDelegate(TileCoord tile, int maxHealth);
@@ -301,6 +330,7 @@ public sealed class BossEncounterEngine
     private readonly ScheduleFieldVisualDelegate _scheduleFieldVisual;
     private readonly RootBossDelegate _rootBoss;
     private readonly ScheduleBeamDelegate _scheduleBeam;
+    private readonly EncounterEndedDelegate? _encounterEnded;
 
     private readonly uint _countdownTicks;
     private readonly uint _emptyResetTicks;
@@ -417,6 +447,14 @@ public sealed class BossEncounterEngine
     // if the partner returns — for free); this only stops the chat line from repeating every subsequent tick/flap.
     private bool _duoDowngradeAnnounced;
 
+    // ADUE P1 RUN LOOP: cumulative damage this run's boss has taken, accumulated in ModifyIncomingDamage — the ONE hook
+    // every damage source (melee / skillshot / tether / midpoint blast) already funnels through, so counting here costs
+    // an add and needs no new instrumentation on any damage path. Zeroed at each boss spawn (never on the end paths, so
+    // the end-edge observer can still read it). APPROXIMATION accepted for a summary stat: it counts damage OFFERED
+    // after the plating/ward modifier, so the killing blow's overkill is included (the engine cannot see the clamp
+    // ApplyDamage performs at 0 HP).
+    private long _bossDamageTaken;
+
     public BossEncounterEngine(
         int tickRate,
         SpawnBossDelegate spawnBoss,
@@ -433,7 +471,9 @@ public sealed class BossEncounterEngine
         SpawnSplinterDelegate spawnSplinter,
         ScheduleFieldVisualDelegate scheduleFieldVisual,
         RootBossDelegate rootBoss,
-        ScheduleBeamDelegate scheduleBeam)
+        ScheduleBeamDelegate scheduleBeam,
+        // ADUE P1 RUN LOOP: optional end-edge observer (the run chassis). Null = nobody is watching (a bare /boss run).
+        EncounterEndedDelegate? encounterEnded = null)
     {
         _tickRate = tickRate;
         _spawnBoss = spawnBoss ?? throw new ArgumentNullException(nameof(spawnBoss));
@@ -451,6 +491,7 @@ public sealed class BossEncounterEngine
         _scheduleFieldVisual = scheduleFieldVisual ?? throw new ArgumentNullException(nameof(scheduleFieldVisual));
         _rootBoss = rootBoss ?? throw new ArgumentNullException(nameof(rootBoss));
         _scheduleBeam = scheduleBeam ?? throw new ArgumentNullException(nameof(scheduleBeam));
+        _encounterEnded = encounterEnded; // optional by design — see EncounterEndedDelegate.
         _countdownTicks = SecondsToTicks(CountdownSeconds);
         _emptyResetTicks = SecondsToTicks(EmptyResetSeconds);
         _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
@@ -509,6 +550,9 @@ public sealed class BossEncounterEngine
     public bool WardUp => _p3Active && !_burstWindowOpen;
     public bool BurstWindowOpen => _burstWindowOpen;
     public bool Enraged => _enraged;
+
+    // ADUE P1 RUN LOOP test/diagnostic visibility: cumulative damage dealt to this run's boss (see _bossDamageTaken).
+    public long BossDamageTaken => _bossDamageTaken;
 
     // Seconds → ticks, the canonical windup quantization (Math.Ceiling, floored at 1) GameServer uses everywhere.
     private uint SecondsToTicks(double seconds) => (uint)Math.Max(1, (int)Math.Ceiling(seconds * _tickRate));
@@ -629,7 +673,7 @@ public sealed class BossEncounterEngine
         if (_participants.Count == 0)
         {
             // Everyone bailed before the boss spawned — cancel cleanly (no boss to despawn), back to Idle.
-            Reset();
+            Reset(serverTick, EncounterOutcome.Abandoned);
             return;
         }
 
@@ -671,6 +715,10 @@ public sealed class BossEncounterEngine
         _droneSpawnScheduled = true;
         _droneSpawnTick = serverTick + _droneFirstSpawnTicks;
 
+        // ADUE P1 RUN LOOP: fresh damage tally for THIS boss (the end-edge observer reads it after the fight, so it is
+        // zeroed at spawn and never on an end path).
+        _bossDamageTaken = 0;
+
         // BOSS-3 (P2): fresh P2 state — the SUNDER mechanics arm only at the 70% crumble, so they are latched OFF here.
         _p2Active = false;
         _p3Reached = false;
@@ -709,6 +757,9 @@ public sealed class BossEncounterEngine
             // (the victory path does NOT call Reset — it retains the victors — so it must clean the add itself).
             TearDownEncounterMechanics();
             AnnounceAll("The Sunderer shatters! Victory. Leave with /boss.");
+            // ADUE P1 RUN LOOP: the CLEAR end edge. Fired BEFORE the boss id is cleared so the observer can still read
+            // the boss's final HP; on a victory the remaining-percent is 0 by construction.
+            FireEncounterEnded(serverTick, EncounterOutcome.Victory);
             _bossSpawned = false;
             _bossId = 0;
             _state = EncounterState.Idle;
@@ -733,7 +784,7 @@ public sealed class BossEncounterEngine
             }
             else if (serverTick - _emptyStartTick >= _emptyResetTicks)
             {
-                Reset();
+                Reset(serverTick, EncounterOutcome.Abandoned);
             }
 
             return;
@@ -757,7 +808,7 @@ public sealed class BossEncounterEngine
         if (aliveInArena == 0)
         {
             AnnounceAll("The party has fallen. The Sunderer subsides.");
-            Reset();
+            Reset(serverTick, EncounterOutcome.Wipe);
             return;
         }
 
@@ -792,8 +843,13 @@ public sealed class BossEncounterEngine
 
     // Reset to Idle: despawn the boss (if one is up) and clear all participants. The victory path deliberately does
     // NOT call this (it keeps the participants so victors can walk out); wipe / empty / countdown-cancel do.
-    private void Reset()
+    // ADUE P1 RUN LOOP: takes the tick + the outcome so the end edge can be reported before anything is torn down.
+    private void Reset(uint serverTick, EncounterOutcome outcome)
     {
+        // ADUE P1 RUN LOOP: report the end edge FIRST — the observer reads the boss's remaining HP, which the despawn
+        // below destroys. A no-op when nobody is watching, and a no-op when no encounter was ever underway.
+        FireEncounterEnded(serverTick, outcome);
+
         // BOSS-2 (P1): clean the encounter add (interposer drone) + plating mechanics on EVERY reset path (wipe /
         // empty / countdown-cancel) — the "adds list is cleaned everywhere the boss is" invariant.
         TearDownEncounterMechanics();
@@ -810,6 +866,27 @@ public sealed class BossEncounterEngine
         _emptyTimerArmed = false;
     }
 
+    // ADUE P1 RUN LOOP: report an end edge to the optional observer (the run chassis). Called from the victory branch
+    // and from Reset, in both cases BEFORE the boss entity is despawned so the remaining-HP percent is still readable.
+    // The percent is 0 on a victory (the boss is dead or gone) and on a countdown-cancel (no boss ever spawned).
+    private void FireEncounterEnded(uint serverTick, EncounterOutcome outcome)
+    {
+        if (_encounterEnded is null)
+        {
+            return;
+        }
+
+        var percentRemaining = 0;
+        if (outcome != EncounterOutcome.Victory && _bossSpawned && _tryResolve(_bossId) is { } boss
+            && boss.Stats.MaxHealth > 0 && boss.Stats.Health > 0)
+        {
+            percentRemaining = Math.Clamp(
+                (int)Math.Round(boss.Stats.Health * 100d / boss.Stats.MaxHealth, MidpointRounding.AwayFromZero), 0, 100);
+        }
+
+        _encounterEnded(new EncounterResult(outcome, _bossDamageTaken, percentRemaining), serverTick);
+    }
+
     // ==== BOSS-2 (P1 HUSK): Sundered Plating + fusion shatter + interposer drone ====
 
     // The damage-taken MODIFIER GameServer applies at the monster-damage seam(s) for EVERY source (melee, skillshot,
@@ -818,7 +895,21 @@ public sealed class BossEncounterEngine
     // crumbled), in which case damage is reduced by DuoDamageReduction (duo) / SoloDamageReduction (solo — the mode is
     // fixed at spawn). During a shatter window (or below 70%, or off-encounter) damage passes through at full. Also
     // fires the one-shot "your blows turn" chat line on the first plated hit (Laws 4/7 legibility).
+    // ADUE P1 RUN LOOP: the public entry now also TALLIES what it lets through (see _bossDamageTaken) — the run
+    // chassis' "damage dealt" summary stat, free because this is already the one hook every damage source funnels
+    // through. The modifier logic itself is untouched, moved verbatim into ResolveIncomingDamage below.
     public int ModifyIncomingDamage(ulong monsterId, int rawAmount)
+    {
+        var modified = ResolveIncomingDamage(monsterId, rawAmount);
+        if (_bossSpawned && monsterId == _bossId && modified > 0)
+        {
+            _bossDamageTaken += modified;
+        }
+
+        return modified;
+    }
+
+    private int ResolveIncomingDamage(ulong monsterId, int rawAmount)
     {
         if (rawAmount <= 0 || monsterId != _bossId || !_bossSpawned || _state != EncounterState.Active)
         {

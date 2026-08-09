@@ -114,6 +114,11 @@ public sealed class ClientSession
     // strict monotonic `seq > cursor` gate is all the dedup needed.
     private uint _lastDuoSeq;
 
+    // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the RUN-READY-stream dedup cursor (highest accepted
+    // RunReadyMessage seq). A SIXTH independent stream — shares nothing with move/attack/action/fire/duo (the NET6
+    // "one cursor per stream" lesson). Reliable-ordered + very low rate, so strict monotonic `seq > cursor` is enough.
+    private uint _lastRunReadySeq;
+
     // DUO-WAVE2 ability 2 (Unison Shield): the damage-absorption pool state. _shieldPool is the REMAINING absorb amount
     // (0 = none); _shieldExpiryTick is the absolute tick it lapses (the pool is dead at/after it). _shieldPendingPress
     // Tick is the tick this player last pressed R while awaiting a possible partner coincidence (null = none) — the
@@ -423,6 +428,19 @@ public sealed class ClientSession
         }
 
         _lastDuoSeq = sequence;
+        return true;
+    }
+
+    // ADUE P1 RUN LOOP: advances the RUN-READY-sequence cursor for an inbound RunReadyMessage. Rejects stale/duplicate
+    // sequences without mutating anything; fully independent of every other cursor. Returns true iff fresh.
+    public bool TryConsumeRunReadySequence(uint sequence)
+    {
+        if (sequence <= _lastRunReadySeq)
+        {
+            return false;
+        }
+
+        _lastRunReadySeq = sequence;
         return true;
     }
 

@@ -137,6 +137,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
+	// ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the run chassis' whole client surface — ONE top-centre
+	// panel that is the ready-up affordance in the lobby, a thin "run under way" banner during a run, and the END
+	// SCREEN (clear/wipe + the cheap stats) when a run finishes. Legibility over polish, per the task: it renders
+	// from the replicated MmoClient run state only (no client authority), in the same overlay-panel idiom as the
+	// status/metrics/chat/toast panels, and rebuilds only when RunVersion changes.
+	private PanelContainer? _runPanel;
+	private Label? _runLabel;
+	private int _runPanelVersion = -1;
+
 	// ---- F1 tuning panel (TabContainer) -----------------------------------------------------------
 	// One DRAGGABLE tabbed panel under F1 holding the FIVE admin tuning surfaces (the old F4–F8 F-key panels) as
 	// thematic TABS: Visual / Movement / Combat / Server / Vitals. The whole panel is ADMIN-ONLY — every tab was an
@@ -806,6 +815,23 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			GetViewport().SetInputAsHandled();
 			return;
 		}
+		// ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): B = READY UP for a run — the chassis' front door,
+		// and the same key dismisses the end screen into the next run's lobby. A TOGGLE against the replicated
+		// RunSelfReady flag, so a mis-press is undoable; the server owns every rule (partner required, run start,
+		// summary dismissal) and echoes the result back as RunStatus. B is otherwise unbound (distinct from WASD,
+		// E/F interact, Space/J/K actions, R/G/V duo abilities, Tab/Enter/T chat, F1/F3/F11 panels). Not while
+		// typing in chat. The chat verb /ready is the equivalent for a client that hasn't rebound anything.
+		if (key.Keycode == Key.B && _chatInput?.HasFocus() != true)
+		{
+			if (_client is not null && _client.IsLoggedIn)
+			{
+				_client.SendRunReady(!_client.RunSelfReady);
+			}
+
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		if ((key.Keycode == Key.Enter || key.Keycode == Key.KpEnter || key.Keycode == Key.T)
 			&& _chatInput?.HasFocus() != true)
 		{
@@ -1477,6 +1503,24 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		toastPanel.Visible = false;
 		_toastPanel = toastPanel;
 
+		// ADUE P1 RUN LOOP: the run panel — top-centre, under the status panel, wide enough for the end screen's
+		// stat lines. Same overlay idiom as every other panel here; visibility + text are driven by UpdateRunPanel.
+		var runPanel = CreateOverlayPanel("RunPanel", Vector2.Zero, new Vector2(460, 120));
+		runPanel.AnchorLeft = 0.5f;
+		runPanel.AnchorRight = 0.5f;
+		runPanel.OffsetLeft = -230f;
+		runPanel.OffsetRight = 230f;
+		// Sits BELOW the top-left status panel (which is 132 tall from y=10), so the two never overlap on narrow
+		// windows even though the run panel is centred.
+		runPanel.OffsetTop = 152f;
+		runPanel.OffsetBottom = 272f;
+		var runRows = CreatePanelVBox(runPanel);
+		_runLabel = CreateOverlayLabel("Run", 16);
+		_runLabel.HorizontalAlignment = HorizontalAlignment.Center;
+		runRows.AddChild(_runLabel);
+		runPanel.Visible = false;
+		_runPanel = runPanel;
+
 		var inputPanel = CreateOverlayPanel("ChatInputPanel", Vector2.Zero, new Vector2(760, 40));
 		inputPanel.AnchorTop = 1f;
 		inputPanel.AnchorBottom = 1f;
@@ -1509,6 +1553,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		layer.AddChild(metricsPanel);
 		layer.AddChild(chatPanel);
 		layer.AddChild(toastPanel);
+		// ADUE P1 RUN LOOP: added after the status/metrics/chat panels so the end screen draws OVER them.
+		layer.AddChild(runPanel);
 		layer.AddChild(inputPanel);
 	}
 
@@ -2572,6 +2618,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		UpdateInventory();
 		UpdateLootWindow();
+		UpdateRunPanel();
 		UpdateInteractFeedback(now);
 		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
 		// reads the freshest local position/facing. Do not re-add it here — that reintroduces the one-frame-stale feed.
@@ -2814,6 +2861,84 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		else
 		{
 			window.HideWindow();
+		}
+	}
+
+	// ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): render the run chassis' one panel from the replicated
+	// run state. Three faces, one panel: LOBBY = the ready-up affordance (who is ready, and the key to press),
+	// ACTIVE = a thin "run under way" banner, SUMMARY = the END SCREEN (clear/wipe headline + the cheap stats +
+	// how to start the next run). Rebuilds only when RunVersion changes (the run state is edge-driven on the wire,
+	// so this is idle almost always). Pure presentation — the server owns every rule; the panel never gates input.
+	private void UpdateRunPanel()
+	{
+		if (_client is null || _runPanel is null || _runLabel is null)
+		{
+			return;
+		}
+
+		// Nothing to say before login (and the replicated run state is stale/default until the login RunStatus
+		// lands). Resetting the cached version forces a rebuild on the next logged-in frame.
+		if (!_client.IsLoggedIn)
+		{
+			_runPanel.Visible = false;
+			_runPanelVersion = -1;
+			return;
+		}
+
+		if (_client.RunVersion == _runPanelVersion)
+		{
+			return;
+		}
+
+		_runPanelVersion = _client.RunVersion;
+
+		switch (_client.CurrentRunPhase)
+		{
+			case RunPhase.Lobby:
+			{
+				var ready = _client.RunSelfReady ? "READY" : "not ready";
+				var waiting = _client.RunRosterCount > 1
+					? $"\n{_client.RunReadyCount}/{_client.RunRosterCount} ready — the run starts when both are."
+					: "\nUnpaired: readying up starts a SOLO run. (/pair <name> to run as a duo.)";
+				SetTextIfChanged(
+					_runLabel,
+					$"THE SUNDERER — press [B] to ready up  ({ready}){waiting}");
+				_runPanel.Visible = true;
+				break;
+			}
+
+			case RunPhase.Active:
+			{
+				SetTextIfChanged(
+					_runLabel,
+					_client.RunSelfReady
+						? "RUN UNDER WAY — there is no respawn until it ends."
+						: "A run is under way.");
+				_runPanel.Visible = true;
+				break;
+			}
+
+			case RunPhase.Summary:
+			{
+				if (_client.RunSummary is not { } summary)
+				{
+					// Summary phase with no payload: this client was not on the roster (a bystander). Say nothing.
+					_runPanel.Visible = false;
+					break;
+				}
+
+				var headline = summary.Outcome == RunOutcome.Clear ? "RUN CLEARED" : "RUN OVER — WIPED";
+				var minutes = summary.DurationSeconds / 60;
+				var seconds = summary.DurationSeconds % 60;
+				SetTextIfChanged(
+					_runLabel,
+					$"{headline}\n" +
+					$"time {minutes}:{seconds:00}   damage {summary.DamageDealt}   deaths {summary.Deaths}\n" +
+					$"Sunderer left at {summary.BossHealthPercent}% HP\n" +
+					"press [B] to ready up for another run");
+				_runPanel.Visible = true;
+				break;
+			}
 		}
 	}
 
