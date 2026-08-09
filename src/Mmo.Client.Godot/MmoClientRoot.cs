@@ -196,6 +196,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// the only additive HUD hook in MmoClientRoot; it touches no movement/snapshot/prediction code.
 	private Mmo.Client.Godot.UI.Hud? _hud;
 	private readonly Mmo.Client.Godot.UI.HudState _hudState = new();
+	// ADUE P2-B (todo/S-p2-onboarding-verb-hints.md): the pure onboarding brain. RefreshHud reads (in-practice-room,
+	// paired) off already-replicated client state each frame and pushes the resulting OnboardingHintView to the HUD;
+	// the R/G/V and Q handlers mark a verb used so its hint dims. No protocol/wire change — all inputs are local.
+	private readonly OnboardingCoach _onboardingCoach = new();
 	// Cycles the stub vitals/portrait through demo presets so a visual check can see each HUD state. Advanced by
 	// the F5 "HUD: cycle stub states" button; flips values live (no restart).
 	private int _hudStubPreset;
@@ -848,6 +852,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_client is not null && _client.IsLoggedIn)
 		{
 			_client.SendDuoAbility(ability);
+			// ADUE P2-B: dim this verb's onboarding hint once actually used (covers both the R/G/V keys and the
+			// LB/RB/D-pad controller mirrors, since both route through here). A light "learned it" beat.
+			_onboardingCoach.MarkUsed(ability);
 		}
 	}
 
@@ -2688,6 +2695,30 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		RefreshMinimapRegions();
 
 		_hud.SetState(_hudState);
+
+		// ADUE P2-B: compute + push the onboarding hints. Both triggers are already-replicated, read-only local state:
+		// "am I inside the practice room?" is PracticeRoom.ContainsInterior on the local player's own tile (shared
+		// geometry — the client evaluates it for free), and "am I paired?" is MmoClient.IsPaired. Hidden entirely
+		// (paired + outside the room) means the overlay draws nothing. Not logged in -> hide.
+		RefreshOnboarding();
+	}
+
+	// ADUE P2-B: build the onboarding view from local state and hand it to the HUD overlay. Cheap, read-only.
+	private void RefreshOnboarding()
+	{
+		if (_hud is null)
+		{
+			return;
+		}
+
+		if (_client is not { IsLoggedIn: true } client)
+		{
+			_hud.SetOnboarding(OnboardingHintView.Hidden);
+			return;
+		}
+
+		var inPracticeRoom = client.LocalTile is { } tile && PracticeRoom.ContainsInterior(tile);
+		_hud.SetOnboarding(_onboardingCoach.Build(inPracticeRoom, client.IsPaired));
 	}
 
 	// S110: project the client's known Resource-kind entities onto HudState.MinimapObjects. Resources are point
@@ -4959,6 +4990,8 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			if (!chatFocused && GetWindow().HasFocus())
 			{
 				_client.SendFireSkillshot(AimAngle.Quantize(_skillshotAimRadians));
+				// ADUE P2-B: the fusion skillshot (Q / LT) was actually fired — dim its onboarding hint.
+				_onboardingCoach.MarkUsed(OnboardingVerb.Fusion);
 			}
 
 			if (_client.IsPaired)

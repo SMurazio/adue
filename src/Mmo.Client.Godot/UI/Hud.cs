@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Godot;
+using Mmo.Client.Core;
 
 namespace Mmo.Client.Godot.UI;
 
@@ -44,6 +45,10 @@ public partial class Hud : CanvasLayer
     // (CorpseLootVersion-guarded) rows and forwards its take/loot-all/close events to the MmoClient send methods.
     private LootWindow? _loot;
 
+    // ADUE P2-B (todo/S-p2-onboarding-verb-hints.md): the in-context verb/pairing teaching overlay. The HUD owns it
+    // as a child; MmoClientRoot pushes an OnboardingHintView (from its OnboardingCoach) each frame via SetOnboarding.
+    private OnboardingOverlay? _onboarding;
+
     // The portrait's base (white) modulate so we can toggle the low-health red tint without losing the texture.
     private static readonly Color PortraitNormalTint = Colors.White;
     private static readonly Color PortraitLowHealthTint = new(1f, 0.45f, 0.45f, 1f);
@@ -63,6 +68,22 @@ public partial class Hud : CanvasLayer
         MountMinimap();
         MountInventoryWindow();
         MountLootWindow();
+        MountOnboarding();
+    }
+
+    // ADUE P2-B: instantiate the onboarding overlay (built programmatically; no .tscn) and add it as a child. It
+    // starts hidden and stays so until MmoClientRoot pushes a view where something should show.
+    private void MountOnboarding()
+    {
+        _onboarding = new OnboardingOverlay { Name = "OnboardingOverlay" };
+        AddChild(_onboarding);
+    }
+
+    // ADUE P2-B: render the current onboarding view. MmoClientRoot computes it (in-practice-room + paired + used
+    // verbs) and calls this each refresh; the overlay reads it and never decides anything itself.
+    public void SetOnboarding(OnboardingHintView view)
+    {
+        _onboarding?.Apply(view);
     }
 
     // S111: instantiate the Inventory window scene and add it as a child of the HUD (hidden by default). Falls
