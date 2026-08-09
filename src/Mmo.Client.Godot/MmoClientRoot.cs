@@ -1580,7 +1580,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		var landingBg = new ColorRect
 		{
 			Name = "LandingBg",
-			Color = new Color(0.02f, 0.03f, 0.05f, 0.92f),
+			Color = new Color(0.02f, 0.03f, 0.05f, 1f),
 			MouseFilter = Control.MouseFilterEnum.Ignore
 		};
 		landingBg.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
@@ -1592,14 +1592,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 		var landingRows = new VBoxContainer { Name = "LandingRows", MouseFilter = Control.MouseFilterEnum.Ignore };
 		landingRows.AddThemeConstantOverride("separation", 8);
+		// Fixed content width: without it the CenterContainer collapses each autowrap label to ~0 width and the text
+		// renders ONE CHARACTER PER LINE (vertical). 760px gives the title + prompt real room to lay out horizontally.
+		landingRows.CustomMinimumSize = new Vector2(760, 0);
 		landingCenter.AddChild(landingRows);
-
-		// The a2 monogram (TEXT placeholder, art pending) in the teal accent, over the big ADUE title.
-		var landingMark = CreateOverlayLabel("LandingMark", 46);
-		landingMark.Text = LandingScreen.Mark;
-		landingMark.HorizontalAlignment = HorizontalAlignment.Center;
-		landingMark.AddThemeColorOverride("font_color", new Color(0.45f, 0.72f, 0.78f));
-		landingRows.AddChild(landingMark);
 
 		var landingTitle = CreateOverlayLabel("LandingTitle", 88);
 		landingTitle.Text = LandingScreen.Title;
@@ -1656,9 +1652,6 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// the perf overlay is on. F1 reveals the admin tuning panel (independent of _debugOverlayVisible).
 		metricsPanel.Visible = false;
 
-		// ADUE P2: the landing is a full-screen BACKDROP for the lobby — added FIRST so the HUD panels (status/chat) and
-		// the duo-card reveal all draw OVER it. It shows only in Lobby (UpdateLanding), so it never occludes live play.
-		layer.AddChild(landingPanel);
 		layer.AddChild(statusPanel);
 		layer.AddChild(metricsPanel);
 		layer.AddChild(chatPanel);
@@ -1666,6 +1659,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// ADUE P1 RUN LOOP: added after the status/metrics/chat panels so the end screen draws OVER them.
 		layer.AddChild(runPanel);
 		layer.AddChild(inputPanel);
+		// ADUE P2: the landing is a full-screen OPAQUE backdrop for the lobby — added AFTER the HUD panels so it HIDES
+		// everything beneath while up (shown only in Lobby via UpdateLanding, never during live play). The duo card is
+		// added after it so the pairing celebration still draws over the landing.
+		layer.AddChild(landingPanel);
 		// ADUE P2-B FIX: the duo-card reveal was created + made visible on pairing but never added to the layer, so it
 		// never rendered (why the "a due" card didn't show). Add it here, above the run/input panels so the celebration
 		// draws over them.
