@@ -3472,8 +3472,7 @@ public sealed class GameServer
 
     // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the READY-UP wire verb — the run's front door. Dedup on
     // the session's DEDICATED run-ready cursor (independent of move/attack/action/fire/duo), then hand to the run
-    // engine. Deliberately NOT gated on IsDead: a downed player must be able to ready for the NEXT run off the end
-    // screen (and the run's own rules, not this handler, decide what a mid-run ready means).
+    // engine.
     private void HandleRunReady(ClientSession session, uint sequence, bool ready)
     {
         if (!session.TryConsumeRunReadySequence(sequence))
@@ -3492,6 +3491,17 @@ public sealed class GameServer
         if (!TryGetSessionEntity(session, out var self))
         {
             SendSystem(session, "ready: no controllable entity.");
+            return;
+        }
+
+        // P1-review H1: readying UP while dead is refused. The original "must be able to ready off the end screen"
+        // rationale was hollow — returnPlayer revives everyone BEFORE Summary, so an end-screen player is never dead.
+        // Unguarded, a town-respawn-delay corpse could be teleported into a fresh run: duo → the corpse counts into
+        // _participantsAtSpawn (duo boss HP + reduction vs ONE live fighter, unwinnable); solo → instant 3s wipe.
+        // Un-readying while dead stays allowed (it only clears a flag).
+        if (ready && session.IsDead)
+        {
+            SendSystem(session, "You can't ready while down.");
             return;
         }
 
