@@ -15,6 +15,7 @@ try
 {
     Log.Info($"Starting MMO server on UDP port {options.Port} at {options.TickRate} ticks/sec.");
     Log.Info($"Database provider: {options.DatabaseProvider}; migrations: {options.MigrationsPath}.");
+    Log.Info($"Demo mode (auto-pair + solo-start guard): {(options.DemoMode ? "ON" : "off")}.");
 
     // ECOLOGY E3 (docs/ecology-v1-design.md D8): region_populations only has a Sqlite migration/repository in
     // this task's scope (Postgres has zero test coverage today and is not the active provider — see the review
