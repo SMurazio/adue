@@ -44,8 +44,14 @@ Identical to the MMO contract this repo forked from, in brief:
 - **Reviewer subagents** are fresh per review, get the live symptom + the diff — NOT the plan —
   and judge the hypothesis against the symptom.
 - Work happens on **feature branches, never directly on `main`**; merge only tested + reviewed.
-- **Scale rigor to risk**: trivial edits direct with no review; standard changes gate the
-  affected suite; server-authoritative combat/damage/protocol/concurrency get full rigor.
+- **Scale rigor to risk** (2026-08-09 policy): `N-*` nits skip independent review — orchestrator
+  verification (run-checks green + the task's own regression test) is their gate. `S-*` reviews
+  batch **by shared code seam, not by count** — one fresh reviewer per cluster of tasks touching
+  the same code, never a grab-bag diff. The **host-authoritative sim** (run-loop / combat / damage /
+  hit-test / protocol / two-session concurrency) still gets one review per seam-batch regardless:
+  "authoritative" here means the host holds the real game state both players trust — it is a
+  *sim-correctness* concern, NOT dedicated-server ops (which are parked). Couch-only paths (one
+  client, one clock) are lower-risk. Trivial edits still go direct with no review.
 - **Design decisions survive a Fable adversarial review** (2026-08-09): consequential
   design/direction/identity calls pass a Fable RED-TEAM — a Fable-model agent prompted to REFUTE the
   decision (strongest case against, failure modes, cheaper alternatives, how it dies at the P2

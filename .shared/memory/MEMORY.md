@@ -15,6 +15,8 @@ index at session start, then read any note relevant to the current task.
 
 - [Review handoff loop](review-handoff-loop.md) - Claude-only loop: orchestrator plans/verifies/commits,
   implementer subagents write code/tests, and a fresh reviewer subagent verifies independently.
+  **Cadence (2026-08-09): N-nits skip review; S-tasks batch review by shared seam; host-authoritative
+  sim always reviewed (referee code, not "server ops").**
 - [Design decisions survive a Fable adversarial review](design-decisions-survive-fable-adversarial-review.md)
   — consequential design calls must pass a Fable RED-TEAM (prompted to refute, not bless) before being
   locked into docs/contract; scale to consequence; Law changes still a user decision.

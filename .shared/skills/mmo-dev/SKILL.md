@@ -1,13 +1,29 @@
 ---
 name: mmo-dev
-description: Project-specific MMO development workflows for D:\MMO. Use when Claude needs to run, stop, verify, debug, or explain this MMO repo, including starting the .NET server, starting the browser debug client, running build/tests, resetting SQLite, checking logs, or avoiding Docker/Postgres assumptions.
+description: Dev workflows for the ADUE repo (D:\Adue, forked from the MMO). Use to run, stop, verify, debug, or explain this repo — start the .NET server, launch the Godot client(s) for the duo feel-test, run build/tests, stress, or profiling. Retains MMO-era framing (SQLite, web client) for parked systems.
 ---
 
-# MMO Dev
+# Adue Dev (forked from mmo-dev)
+
+> **ADUE ORIENTATION.** This repo is Adue — the standalone two-player co-op roguelite — forked
+> full-history from the MMO. The skill name stays `mmo-dev` (referenced by the stub); its scripts
+> split into:
+> - **Duo-primary (live):** `run-checks`, `start-server`, `start-godot-visual-check` (SOLO client),
+>   **`start-duo`** (TWO clients — the two-player feel-test / merge gate), `stop-mmo`,
+>   `godot-build/import/run`, `client-control`, `movement-debug-trace`.
+> - **Perf gate (keep):** `stress-test`, `review-stress`, `review-stress-release` — the plan keeps
+>   these as the performance gate; not cruft.
+> - **Online-duo relevant:** `connect-server` — the two-machine LAN path the bundled host-side
+>   server work will reuse.
+> - **MMO-era / parked:** the web-client trio (`start-web-client`, `run-web-client-window`,
+>   `start-web-client.ps1`) drives the retired tile-stepped browser client — slated for retirement,
+>   see `todo/N-retire-web-client.md`; do NOT use it for Adue testing. SQLite/ecology/AOI framing
+>   below is likewise parked (prune on friction, not principle).
 
 Use the repo-local .NET SDK at `.tools/dotnet/dotnet.exe`.
 
-Prefer the browser debug client over the console client for interactive testing. The console client is still useful for scripted protocol checks.
+The **Godot client** is the client for Adue. The browser/console clients are MMO-era; the console
+client is still occasionally useful for scripted protocol checks.
 
 ## Workflows
 
@@ -88,14 +104,21 @@ Run the Godot client headless for ~N seconds and capture its output (compile + r
 .\.shared\skills\mmo-dev\scripts\godot-run.cmd 8
 ```
 
-Launch the manual Godot visual check: visible server plus two visible Godot clients named `GodotA`
-and `GodotB`:
+Launch the **duo feel-test** — visible server plus TWO Godot clients (`GodotA` + `GodotB`), the
+two-player run-loop / merge-gate check:
+
+```powershell
+.\.shared\skills\mmo-dev\scripts\start-duo.cmd
+```
+
+For a **solo** run, launch a single client instead:
 
 ```powershell
 .\.shared\skills\mmo-dev\scripts\start-godot-visual-check.cmd
 ```
 
-Add `-LogToFile` to capture the server logs during that visual check.
+Both wrap `start-godot-visual-check.ps1` (solo passes `-Clients 1`, `start-duo` passes `-Clients 2`).
+Add `-LogToFile` to either to capture the server logs during the check.
 Inside the Godot client, press `F3` to toggle the performance HUD with FPS, frame timings, render
 counts, memory, GC, hitch count, and a rolling frame-time graph.
 
@@ -185,8 +208,8 @@ its only disk write is the autopilot CSV under `.run/`.
 ## Local Runtime Facts
 
 - Game server: UDP `127.0.0.1:7777`.
-- Browser debug client: http://127.0.0.1:5080.
-- SQLite database: `data/mmo.db`.
+- Browser debug client: http://127.0.0.1:5080 (MMO-era / parked — see `todo/N-retire-web-client.md`).
+- SQLite database: `data/mmo.db` (MMO-era / parked).
 - PID files: `.run/server.pid`, `.run/web-client.pid`.
 - Godot client project: `src/Mmo.Client.Godot` (`MmoClientGodot.sln`); Godot 4.x .NET build.
 - `MMO_GODOT` env var: path to the Godot .NET executable (used by `godot-run.cmd`).
@@ -197,9 +220,11 @@ its only disk write is the autopilot CSV under `.run/`.
 
 - Do not require Docker for normal local development.
 - Stop running server/client processes before a full solution build if DLLs are locked.
-- Prefer `start-server.cmd` and `start-web-client.cmd`; they run visible windows with PID files.
-- Use `stop-mmo.cmd` before restarting server/web; it cleans PID files, port listeners, repo-local dotnet, and known wrapper windows.
+- Prefer `start-server.cmd` + the Godot launchers (`start-duo.cmd` for the two-player test,
+  `start-godot-visual-check.cmd` for solo); they run visible windows with PID files. `start-web-client.cmd`
+  is MMO-era/parked — don't use it for Adue.
+- Use `stop-mmo.cmd` before restarting server/clients; it cleans PID files, port listeners, repo-local dotnet, and known wrapper windows.
 - Use `--snapshots` only when the console client needs snapshot logs.
 - Use `stress-test.cmd` for synthetic client load before trying manual multi-window testing.
-- Use `start-godot-visual-check.cmd` when the S16 Godot visual/manual check is needed.
+- Use `start-duo.cmd` (two clients) for the Adue duo feel-test; `start-godot-visual-check.cmd` (one client) for solo.
 - Keep Postgres as a later provider, not the default path.
