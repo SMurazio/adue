@@ -156,6 +156,17 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private Label? _runLabel;
 	private int _runPanelVersion = -1;
 
+	// ADUE P2 (todo/S-p2-landing-screen.md): the branded LANDING screen — a full-screen title that owns the pre-run
+	// LOBBY (and the pre-login connecting gap) and leads into the run on "press B together to begin". It REPLACES the
+	// small RunPhase.Lobby face of the run panel (suppressed below) with a big ADUE title + a2 placeholder mark +
+	// tagline + a live ready-state prompt line. Visibility + the prompt come from the pure LandingScreen.Compose brain
+	// (unit-tested in Mmo.Client.Core.Tests); this layer only renders what it returns. Hidden during Active + Summary.
+	// The a2 mark is a TEXT placeholder (art pending), matching the duo-card convention. VISUAL/feel is a HUMAN
+	// feel-test. The overlay is a full-rect, input-IGNORING Control so B (keyboard) still readies through the existing
+	// path and clicks pass through to the world beneath.
+	private Control? _landingPanel;
+	private Label? _landingPromptLabel;
+
 	// ---- F1 tuning panel (TabContainer) -----------------------------------------------------------
 	// One DRAGGABLE tabbed panel under F1 holding the FIVE admin tuning surfaces (the old F4–F8 F-key panels) as
 	// thematic TABS: Visual / Movement / Combat / Server / Vitals. The whole panel is ADMIN-ONLY — every tab was an
@@ -1558,6 +1569,65 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		runPanel.Visible = false;
 		_runPanel = runPanel;
 
+		// ADUE P2 (todo/S-p2-landing-screen.md): the branded LANDING screen. A full-rect, input-IGNORING Control so B
+		// (keyboard) still readies through the existing path and the world/clicks pass through beneath it. A dark
+		// backdrop + a centred column: the a2 placeholder mark, the ADUE title, the tagline, then the LIVE ready-state
+		// prompt (_landingPromptLabel, driven by UpdateLanding from the pure LandingScreen brain) and a small practice
+		// nudge. Sizes/placement/copy are a first cut — HUMAN feel-test owed.
+		var landingPanel = new Control { Name = "LandingScreen", MouseFilter = Control.MouseFilterEnum.Ignore };
+		landingPanel.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+
+		var landingBg = new ColorRect
+		{
+			Name = "LandingBg",
+			Color = new Color(0.02f, 0.03f, 0.05f, 0.92f),
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		landingBg.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+		landingPanel.AddChild(landingBg);
+
+		var landingCenter = new CenterContainer { Name = "LandingCenter", MouseFilter = Control.MouseFilterEnum.Ignore };
+		landingCenter.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+		landingPanel.AddChild(landingCenter);
+
+		var landingRows = new VBoxContainer { Name = "LandingRows", MouseFilter = Control.MouseFilterEnum.Ignore };
+		landingRows.AddThemeConstantOverride("separation", 8);
+		landingCenter.AddChild(landingRows);
+
+		// The a2 monogram (TEXT placeholder, art pending) in the teal accent, over the big ADUE title.
+		var landingMark = CreateOverlayLabel("LandingMark", 46);
+		landingMark.Text = LandingScreen.Mark;
+		landingMark.HorizontalAlignment = HorizontalAlignment.Center;
+		landingMark.AddThemeColorOverride("font_color", new Color(0.45f, 0.72f, 0.78f));
+		landingRows.AddChild(landingMark);
+
+		var landingTitle = CreateOverlayLabel("LandingTitle", 88);
+		landingTitle.Text = LandingScreen.Title;
+		landingTitle.HorizontalAlignment = HorizontalAlignment.Center;
+		landingRows.AddChild(landingTitle);
+
+		var landingTagline = CreateOverlayLabel("LandingTagline", 20);
+		landingTagline.Text = LandingScreen.Tagline;
+		landingTagline.HorizontalAlignment = HorizontalAlignment.Center;
+		landingTagline.AddThemeColorOverride("font_color", new Color(0.70f, 0.82f, 0.86f));
+		landingRows.AddChild(landingTagline);
+
+		// Breathing room between the brand block and the call-to-action.
+		landingRows.AddChild(new Control { Name = "LandingSpacer", CustomMinimumSize = new Vector2(0, 40), MouseFilter = Control.MouseFilterEnum.Ignore });
+
+		_landingPromptLabel = CreateOverlayLabel("LandingPrompt", 26);
+		_landingPromptLabel.HorizontalAlignment = HorizontalAlignment.Center;
+		landingRows.AddChild(_landingPromptLabel);
+
+		var landingNudge = CreateOverlayLabel("LandingNudge", 14);
+		landingNudge.Text = LandingScreen.Nudge;
+		landingNudge.HorizontalAlignment = HorizontalAlignment.Center;
+		landingNudge.AddThemeColorOverride("font_color", new Color(0.58f, 0.68f, 0.72f));
+		landingRows.AddChild(landingNudge);
+
+		landingPanel.Visible = false;
+		_landingPanel = landingPanel;
+
 		var inputPanel = CreateOverlayPanel("ChatInputPanel", Vector2.Zero, new Vector2(760, 40));
 		inputPanel.AnchorTop = 1f;
 		inputPanel.AnchorBottom = 1f;
@@ -1586,6 +1656,9 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// the perf overlay is on. F1 reveals the admin tuning panel (independent of _debugOverlayVisible).
 		metricsPanel.Visible = false;
 
+		// ADUE P2: the landing is a full-screen BACKDROP for the lobby — added FIRST so the HUD panels (status/chat) and
+		// the duo-card reveal all draw OVER it. It shows only in Lobby (UpdateLanding), so it never occludes live play.
+		layer.AddChild(landingPanel);
 		layer.AddChild(statusPanel);
 		layer.AddChild(metricsPanel);
 		layer.AddChild(chatPanel);
@@ -2660,6 +2733,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateInventory();
 		UpdateLootWindow();
 		UpdateRunPanel();
+		UpdateLanding();
 		UpdateInteractFeedback(now);
 		UpdateDuoCard(now);
 		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
@@ -2962,17 +3036,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		{
 			case RunPhase.Lobby:
 			{
-				var ready = _client.RunSelfReady ? "READY" : "not ready";
-				var waiting = _client.RunRosterCount > 1
-					? $"\n{_client.RunReadyCount}/{_client.RunRosterCount} ready — the run starts when both are."
-					: // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): pairing is no longer typed — the demo auto-pairs
-						// on join, so the unpaired lobby state is just "partner not connected yet". Dropped the
-						// "(/pair <name> …)" hint (a fake choice); the paired "N/N ready" line is kept unchanged.
-						"\nWaiting for your partner to join...";
-				SetTextIfChanged(
-					_runLabel,
-					$"THE SUNDERER — press [B] to ready up  ({ready}){waiting}");
-				_runPanel.Visible = true;
+				// ADUE P2 (todo/S-p2-landing-screen.md): the small lobby face is RETIRED — the full-screen branded
+				// LANDING screen (UpdateLanding) now owns the lobby ready-up affordance. Suppress the run panel here so
+				// the two never double-render. The Active banner + Summary end screen below keep the run panel.
+				_runPanel.Visible = false;
 				break;
 			}
 
@@ -3016,6 +3083,37 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				_runPanel.Visible = true;
 				break;
 			}
+		}
+	}
+
+	// ADUE P2 (todo/S-p2-landing-screen.md): render the branded LANDING screen from the pure LandingScreen brain. It
+	// owns the pre-run LOBBY (and, because CurrentRunPhase defaults to Lobby before the first RunStatus, the pre-login
+	// connecting gap too): a big ADUE title + a2 placeholder mark + tagline + a LIVE ready-state prompt ("waiting for
+	// your partner" / "press [B] together" / "you're ready — waiting for <partner>" / "both ready — descending…").
+	// Hidden during Active + Summary (the run panel keeps those). Recomputed each frame — Compose is a cheap pure call
+	// and SetTextIfChanged avoids touching the label unless the prompt actually changed — so the prompt stays live even
+	// on pair/ready edges that don't bump RunVersion. Never gates input: B readies through the existing path, and the
+	// overlay ignores the mouse so the world beneath still receives clicks.
+	private void UpdateLanding()
+	{
+		if (_client is null || _landingPanel is null || _landingPromptLabel is null)
+		{
+			return;
+		}
+
+		var partnerName = _client.PartnerNetworkId is { } partnerId ? _client.DisplayNameFor(partnerId) : null;
+		var view = LandingScreen.Compose(
+			_client.CurrentRunPhase,
+			_client.IsPaired,
+			_client.RunSelfReady,
+			_client.RunReadyCount,
+			_client.RunRosterCount,
+			partnerName);
+
+		_landingPanel.Visible = view.Visible;
+		if (view.Visible)
+		{
+			SetTextIfChanged(_landingPromptLabel, view.Prompt);
 		}
 	}
 

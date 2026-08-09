@@ -64,8 +64,12 @@ public sealed class OnboardingCoach
     // seen in the brief pre-join gap before the partner connects. It stopped telling the player to type `/pair` (a
     // fake choice — there is only ever one possible partner) and instead just reassures them the partner is coming;
     // pair formation itself is celebrated by the one-shot duo-card reveal, not petitioned here.
+    // The bare "waiting for your partner" line — the calm reassurance shared with the P2 landing screen
+    // (LandingScreen.ConnectingPrompt) so the pre-login/connecting copy lives in exactly one place.
+    public const string WaitingForPartnerLine = "Waiting for your partner…";
+
     public const string PairingPromptText =
-        "Waiting for your partner…\nAdue's four verbs are built for two.";
+        WaitingForPartnerLine + "\nAdue's four verbs are built for two.";
 
     // Heading over the verb list inside the practice room.
     public const string VerbHeadingText = "PRACTICE ROOM — your four duo verbs:";
