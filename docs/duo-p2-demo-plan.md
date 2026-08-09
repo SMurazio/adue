@@ -42,9 +42,19 @@ emergent CROSSING of both partners' shots server-side, not a button) **+ Shield 
   first-run / practice-room hint layer for the verbs + a pairing prompt. Mostly client; feel-gated.
 - **C. Menu shell + title — polish over the EXISTING run panel.** `UpdateRunPanel`
   (`MmoClientRoot.cs:2872`) is already a lobby→run→end→restart loop keyed on `RunVersion`. Greenfield:
-  a title screen, an explicit pair step as a screen (wraps `/pair` + existing `IsPaired`), and a light
-  floor/height label on the end screen. NOTE: the run is a SINGLE room today, so "how high climbed" is
-  cosmetic — the end screen already shows "Sunderer left at N% HP"; no multi-floor content in P2.
+  a title screen and a light floor/height label on the end screen. NOTE: the run is a SINGLE room
+  today, so "how high climbed" is cosmetic — the end screen already shows "Sunderer left at N% HP"; no
+  multi-floor content in P2. (There is NO explicit pair step — see B-pairing below.)
+- **B-pairing. Auto-pair + duo reveal — REPLACES `/pair` (Fable adversarial review, 2026-08-09).**
+  Pairing is NOT an input in the 2-player in-person demo: asking a player to select the only possible
+  partner is a fake choice, and that fake choice is the "cringe" the tester flagged. So (config-flagged
+  demo mode): the two players **auto-pair on join**; an unpaired ready is GUARDED ("Waiting for your
+  partner to join") instead of solo-starting (a real race bug — RunEngine solo-starts an unpaired
+  ready); the client kills the "type /pair" prompt and instead shows a one-shot **duo-card reveal**
+  (the *a due* framing + both names) on pair formation. The "commit together" beat stays at ready-up
+  (both press B), where it has real stakes — not duplicated at pairing. `/pair`/`/unpair` survive as
+  dev commands (flag off). Deferred to the post-P2 lobby: partner selection among many, invite/accept,
+  matchmaking, cross-session pair identity.
 - **D. Instrumentation.** Mostly the observer (in person). Optionally light bounce-point telemetry
   (where they quit / stick) if cheap.
 - **E. In-person LAN session kit.** A setup checklist + a one-command two-machine launch (existing
