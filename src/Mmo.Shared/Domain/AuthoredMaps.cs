@@ -26,6 +26,82 @@ public static class AuthoredMaps
     /// <summary>See <see cref="TownAndFloor1Width"/>.</summary>
     public const int TownAndFloor1Height = 384;
 
+    // ============================ ADUE BASE-CAMP REFRAME (genVersion 3) ============================
+    // docs/duo-base-camp-reframe.md — the small "pocket base camp, not a town" hub the P2 demo launches
+    // runs from. Authored as its OWN map (commit 1 of the 3-commit reframe): the live world stays
+    // genVersion 2 (TownAndFloor1) THIS commit, so both maps coexist and the whole v2 suite proves it.
+    // The commit-2 flip points CurrentGenVersion + ServerOptions + the engine at this map.
+
+    /// <summary>
+    /// The genVersion 3 base-camp dimensions. A deliberately SMALL one-screen hub (48x48). Content, not
+    /// config, exactly like <see cref="TownAndFloor1Width"/>: the commit-2 ServerOptions v3 derivation
+    /// reads these so the configured dims and the authored grid can never drift.
+    /// </summary>
+    public const int BaseCampWidth = 48;
+
+    /// <summary>See <see cref="BaseCampWidth"/>.</summary>
+    public const int BaseCampHeight = 48;
+
+    // The two sealed teleport-only pockets, RE-HOMED into the 48x48 camp. Each is byte-identical in SHAPE
+    // to its live-world twin (a 24x24 exterior, a 1-tile wall ring, a 22x22 DungeonStone interior) — the
+    // gated-combat interior geometry (BossArena / PracticeRoom entry-tile spacing, boss-spawn/core sweet
+    // band) is a function of the interior-RELATIVE layout, which does not move. They tile the north half
+    // side by side (x 0-23 practice, x 24-47 boss), disjoint. NB: the shared BossArena / PracticeRoom
+    // consts stay FROZEN at their v2 (356.. / 8..) coords this commit — TownAndFloor1 + its whole test
+    // suite stamp and pin the pockets THROUGH those consts and must stay byte-identical/green — so the
+    // BaseCamp pockets carry their own coords here. Commit 2 re-points the shared consts + the server
+    // teleport targets at THESE origins (the derived entry/spawn/core tiles are worked out, interior
+    // byte-identical, in review-request-reframe-base-camp-map.md).
+
+    /// <summary>Practice pocket (west of the north half): 24x24 exterior, re-homed <see cref="PracticeRoom"/>.</summary>
+    public const int BaseCampPracticeExteriorMinX = 0;
+
+    /// <summary>See <see cref="BaseCampPracticeExteriorMinX"/>.</summary>
+    public const int BaseCampPracticeExteriorMinY = 24;
+
+    /// <summary>See <see cref="BaseCampPracticeExteriorMinX"/>.</summary>
+    public const int BaseCampPracticeExteriorMaxX = 23;
+
+    /// <summary>See <see cref="BaseCampPracticeExteriorMinX"/>.</summary>
+    public const int BaseCampPracticeExteriorMaxY = 47;
+
+    /// <summary>Boss (Sunderer) pocket (east of the north half): 24x24 exterior, re-homed <see cref="BossArena"/>.</summary>
+    public const int BaseCampBossExteriorMinX = 24;
+
+    /// <summary>See <see cref="BaseCampBossExteriorMinX"/>.</summary>
+    public const int BaseCampBossExteriorMinY = 24;
+
+    /// <summary>See <see cref="BaseCampBossExteriorMinX"/>.</summary>
+    public const int BaseCampBossExteriorMaxX = 47;
+
+    /// <summary>See <see cref="BaseCampBossExteriorMinX"/>.</summary>
+    public const int BaseCampBossExteriorMaxY = 47;
+
+    // The walkable camp island (south-centre): a 16x16 NON-grass cobble platform in the void — the one
+    // place the pair stands. Non-grass masks the Grass-only node scatter out (the BossArena trick), so the
+    // WHOLE walkable camp is non-grass ⇒ the NodeCatalog is empty (pinned in BaseCampMapTests).
+
+    /// <summary>The walkable cobble camp island (inclusive rect).</summary>
+    public const int BaseCampIslandMinX = 16;
+
+    /// <summary>See <see cref="BaseCampIslandMinX"/>.</summary>
+    public const int BaseCampIslandMinY = 4;
+
+    /// <summary>See <see cref="BaseCampIslandMinX"/>.</summary>
+    public const int BaseCampIslandMaxX = 31;
+
+    /// <summary>See <see cref="BaseCampIslandMinX"/>.</summary>
+    public const int BaseCampIslandMaxY = 19;
+
+    /// <summary>
+    /// THE genVersion 3 map (docs/duo-base-camp-reframe.md): the small base-camp hub — a walkable cobble
+    /// island the pair spawns on, floating in out-of-world void, with the two sealed teleport-only pockets
+    /// (the re-homed Sunderer arena + practice room) tiling the north half. Expanded ONCE at static init by
+    /// the deterministic stamp program below, exactly like <see cref="TownAndFloor1"/>.
+    /// Do NOT mutate the array at runtime (it is content, not state).
+    /// </summary>
+    public static readonly string[] BaseCamp = BuildBaseCamp();
+
     /// <summary>
     /// THE genVersion 2 map (town-blockout §4): the base town, the great wall + gate, and floor 1's
     /// three wings. Expanded ONCE at static init by the deterministic stamp program below — this array
@@ -201,6 +277,46 @@ public static class AuthoredMaps
         // (re-pinned in the same commit) and — via the masked-out interior tiles — the NodeCatalog CatalogHash (likewise).
         map.Border(PracticeRoom.ExteriorMinX, PracticeRoom.ExteriorMinY, PracticeRoom.ExteriorMaxX, PracticeRoom.ExteriorMaxY, 1, '#');
         map.FillRect(PracticeRoom.InteriorMinX, PracticeRoom.InteriorMinY, PracticeRoom.InteriorMaxX, PracticeRoom.InteriorMaxY, '-');
+
+        return map.Emit();
+    }
+
+    /// <summary>
+    /// The BaseCamp stamp program (ADUE base-camp reframe, docs/duo-base-camp-reframe.md). y grows
+    /// NORTHWARD (row 0 = y 0 = the south edge), all stamp coordinates inclusive — same conventions as
+    /// <see cref="BuildTownAndFloor1"/>. Public so the expansion-determinism test can re-run it; every
+    /// other caller reads the canonical <see cref="BaseCamp"/> instance.
+    ///
+    /// The canvas seed is SPACE (out-of-world void), not grass: the camp is a small platform floating in
+    /// nothing, and — with every walkable tile authored as a non-grass surface — the Grass-only node
+    /// scatter has nowhere to land, so the NodeCatalog is empty (the pockets use the same trick).
+    /// </summary>
+    public static string[] BuildBaseCamp()
+    {
+        var map = new MapStamps(BaseCampWidth, BaseCampHeight, ' ');
+
+        // The two sealed teleport-only pockets tile the NORTH half, side by side (practice west, boss
+        // east), disjoint. Each is stamped IDENTICALLY to the live-world arena/practice room: a 1-tile
+        // wall ring (shared-collision obstacle both sides predict) around a 22x22 DungeonStone floor
+        // ('-', the non-grass surface that masks node scatter out for free — flat, empty). DELIBERATELY
+        // unconnected to the island (no mouth): players only ever teleport in, so the reachability
+        // invariant carves both interiors out (pinned in BaseCampMapTests).
+        map.Border(BaseCampPracticeExteriorMinX, BaseCampPracticeExteriorMinY, BaseCampPracticeExteriorMaxX, BaseCampPracticeExteriorMaxY, 1, '#');
+        map.FillRect(BaseCampPracticeExteriorMinX + 1, BaseCampPracticeExteriorMinY + 1, BaseCampPracticeExteriorMaxX - 1, BaseCampPracticeExteriorMaxY - 1, '-');
+        map.Border(BaseCampBossExteriorMinX, BaseCampBossExteriorMinY, BaseCampBossExteriorMaxX, BaseCampBossExteriorMaxY, 1, '#');
+        map.FillRect(BaseCampBossExteriorMinX + 1, BaseCampBossExteriorMinY + 1, BaseCampBossExteriorMaxX - 1, BaseCampBossExteriorMaxY - 1, '-');
+
+        // The camp island (south-centre): a 16x16 walkable COBBLE platform — non-grass, so it carries no
+        // node scatter (the whole walkable camp is non-grass ⇒ empty catalog). Sealed by the surrounding
+        // void, so it is its own connected walkable region — every `S` reaches all of it and nothing else.
+        map.FillRect(BaseCampIslandMinX, BaseCampIslandMinY, BaseCampIslandMaxX, BaseCampIslandMaxY, ':');
+
+        // Clustered spawn anchors near the island centre (~23.5, 11.5): the pair wakes a few tiles apart,
+        // together. `S` parses to walkable cobble, so these are non-grass too (no scatter under a spawn).
+        foreach (var (sx, sy) in new[] { (22, 11), (25, 11), (22, 12), (25, 12) })
+        {
+            map.Put(sx, sy, 'S');
+        }
 
         return map.Emit();
     }

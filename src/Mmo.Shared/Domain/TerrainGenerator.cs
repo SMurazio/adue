@@ -37,6 +37,16 @@ public static class TerrainGenerator
     /// <summary>The authored-map version (town+floor-1 blockout) — the server default as of M3.</summary>
     public const int AuthoredGenVersion = 2;
 
+    /// <summary>
+    /// The base-camp version (ADUE base-camp reframe, docs/duo-base-camp-reframe.md): the small 48x48
+    /// hub map <see cref="AuthoredMaps.BaseCamp"/>. Authored + generatable NOW, but NOT yet the boot
+    /// default — <see cref="CurrentGenVersion"/> stays 2 this commit so the live world is still the town;
+    /// the reframe's commit 2 flips CurrentGenVersion (and the ServerOptions v3 dims derivation) to this.
+    /// Also an AUTHORED genVersion: the layout IS the shared grid, the seed is intentionally unused, and
+    /// the caller's (width, height) MUST match the grid's intrinsic dims.
+    /// </summary>
+    public const int BaseCampGenVersion = 3;
+
     // genVersion 1 reproduces the historical hand-authored map exactly: a 1-tile blocked border around
     // the whole world plus three short interior wall segments, with the legacy default spawn tile
     // carved back open. The seed is plumbed through a deterministic PRNG but genVersion 1 does not yet
@@ -87,9 +97,15 @@ public static class TerrainGenerator
             return GenerateVersion2(width, height);
         }
 
+        if (genVersion == BaseCampGenVersion)
+        {
+            return GenerateVersion3(width, height);
+        }
+
         throw new ArgumentOutOfRangeException(
             nameof(genVersion),
-            $"Unsupported terrain genVersion {genVersion}. This build generates versions 1 (procedural) and {AuthoredGenVersion} (authored).");
+            $"Unsupported terrain genVersion {genVersion}. This build generates versions 1 (procedural), " +
+            $"{AuthoredGenVersion} (authored town+floor-1), and {BaseCampGenVersion} (authored base camp).");
     }
 
     /// <summary>
@@ -264,6 +280,32 @@ public static class TerrainGenerator
             throw new ArgumentOutOfRangeException(
                 nameof(width),
                 $"genVersion {AuthoredGenVersion} is the authored {map.Width}x{map.Height} map; " +
+                $"requested {width}x{height}. Configure the world size to match the authored content.");
+        }
+
+        return layout;
+    }
+
+    // Same single-parse-per-process cache as AuthoredLayoutCache, for the genVersion 3 base-camp map.
+    private static readonly Lazy<TerrainLayout> BaseCampLayoutCache = new(() =>
+    {
+        var map = AuthoredMap.Parse(AuthoredMaps.BaseCamp);
+        return new TerrainLayout(map.BlockedTiles, ContentHash(map), map);
+    });
+
+    // genVersion 3 (AUTHORED base camp): identical mechanics to GenerateVersion2 — the layout IS the shared
+    // BaseCamp grid, served from cache; the seed is intentionally unused and the caller's (width, height)
+    // MUST match the grid's intrinsic dims or the server would generate a world that disagrees with its own
+    // content, so fail loudly (boot/test) exactly as v2 does.
+    private static TerrainLayout GenerateVersion3(int width, int height)
+    {
+        var layout = BaseCampLayoutCache.Value;
+        var map = layout.Authored!; // always populated by the cache factory above.
+        if (width != map.Width || height != map.Height)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(width),
+                $"genVersion {BaseCampGenVersion} is the authored {map.Width}x{map.Height} base-camp map; " +
                 $"requested {width}x{height}. Configure the world size to match the authored content.");
         }
 
