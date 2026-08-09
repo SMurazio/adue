@@ -95,6 +95,11 @@ public sealed class RunLoopSessionIntegrationTests
 
             // A short respawn delay: if the mid-run skip were broken, a dead body would jump to town almost at once.
             a.SendAdminSetTuning("player.respawnMs", 300d);
+            // DETERMINISM: park the boss so it can never close on Bravo and wipe the run mid-watch (a load-dependent
+            // flake — the watch below relied on wall-clock chase distance). Aggro at its floor (0.5u) means the boss
+            // never acquires a target 10 tiles away, so it holds at spawn; the WIPE still fires from aliveInArena==0
+            // (StepActive) independent of boss behaviour, so this changes nothing the test asserts.
+            a.SendAdminSetTuning("sunderer.aggroRadius", 0.5d);
             await PollForAsync(TimeSpan.FromMilliseconds(150), a, b);
 
             // Pair up, then both ready → the duo run starts and both are teleported into the arena.
@@ -118,9 +123,9 @@ public sealed class RunLoopSessionIntegrationTests
             await WaitUntilAsync(() => a.HasSystemLine("You are down. No respawn until the run ends."), a, b);
 
             // SKIP HELD: for well over the (300 ms) respawn delay, Alpha's body must STAY in the arena, never get the
-            // town-respawn line, and the run must stay Active (Bravo is still up). Kept to ~1 s — long enough to be >3x
-            // the respawn delay (a broken skip would fire within ~300 ms) but short enough that the freshly-spawned boss
-            // (10 tiles away, chasing) can't close on Bravo and end the run before we do it deliberately below.
+            // town-respawn line, and the run must stay Active (Bravo is still up). ~1 s is >3x the respawn delay (a
+            // broken skip would fire within ~300 ms); the run cannot end early here because the boss is parked (aggro
+            // floored above), so only our deliberate Bravo kill below ends it.
             var watchUntil = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(1000);
             while (DateTimeOffset.UtcNow < watchUntil)
             {
