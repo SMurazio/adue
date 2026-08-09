@@ -385,6 +385,57 @@ public sealed class ClientSessionTests
         Assert.Equal(1u, session.LastAttackSeq);
     }
 
+    // ADUE P1 RUN LOOP (L5, P1 review): the RUN-READY dedup cursor rejects stale/duplicate seqs and advances only on a
+    // fresh (higher) one — a resent RunReadyMessage (reliable-ordered but a client may re-mint on reconnect) must never
+    // double-apply a ready toggle.
+    [Fact]
+    public void RunReadyCursorDedupsStaleSequences()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.True(session.TryConsumeRunReadySequence(1));
+        // A duplicate / re-ordered (<=) run-ready seq is rejected and does not advance.
+        Assert.False(session.TryConsumeRunReadySequence(1));
+        Assert.False(session.TryConsumeRunReadySequence(0));
+        // A higher seq is accepted and advances the cursor.
+        Assert.True(session.TryConsumeRunReadySequence(5));
+        Assert.False(session.TryConsumeRunReadySequence(5));
+    }
+
+    // ADUE P1 RUN LOOP (L5): DUO-WAVE2 duo-ability cursor — same dedup/replay contract, verified alongside the run-ready
+    // cursor (the review noted both were untested).
+    [Fact]
+    public void DuoCursorDedupsStaleSequences()
+    {
+        var session = new ClientSession(null!);
+
+        Assert.True(session.TryConsumeDuoSequence(1));
+        Assert.False(session.TryConsumeDuoSequence(1));
+        Assert.False(session.TryConsumeDuoSequence(0));
+        Assert.True(session.TryConsumeDuoSequence(5));
+        Assert.False(session.TryConsumeDuoSequence(5));
+    }
+
+    // ADUE P1 RUN LOOP (L5): the run-ready and duo cursors are FULLY INDEPENDENT streams (the NET6 "one cursor per
+    // stream" rule) — advancing one must never burn a low seq on the other, and neither touches the move-input cursor.
+    [Fact]
+    public void RunReadyAndDuoCursorsAreIndependentOfEachOtherAndOfMoveInput()
+    {
+        var session = new ClientSession(null!);
+
+        // Drive the move input and duo cursors up high.
+        Assert.True(session.TryBeginMoveInput(50, serverTick: 1));
+        Assert.True(session.TryConsumeDuoSequence(40));
+
+        // A LOW run-ready seq is still fresh — neither the move nor the duo cursor burned it.
+        Assert.True(session.TryConsumeRunReadySequence(1));
+
+        // And advancing the run-ready cursor touched neither of the others.
+        Assert.Equal(50u, session.LastInputSeq);
+        Assert.False(session.TryConsumeDuoSequence(40)); // duo cursor intact at 40 (rejects the replay).
+        Assert.True(session.TryConsumeDuoSequence(41));  // and still advances on its own.
+    }
+
     [Fact]
     public void CollectSnapshotEntitiesMissingFromReusesDestination()
     {

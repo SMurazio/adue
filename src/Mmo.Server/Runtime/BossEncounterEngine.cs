@@ -70,6 +70,13 @@ public sealed class BossEncounterEngine
     // parameter rather than a required seam: no existing construction site has to change.
     public delegate void EncounterEndedDelegate(EncounterResult result, uint serverTick);
 
+    // ADUE P1 RUN LOOP (L6, P1 review): reports whether the run chassis currently has a LIVE run wrapping this
+    // encounter. The victory line uses it to DROP the "Leave with /boss." hint when a run is active — the run
+    // auto-returns the pair, so telling them to `/boss` out is stale and wrong. OPTIONAL and TRAILING like
+    // EncounterEndedDelegate: null (a bare `/boss` dev run, or the headless suite) reads as "not in a run", which keeps
+    // the `/boss` hint — exactly the dev path where the player really does leave under their own steam.
+    public delegate bool RunActiveDelegate();
+
     // Spawn the boss at `tile` with `maxHealth` (scaled by participant count) and return its entity. GameServer wires
     // SpawnMonsterCore(sunderer type, tile, maxHealth) — NOT a world/region spawner, so the boss has no auto-respawn.
     public delegate WorldEntity SpawnBossDelegate(TileCoord tile, int maxHealth);
@@ -331,6 +338,7 @@ public sealed class BossEncounterEngine
     private readonly RootBossDelegate _rootBoss;
     private readonly ScheduleBeamDelegate _scheduleBeam;
     private readonly EncounterEndedDelegate? _encounterEnded;
+    private readonly RunActiveDelegate? _runActive;
 
     private readonly uint _countdownTicks;
     private readonly uint _emptyResetTicks;
@@ -473,7 +481,9 @@ public sealed class BossEncounterEngine
         RootBossDelegate rootBoss,
         ScheduleBeamDelegate scheduleBeam,
         // ADUE P1 RUN LOOP: optional end-edge observer (the run chassis). Null = nobody is watching (a bare /boss run).
-        EncounterEndedDelegate? encounterEnded = null)
+        EncounterEndedDelegate? encounterEnded = null,
+        // ADUE P1 RUN LOOP (L6): optional "is a run wrapping this fight?" probe — see RunActiveDelegate. Null = no run.
+        RunActiveDelegate? runActive = null)
     {
         _tickRate = tickRate;
         _spawnBoss = spawnBoss ?? throw new ArgumentNullException(nameof(spawnBoss));
@@ -492,6 +502,7 @@ public sealed class BossEncounterEngine
         _rootBoss = rootBoss ?? throw new ArgumentNullException(nameof(rootBoss));
         _scheduleBeam = scheduleBeam ?? throw new ArgumentNullException(nameof(scheduleBeam));
         _encounterEnded = encounterEnded; // optional by design — see EncounterEndedDelegate.
+        _runActive = runActive; // optional by design — see RunActiveDelegate.
         _countdownTicks = SecondsToTicks(CountdownSeconds);
         _emptyResetTicks = SecondsToTicks(EmptyResetSeconds);
         _victoryEjectTicks = SecondsToTicks(VictoryEjectSeconds);
@@ -756,7 +767,12 @@ public sealed class BossEncounterEngine
             // BOSS-2 (P1): tear down the encounter add (interposer drone) + clear the plating mechanics on victory
             // (the victory path does NOT call Reset — it retains the victors — so it must clean the add itself).
             TearDownEncounterMechanics();
-            AnnounceAll("The Sunderer shatters! Victory. Leave with /boss.");
+            // L6 (P1 review): inside a real run the chassis auto-returns the pair to town (and pushes its own "RUN
+            // CLEARED" line), so the "Leave with /boss." hint is stale — drop it. A bare `/boss` dev run keeps the hint
+            // (that player really does walk out via `/boss`, or the victory-eject timer sends them home).
+            AnnounceAll(_runActive?.Invoke() == true
+                ? "The Sunderer shatters! Victory."
+                : "The Sunderer shatters! Victory. Leave with /boss.");
             // ADUE P1 RUN LOOP: the CLEAR end edge. Fired BEFORE the boss id is cleared so the observer can still read
             // the boss's final HP; on a victory the remaining-percent is 0 by construction.
             FireEncounterEnded(serverTick, EncounterOutcome.Victory);
@@ -901,7 +917,10 @@ public sealed class BossEncounterEngine
     public int ModifyIncomingDamage(ulong monsterId, int rawAmount)
     {
         var modified = ResolveIncomingDamage(monsterId, rawAmount);
-        if (_bossSpawned && monsterId == _bossId && modified > 0)
+        // L2 (P1 review): tally only while the encounter is genuinely Active. `_bossSpawned` implies Active today (they
+        // are set/cleared together), so this is inert — but the coupling is no longer guaranteed by construction, so
+        // make the Active gate explicit to match ResolveIncomingDamage's own guard and keep the summary stat honest.
+        if (_state == EncounterState.Active && _bossSpawned && monsterId == _bossId && modified > 0)
         {
             _bossDamageTaken += modified;
         }

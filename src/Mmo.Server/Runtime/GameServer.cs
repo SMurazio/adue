@@ -729,7 +729,11 @@ public sealed class GameServer
             // ADUE P1 RUN LOOP: report the encounter's end edge (victory / wipe / abandon) to the run chassis. Reads
             // _run at CALL time (constructed just below) — the same late-bound pattern SkillshotEngine/Midpoint use for
             // _bossEncounter. A bare `/boss` dev run also reports here and is ignored (the chassis is in Lobby).
-            encounterEnded: (result, tick) => _run.OnBossRoomEnded(result, tick));
+            encounterEnded: (result, tick) => _run.OnBossRoomEnded(result, tick),
+            // ADUE P1 RUN LOOP (L6): tell the victory line whether a real run wraps this fight, so it drops the "Leave
+            // with /boss." hint when the run auto-returns the pair. Late-bound read of _run (constructed just below),
+            // the same pattern as encounterEnded above.
+            runActive: () => _run.Phase == RunPhase.Active);
         // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the roguelite run state machine — lobby/ready -> run
         // -> clear-or-wipe -> end screen -> clean reset, no server restart. Every world touch is an injected seam so
         // the engine is headlessly testable and GameServer stays the single wiring point. The run's boss room IS the
@@ -3514,9 +3518,11 @@ public sealed class GameServer
 
         _run.TryReady(self, partner, ready, _serverTick, out var message);
         SendSystem(session, message);
-        // The caller's own status always goes out, even when nothing global changed (an un-ready of an already-
-        // un-ready player), so the client's ready affordance can never drift out of sync with the server.
-        SendRunStatus(session);
+        // M6 (P1 review): no redundant targeted status send here. When the ready press actually changes state, the
+        // engine's statusChanged seam already re-pushes RunStatus to EVERY session (this caller included) via
+        // BroadcastRunStatus; a second owner-scoped send was pure duplication (a 1→N reliable amplifier at scale). When
+        // nothing changed (a no-op un-ready, or a refusal that mutated nothing), there is nothing to sync — the client
+        // is a pure mirror of server-pushed RunStatus (it never predicts its own ready flag), so it cannot drift.
     }
 
     // ADUE P1 RUN LOOP: push ONE session's run status. Owner-scoped because SelfReady (and, in the lobby, the roster
@@ -6188,7 +6194,11 @@ public sealed class GameServer
             // ADUE P1 RUN LOOP: count the death for the run summary (a no-op outside a live run). Recorded on the death
             // EDGE (MarkDead returned true), so it can never double-count a body that keeps being hit.
             _run.OnPlayerDied(target.Id);
-            SendSystem(session, _run.IsRunParticipant(target.Id)
+            // M2 (P1 review): the "no respawn until the run ends" line — and the respawn skip it describes — apply only
+            // to a body that is DOWN INSIDE THE ARENA. A run member who left the arena alive (via `/boss`) and dies in
+            // town is not arena-located, so they get the ordinary death line and respawn normally (RespawnPlayers is
+            // scoped to match), never frozen dead in town for the rest of the run.
+            SendSystem(session, _run.IsRunParticipant(target.Id) && BossArena.ContainsInterior(target.TileCoord)
                 ? "You are down. No respawn until the run ends."
                 : "You died.");
             Log.Info($"{target.DisplayName} died; respawn in {_tuning.PlayerRespawnTicks} ticks.");
@@ -6215,11 +6225,14 @@ public sealed class GameServer
                 continue;
             }
 
-            // ADUE P1 RUN LOOP (task item 3 — "no town respawn mid-run"): a player inside a live run does NOT respawn
-            // when their delay elapses. Their body stays down in the arena, which is what lets the boss room read "all
-            // participants dead" as a WIPE (before this, the town teleport raced that check). The debt is settled at
-            // the run's end for everyone at once, via RunEngine's returnPlayer seam (revive + refill + send home).
-            if (_run.IsRunParticipant(entity.Id))
+            // ADUE P1 RUN LOOP (task item 3 — "no town respawn mid-run"): a run member whose body is DOWN INSIDE THE
+            // ARENA does NOT respawn when their delay elapses. Their body stays put, which is what lets the boss room
+            // read "all participants dead" as a WIPE (before this, the town teleport raced that check). The debt is
+            // settled at the run's end for everyone at once, via RunEngine's returnPlayer seam (revive + refill + send
+            // home). M2 (P1 review): the skip is scoped to the arena LOCATION, not roster membership alone — a member
+            // who left the arena alive (via `/boss`) and then died in town is NOT skipped here (else they would freeze
+            // dead in town for the rest of the run); their body is outside the arena and irrelevant to the wipe read.
+            if (_run.IsRunParticipant(entity.Id) && BossArena.ContainsInterior(entity.TileCoord))
             {
                 continue;
             }

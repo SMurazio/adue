@@ -136,9 +136,11 @@ public sealed class RunEngine
     public RunSummary? LastSummary => _lastSummary;
     public bool IsReady(ulong entityId) => _ready.Contains(entityId);
 
-    // THE death-rule hook (task item 3): true while `entityId` is inside a live run, which is exactly when the town
-    // respawn must NOT fire for it. GameServer's RespawnPlayers consults this and skips the entity — the body stays
-    // down in the arena until the run resolves, and `returnPlayer` settles it then.
+    // THE death-rule hook (task item 3): true while `entityId` is on a live run's roster. GameServer's RespawnPlayers
+    // consults this AND the body's location — a dead run member is skipped only while its body is still INSIDE the
+    // arena (M2, P1 review), so it stays down for the "all participants dead → wipe" read and `returnPlayer` settles it
+    // at the run's end. A member who LEFT the arena alive (via `/boss`) and later dies in town is NOT arena-located, so
+    // it respawns normally instead of freezing dead in town for the rest of the run.
     public bool IsRunParticipant(ulong entityId) => _phase == RunPhase.Active && _roster.Contains(entityId);
 
     // Ready-up / un-ready. `partner` is the caller's `/pair` partner when paired AND online (GameServer resolves it),
@@ -156,18 +158,38 @@ public sealed class RunEngine
 
         // Pressing ready on the END SCREEN dismisses it and drops straight back to the lobby, so a pair can chain
         // runs with one key. Done BEFORE the ready is recorded (EnterLobby clears the ready set).
+        //
+        // M7/L1 (P1 review): ONLY the pair whose run just ended may dismiss THEIR end screen (or chain straight into
+        // the next run). A third party's ready/un-ready must neither tear their summary down nor hijack the phase — it
+        // is refused and the summary stays up. `_roster` is deliberately kept populated through Summary (see EndRun)
+        // precisely so this membership test is possible; EnterLobby clears it on dismissal / timeout.
+        var dismissedSummary = false;
         if (_phase == RunPhase.Summary)
         {
+            if (!_roster.Contains(self.Id))
+            {
+                message = "An end screen is up — wait for it to clear.";
+                return false;
+            }
+
             EnterLobby();
+            dismissedSummary = true;
         }
 
         var hasPartner = partner is not null && partner.Id != self.Id;
 
         if (!ready)
         {
-            _ready.Remove(self.Id);
+            // M6 (P1 review): only push a status change when something actually changed. A no-op un-ready (the flag was
+            // already clear) fires nothing — the redundant 1→N reliable broadcast it used to trigger is the amplifier
+            // the review flagged. A summary dismissal IS a change (the phase flipped), so push in that case too.
+            var removed = _ready.Remove(self.Id);
+            if (removed || dismissedSummary)
+            {
+                _statusChanged();
+            }
+
             message = "You are no longer ready.";
-            _statusChanged();
             return true;
         }
 
@@ -176,8 +198,20 @@ public sealed class RunEngine
         if (!hasPartner)
         {
             // SOLO START: an unpaired player is their own full roster, so their ready is the whole gate.
+            if (!StartRun(self, null, serverTick, out var refusal))
+            {
+                // M3 (P1 review): the room refused. StartRun rolled the just-added ready flag back, so the only net
+                // change is a possible summary dismissal — push for that alone. The refusal is the caller's ONE line.
+                message = refusal;
+                if (dismissedSummary)
+                {
+                    _statusChanged();
+                }
+
+                return false;
+            }
+
             message = "Ready. Starting a solo run...";
-            StartRun(self, null, serverTick);
             _statusChanged();
             return true;
         }
@@ -190,8 +224,18 @@ public sealed class RunEngine
             return true;
         }
 
+        if (!StartRun(self, partner, serverTick, out var duoRefusal))
+        {
+            // M3 (P1 review): the room refused with both partners ready. StartRun cleared THIS pair's ready flags
+            // (leaving any other lobby pair's flags intact) — a real change, so push. The caller gets the refusal as
+            // its single line; the partner gets the same line (their ready was just rolled back under them).
+            message = duoRefusal;
+            _notify(partner!.Id, duoRefusal);
+            _statusChanged();
+            return false;
+        }
+
         message = "Both ready. The run begins.";
-        StartRun(self, partner, serverTick);
         _statusChanged();
         return true;
     }
@@ -310,7 +354,12 @@ public sealed class RunEngine
         }
     }
 
-    private void StartRun(WorldEntity issuer, WorldEntity? partner, uint serverTick)
+    // Attempt to open the run's boss room for this (pair). Returns true and flips the phase to Active on success;
+    // returns false with `refusal` set (and NO state left mutated beyond a scoped rollback) when the room is
+    // unavailable. M3 (P1 review): the refusal path used to (a) let TryReady still report success AND (b) clear the
+    // GLOBAL `_ready` set — wiping unrelated lobby pairs' readiness — so this now signals a real failure and rolls back
+    // ONLY the attempting pair.
+    private bool StartRun(WorldEntity issuer, WorldEntity? partner, uint serverTick, out string refusal)
     {
         _roster.Clear();
         _roster.Add(issuer.Id);
@@ -319,18 +368,19 @@ public sealed class RunEngine
             _roster.Add(partner.Id);
         }
 
-        if (!_beginBossRoom(issuer, partner, serverTick, out var refusal))
+        if (!_beginBossRoom(issuer, partner, serverTick, out refusal))
         {
-            // The room refused (a dev /boss run is live, or last fight's victors are still inside). Stay in the lobby
-            // and tell everyone who had readied why, rather than silently swallowing their press.
+            // The room refused (a dev /boss run is live, or last fight's victors are still inside). Roll back ONLY this
+            // attempt: drop the roster and the ATTEMPTING pair's ready flags, and report failure so the caller surfaces
+            // the refusal as its single line. Any OTHER lobby player's ready flag is left untouched.
             _roster.Clear();
-            foreach (var id in _ready)
+            _ready.Remove(issuer.Id);
+            if (partner is not null && partner.Id != issuer.Id)
             {
-                _notify(id, $"The run cannot start yet: {refusal}");
+                _ready.Remove(partner.Id);
             }
 
-            _ready.Clear();
-            return;
+            return false;
         }
 
         _phase = RunPhase.Active;
@@ -339,12 +389,40 @@ public sealed class RunEngine
         _pendingResult = null;
         _lastSummary = null;
         _ready.Clear();
+        return true;
     }
 
     private void EndRun(RunOutcome outcome, BossEncounterEngine.EncounterResult result, uint serverTick)
     {
-        // Settle EVERY roster member first — revive the dead, refill, and teleport out of the arena — so nobody is
-        // ever left as a body in a room that no longer has a run in it. Done before the phase flips so a resolve
+        if (outcome == RunOutcome.Abandoned)
+        {
+            // M5 (P1 review): an abandon can fire with a LIVE roster — members who `/boss`-LEFT the arena alive while
+            // the run was still counting down (or grace-resetting), now standing in town at their OWN captured return
+            // tiles. Do NOT yank them to the town spawn anchor the way `returnPlayer` does: they are already OUT of the
+            // arena where they chose to be. Just tell them the run is over. A member somehow still INSIDE the arena is
+            // pulled out + revived defensively; a dead body OUTSIDE the arena is left for the ordinary town-respawn pass
+            // to pick up (with the location-scoped respawn skip, that body is no longer frozen). The empty-roster
+            // abandon (everyone disconnected) runs this loop over an empty list — a silent clean reset, unchanged.
+            foreach (var id in _roster)
+            {
+                if (_tryResolve(id) is { } player)
+                {
+                    if (BossArena.ContainsInterior(player.TileCoord))
+                    {
+                        _returnPlayer(player);
+                    }
+
+                    _notify(id, "The run was abandoned.");
+                }
+            }
+
+            EnterLobby();
+            _statusChanged();
+            return;
+        }
+
+        // Clear / Wipe: settle EVERY roster member — revive the dead, refill, and teleport out of the arena — so nobody
+        // is ever left as a body in a room that no longer has a run in it. Done before the phase flips so a resolve
         // failure (a member who vanished this very tick) can't skip anyone still present.
         foreach (var id in _roster)
         {
@@ -352,14 +430,6 @@ public sealed class RunEngine
             {
                 _returnPlayer(player);
             }
-        }
-
-        if (outcome == RunOutcome.Abandoned)
-        {
-            // Nobody to show an end screen to (the roster emptied, or the room reported an abandon). Clean reset.
-            EnterLobby();
-            _statusChanged();
-            return;
         }
 
         var elapsedTicks = serverTick >= _startTick ? serverTick - _startTick : 0u;
@@ -381,8 +451,11 @@ public sealed class RunEngine
         _phase = RunPhase.Summary;
         _summaryEndTick = serverTick + _summaryTicks;
         _lastSummary = summary;
-        _roster.Clear();
         _ready.Clear();
+        // M7/L1 (P1 review): `_roster` is intentionally KEPT populated through the Summary phase so TryReady can tell
+        // whether a ready press belongs to the pair whose end screen this is (only they may dismiss it). EnterLobby
+        // clears it when the summary is dismissed or times out. `_roster` is not read as the live run roster in Summary
+        // (IsRunParticipant / StatusFor both key off `_phase == Active`), so keeping it here changes no projection.
         _statusChanged();
     }
 

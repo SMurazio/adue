@@ -72,7 +72,9 @@ public sealed class RunEngineTests
                 rootBoss: (boss, tile) => boss.TeleportTo(tile),
                 scheduleBeam: (_, _, _, _, _, _, _) => { },
                 // THE new seam under test: the encounter's end edge feeds the run chassis.
-                encounterEnded: (result, tick) => Run.OnBossRoomEnded(result, tick));
+                encounterEnded: (result, tick) => Run.OnBossRoomEnded(result, tick),
+                // L6: the victory line's "is a run wrapping this fight?" probe — wired exactly as GameServer wires it.
+                runActive: () => Run.Phase == RunPhase.Active);
 
             Run = new RunEngine(
                 TickRate,
@@ -451,8 +453,11 @@ public sealed class RunEngineTests
         Assert.Equal(RunPhase.Active, h.Run.Phase);
     }
 
+    // M3 (P1 review): a refused start reports a REAL FAILURE, and the refusal is the caller's ONE line — the review
+    // caught that the old path returned success ("the run begins") alongside a contradictory "cannot start" notify.
+    // This asserts the returned MESSAGE (the review flagged that the prior test discarded it with `out _`).
     [Fact]
-    public void RunRefused_WhenTheArenaIsBusyWithADevRun()
+    public void RunRefused_WhenTheArenaIsBusyWithADevRun_ReturnsFailureWithTheRefusalAsItsOnlyLine()
     {
         var h = new Harness();
         var dev = h.AddPlayer("Dev", TownA);
@@ -461,12 +466,188 @@ public sealed class RunEngineTests
         h.Boss.TryBegin(dev, partner: null, serverTick: 1, out _);
         h.StepThrough(2, 80);
 
-        // The ready is accepted (nothing is wrong with the request) but the run never starts — the room refused, so
-        // the chassis stays in the lobby and says why rather than half-starting.
-        h.Run.TryReady(player, null, ready: true, serverTick: 81, out _);
+        // The room refuses (a dev /boss run is live). TryReady now returns FALSE, the message IS the refusal (not a
+        // success line), and the chassis stays cleanly in the lobby rather than half-starting.
+        Assert.False(h.Run.TryReady(player, null, ready: true, serverTick: 81, out var message));
+        Assert.Contains("wait for the arena to clear", message);
         Assert.Equal(RunPhase.Lobby, h.Run.Phase);
         Assert.Equal(0, h.Run.RosterCount);
-        Assert.Contains(h.Notifications, n => n.Id == player.Id && n.Text.Contains("cannot start"));
+        Assert.False(h.Run.IsReady(player.Id)); // the refused solo ready was rolled back, not left dangling.
         Assert.False(BossArena.ContainsInterior(player.TileCoord));
+    }
+
+    // M3 (P1 review): the refusal must NOT wipe the GLOBAL ready set — an UNRELATED lobby pair that was mid-ready keeps
+    // its readiness (the pre-fix code cleared `_ready` wholesale on any refusal).
+    [Fact]
+    public void RunRefused_LeavesAnUnrelatedReadyingPlayerUntouched()
+    {
+        var h = new Harness();
+        var dev = h.AddPlayer("Dev", TownA);
+        // A paired player who has readied and is WAITING for their partner — their flag sits in the ready set.
+        var waiting = h.AddPlayer("Waiting", TownB);
+        var waitingPartner = h.AddPlayer("Partner", TownA);
+        var intruder = h.AddPlayer("Intruder", TownB);
+
+        h.Boss.TryBegin(dev, partner: null, serverTick: 1, out _);
+        h.StepThrough(2, 80);
+
+        Assert.True(h.Run.TryReady(waiting, waitingPartner, ready: true, serverTick: 81, out _));
+        Assert.True(h.Run.IsReady(waiting.Id)); // parked in the ready set, waiting for the partner.
+
+        // A DIFFERENT player's solo ready is refused (arena busy). It must roll back ONLY the intruder, not the waiter.
+        Assert.False(h.Run.TryReady(intruder, null, ready: true, serverTick: 82, out _));
+        Assert.False(h.Run.IsReady(intruder.Id));
+        Assert.True(h.Run.IsReady(waiting.Id)); // untouched — the whole point of M3.
+    }
+
+    // M5 (P1 review): an abandon with a LIVE roster (members who left the arena alive, then the run emptied out)
+    // NOTIFIES them and does NOT yank them to the town spawn anchor — they stay at the return position they walked to.
+    [Fact]
+    public void AbandonWithALiveRoster_NotifiesAndDoesNotYankToTheAnchor()
+    {
+        var h = new Harness();
+        var a = h.AddPlayer("A", TownA);
+        var b = h.AddPlayer("B", TownB);
+        h.Run.TryReady(a, b, ready: true, serverTick: 1, out _);
+        h.Run.TryReady(b, a, ready: true, serverTick: 1, out _);
+        Assert.Equal(RunPhase.Active, h.Run.Phase);
+
+        // Both /boss-leave the arena alive DURING the countdown (before the boss spawns): teleport them to town tiles,
+        // as the encounter's leave path would. The encounter then finds an empty arena and cancels the countdown as an
+        // ABANDON — while the run roster still holds both (they are alive + resolvable, just out of the arena).
+        a.TeleportTo(TownA);
+        b.TeleportTo(TownB);
+        var returnedBefore = h.Returned.Count;
+        h.StepThrough(2, 6);
+
+        Assert.Equal(RunPhase.Lobby, h.Run.Phase);
+        Assert.Empty(h.Summaries); // an abandon has no end screen.
+        // Both were told the run ended...
+        Assert.Contains(h.Notifications, n => n.Id == a.Id && n.Text.Contains("abandoned"));
+        Assert.Contains(h.Notifications, n => n.Id == b.Id && n.Text.Contains("abandoned"));
+        // ... and NEITHER was teleported to the lobby anchor: they kept the return tiles they walked to.
+        Assert.Equal(returnedBefore, h.Returned.Count);
+        Assert.Equal(TownA, a.TileCoord);
+        Assert.Equal(TownB, b.TileCoord);
+    }
+
+    // M7/L1 (P1 review): a THIRD player readying during another pair's Summary must NOT dismiss their end screen (nor
+    // hijack the phase). Only a member of the ended run may end the Summary early.
+    [Fact]
+    public void ReadyingDuringAnotherPairsSummary_IsRefusedAndDoesNotDismissIt()
+    {
+        var h = new Harness();
+        var solo = h.AddPlayer("Solo", TownA);
+        var bystander = h.AddPlayer("Bystander", TownB);
+        h.Run.TryReady(solo, null, ready: true, serverTick: 1, out _);
+        h.StepThrough(2, 80);
+        h.Kill(solo);
+        h.StepThrough(81, 84);
+        Assert.Equal(RunPhase.Summary, h.Run.Phase);
+
+        // The bystander (never on this run's roster) readies during the summary: refused, and the end screen stays up.
+        Assert.False(h.Run.TryReady(bystander, null, ready: true, serverTick: 90, out var message));
+        Assert.Contains("end screen", message);
+        Assert.Equal(RunPhase.Summary, h.Run.Phase);
+        Assert.False(h.Run.IsReady(bystander.Id));
+
+        // The actual roster member can STILL dismiss it (the chain-run path is unbroken).
+        Assert.True(h.Run.TryReady(solo, null, ready: true, serverTick: 91, out _));
+        Assert.Equal(RunPhase.Active, h.Run.Phase);
+        Assert.True(h.Run.IsRunParticipant(solo.Id));
+    }
+
+    // M6 (P1 review): a no-op un-ready (the flag was already clear) fires NO status change — the redundant broadcast it
+    // used to trigger is the 1→N reliable amplifier the review flagged. A real un-ready still fires exactly one.
+    [Fact]
+    public void UnreadyOnlyPushesStatusWhenItActuallyChangesSomething()
+    {
+        var h = new Harness();
+        var a = h.AddPlayer("A", TownA);
+        var b = h.AddPlayer("B", TownB);
+
+        var baseline = h.StatusPushes;
+        // A no-op un-ready of a player who was never ready: no change, no push.
+        Assert.True(h.Run.TryReady(a, b, ready: false, serverTick: 1, out _));
+        Assert.Equal(baseline, h.StatusPushes);
+
+        // A real ready (parks the flag) then a real un-ready (clears it): each is one push.
+        Assert.True(h.Run.TryReady(a, b, ready: true, serverTick: 2, out _));
+        var afterReady = h.StatusPushes;
+        Assert.True(afterReady > baseline);
+
+        Assert.True(h.Run.TryReady(a, b, ready: false, serverTick: 3, out _));
+        Assert.Equal(afterReady + 1, h.StatusPushes);
+
+        // A second un-ready is now a no-op again: still no further push.
+        Assert.True(h.Run.TryReady(a, b, ready: false, serverTick: 4, out _));
+        Assert.Equal(afterReady + 1, h.StatusPushes);
+    }
+
+    // Named-list item: ForgetPlayer (disconnect/despawn in the lobby) drops a parked ready flag AND pushes the status
+    // change so the partner's HUD reflects the drop.
+    [Fact]
+    public void ForgetPlayer_ClearsAParkedReadyFlag_AndPushesStatus()
+    {
+        var h = new Harness();
+        var a = h.AddPlayer("A", TownA);
+        var b = h.AddPlayer("B", TownB);
+        h.Run.TryReady(a, b, ready: true, serverTick: 1, out _); // A parks a ready flag, waiting for B.
+        Assert.True(h.Run.IsReady(a.Id));
+
+        var before = h.StatusPushes;
+        h.Run.ForgetPlayer(a.Id);
+        Assert.False(h.Run.IsReady(a.Id));
+        Assert.True(h.StatusPushes > before);
+
+        // Forgetting a player with no parked flag is a silent no-op (no spurious push).
+        var after = h.StatusPushes;
+        h.Run.ForgetPlayer(b.Id);
+        Assert.Equal(after, h.StatusPushes);
+    }
+
+    // Named-list item: the Summary-phase StatusFor projection reports phase Summary with the lobby-style ready gate
+    // (the ready set is cleared at a run's end, so ReadyCount is 0 and SelfReady false even for the ended roster).
+    [Fact]
+    public void StatusFor_DuringSummary_ProjectsTheLobbyGateWithPhaseSummary()
+    {
+        var h = new Harness();
+        var solo = h.AddPlayer("Solo", TownA);
+        h.Run.TryReady(solo, null, ready: true, serverTick: 1, out _);
+        h.StepThrough(2, 80);
+        h.Kill(solo);
+        h.StepThrough(81, 84);
+        Assert.Equal(RunPhase.Summary, h.Run.Phase);
+
+        var view = h.Run.StatusFor(solo.Id, partnerId: null);
+        Assert.Equal(RunPhase.Summary, view.Phase);
+        Assert.Equal(1, view.RosterCount); // unpaired → a gate of one.
+        Assert.Equal(0, view.ReadyCount);  // the ready set was consumed at the run's end.
+        Assert.False(view.SelfReady);
+    }
+
+    // L6 (P1 review): the victory line DROPS the "Leave with /boss." hint inside a run (the chassis auto-returns the
+    // pair), but KEEPS it for a bare /boss dev run (that player leaves under their own steam).
+    [Fact]
+    public void VictoryText_DropsTheBossHint_InsideARun_ButKeepsIt_ForADevRun()
+    {
+        // (a) inside a real run: the hint is dropped.
+        var h = new Harness();
+        var solo = h.AddPlayer("Solo", TownA);
+        h.Run.TryReady(solo, null, ready: true, serverTick: 1, out _);
+        h.StepThrough(2, 80);
+        h.BossEntity!.ApplyDamage(h.BossEntity.Stats.Health); // kill the boss → CLEAR.
+        h.StepThrough(81, 84);
+        Assert.Contains(h.Notifications, n => n.Id == solo.Id && n.Text.Contains("Victory"));
+        Assert.DoesNotContain(h.Notifications, n => n.Text.Contains("Leave with /boss"));
+
+        // (b) a bare /boss dev run (no run wrapping it): the hint stays.
+        var h2 = new Harness();
+        var dev = h2.AddPlayer("Dev", TownA);
+        Assert.True(h2.Boss.TryBegin(dev, partner: null, serverTick: 1, out _));
+        h2.StepThrough(2, 80);
+        h2.BossEntity!.ApplyDamage(h2.BossEntity.Stats.Health);
+        h2.StepThrough(81, 84);
+        Assert.Contains(h2.Notifications, n => n.Text.Contains("Leave with /boss"));
     }
 }
