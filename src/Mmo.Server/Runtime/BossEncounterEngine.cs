@@ -449,10 +449,11 @@ public sealed class BossEncounterEngine
     private uint _nextTrickleTick;
     private double _trickleAngle;
 
-    // S-boss-p3-partner-loss-dead-run: one-shot latch for the "duo run down to one live participant" announce (fired
-    // once per encounter run, the first StepP3 tick that observes it — see StepP3). Does NOT gate the ward mechanic
-    // itself (OnMidpointBlast recomputes the live count fresh on every blast, so the gate downgrades — and RESTORES,
-    // if the partner returns — for free); this only stops the chat line from repeating every subsequent tick/flap.
+    // S-boss-p3-partner-loss-dead-run + N-boss-p1-partner-loss-slog: one-shot latch for the "duo run down to one live
+    // participant" announce (fired once per encounter run, the first ongoing tick AnnounceDuoDowngradeOnce observes it
+    // — called from StepPlatingAndAdds so it covers P1/P2/P3, no longer P3-only). Does NOT gate any mechanic
+    // (OnMidpointBlast + the P1 plating gates recompute liveness via EffectivelyDuo() fresh on every blast/hit, so they
+    // downgrade — and RESTORE, if the partner returns — for free); this only stops the chat line repeating each tick.
     private bool _duoDowngradeAnnounced;
 
     // ADUE P1 RUN LOOP: cumulative damage this run's boss has taken, accumulated in ModifyIncomingDamage — the ONE hook
@@ -955,7 +956,10 @@ public sealed class BossEncounterEngine
             AnnounceAll("The Sunderer's plating turns your blows!");
         }
 
-        var reduction = _participantsAtSpawn >= 2 ? DuoDamageReduction : SoloDamageReduction;
+        // N-boss-p1-partner-loss-slog: read the LIVE mode, not the spawn-fixed one — a duo survivor whose partner is
+        // lost gets the WEAKER solo reduction (0.40, not 0.75), the same plating a solo run faces (Law-2 degrade,
+        // player-favorable), so the phase is no longer a 25%-damage slog with no fusion partner.
+        var reduction = EffectivelyDuo() ? DuoDamageReduction : SoloDamageReduction;
         var reduced = (int)Math.Round(rawAmount * (1d - reduction), MidpointRounding.AwayFromZero);
         return Math.Max(0, reduced);
     }
@@ -986,8 +990,12 @@ public sealed class BossEncounterEngine
 
     // SkillshotEngine reports EVERY skillshot monster hit here (it doesn't know which monster is the boss); the engine
     // filters to its boss id. SOLO fallback (Law 2): SoloShatterHitCount skillshot hits on the boss within
-    // SoloShatterWindowSeconds shatter it for the Good window. In DUO the gate is fusion, so solo hit-counting is
-    // inert. No-op while a window is already open or the plating has crumbled.
+    // SoloShatterWindowSeconds shatter it for the Good window. In an effective DUO the gate is fusion, so solo
+    // hit-counting is inert. No-op while a window is already open or the plating has crumbled.
+    // N-boss-p1-partner-loss-slog: the fallback keys on EffectivelyDuo() (spawned duo AND >= 2 live), not the
+    // spawn-fixed count — so a duo survivor whose partner is lost in P1 CAN shatter the plating solo (3 hits in 6 s),
+    // where before the fallback stayed gated off and left them with no vulnerability window at all. A both-live duo
+    // still can't hit-count (EffectivelyDuo() is true → inert), so fusion stays the duo gate.
     public void OnSkillshotMonsterHit(ulong monsterId, uint serverTick)
     {
         if (monsterId != _bossId || !_bossSpawned || _state != EncounterState.Active)
@@ -995,7 +1003,7 @@ public sealed class BossEncounterEngine
             return;
         }
 
-        if (_participantsAtSpawn >= 2 || _platingPermanentlyOff || _windowOpen)
+        if (EffectivelyDuo() || _platingPermanentlyOff || _windowOpen)
         {
             return;
         }
@@ -1065,6 +1073,13 @@ public sealed class BossEncounterEngine
     // spawn/respawn cadence. `boss` is the live boss entity (non-null).
     private void StepPlatingAndAdds(uint serverTick, WorldEntity boss)
     {
+        // N-boss-p1-partner-loss-slog + S-boss-p3-partner-loss-dead-run: the one-shot "your bond is broken" legibility
+        // chat, fired the first ONGOING tick the run drops to one live participant IN ANY PHASE (P1 plating / P2 sunder
+        // / P3 core). Hoisted here above the phase split (was P3-only) so the announce is uniform across the phases where
+        // the loss now degrades a mechanic. The mechanical degrade itself is latch-INDEPENDENT — EffectivelyDuo() /
+        // CountLivingParticipants() recompute liveness fresh on every hit/blast — so this only stops the chat repeating.
+        AnnounceDuoDowngradeOnce();
+
         // (1) Permanent-off boundary: the first tick the boss's HP is at/below 70% of max, the plating crumbles for
         // good this run (P2 mechanics arrive in BOSS-3; the boss just fights its baseline kit below 70%).
         if (!_platingPermanentlyOff && boss.Stats.MaxHealth > 0
@@ -1298,16 +1313,6 @@ public sealed class BossEncounterEngine
     // residues by construction (see the stagger note), so no two ever land on the same tick at the base cadence.
     private void StepP3(uint serverTick, WorldEntity boss)
     {
-        // (0) S-boss-p3-partner-loss-dead-run: the duo run has dropped to one live participant (partner disconnected
-        // — pruned out of `_participants` — or died — kept as a corpse). One-shot legibility chat; the ward gate
-        // itself (OnMidpointBlast) already recomputes the live count on every blast independently of this latch, so
-        // the mechanic degrades (and silently restores if the partner returns) whether or not this has fired yet.
-        if (!_duoDowngradeAnnounced && _participantsAtSpawn >= 2 && CountLivingParticipants() < 2)
-        {
-            _duoDowngradeAnnounced = true;
-            AnnounceAll("Your bond is broken — the ward yields to a lone strike.");
-        }
-
         // (1) Burst-window expiry → the ward REFORMS (broadcast steel tint back on + chat). The victory branch fires
         // FIRST in StepActive, so a boss killed during the window never reaches here.
         if (_burstWindowOpen && serverTick >= _burstWindowEndTick)
@@ -1425,14 +1430,33 @@ public sealed class BossEncounterEngine
             return;
         }
 
-        var effectivelyDuo = _participantsAtSpawn >= 2 && CountLivingParticipants() >= 2;
+        var effectivelyDuo = EffectivelyDuo();
+        var radius = effectivelyDuo ? WardBreakRadiusDuoUnits : WardBreakRadiusSoloUnits;
+        var onCore = (center - boss.Position).Length <= radius;
+
+        // N-boss-p3-ward-reject-legibility (ward-break review MEDIUM): in duo mode a blast that landed ON the core
+        // (within the ward radius) but did NOT qualify — a lapsed solo self-blast (PairTier.None) or a stacked pair
+        // (separation < MinPairSeparationUnits) — is now TAUGHT through the announce/cue path rather than silently
+        // eaten. A perfectly-centred Good blast at 3.9u separation previously showed NOTHING, indistinguishable from a
+        // bug and contradicting b188aa8's protected-state legibility (deflected hits + teach labels). Distinct one-line
+        // teach text per refusal mode; PairTier.None (the degraded solo self-blast, never a duo substitute) takes
+        // precedence over the separation ask when both fail. An OFF-core detonation is an ordinary MISS and earns no
+        // teach line — the client's HP-fraction "detonate at its heart!" label already covers aiming, and "strike from
+        // farther apart" would misread a stray blast. NOT latched: a detonation is a deliberate, cooldown-gated act, so
+        // each failed attempt earns its own honest cue (no per-tick spam risk — this fires once per resolved blast).
         if (effectivelyDuo && (tier == PairTier.None || pairSeparationUnits < MinPairSeparationUnits))
         {
+            if (onCore)
+            {
+                AnnounceAll(tier == PairTier.None
+                    ? "The ward only yields to a true duo strike."
+                    : "Strike from farther apart.");
+            }
+
             return;
         }
 
-        var radius = effectivelyDuo ? WardBreakRadiusDuoUnits : WardBreakRadiusSoloUnits;
-        if ((center - boss.Position).Length > radius)
+        if (!onCore)
         {
             return;
         }
@@ -1670,6 +1694,33 @@ public sealed class BossEncounterEngine
         }
 
         return living;
+    }
+
+    // Whether the run is CURRENTLY duo: it spawned duo AND still has >= 2 LIVE participants. The single "effectively
+    // duo" predicate every liveness-sensitive gate reads — the P3 ward gate (OnMidpointBlast), and (N-boss-p1-partner-
+    // loss-slog) the P1 plating gates: the solo hit-count shatter fallback (OnSkillshotMonsterHit) + the weaker solo
+    // damage reduction (ResolveIncomingDamage). A survivor whose partner is lost — disconnect (pruned out of
+    // `_participants`) or death (a Health<=0 corpse until town respawn) — reads as effectively-solo, so those gates
+    // DEGRADE to solo rules instead of leaving a partnerless survivor with no shatter path (an unannounced 25%-damage
+    // slog). Spawn-fixed knobs — boss HP, splinter/lash COUNTS — legitimately keep reading `_participantsAtSpawn`
+    // directly (they are fixed at spawn by design, not by liveness).
+    private bool EffectivelyDuo() => _participantsAtSpawn >= 2 && CountLivingParticipants() >= 2;
+
+    // One-shot "your bond is broken" legibility chat, fired the first time a duo-spawned run is observed to have dropped
+    // to one live participant (partner disconnected — pruned out of `_participants` — or died — a Health<=0 corpse until
+    // town respawn). Called each ongoing tick from StepPlatingAndAdds regardless of phase, so a P1/P2/P3 loss all
+    // announce once. Does NOT gate any mechanic — EffectivelyDuo() recomputes liveness fresh per hit/blast — this only
+    // stops the chat line repeating. A no-op for a run that never had a partner, or one still holding two live members.
+    // Text is phase-neutral ("the Sunderer yields", not "the ward yields") because the loss now degrades P1 plating too.
+    private void AnnounceDuoDowngradeOnce()
+    {
+        if (_duoDowngradeAnnounced || _participantsAtSpawn < 2 || CountLivingParticipants() >= 2)
+        {
+            return;
+        }
+
+        _duoDowngradeAnnounced = true;
+        AnnounceAll("Your bond is broken — the Sunderer yields to a lone strike.");
     }
 
     // Alloc-free count of currently-living (Health > 0) tracked participants — the S-boss-p3-partner-loss-dead-run

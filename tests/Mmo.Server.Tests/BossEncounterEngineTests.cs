@@ -923,6 +923,87 @@ public sealed class BossEncounterEngineTests
         Assert.False(h.Engine.WindowOpen); // duo uses fusion, not hit-count.
     }
 
+    // N-boss-p1-partner-loss-slog (partner-loss review LOW-2): a duo-spawned survivor whose partner is lost DURING P1
+    // had NO shatter path — fusion needs two, and the solo hit-count fallback was gated OFF by the spawn-fixed count,
+    // leaving a 25%-damage slog with no vulnerability window until P3. The fallback now keys on LIVE liveness
+    // (EffectivelyDuo), so 3 hits in 6 s open the Good window whether the partner died (a corpse) or disconnected (gone).
+    [Fact]
+    public void SoloShatter_PartnerLostInP1_SurvivorHitCountShatters()
+    {
+        // Loss mode A — partner DIES in P1 (kept in `_participants` as a Health<=0 corpse until the town respawn).
+        var died = new Harness();
+        var dp = died.BeginAndSpawnBoss(duo: true);
+        var diedBoss = died.Engine.BossId;
+        Assert.True(dp[1].ApplyDamage(dp[1].Stats.Health)); // partner down; boss still above 70% (plating up).
+        died.Engine.OnSkillshotMonsterHit(diedBoss, 61);
+        died.Engine.OnSkillshotMonsterHit(diedBoss, 100);
+        Assert.False(died.Engine.WindowOpen); // 2 hits — not yet.
+        died.Engine.OnSkillshotMonsterHit(diedBoss, 120); // 3rd within 6 s of the first (120 - 61 = 59 ticks).
+        Assert.True(died.Engine.WindowOpen);
+
+        // Loss mode B — partner DISCONNECTS in P1 (fully removed, like OnPeerDisconnected's BreakPair + Zone.Despawn).
+        var gone = new Harness();
+        var gp = gone.BeginAndSpawnBoss(duo: true);
+        var goneBoss = gone.Engine.BossId;
+        Assert.True(gone.World.Remove(gp[1].Id, out _));
+        gone.Engine.OnSkillshotMonsterHit(goneBoss, 61);
+        gone.Engine.OnSkillshotMonsterHit(goneBoss, 100);
+        gone.Engine.OnSkillshotMonsterHit(goneBoss, 120);
+        Assert.True(gone.Engine.WindowOpen);
+    }
+
+    // The other half of the acceptance: a BOTH-LIVE duo still cannot use the hit-count path (fusion stays the duo gate).
+    // (Also pinned by SoloShatter_Counting_IsInertInDuo; re-stated here alongside the partner-loss case for contrast.)
+    [Fact]
+    public void SoloShatter_BothPartnersLiveInP1_HitCountStillInert()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var bossId = h.Engine.BossId;
+        h.Engine.OnSkillshotMonsterHit(bossId, 61);
+        h.Engine.OnSkillshotMonsterHit(bossId, 100);
+        h.Engine.OnSkillshotMonsterHit(bossId, 120);
+        Assert.False(h.Engine.WindowOpen); // EffectivelyDuo is true → hit-counting inert.
+    }
+
+    // N-boss-p1-partner-loss-slog: the P1 plating REDUCTION also degrades to the weaker SOLO value (0.40, not 0.75) for
+    // a partnerless survivor — player-favorable (the plating a solo run faces), never a nullification. Read through the
+    // uniform ModifyIncomingDamage hook every damage source funnels through.
+    [Fact]
+    public void Plating_PartnerLostInP1_ReductionDegradesToSolo()
+    {
+        var h = new Harness();
+        var p = h.BeginAndSpawnBoss(duo: true);
+        var bossId = h.Engine.BossId;
+
+        // Both live → DUO reduction 0.75: 100 raw → 25 lands.
+        Assert.Equal(25, h.Engine.ModifyIncomingDamage(bossId, 100));
+
+        // Partner dies → SOLO reduction 0.40: 100 raw → 60 lands (weaker plating, still up).
+        Assert.True(p[1].ApplyDamage(p[1].Stats.Health));
+        Assert.Equal(60, h.Engine.ModifyIncomingDamage(bossId, 100));
+    }
+
+    // N-boss-p1-partner-loss-slog: the one-shot "bond is broken" legibility chat (previously P3-only) now fires in P1
+    // too, the first ongoing tick the run drops to one live participant — the degrade is announced, not silent until P3.
+    [Fact]
+    public void BondBroken_AnnouncesOnce_WhenPartnerLostInP1()
+    {
+        var h = new Harness();
+        var p = h.BeginAndSpawnBoss(duo: true);
+        // Partner dies in P1 (boss still above 70% — plating phase, not yet crumbled).
+        Assert.True(p[1].ApplyDamage(p[1].Stats.Health));
+        Assert.DoesNotContain(h.Announcements, a => a.Text.Contains("bond is broken")); // silent until a tick observes it.
+
+        h.Engine.Step(61);
+        Assert.Contains(h.Announcements, a => a.Text.Contains("bond is broken"));
+        var count = h.Announcements.Count(a => a.Text.Contains("bond is broken"));
+
+        // One-shot latch: stepping further through P1 does not repeat the line.
+        h.StepThrough(62, 90);
+        Assert.Equal(count, h.Announcements.Count(a => a.Text.Contains("bond is broken")));
+    }
+
     [Fact]
     public void Fusion_DuringCountdownOrIdle_IsIgnored()
     {
@@ -1145,6 +1226,63 @@ public sealed class BossEncounterEngineTests
         var se0 = separated.CrumbleIntoP3(atTick: 200);
         separated.Engine.OnMidpointBlast(separated.Boss!.Position, se0 + 1, PairTier.Good, BossEncounterEngine.MinPairSeparationUnits);
         Assert.True(separated.Engine.BurstWindowOpen);
+    }
+
+    // N-boss-p3-ward-reject-legibility (ward-break review MEDIUM): a duo-mode ward blast REJECTED by the tier/separation
+    // gate but landing ON the core previously returned SILENTLY — a perfectly-centred Good blast at 3.9u separation
+    // showed nothing, indistinguishable from a bug and contradicting b188aa8's protected-state legibility. Each refusal
+    // mode now teaches a distinct one-liner through the announce path (server-side reuse; no protocol change).
+    [Fact]
+    public void WardReject_OnCoreButGated_TeachesDistinctReason()
+    {
+        // A lapsed solo self-blast (PairTier.None) landing on the core → "true duo strike" teach, ward stays sealed.
+        var lapsed = new Harness();
+        lapsed.BeginAndSpawnBoss(duo: true);
+        var l0 = lapsed.CrumbleIntoP3(atTick: 200);
+        lapsed.Engine.OnMidpointBlast(lapsed.Boss!.Position, l0 + 1, PairTier.None, pairSeparationUnits: 99d);
+        Assert.False(lapsed.Engine.BurstWindowOpen);
+        Assert.Contains(lapsed.Announcements, a => a.Text.Contains("true duo strike"));
+
+        // A confirmed Good blast but the pair stacked (the task's exact symptom: centred, 3.9u apart) → "farther apart".
+        var stacked = new Harness();
+        stacked.BeginAndSpawnBoss(duo: true);
+        var s0 = stacked.CrumbleIntoP3(atTick: 200);
+        stacked.Engine.OnMidpointBlast(stacked.Boss!.Position, s0 + 1, PairTier.Good, pairSeparationUnits: 3.9d);
+        Assert.False(stacked.Engine.BurstWindowOpen);
+        Assert.Contains(stacked.Announcements, a => a.Text.Contains("farther apart"));
+        Assert.DoesNotContain(stacked.Announcements, a => a.Text.Contains("true duo strike")); // separation, not tier.
+    }
+
+    // The teach line is for a blast that ACTUALLY landed on the core — an OFF-core gated detonation is an ordinary MISS
+    // and stays silent (the client's HP-fraction "detonate at its heart!" label covers aiming; "farther apart" would
+    // misread a stray blast).
+    [Fact]
+    public void WardReject_OffCoreGated_IsAnOrdinaryMiss_NoTeach()
+    {
+        var h = new Harness();
+        h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+        // Stacked pair (separation < 4u) but the blast landed 6u off the core (well beyond the 2.5u duo ward radius).
+        h.Engine.OnMidpointBlast(h.Boss!.Position + new WorldVector(6d, 0d), t0 + 1, PairTier.Good, pairSeparationUnits: 0.4d);
+        Assert.False(h.Engine.BurstWindowOpen);
+        Assert.DoesNotContain(h.Announcements, a => a.Text.Contains("farther apart"));
+        Assert.DoesNotContain(h.Announcements, a => a.Text.Contains("true duo strike"));
+    }
+
+    // A survivor in SOLO ward rules (partner lost) is ungated by tier/separation, so it must never emit the duo teach
+    // lines — its on-core self-blast simply breaks the ward (regression guard on the duo-only refusal branch).
+    [Fact]
+    public void WardReject_SoloRules_NoDuoTeach_JustBreaksWard()
+    {
+        var h = new Harness();
+        var players = h.BeginAndSpawnBoss(duo: true);
+        var t0 = h.CrumbleIntoP3(atTick: 200);
+        Assert.True(h.World.Remove(players[1].Id, out _)); // partner disconnects → solo ward rules.
+
+        h.Engine.OnMidpointBlast(h.Boss!.Position + new WorldVector(3.4d, 0d), t0 + 1, PairTier.None, pairSeparationUnits: 0d);
+        Assert.True(h.Engine.BurstWindowOpen);
+        Assert.DoesNotContain(h.Announcements, a => a.Text.Contains("true duo strike"));
+        Assert.DoesNotContain(h.Announcements, a => a.Text.Contains("farther apart"));
     }
 
     // S-boss-p3-partner-loss-dead-run: c2c03dd's DUO-GRILL gate rejects the solo self-blast (PairTier.None) in duo
