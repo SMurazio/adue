@@ -1,7 +1,13 @@
 # Shared Memory Index
 
-This directory is the canonical, version-controlled memory store for the D:\MMO project. Read this index
-at session start, then read any note relevant to the current task.
+> **FORK BANNER (2026-08-09):** this repo is **ADUE** — the standalone two-player co-op
+> roguelite, forked full-history from the MMO repo at `10c0f9c`. Notes below this banner are
+> **inherited MMO-era memory**: process notes (review loop, safe execution, skills layout)
+> still bind; world/scale notes (ecology, AOI, persistence, stress capacity) describe systems
+> that are PARKED here (prune on friction). New Adue-era notes go above the inherited list.
+
+This directory is the canonical, version-controlled memory store for this project. Read this
+index at session start, then read any note relevant to the current task.
 
 - [Review handoff loop](review-handoff-loop.md) - Claude-only loop: orchestrator plans/verifies/commits,
   implementer subagents write code/tests, and a fresh reviewer subagent verifies independently.

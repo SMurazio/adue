@@ -1,6 +1,7 @@
-# TODO Queue
+# TODO Queue — ADUE
 
-Each file here is one self-contained work item. An agent works through them and removes them as they land.
+Each file here is one self-contained work item. An agent works through them and removes them as
+they land.
 
 ## Convention
 
@@ -10,49 +11,34 @@ Each file here is one self-contained work item. An agent works through them and 
 - On completion: implement the fix, add/adjust regression tests, run
   `.\.shared\skills\mmo-dev\scripts\run-checks.cmd`, then **delete the file in the same commit**.
   One commit per task; reference the task filename in the commit message.
-- If a task cannot be completed, do **not** delete it — append a `## Blocked` section explaining
-  why, and move on to the next.
-- Do not expand scope beyond what a file describes. New issues discovered along the way become
-  new `todo/` files, not silent extra changes.
+- If a task cannot be completed, do **not** delete it — append a `## Blocked` section and move on.
+- Do not expand scope beyond what a file describes. New issues become new `todo/` files.
 
-## Current priority order (as of 2026-07-02, post-continuous-migration)
+## Current priority order (as of 2026-08-09, the Adue fork point)
 
-Branch of record: `feat/continuous-migration` (fully continuous-native; `main` is still frozen tile).
-The old tile-era order (S41/S36b/S42) is long shipped or obsolete. Active order:
+Roadmap of record: `docs/duo-standalone-plan.md`. Order:
 
-1. **Quick hardening wins (small, do first):**
-   - `N-atomic-manifest-write` — temp-file + atomic move for the F1 Save manifest write.
-   - `N-docs-hygiene-resync` — add the protocol.md ↔ `ProtocolCodec.Version` drift gate.
-   - `monster-types-followups` — `/clearspawners` admin command (+ the ~300 ms prose nit).
-   - `loot-followups` — #1 construction-time tableRef cycle detection (+ #2 coverage).
-2. **Guardrail compliance:** `N-movement-trace-live-toggle` — `MMO_DEBUG_MOVEMENT` env var
-   violates the live-toggle rule; make it an F1 checkbox.
-3. **Netcode feel (measure first, full rigor):** `N-gnoll-walk-jitter-extrapolation` —
-   remote extrapolation of a turning entity; then `N-remote-extrapolation-followups` as gated.
-4. **Feature track:** `S-movement-actions-phase-d` (charge + dodge-roll — framework proven by
-   A/B/C, adding actions should now be cheap) → `N-movement-actions-phase-e` (skill-input wiring
-   + animations; needs ART + human feel-tests).
-5. **Deferred / trigger-gated:** `monster-ai-dormancy` (implement when monster-AI tick cost is
-   measured material), `N-phaseC-monster-dense-bandwidth-stress` (run with the next stress pass),
-   `N-test-suite-audit-tile-era-cruft`, remaining phase-followup files, `S28` (needs a human,
-   nice-to-have despite the prefix).
+1. **`S-adue-p1-run-loop-chassis`** — the roguelite run skeleton (start-run → floor → Sunderer →
+   end screen → restart). Everything else builds on this.
+2. **Duo/boss followups that sharpen the demo** (post-P1, pre-P2): `N-boss-p3-ward-reject-legibility`
+   (silent gate rejections), `N-boss-p1-partner-loss-slog`, `N-fusion-review-followups`,
+   `N-telegraph-shapes-review-nits`, `N-boss*-review-followups` as they bite.
+3. **`N-adue-p2-stranger-demo`** — the kill-test demo slice (BLOCKED on P1; gates all further
+   investment per the plan).
+4. **Post-P2 (only if the demo passes):** couch co-op mode, bundled host-side server, first
+   couple-items, second boss from the inversion generator (`docs/duo-standalone-plan.md` P3).
+5. **Inherited MMO-era files** (ecology/AOI/stress/web-client/etc.): PARKED — irrelevant to Adue
+   until they block something; delete or work them only on friction, per the fork plan.
 
 ## Waiting on the HUMAN (not agent-workable; ask, don't block)
 
-- **Feel-tests pending (duo-grill fixes):** the echo-cue ring flash (gold = shield press/Echo
-  Lash, magenta = detonate initiate/confirm) — is it unmissable in combat?; the P3 ward-break
-  duo rule (Good/Perfect blast + >=4u pair separation — the 4u number is untuned).
-- **Feel-tests pending:** walk-anim-idles-when-blocked (`31ab750`), free-angle movement
-  (`825d0ba`), movement speed multipliers (`ea15bea`), monster behaviors P2/P4/P5 (gnoll
-  glide/flee/charge), AgX tonemapping (`5c2823d`), player charge/dodge-roll (K/L, Phase D),
-  **remote-render correction smoothing** — re-run the live A/B (client_render_trace on a bot at
-  120 and 200 stress clients; pre-fix baselines: 27 and 62 reversals/4s) + eyeball the crowd.
-- **Merge decision:** `feat/continuous-migration` → `main` (hard replacement of tile) after the
-  full feel-test.
-- **Scope confirmations:** `N-retire-web-client` (retirement final?), the `docs/tile-audit.md`
-  DECISION items (persistence tile cols, spatial-grid cell size, AOI gather-quant),
-  `N-slime-feel-polish` (needs the user's feel verdict).
-- **ART:** monster P6 real per-type visuals/animations (placeholder tint/scale shipped).
+- **Feel-tests pending:** the duo-grill fixes as a set (echo-cue ring flash; P3 ward duo rule
+  Good/Perfect + >=4u — the 4u and the fusion 2.0u/0.6s numbers are all untuned; the 2-3u
+  fusion crossing band; opposite-side-hug P3 strategy `N-boss-p3-opposite-side-hug`).
+- **First live Adue session** once P1 lands: a full run start-to-end-screen, two players.
+- **ART direction**: the committed low-fi style decision (blocks the P2 demo's Steam-facing
+  packaging, not the P2 playtest itself); the a2 logo pick.
+- **GitHub**: create the empty private repo `SMurazio/adue` so `main` can be pushed.
 
-> **Protocol changes must update `docs/protocol.md`** (version + message list) in the same unit of
-> work. `N-docs-hygiene-resync` adds a gate test so this drift fails the build instead of recurring.
+> **Protocol changes must update `docs/protocol.md`** (version + message list) in the same unit
+> of work — the drift gate test enforces this.
