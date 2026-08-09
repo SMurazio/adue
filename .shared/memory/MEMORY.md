@@ -11,6 +11,8 @@ index at session start, then read any note relevant to the current task.
 
 - [Review handoff loop](review-handoff-loop.md) - Claude-only loop: orchestrator plans/verifies/commits,
   implementer subagents write code/tests, and a fresh reviewer subagent verifies independently.
+  **Cadence (2026-08-09): N-nits skip review; S-tasks batch review by shared seam; host-authoritative
+  sim always reviewed (referee code, not "server ops").**
 - [Production-ready intent](production-ready-intent.md) - production readiness means open seams and
   reversible decisions, not building every future feature immediately.
 - [Prefer scripts over MCP](prefer-scripts-over-mcp.md) - repeatable agent workflows should be
