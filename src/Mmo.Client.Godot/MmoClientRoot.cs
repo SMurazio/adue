@@ -146,6 +146,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private double _duoCardExpiresAt;
 	private const double DuoCardSeconds = 2.5d;
 
+	// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): the branded startup SPLASH — "ADUE" + the a2 mark (TEXT
+	// placeholder, art pending) + a tagline, so a stranger duo sits down to a game, not a debug client. It is
+	// deliberately NON-BLOCKING and impossible to trap in: the auto-connect / auto-pair flow runs unconditionally in
+	// _Ready regardless of this overlay, the backdrop's MouseFilter is Ignore (it never eats input), and it self-
+	// dismisses on the EARLIEST of three independent triggers — a short timer, the first player input, or being in-game
+	// (logged in with the local entity known). There is no "press start to connect" gate. VISUAL/timing/copy is a HUMAN
+	// feel-test. Fork on approach: see review-request-p2-title-frame.md (chosen = timed startup splash w/ 3 dismissers).
+	private Control? _splashPanel;
+	private double _splashExpiresAt;
+	private bool _splashDismissed;
+	private bool _splashInputSeen;
+	private const double SplashSeconds = 3.2d;
+
 	// ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the run chassis' whole client surface — ONE top-centre
 	// panel that is the ready-up affordance in the lobby, a thin "run under way" banner during a run, and the END
 	// SCREEN (clear/wipe + the cheap stats) when a run finishes. Legibility over polish, per the task: it renders
@@ -609,6 +622,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	// control focus. Ignored while typing in chat so Tab behaves normally in the chat box.
 	public override void _Input(InputEvent @event)
 	{
+		// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): the first deliberate player input dismisses the startup
+		// splash (UpdateSplash reads this flag). Detection only — we NEVER consume the event, so the very same press
+		// still does its real job; the splash is non-blocking and can't swallow an input. Movement/click/key all count.
+		if (!_splashDismissed
+			&& @event is InputEventKey { Pressed: true, Echo: false } or InputEventMouseButton { Pressed: true }
+				or InputEventJoypadButton { Pressed: true })
+		{
+			_splashInputSeen = true;
+		}
+
 		if (@event is InputEventKey { Pressed: true, Echo: false } key
 			&& key.Keycode == Key.Tab
 			&& _chatInput?.HasFocus() != true)
@@ -1538,6 +1561,54 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		duoCardPanel.Visible = false;
 		_duoCardPanel = duoCardPanel;
 
+		// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): the branded startup SPLASH. A full-rect, input-IGNORING
+		// backdrop (so it can never trap the player) with centred "ADUE / a2 / tagline" text. Visible from frame 0;
+		// UpdateSplash self-dismisses it (timer / first input / in-game). The a2 mark is a TEXT placeholder (art
+		// pending), matching the duo-card convention. Added last among the top-of-overlay panels so it draws OVER them
+		// while up. Non-blocking by construction — connect/auto-pair runs in _Ready no matter what this overlay does.
+		var splash = new Control
+		{
+			Name = "SplashPanel",
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		splash.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+		var splashBackdrop = new ColorRect
+		{
+			Name = "SplashBackdrop",
+			Color = new Color(0.03f, 0.05f, 0.07f, 0.96f),
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		splashBackdrop.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+		splash.AddChild(splashBackdrop);
+		var splashCenter = new CenterContainer
+		{
+			Name = "SplashCenter",
+			MouseFilter = Control.MouseFilterEnum.Ignore
+		};
+		splashCenter.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+		splash.AddChild(splashCenter);
+		var splashRows = new VBoxContainer { Name = "SplashRows", MouseFilter = Control.MouseFilterEnum.Ignore };
+		splashRows.AddThemeConstantOverride("separation", 10);
+		splashCenter.AddChild(splashRows);
+		var splashMark = CreateOverlayLabel("SplashMark", 84);      // the a2 logo mark — TEXT placeholder (art pending)
+		splashMark.Text = "a2";
+		splashMark.HorizontalAlignment = HorizontalAlignment.Center;
+		splashMark.MouseFilter = Control.MouseFilterEnum.Ignore;
+		splashRows.AddChild(splashMark);
+		var splashTitle = CreateOverlayLabel("SplashTitle", 40);
+		splashTitle.Text = "ADUE";
+		splashTitle.HorizontalAlignment = HorizontalAlignment.Center;
+		splashTitle.MouseFilter = Control.MouseFilterEnum.Ignore;
+		splashRows.AddChild(splashTitle);
+		var splashTagline = CreateOverlayLabel("SplashTagline", 18);
+		splashTagline.Text = "two players, one line — a due";
+		splashTagline.HorizontalAlignment = HorizontalAlignment.Center;
+		splashTagline.MouseFilter = Control.MouseFilterEnum.Ignore;
+		splashRows.AddChild(splashTagline);
+		splash.Visible = true;
+		_splashPanel = splash;
+		_splashExpiresAt = SplashSeconds; // _elapsedSeconds starts at 0; dismiss no later than SplashSeconds in.
+
 		// ADUE P1 RUN LOOP: the run panel — top-centre, under the status panel, wide enough for the end screen's
 		// stat lines. Same overlay idiom as every other panel here; visibility + text are driven by UpdateRunPanel.
 		var runPanel = CreateOverlayPanel("RunPanel", Vector2.Zero, new Vector2(460, 120));
@@ -1591,6 +1662,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		// ADUE P1 RUN LOOP: added after the status/metrics/chat panels so the end screen draws OVER them.
 		layer.AddChild(runPanel);
 		layer.AddChild(inputPanel);
+		// ADUE P2-B FIX: the duo-card reveal was created + made visible on pairing but never added to the layer, so it
+		// never rendered (why the "a due" card didn't show). Add it here, above the run/input panels so the celebration
+		// draws over them, below the splash (added last).
+		layer.AddChild(duoCardPanel);
+		// ADUE P2-C: the startup splash is added LAST so its branded backdrop draws OVER every other overlay while up.
+		// It is input-ignoring and self-dismissing (UpdateSplash), so covering the panels for a few seconds is safe.
+		if (_splashPanel is not null)
+		{
+			layer.AddChild(_splashPanel);
+		}
 	}
 
 	// The STANDALONE F3 perf overlay (restored from before the panel consolidation): a glanceable HUD you watch
@@ -2656,6 +2737,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateRunPanel();
 		UpdateInteractFeedback(now);
 		UpdateDuoCard(now);
+		UpdateSplash(now);
 		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
 		// reads the freshest local position/facing. Do not re-add it here — that reintroduces the one-frame-stale feed.
 	}
@@ -2972,11 +3054,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 
 			case RunPhase.Active:
 			{
+				// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): frame the live run as a numbered floor — "FLOOR 1 ·
+				// The Sunderer" (one floor today; framing, not content). The floor label + boss name are the pure
+				// RunFraming vocabulary; the second line is the existing run-under-way banner.
 				SetTextIfChanged(
 					_runLabel,
-					_client.RunSelfReady
+					$"{RunFraming.FloorLabel}\n" +
+					(_client.RunSelfReady
 						? "RUN UNDER WAY — there is no respawn until it ends."
-						: "A run is under way.");
+						: "A run is under way."));
 				_runPanel.Visible = true;
 				break;
 			}
@@ -2990,12 +3076,16 @@ public partial class MmoClientRoot : Node3D, IControlHost
 					break;
 				}
 
-				var headline = summary.Outcome == RunOutcome.Clear ? "RUN CLEARED" : "RUN OVER — WIPED";
+				// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): the headline + the new "how far you got" floor beat
+				// (rendered ABOVE the cheap stats) are the PURE RunFraming.Compose decision, derived from the existing
+				// replicated outcome + boss-HP% — no new wire field. This layer only renders the strings it returns.
+				var lines = RunFraming.Compose(summary.Outcome, summary.BossHealthPercent);
 				var minutes = summary.DurationSeconds / 60;
 				var seconds = summary.DurationSeconds % 60;
 				SetTextIfChanged(
 					_runLabel,
-					$"{headline}\n" +
+					$"{lines.Headline}\n" +
+					$"{lines.FloorBeat}\n" +
 					$"time {minutes}:{seconds:00}   damage {summary.DamageDealt}   deaths {summary.Deaths}\n" +
 					$"Sunderer left at {summary.BossHealthPercent}% HP\n" +
 					"press [B] to ready up for another run");
@@ -3060,6 +3150,26 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		if (_duoCardPanel is { Visible: true } && now.TotalSeconds >= _duoCardExpiresAt)
 		{
 			_duoCardPanel.Visible = false;
+		}
+	}
+
+	// ADUE P2-C (todo/N-p2-title-and-floor-frame.md): drive the NON-BLOCKING startup splash. It hides on the EARLIEST
+	// of three independent, un-trappable triggers — the SplashSeconds timer, the first player input (_splashInputSeen,
+	// set in _Input), or being IN-GAME (logged in with the local entity known). Auto-connect/auto-pair never waits on
+	// this (it runs in _Ready); the splash only ever REMOVES itself, never gates. Once dismissed it stays gone for the
+	// session (_splashDismissed) — it is a startup beat, not a recurring panel.
+	private void UpdateSplash(TimeSpan now)
+	{
+		if (_splashPanel is null || _splashDismissed)
+		{
+			return;
+		}
+
+		var inGame = _client is { IsLoggedIn: true } && _client.LocalNetworkId.HasValue;
+		if (now.TotalSeconds >= _splashExpiresAt || _splashInputSeen || inGame)
+		{
+			_splashDismissed = true;
+			_splashPanel.Visible = false;
 		}
 	}
 
