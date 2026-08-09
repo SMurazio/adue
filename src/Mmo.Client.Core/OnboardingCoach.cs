@@ -59,10 +59,13 @@ public sealed class OnboardingCoach
 {
     // ---- copy (single source; the Godot layer renders these verbatim) ------------------------------------
 
-    // Shown while unpaired. Unmissable + honest: the verbs need a partner, and /pair is how you get one. (The lobby
-    // run panel also mentions /pair, but this is the prominent, always-on-when-unpaired prompt.)
+    // Shown while unpaired. ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): pairing is no longer a typed input — in
+    // the demo the server AUTO-PAIRS the two players the moment both are online, so this prompt is only realistically
+    // seen in the brief pre-join gap before the partner connects. It stopped telling the player to type `/pair` (a
+    // fake choice — there is only ever one possible partner) and instead just reassures them the partner is coming;
+    // pair formation itself is celebrated by the one-shot duo-card reveal, not petitioned here.
     public const string PairingPromptText =
-        "You're on your own — type  /pair <name>  in chat to team up.\nAdue's four verbs are built for two.";
+        "Waiting for your partner…\nAdue's four verbs are built for two.";
 
     // Heading over the verb list inside the practice room.
     public const string VerbHeadingText = "PRACTICE ROOM — your four duo verbs:";

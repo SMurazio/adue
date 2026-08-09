@@ -158,12 +158,154 @@ public sealed class RunLoopSessionIntegrationTests
         }
     }
 
+    // ---- ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): demo-mode auto-pair + solo-start guard -------------------
+
+    // With demo mode ON, two clients that join are AUTO-PAIRED with no /pair typed — both see PairStatus.Paired. This is
+    // the load-bearing swap: pairing stops being an input. Uses the SAME wire surface RunClient already tracks (IsPaired
+    // flips on PairStatusMessage.Paired), so a pass proves the server-side FormPair funnel replicated to both sides.
+    [Fact]
+    public async Task DemoMode_TwoClientsJoin_AreAutoPairedWithoutPairCommand()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Alpha", "Bravo"], demoMode: true);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var a = new RunClient("Alpha");
+            using var b = new RunClient("Bravo");
+            a.Connect(port, options.ConnectionKey);
+            b.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(
+                () => a.IsLoggedIn && a.OwnNetworkId != 0 && b.IsLoggedIn && b.OwnNetworkId != 0, a, b);
+
+            // No /pair sent by EITHER client — the server auto-pairs the moment both are online.
+            await WaitUntilAsync(() => a.IsPaired && b.IsPaired, a, b);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    // With demo mode ON, an UNPAIRED ready-up is REFUSED with "Waiting for your partner to join." and NO run starts —
+    // this closes the solo-start race (P1 mashes ready before P2's client connects). A lone client never auto-pairs
+    // (no other player), so its /ready hits the guard.
+    [Fact]
+    public async Task DemoMode_UnpairedReadyIsRefused_AndNoRunStarts()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Solo"], demoMode: true);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var solo = new RunClient("Solo");
+            solo.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => solo.IsLoggedIn && solo.OwnNetworkId != 0, solo);
+
+            solo.SendChat("/ready");
+            await WaitUntilAsync(() => solo.HasSystemLine("Waiting for your partner to join."), solo);
+
+            // No solo run started: phase stays Lobby and self is not marked ready.
+            await PollForAsync(TimeSpan.FromMilliseconds(300), solo);
+            Assert.NotEqual(RunPhase.Active, solo.LastRunPhase);
+            Assert.False(solo.LastRunSelfReady);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    // With demo mode ON, disconnect breaks the pair (BreakPair) and a RECONNECT re-runs the join rule and re-pairs —
+    // the auto-pair path self-heals. Bravo drops, Alpha sees the pair clear, Bravo rejoins under the same name, both
+    // are auto-paired again.
+    [Fact]
+    public async Task DemoMode_Reconnect_RePairs()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Alpha", "Bravo"], demoMode: true);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var a = new RunClient("Alpha");
+            var b = new RunClient("Bravo");
+            a.Connect(port, options.ConnectionKey);
+            b.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(
+                () => a.IsLoggedIn && a.OwnNetworkId != 0 && b.IsLoggedIn && b.OwnNetworkId != 0, a, b);
+            await WaitUntilAsync(() => a.IsPaired && b.IsPaired, a, b);
+
+            // Bravo drops -> the pair breaks; Alpha's client sees Paired=false.
+            b.Dispose();
+            await WaitUntilAsync(() => !a.IsPaired, a);
+
+            // Bravo reconnects under the same name -> auto-pair re-forms on the join rule.
+            using var b2 = new RunClient("Bravo");
+            b2.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => b2.IsLoggedIn && b2.OwnNetworkId != 0, b2);
+            await WaitUntilAsync(() => a.IsPaired && b2.IsPaired, a, b2);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
+    // FLAG OFF (default) is byte-unchanged: an unpaired ready-up SOLO-STARTS immediately (today's behaviour), so
+    // dev/headless testing is untouched by the P2 work. This pins the opt-in boundary — the guard only bites with the
+    // flag on. (No /pair is used; the lone player readies and a solo run begins.)
+    [Fact]
+    public async Task DemoModeOff_UnpairedReadySoloStarts()
+    {
+        using var database = await TestSqliteDatabase.CreateMigratedAsync();
+        var port = GetFreeUdpPort();
+        var options = CreateOptions(port, database.ConnectionString, admins: ["Solo"], demoMode: false);
+        var server = new GameServer(options, new SqliteCharacterRepository(database.ConnectionString));
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await Task.Delay(100);
+            using var solo = new RunClient("Solo");
+            solo.Connect(port, options.ConnectionKey);
+            await WaitUntilAsync(() => solo.IsLoggedIn && solo.OwnNetworkId != 0, solo);
+
+            solo.SendChat("/ready");
+            await WaitUntilAsync(() => solo.HasSystemLine("Ready. Starting a solo run..."), solo);
+            await WaitUntilAsync(() => solo.LastRunPhase == RunPhase.Active, solo);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            await serverTask;
+        }
+    }
+
     // The run's boss room IS the authored Sunderer arena (BossArena tiles 356-379), which only exists on the AUTHORED
     // 384x384 town+floor-1 map — so this harness MUST generate that map (GenVersion = AuthoredGenVersion at the
     // authored dims), or the arena is never stamped and SpawnMonsterCore fails to place the boss at BossSpawnTile
     // (players still "teleport in" because ContainsInterior is a pure coordinate check, but the fight never starts).
     // Mirrors InteractHarvestIntegrationTests / TelegraphWireIntegrationTests, which stand up the same authored map.
-    private static ServerOptions CreateOptions(int port, string connectionString, string[] admins)
+    private static ServerOptions CreateOptions(int port, string connectionString, string[] admins, bool demoMode = false)
     {
         return new ServerOptions(
             port,
@@ -182,6 +324,7 @@ public sealed class RunLoopSessionIntegrationTests
             new HashSet<string>(admins, StringComparer.OrdinalIgnoreCase))
         {
             GenVersion = TerrainGenerator.AuthoredGenVersion,
+            DemoMode = demoMode,
         };
     }
 

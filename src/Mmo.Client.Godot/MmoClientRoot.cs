@@ -137,6 +137,15 @@ public partial class MmoClientRoot : Node3D, IControlHost
 	private PanelContainer? _toastPanel;
 	private Label? _toastLabel;
 
+	// ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the DUO-CARD reveal — a one-shot ~2.5s centre-screen card that
+	// CELEBRATES pair formation ("A & B — a due") instead of asking the player to type /pair. Raised on the rising
+	// pairing edge (MmoClient.TakePendingPairReveal) and auto-hidden after its window. Placeholder text stands in for
+	// the a2 logo mark (art pending). VISUAL/feel is a HUMAN feel-test — the copy/placement/timing here are a first cut.
+	private PanelContainer? _duoCardPanel;
+	private Label? _duoCardLabel;
+	private double _duoCardExpiresAt;
+	private const double DuoCardSeconds = 2.5d;
+
 	// ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the run chassis' whole client surface — ONE top-centre
 	// panel that is the ready-up affordance in the lobby, a thin "run under way" banner during a run, and the END
 	// SCREEN (clear/wipe + the cheap stats) when a run finishes. Legibility over polish, per the task: it renders
@@ -1510,6 +1519,25 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		toastPanel.Visible = false;
 		_toastPanel = toastPanel;
 
+		// ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the DUO-CARD reveal — CENTRE screen, large, one-shot. Same
+		// overlay idiom; visibility + text are driven by UpdateDuoCard on the pairing edge. Placeholder logo text ("a2 /
+		// a due") stands in until the a2 art lands. HUMAN feel-test owed (size/timing/placement/copy are a first cut).
+		var duoCardPanel = CreateOverlayPanel("DuoCardPanel", Vector2.Zero, new Vector2(560, 150));
+		duoCardPanel.AnchorLeft = 0.5f;
+		duoCardPanel.AnchorRight = 0.5f;
+		duoCardPanel.AnchorTop = 0.5f;
+		duoCardPanel.AnchorBottom = 0.5f;
+		duoCardPanel.OffsetLeft = -280f;
+		duoCardPanel.OffsetRight = 280f;
+		duoCardPanel.OffsetTop = -160f;
+		duoCardPanel.OffsetBottom = -10f;
+		var duoCardRows = CreatePanelVBox(duoCardPanel);
+		_duoCardLabel = CreateOverlayLabel("DuoCard", 26);
+		_duoCardLabel.HorizontalAlignment = HorizontalAlignment.Center;
+		duoCardRows.AddChild(_duoCardLabel);
+		duoCardPanel.Visible = false;
+		_duoCardPanel = duoCardPanel;
+
 		// ADUE P1 RUN LOOP: the run panel — top-centre, under the status panel, wide enough for the end screen's
 		// stat lines. Same overlay idiom as every other panel here; visibility + text are driven by UpdateRunPanel.
 		var runPanel = CreateOverlayPanel("RunPanel", Vector2.Zero, new Vector2(460, 120));
@@ -2627,6 +2655,7 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		UpdateLootWindow();
 		UpdateRunPanel();
 		UpdateInteractFeedback(now);
+		UpdateDuoCard(now);
 		// S109: RefreshHud moved OUT of here to _Process AFTER SampleMotionMetrics (read-order fix) so the minimap
 		// reads the freshest local position/facing. Do not re-add it here — that reintroduces the one-frame-stale feed.
 	}
@@ -2930,7 +2959,10 @@ public partial class MmoClientRoot : Node3D, IControlHost
 				var ready = _client.RunSelfReady ? "READY" : "not ready";
 				var waiting = _client.RunRosterCount > 1
 					? $"\n{_client.RunReadyCount}/{_client.RunRosterCount} ready — the run starts when both are."
-					: "\nUnpaired: readying up starts a SOLO run. (/pair <name> to run as a duo.)";
+					: // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): pairing is no longer typed — the demo auto-pairs
+						// on join, so the unpaired lobby state is just "partner not connected yet". Dropped the
+						// "(/pair <name> …)" hint (a fake choice); the paired "N/N ready" line is kept unchanged.
+						"\nWaiting for your partner to join...";
 				SetTextIfChanged(
 					_runLabel,
 					$"THE SUNDERER — press [B] to ready up  ({ready}){waiting}");
@@ -2998,6 +3030,37 @@ public partial class MmoClientRoot : Node3D, IControlHost
 		SetTextIfChanged(_toastLabel, text);
 		_toastPanel.Visible = true;
 		_toastExpiresAt = _elapsedSeconds + 2.0d;
+	}
+
+	// ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the DUO-CARD reveal. Drains the one-shot pairing-edge signal from
+	// the pure client (TakePendingPairReveal) and raises a centre-screen ~2.5s card naming both players in the *a due*
+	// framing — pairing becomes a fact the game CELEBRATES, not a command typed. Auto-hides after its window. The a2
+	// logo is a text placeholder (art pending). VISUAL/feel is a HUMAN feel-test.
+	private void UpdateDuoCard(TimeSpan now)
+	{
+		if (_duoCardPanel is null || _duoCardLabel is null)
+		{
+			return;
+		}
+
+		if (_client is not null && _client.TakePendingPairReveal())
+		{
+			// Resolve both names off replicated entities; fall back gracefully if the partner entity isn't known yet.
+			var selfName = _client.LocalNetworkId is { } selfId ? _client.DisplayNameFor(selfId) : null;
+			var partnerName = _client.PartnerNetworkId is { } partnerId ? _client.DisplayNameFor(partnerId) : null;
+			selfName = string.IsNullOrWhiteSpace(selfName) ? "You" : selfName;
+			partnerName = string.IsNullOrWhiteSpace(partnerName) ? "your partner" : partnerName;
+
+			// Placeholder for the a2 logo mark (art pending) + the "a due" framing + both names.
+			SetTextIfChanged(_duoCardLabel, $"a2\n\n{selfName}  &  {partnerName}\n— a due —");
+			_duoCardPanel.Visible = true;
+			_duoCardExpiresAt = _elapsedSeconds + DuoCardSeconds;
+		}
+
+		if (_duoCardPanel is { Visible: true } && now.TotalSeconds >= _duoCardExpiresAt)
+		{
+			_duoCardPanel.Visible = false;
+		}
 	}
 
 	// Maps the server's machine-readable Interact reason codes to a short human-readable line.

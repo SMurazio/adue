@@ -232,6 +232,30 @@ public sealed class MmoClient : IDisposable
 
     public int PairVersion { get; private set; }
 
+    // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the one-shot DUO-CARD reveal signal. Set on the RISING edge of a
+    // pairing (unpaired -> paired), drained exactly once by the Godot layer via TakePendingPairReveal() to raise the
+    // ~2-3s "A & B — a due" celebration card. Pure presentation intent — pairing itself is server-authoritative; this
+    // just tells the client "a pair just formed, play the beat". A re-pair (e.g. reconnect re-pair) is another rising
+    // edge, so the card fires again — a pairing is always celebrated.
+    private bool _pairRevealPending;
+
+    // Drain the pending duo-card reveal (true at most once per pairing edge). The Godot overlay polls this each frame.
+    public bool TakePendingPairReveal()
+    {
+        if (!_pairRevealPending)
+        {
+            return false;
+        }
+
+        _pairRevealPending = false;
+        return true;
+    }
+
+    // ADUE P2: resolve a replicated entity's display name for the reveal card (and any other presentation use). Returns
+    // null when that entity is not (yet) known to this client — the reveal supplies a neutral fallback in that case.
+    public string? DisplayNameFor(uint networkId) =>
+        _entities.TryGetValue(networkId, out var entity) ? entity.DisplayName : null;
+
     public readonly record struct AimPreviewState(uint ShooterNetworkId, float HeadingRadians, bool Active);
 
     public AimPreviewState? PartnerAimPreview { get; private set; }
@@ -1364,10 +1388,16 @@ public sealed class MmoClient : IDisposable
                 break;
             case PairStatusMessage pair:
                 // DUO-SKILLSHOT: adopt the replicated pair state. On unpair, also drop any stale partner aim preview.
+                // ADUE P2: a RISING edge (was unpaired, now paired) arms the one-shot duo-card reveal.
+                var wasPaired = PartnerNetworkId.HasValue;
                 PartnerNetworkId = pair.Paired ? pair.PartnerNetworkId : null;
                 if (!pair.Paired)
                 {
                     PartnerAimPreview = null;
+                }
+                else if (!wasPaired)
+                {
+                    _pairRevealPending = true;
                 }
 
                 PairVersion++;

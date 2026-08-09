@@ -63,6 +63,22 @@ public sealed class OnboardingCoachTests
         Assert.Equal(4, view.VerbHints.Count);
     }
 
+    // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): pairing is no longer a typed input — the demo auto-pairs, so the
+    // prompt must NOT tell the player to type `/pair` (a fake choice among one possible partner). It reads as a calm
+    // "waiting for your partner" reassurance instead. Pins the copy swap so a regression can't reintroduce the command.
+    [Fact]
+    public void PairingPrompt_DoesNotTellPlayerToTypePair()
+    {
+        var prompt = OnboardingCoach.PairingPromptText;
+
+        Assert.DoesNotContain("/pair", prompt);
+        Assert.Contains("partner", prompt, System.StringComparison.OrdinalIgnoreCase);
+
+        // And the rendered view carries the same (no-command) copy when unpaired.
+        var view = OnboardingCoach.Select(inPracticeRoom: false, isPaired: false, usedVerbs: null);
+        Assert.DoesNotContain("/pair", view.PairingPrompt);
+    }
+
     // ---- the verb table: order, keys, and the signature CROSS copy ---------------------------------------
 
     [Fact]

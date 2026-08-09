@@ -107,6 +107,17 @@ $effectiveAdminNames = if ([string]::IsNullOrWhiteSpace($AdminNames)) {
 }
 $env:MMO_ADMIN_NAMES = $effectiveAdminNames
 "Admin names for visual check: $effectiveAdminNames"
+
+# ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the two-player DEMO front door (start-duo -> -Clients 2) turns on
+# server DEMO MODE via MMO_DEMO_MODE — auto-pair the two players on join (no typed /pair) and refuse an unpaired
+# solo-start ("Waiting for your partner to join."). A SOLO visual check (-Clients 1) leaves it unset, so single-client
+# dev keeps today's solo-start + /pair behaviour. The var is inherited by the server the start-server script launches.
+if ($Clients -ge 2) {
+    $env:MMO_DEMO_MODE = '1'
+    "Demo mode ON (auto-pair + solo-start guard) for the two-player front door."
+} else {
+    Remove-Item Env:\MMO_DEMO_MODE -ErrorAction SilentlyContinue
+}
 $serverArgs = @()
 if ($LogToFile) {
     $serverArgs += '-LogToFile'

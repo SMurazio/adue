@@ -35,6 +35,14 @@ public sealed record ServerOptions(
     // under an authored genVersion: an authored layout has no randomness to seed.)
     public int MapSeed { get; init; }
 
+    // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the two-player in-person DEMO mode. OFF by default so every
+    // existing test + dev/headless flow is byte-unchanged (solo-start + `/pair` survive). When ON: a joining player is
+    // AUTO-PAIRED with the one other unpaired online player (pairing stops being a typed input), and an UNPAIRED ready
+    // is REFUSED ("Waiting for your partner to join.") instead of solo-starting — closing the operator-intervention
+    // race where P1 mashes ready before P2's client has connected. Enabled on the demo launch via MMO_DEMO_MODE (the
+    // duo front door sets it; solo dev leaves it unset). Init-only so the many test ServerOptions don't thread it.
+    public bool DemoMode { get; init; }
+
     public bool DebugMovement { get; init; }
 
     public IReadOnlySet<string> DebugMovementWatchNames { get; init; } =
@@ -90,6 +98,9 @@ public sealed record ServerOptions(
         {
             GenVersion = genVersion,
             MapSeed = ReadInt("MMO_MAP_SEED", 0),
+            // ADUE P2: the demo's auto-pair + solo-start-guard. Default OFF (dev/headless behaviour unchanged); the
+            // duo launch script sets MMO_DEMO_MODE=1.
+            DemoMode = ReadBool("MMO_DEMO_MODE", false),
             DebugMovement = ReadBool("MMO_DEBUG_MOVEMENT", false),
             DebugMovementWatchNames = ReadSet("MMO_DEBUG_MOVEMENT_WATCH", ""),
             DebugMovementHitchThresholdMultiplier = ReadDouble("MMO_DEBUG_MOVEMENT_HITCH_MULTIPLIER", 1.5d),

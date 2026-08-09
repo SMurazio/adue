@@ -1280,6 +1280,10 @@ public sealed class GameServer
                         // joining mid-run sees "a run is under way" and a lobby joiner sees the ready gate immediately
                         // (the status message is edge-driven afterwards — this is the only unconditional send).
                         SendRunStatus(current);
+                        // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the session is now fully online (authenticated
+                        // + entity spawned). In demo mode, auto-pair it with the lone other unpaired player — pairing is
+                        // no longer a typed command. No-op when demo mode is off, so dev/headless login is unchanged.
+                        TryAutoPairOnJoin(current);
                         Log.Info($"Authenticated {character.DisplayName} ({character.CharacterId}) as {role}.");
                     }
                     catch (Exception exception)
@@ -3279,16 +3283,66 @@ public sealed class GameServer
         // Break the sender's prior pair (if any) so a player is only ever in one pair; notify the jilted partner.
         BreakPair(sender);
 
-        sender.SetPartner(target);
-        target.SetPartner(sender);
-        SendPairStatus(sender, target);
-        SendPairStatus(target, sender);
+        FormPair(sender, target);
         SendSystem(sender, $"paired with {target.DisplayName}.");
         SendSystem(target, $"paired with {sender.DisplayName}.");
+    }
+
+    // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the pair-FORMATION funnel — the mechanical half of pairing,
+    // shared by the `/pair` dev command and the demo AUTO-PAIR-on-join path. Sets both sides' PartnerSession
+    // symmetrically, replicates PairStatus(Paired=true) to each (the client turns that edge into the duo-card reveal),
+    // and re-pushes RunStatus to both (pairing grows the ready gate's roster 1 -> 2). Callers own their own chat lines
+    // (/pair adds "paired with X."; auto-pair stays silent — the reveal is the celebration). Assumes both sessions are
+    // currently UNPAIRED (each caller guarantees it: /pair breaks the sender's prior pair first + guards the target;
+    // auto-pair only ever fires between two unpaired sessions).
+    private void FormPair(ClientSession a, ClientSession b)
+    {
+        a.SetPartner(b);
+        b.SetPartner(a);
+        SendPairStatus(a, b);
+        SendPairStatus(b, a);
         // ADUE P1 RUN LOOP: pairing changes the ready gate's roster (1 -> 2), so both HUDs need a fresh run status.
-        SendRunStatus(sender);
-        SendRunStatus(target);
-        Log.Info($"Paired {sender.DisplayName} <-> {target.DisplayName}.");
+        SendRunStatus(a);
+        SendRunStatus(b);
+        Log.Info($"Paired {a.DisplayName} <-> {b.DisplayName}.");
+    }
+
+    // ADUE P2 (demo auto-pair): called when a session becomes fully online (authenticated + entity spawned). When
+    // demo mode is on and EXACTLY ONE other unpaired, authenticated session is online, form the pair automatically —
+    // pairing stops being a typed input. Rules on the "exactly one other" count: for the 2-player in-person demo it is
+    // always exactly one, so the pair always forms. If MORE than one unpaired other is online (a 3rd stranger somehow
+    // connected), we do NOTHING — auto-pairing would have to guess who, and a wrong guess is worse than leaving them
+    // to `/pair`. If ZERO unpaired others are online (the first joiner, or everyone else already paired), we also do
+    // nothing; the next unpaired joiner will pair with THIS one. Disconnect's BreakPair means a reconnect re-runs this
+    // and self-heals the pair. No-op when the caller is already paired (defensive) or demo mode is off.
+    private void TryAutoPairOnJoin(ClientSession joined)
+    {
+        if (!_options.DemoMode || joined.HasPartner || !joined.IsAuthenticated)
+        {
+            return;
+        }
+
+        ClientSession? candidate = null;
+        foreach (var session in _sessions.Values)
+        {
+            if (ReferenceEquals(session, joined) || !session.IsAuthenticated || session.HasPartner)
+            {
+                continue;
+            }
+
+            if (candidate is not null)
+            {
+                // A second unpaired other exists — ambiguous. Leave everyone to `/pair` rather than guess a partner.
+                return;
+            }
+
+            candidate = session;
+        }
+
+        if (candidate is not null)
+        {
+            FormPair(joined, candidate);
+        }
     }
 
     // DUO-SKILLSHOT: /unpair — break the sender's current pair (if any), notifying + updating both sides.
@@ -3697,6 +3751,18 @@ public sealed class GameServer
         if (ready && partner is not null && _practiceOccupants.Contains(partner.Id))
         {
             SendSystem(session, "Your partner is in the practice room — they must leave it first (/practice off).");
+            return;
+        }
+
+        // ADUE P2 (todo/S-p2-auto-pair-and-duo-reveal.md): the solo-start RACE guard. In demo mode an UNPAIRED ready-UP
+        // must NOT solo-start — if P1 mashes ready before P2's client has connected (and so before auto-pair fires), a
+        // solo run would start and the operator has to intervene in the first minute. Refuse it here, BEFORE TryReady,
+        // so RunEngine is untouched (all its headless tests stay byte-identical). Un-readying (ready==false) is always
+        // allowed (it only clears a flag), and a PAIRED ready falls straight through to the normal gate. Demo mode OFF
+        // = today's behaviour (solo-start survives), so dev/headless is unchanged.
+        if (_options.DemoMode && ready && partner is null)
+        {
+            SendSystem(session, "Waiting for your partner to join.");
             return;
         }
 
