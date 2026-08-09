@@ -857,6 +857,19 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			return;
 		}
 
+		// ADUE P2 (feedback: no chat requirements): P toggles the practice room — enter/leave the sealed rehearsal
+		// pocket without typing. Sends the existing /practice server verb; the server owns the toggle + lobby gate.
+		if (key.Keycode == Key.P && _chatInput?.HasFocus() != true)
+		{
+			if (_client is not null && _client.IsLoggedIn)
+			{
+				_client.SendChat("/practice");
+			}
+
+			GetViewport().SetInputAsHandled();
+			return;
+		}
+
 		if ((key.Keycode == Key.Enter || key.Keycode == Key.KpEnter || key.Keycode == Key.T)
 			&& _chatInput?.HasFocus() != true)
 		{
@@ -3107,10 +3120,22 @@ public partial class MmoClientRoot : Node3D, IControlHost
 			_client.RunRosterCount,
 			partnerName);
 
-		_landingPanel.Visible = view.Visible;
-		if (view.Visible)
+		// The landing owns the LOBBY but NOT the practice room (which is also RunPhase.Lobby) — hide it in there so it
+		// doesn't cover the rehearsal. Same own-tile check RefreshOnboarding uses.
+		var inPracticeRoom = _client.LocalTile is { } tile && PracticeRoom.ContainsInterior(tile);
+		var show = view.Visible && !inPracticeRoom;
+
+		_landingPanel.Visible = show;
+		if (show)
 		{
 			SetTextIfChanged(_landingPromptLabel, view.Prompt);
+		}
+
+		// Feedback: HIDE the whole HUD CanvasLayer while the landing is up — it's a separate layer that would otherwise
+		// draw over the opaque backdrop. Shown again in-game and in the practice room.
+		if (_hud is not null)
+		{
+			_hud.Visible = !show;
 		}
 	}
 

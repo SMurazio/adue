@@ -31,7 +31,7 @@ public static class LandingScreen
     public const string Tagline = "two players, one line";
 
     // The optional nudge toward the sealed practice pocket; the renderer may draw it small under the prompt.
-    public const string Nudge = "…or /practice to warm up first";
+    public const string Nudge = "Press [P] to warm up in the practice room.";
 
     // ---- the live prompt line, per ready state -----------------------------------------------------------
 
