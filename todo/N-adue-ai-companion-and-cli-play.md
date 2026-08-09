@@ -16,15 +16,35 @@ Two intertwined but separable pieces:
    script/agent can run a full run headlessly. Overlaps the existing console-client + control-channel
    infra; lower-risk, high leverage for automated feel/regression testing.
 
-## Before building: Fable ADVERSARIAL review (per the new rule)
-This is a consequential design decision (does the game have AI allies at all? does that dilute the
-duo thesis or the P2 kill-test?) → it MUST pass a Fable red-team before we commit, per
-`.shared/memory/design-decisions-survive-fable-adversarial-review.md`. Ask Fable to REFUTE: does a
-bot ally undermine "the second player is a person you laugh with" (the P2 pass criterion)? Is piece 2
-(agent-drivable combat) worth the surface area vs. the human feel-test? Where does each die?
+## Red-team verdict on PIECE 2 (CLI-play), 2026-08-09: SURVIVES-NARROWED
+Fable adversarial review (per `.shared/memory/design-decisions-survive-fable-adversarial-review.md`)
+KILLED both headline claims and reduced the idea:
+- **"Claude feel-tests combat" — DROPPED (category error).** The channel reads state JSON, not the
+  screen, so it bypasses the render layer where Law-7 legibility and render==hit honesty live; and an
+  MCP-round-trip agent has no human reaction time, so sync-window (T1) signal is zero-information
+  about humans. Laughter (the P2 gate) has no computable proxy. Feel stays HUMAN, per the contract.
+- **"Automated combat regression" — BELONGS SERVER-SIDE, not here.** The existing headless harnesses
+  (e.g. RunLoopSessionIntegrationTests drives the full sim over loopback) already cover the sim;
+  extend the test `RunClient` with duo-ability packets for combat regression — it runs in run-checks,
+  no Godot flakiness. A Godot-client combat test can't run in run-checks and inherits process/frame/
+  TCP flake (tests the harness, not the game).
+- **Semantic combat verbs (`client_fusion` etc.) — REJECTED.** They freeze the pre-P2, churning duo
+  kit into three parallel surfaces (protocol + flags + MCP tools) and rot with every tuning/ability;
+  they also bypass the real input path, so they'd test a path no player runs.
+- **Entanglement:** "play a full run" is either trivial-but-useless (flails, dies) or IS the bot-ally
+  problem (piece 1) in disguise (needs a competent second slot). Only the trivial fragment is
+  separable. Do NOT let "we'll want CLI play" launder bot-ally work into existence pre-P2.
+
+**Surviving scope (build ON FRICTION, after P2, not now):** ONE generic `inject_input {action,
+pressed|held_ms}` verb mapped to Godot's existing input-action map — covers every current/future
+ability with zero per-ability maintenance, exercises the REAL input path. Honest claim it may make:
+"deterministic input playback to reproduce client-side input/prediction/render bugs and capture
+combat-load perf traces" (e.g. the live `N-client-swingroot-freeze` when it next needs agent repro).
+Everything else in piece 2 is dropped.
 
 ## Gating
-Design-exploration; not queue-urgent. Piece 2 (CLI/agent combat control) is the more independently
-useful half and could be scoped as tooling even if the bot-ally design is deferred. Do not start the
-bot-ally build until the Fable adversarial review runs and (if it survives) the P2 demo has answered
-whether the duo core lands.
+- **Piece 2 (CLI-play):** narrowed as above; build on friction (first client-combat bug needing
+  agent repro), after P2. Server-side combat regression (extend the test RunClient) is the separable,
+  do-it-anytime slice if/when combat regression coverage is wanted.
+- **Piece 1 (bot ally):** NOT reviewed yet; a post-P2, post-evidence design question — if P2 passes
+  with humans it's a real question, if P2 fails neither piece matters. Do not start pre-P2.
