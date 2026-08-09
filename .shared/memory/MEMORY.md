@@ -9,6 +9,10 @@
 This directory is the canonical, version-controlled memory store for this project. Read this
 index at session start, then read any note relevant to the current task.
 
+- [Session and model economy](session-and-model-economy.md) — **main loop + all subagents =
+  OPUS; Fable only for design or explicit user request**; one work-arc per session (idle gaps
+  = premium cache re-writes); tail big outputs; don't restart with agents in flight.
+
 - [Review handoff loop](review-handoff-loop.md) - Claude-only loop: orchestrator plans/verifies/commits,
   implementer subagents write code/tests, and a fresh reviewer subagent verifies independently.
 - [Production-ready intent](production-ready-intent.md) - production readiness means open seams and
