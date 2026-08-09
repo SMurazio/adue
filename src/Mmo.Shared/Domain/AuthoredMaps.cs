@@ -190,6 +190,18 @@ public static class AuthoredMaps
         map.Border(BossArena.ExteriorMinX, BossArena.ExteriorMinY, BossArena.ExteriorMaxX, BossArena.ExteriorMaxY, 1, '#');
         map.FillRect(BossArena.InteriorMinX, BossArena.InteriorMinY, BossArena.InteriorMaxX, BossArena.InteriorMaxY, '-');
 
+        // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): THE PRACTICE ROOM — a second 24x24 sealed pocket in the far
+        // north-WEST corner (open grass today; west of the Verge, far north of the west wing, diagonally opposite the NE
+        // Sunderer arena and well away from town). Stamped identically to the arena above: a 1-tile wall ring (predicted
+        // collision on both sides) around a 22x22 DungeonStone floor ('-', the non-grass surface that masks the Grass-only
+        // node scatter out for free — flat, empty). DELIBERATELY unconnected to the rest of the map (no mouth): players
+        // only ever /practice-teleport in, so the reachability invariant carves this interior out too (a SECOND sealed
+        // pocket, pinned in TownAndFloor1MapTests alongside the arena). Coords live in PracticeRoom so the /practice
+        // command + this stamp + the test can never drift. Like the arena stamp, this moves the genVersion 2 ContentHash
+        // (re-pinned in the same commit) and — via the masked-out interior tiles — the NodeCatalog CatalogHash (likewise).
+        map.Border(PracticeRoom.ExteriorMinX, PracticeRoom.ExteriorMinY, PracticeRoom.ExteriorMaxX, PracticeRoom.ExteriorMaxY, 1, '#');
+        map.FillRect(PracticeRoom.InteriorMinX, PracticeRoom.InteriorMinY, PracticeRoom.InteriorMaxX, PracticeRoom.InteriorMaxY, '-');
+
         return map.Emit();
     }
 }

@@ -252,6 +252,16 @@ public sealed class GameServer
     // summary, and the clean reset; owns nothing inside the arena (that stays the boss encounter's).
     private readonly RunEngine _run;
 
+    // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): the practice room's live state. `_practiceDummyId` is the
+    // current practice-dummy entity id (0 = none); `_practiceOccupants` is the set of players currently inside the
+    // PracticeRoom. The dummy's lifetime is OWNED here (it is NOT a spawner): EnsurePracticeDummy spawns one on the
+    // first entry, and it is despawned (leak-free, corpse-free — DespawnBossEntity) only when the LAST occupant leaves.
+    // Occupancy is the authority for that lifetime so a partner can leave separately (or disconnect) without the dummy
+    // being pulled out from under a still-practicing partner. Practice is a LOBBY-only rehearsal disjoint from the run:
+    // an occupant is added to the run roster nowhere, so IsRunParticipant is false for them by construction.
+    private ulong _practiceDummyId;
+    private readonly HashSet<ulong> _practiceOccupants = [];
+
     // DUO-SKILLSHOT (exp/duo-abilities): the fusion-skillshot engine (Step() runs each tick in TickCore, a sibling of
     // _telegraphs.ResolveDue). Constructed after _zone + _contributionLedger since it closes over the projectile
     // spawn/move/despawn seams, the world's spatial gather, the shared monster-damage path, and the pairing gate.
@@ -647,6 +657,9 @@ public sealed class GameServer
             // brain never harms a player. Inert for any non-splinter (only the "splinter" type selects it).
             ["splinter"] = new SplinterBehavior((WorldEntity splinter, out WorldVector target) =>
                 _bossEncounter.TryGetSplinterTarget(splinter, out target)),
+            // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): the practice dummy's do-nothing brain — never moves,
+            // aggros, or attacks (the robust non-aggression guarantee; the "dummy" type selects it). Inert for any other type.
+            ["stationary"] = new StationaryBehavior(),
         };
         // BOSS-1 (docs/boss-encounter-sunderer-design.md): the Sunderer encounter engine. Every world touch is an
         // injected seam so the engine is headlessly testable and GameServer stays the single wiring point: spawn the
@@ -741,7 +754,27 @@ public sealed class GameServer
         _run = new RunEngine(
             options.TickRate,
             tryResolve: id => _zone.World.TryGet(id, out var entity) ? entity : null,
-            beginBossRoom: _bossEncounter.TryBegin,
+            // beginBossRoom is EXACTLY the seam `/boss` uses (BossEncounterEngine.TryBegin), wrapped with an H1-review
+            // DEFENSE-IN-DEPTH: anyone placed on a run roster is a run participant now, so drop them from the practice
+            // bookkeeping (a run always teleports them into the arena — they cannot also be a practice occupant, and a
+            // leftover occupancy entry would orphan the dummy). The HandleRunReadyRequest guards + EnterPractice's
+            // ready-flag clear make this unreachable in normal play; this is the belt to those suspenders. Clears the
+            // dummy if the removal emptied the room. `/boss` itself does NOT route through here, so it is unaffected.
+            beginBossRoom: (WorldEntity issuer, WorldEntity? partner, uint serverTick, out string message) =>
+            {
+                var left = _practiceOccupants.Remove(issuer.Id);
+                if (partner is not null)
+                {
+                    left |= _practiceOccupants.Remove(partner.Id);
+                }
+
+                if (left)
+                {
+                    ClearPracticeDummyIfEmpty();
+                }
+
+                return _bossEncounter.TryBegin(issuer, partner, serverTick, out message);
+            },
             // End-of-run settlement for one roster member: revive + refill + teleport back to the town lobby. The SAME
             // spawn-anchor / RestoreFullHealth / MarkAlive / ClearMoveIntent sequence RespawnPlayers runs — a run's
             // deferred death debt is paid here, in one place, on both the clear and the wipe path.
@@ -938,6 +971,13 @@ public sealed class GameServer
         if (session.EntityId is { } leavingEntityId)
         {
             _run.ForgetPlayer(leavingEntityId);
+
+            // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): a disconnect empties this player's practice slot; if they
+            // were the LAST occupant, despawn the dummy so it never leaks (the entity itself despawns just below).
+            if (_practiceOccupants.Remove(leavingEntityId))
+            {
+                ClearPracticeDummyIfEmpty();
+            }
         }
 
         if (session.IsAuthenticated)
@@ -2931,8 +2971,8 @@ public sealed class GameServer
         if (command is "help" or "?")
         {
             SendSystem(sender, sender.Role == ClientRole.Admin
-                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss, /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
-                : "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss. Admin commands require role Admin.");
+                ? "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss, /practice [off], /who, /metrics, /speed <multiplier>, /monster [name], /slam [radius] [windupMs] [damage], /clearspawners, /ecology [set <region> <type> <stock> | pressure <region> <type> <n>], /stress, /stress status, /stress start [clients] [duration], /stress stop"
+                : "commands: /help, /role, /rumors, /pair <name>, /unpair, /ready [off], /boss, /practice [off]. Admin commands require role Admin.");
             return;
         }
 
@@ -2980,6 +3020,16 @@ public sealed class GameServer
         {
             var wantReady = parts.Length < 2 || !parts[1].Equals("off", StringComparison.OrdinalIgnoreCase);
             HandleRunReadyRequest(sender, wantReady);
+            return;
+        }
+
+        // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): /practice is a co-op gameplay verb — available to EVERY
+        // player (resolved before the admin gate, like /pair, /boss, /ready). Outside the room it enters (pulling in a
+        // duo partner too) + spawns the dummy; inside it leaves. "/practice off" forces a leave.
+        if (command == "practice")
+        {
+            var forceLeave = parts.Length >= 2 && parts[1].Equals("off", StringComparison.OrdinalIgnoreCase);
+            HandlePracticeCommand(sender, forceLeave);
             return;
         }
 
@@ -3474,6 +3524,121 @@ public sealed class GameServer
         SendSystem(sender, message);
     }
 
+    // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): the /practice verb. Outside the room (and only from the run
+    // LOBBY) it teleports the issuer — plus their online /pair partner — onto the PracticeRoom entry tiles and spawns
+    // the non-aggressive dummy; inside (or with the explicit `off` arg) it teleports the CALLER back to town. The dummy
+    // is despawned only when the LAST occupant leaves (see ClearPracticeDummyIfEmpty). Simpler than /boss: no encounter
+    // engine, just teleport-in + one dummy, teleport-out + despawn-when-empty. Reuses the same _zone.Teleport +
+    // SpawnMonsterCore + DespawnBossEntity seams the boss encounter uses.
+    private void HandlePracticeCommand(ClientSession sender, bool forceLeave)
+    {
+        if (!TryGetSessionEntity(sender, out var issuer))
+        {
+            SendSystem(sender, "practice: no controllable entity.");
+            return;
+        }
+
+        // Membership: either we are tracking them as an occupant, or they are physically in the room (defensive — the
+        // room is a sealed pocket, so the two agree in normal play). Either way a bare /practice toggles to LEAVE.
+        var inside = _practiceOccupants.Contains(issuer.Id) || PracticeRoom.ContainsInterior(issuer.TileCoord);
+        if (forceLeave || inside)
+        {
+            LeavePractice(sender, issuer);
+            return;
+        }
+
+        // ENTER. LOBBY-only: refuse during a live run or its end screen so a run participant is never pulled out of the
+        // arena and a practice occupant is never entangled with the run state. (The /ready guard is the reverse belt.)
+        if (_run.Phase != RunPhase.Lobby)
+        {
+            SendSystem(sender, "You can't enter the practice room during a run.");
+            return;
+        }
+
+        EnterPractice(sender, issuer);
+    }
+
+    // ADUE P2-A: teleport the issuer (+ their online /pair partner) into the room, mark them occupants, and ensure the
+    // dummy is present. Partner resolution mirrors /boss + the run's roster (paired AND online).
+    private void EnterPractice(ClientSession sender, WorldEntity issuer)
+    {
+        TeleportIntoPractice(issuer, PracticeRoom.IssuerEntryTile);
+        _practiceOccupants.Add(issuer.Id);
+        // H1 review: entering the practice room CLEARS any pending lobby ready flag — you cannot be "ready for a run"
+        // while stepping into a rehearsal. Without this, a still-set flag let a later partner-initiated /ready start a
+        // run that teleported this player out of the room (RunEngine.StartRun pulls a partner in on their set flag) and
+        // orphaned the dummy. ForgetPlayer drops the flag (and re-pushes RunStatus if it changed).
+        _run.ForgetPlayer(issuer.Id);
+
+        if (sender.PartnerSession is { IsAuthenticated: true } partnerSession
+            && TryGetSessionEntity(partnerSession, out var partner)
+            && partner.Id != issuer.Id)
+        {
+            TeleportIntoPractice(partner, PracticeRoom.PartnerEntryTile);
+            _practiceOccupants.Add(partner.Id);
+            _run.ForgetPlayer(partner.Id); // same stale-ready clear for the pulled-in partner.
+            SendSystem(partnerSession, "Pulled into the practice room. Rehearse the duo verbs; /practice off to leave.");
+        }
+
+        EnsurePracticeDummy();
+        SendSystem(sender, "Entered the practice room. Rehearse the duo verbs on the dummy; /practice off to leave.");
+    }
+
+    // ADUE P2-A: remove ONLY the caller from the room (a partner leaves separately) and teleport them back to a town
+    // spawn anchor, then despawn the dummy if that emptied the room. Location OR occupancy membership counts as "in".
+    private void LeavePractice(ClientSession sender, WorldEntity issuer)
+    {
+        var wasOccupant = _practiceOccupants.Remove(issuer.Id);
+        if (!wasOccupant && !PracticeRoom.ContainsInterior(issuer.TileCoord))
+        {
+            SendSystem(sender, "You are not in the practice room.");
+            return;
+        }
+
+        _zone.Teleport(issuer, _zone.NextSpawnTile());
+        sender.ClearMoveIntent();
+        SendSystem(sender, "You leave the practice room.");
+        ClearPracticeDummyIfEmpty();
+    }
+
+    // ADUE P2-A: the boss encounter's teleport seam, mirrored — move the entity onto the entry tile and clear its held
+    // move intent so it doesn't immediately walk off the tile.
+    private void TeleportIntoPractice(WorldEntity player, TileCoord tile)
+    {
+        _zone.Teleport(player, tile);
+        player.OwnerSession?.ClearMoveIntent();
+    }
+
+    // ADUE P2-A: (re)spawn the practice dummy if we don't already own a LIVE one. Idempotent — a stored id that no
+    // longer resolves (e.g. the dummy was killed during an earlier rehearsal — it is not immortal, a P2-B concern) is
+    // treated as absent so a fresh dummy is placed. Spawned via SpawnMonsterCore (NOT a spawner — no auto-respawn).
+    private void EnsurePracticeDummy()
+    {
+        if (_practiceDummyId != 0 && _zone.World.TryGet(_practiceDummyId, out _))
+        {
+            return;
+        }
+
+        var type = _monsterTypes.TryGet("dummy", out var dummy) ? dummy : _monsterTypes.Default;
+        _practiceDummyId = SpawnMonsterCore(type, PracticeRoom.DummySpawnTile, maxHealthOverride: null, renderScaleOverride: null).Id;
+    }
+
+    // ADUE P2-A: despawn the dummy through the SAME leak-free, corpse-free by-id teardown the boss/adds use, but only
+    // once the room is empty — so a partner leaving separately never removes the target from a still-practicing partner.
+    private void ClearPracticeDummyIfEmpty()
+    {
+        if (_practiceOccupants.Count != 0)
+        {
+            return;
+        }
+
+        if (_practiceDummyId != 0)
+        {
+            DespawnBossEntity(_practiceDummyId);
+            _practiceDummyId = 0;
+        }
+    }
+
     // ADUE P1 RUN LOOP (todo/S-adue-p1-run-loop-chassis.md): the READY-UP wire verb — the run's front door. Dedup on
     // the session's DEDICATED run-ready cursor (independent of move/attack/action/fire/duo), then hand to the run
     // engine.
@@ -3514,6 +3679,25 @@ public sealed class GameServer
             && TryGetSessionEntity(partnerSession, out var partnerEntity))
         {
             partner = partnerEntity;
+        }
+
+        // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md) + H1 review: readying UP is refused when EITHER the caller OR
+        // their resolved partner is a practice occupant. Practice is a Lobby-only rehearsal DISJOINT from the run, and
+        // RunEngine.StartRun teleports the PARTNER in whenever the partner's ready flag is already set — so guarding only
+        // `self` let a partner-initiated /ready drag a still-practicing partner out of the room and onto the roster (and
+        // orphan the dummy, since that partner was never removed from _practiceOccupants). Guarding BOTH sides closes it;
+        // EnterPractice also clears each entrant's stale ready flag (the other half of the same fix). Un-readying stays
+        // allowed either way (it only clears a flag — never starts a run).
+        if (ready && _practiceOccupants.Contains(self.Id))
+        {
+            SendSystem(session, "Leave the practice room first (/practice off).");
+            return;
+        }
+
+        if (ready && partner is not null && _practiceOccupants.Contains(partner.Id))
+        {
+            SendSystem(session, "Your partner is in the practice room — they must leave it first (/practice off).");
+            return;
         }
 
         _run.TryReady(self, partner, ready, _serverTick, out var message);

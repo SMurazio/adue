@@ -189,7 +189,12 @@ public sealed class NodeCatalogTests
     // construction. The literal below is STALE; the orchestrator runs the gate once, reads the actual computed hash
     // from this assertion's failure, and pastes it in (the M3 F1 process). Do NOT guess a value or delete the test.
     // REPINNED 2026-07-05 from the BOSS-1 gate run's actual computed value.
-    private const ulong ShippedRealMapSeedZeroCatalogHash = 12785798352589360190UL;
+    // ADUE P2-A REPIN: the practice room ALSO stamps its 22x22 interior as DungeonStone, masking the Grass-only node
+    // scatter out of those NW-corner tiles too — a SECOND intentional catalogue change that moves this hash AGAIN. The
+    // literal below is STALE (still the BOSS-1 value); same process — the orchestrator runs the gate once, reads the
+    // actual computed hash from this assertion's failure, and pastes it in. Do NOT guess a value or delete the test.
+    // REPINNED 2026-08-09 from the ADUE P2-A gate run's actual computed value (practice-room DungeonStone stamp).
+    private const ulong ShippedRealMapSeedZeroCatalogHash = 4830951142581154498UL;
 
     [Fact]
     public void CatalogHashForRealMapSeedZero_IsPinnedToShippedLiteral()

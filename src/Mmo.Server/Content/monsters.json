@@ -210,6 +210,36 @@
       "attackCooldownMs": 1000,
       "attackRangeUnits": 0.5,
       "respawnMs": 5000
+    },
+    {
+      // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): THE PRACTICE DUMMY — the fixed, HARMLESS target the pair
+      // rehearses the four duo verbs against in the sealed PracticeRoom. Spawned/despawned by the /practice command
+      // (NOT a spawner; respawnMs is inert — the command owns its lifetime, spawn on first entry / despawn when the last
+      // occupant leaves). behaviorId "stationary" (StationaryBehavior) is the deliberately minimal brain: it NEVER moves,
+      // roams, aggros, chases, or attacks — it just stands on DummySpawnTile. That is the ROBUST non-aggression guarantee:
+      // aggroRadius here is authored 0 but the registry CLAMPS aggro to a 0.5-unit floor, so a basicRoamer dummy WOULD
+      // still aggro a point-blank player — the stationary brain ignores aggro entirely (like the interposer/splinter), so
+      // the clamp can't defeat it. attackDamage 0 is belt-and-suspenders (the brain never invokes the attack seam anyway).
+      // WALKS (glide) purely so no hop-arc machinery is involved (the brain never drives locomotion). maxHealth 1000 =
+      // large-ish so a rehearsal doesn't accidentally delete the target; it is NOT immortal (a respawning/immortal dummy
+      // is a P2-B polish, out of this server-infra scope) — the /practice enter path re-spawns a fresh dummy if the stored
+      // one was killed. renderTint a neutral grey + renderScale 1.0 (a plain, obviously-inert target with no art assets).
+      "id": "dummy",
+      "displayName": "Practice Dummy",
+      "lootTableId": "",
+      "locomotionId": "glide",
+      "behaviorId": "stationary",
+      "renderTint": "#C0C0C0",
+      "renderScale": 1.0,
+      "maxHealth": 1000,
+      "moveSpeedMultiplier": 0.5,
+      "roamRadius": 0.5,
+      "aggroRadius": 0,
+      "chaseLeash": 0.5,
+      "attackDamage": 0,
+      "attackCooldownMs": 1000,
+      "attackRangeUnits": 0.5,
+      "respawnMs": 5000
     }
   ]
 }

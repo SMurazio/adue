@@ -23,7 +23,12 @@ public sealed class TownAndFloor1MapTests
     // the orchestrator runs the gate once, reads the actual computed hash from this assertion's failure, and pastes it
     // in (the M3 F1 process). Do NOT guess a value or delete the test.
     // REPINNED 2026-07-05 from the BOSS-1 gate run's actual computed value.
-    private const ulong ShippedTownAndFloor1ContentHash = 12881715534524881854UL;
+    // ADUE P2-A REPIN: the practice-room stamp (AuthoredMaps.BuildTownAndFloor1) is a SECOND deliberate map edit — a
+    // 24x24 wall ring + DungeonStone floor in the NW corner — that moves this hash AGAIN by construction. The literal
+    // below is STALE (still the BOSS-1 value); same process — the orchestrator runs the gate once, reads the actual
+    // computed hash from this assertion's failure, and pastes it in. Do NOT guess a value or delete the test.
+    // REPINNED 2026-08-09 from the ADUE P2-A gate run's actual computed value (practice-room stamp).
+    private const ulong ShippedTownAndFloor1ContentHash = 14933617869436013510UL;
 
     private static readonly AuthoredMap Map = AuthoredMap.Parse(AuthoredMaps.TownAndFloor1);
 
@@ -55,18 +60,27 @@ public sealed class TownAndFloor1MapTests
         // (M1 review F4), so this flood-fill genuinely sees house collision, the wall+gate, the
         // arena mouths, the pass, and the Verge pockets.
         //
-        // BOSS-1: ONE deliberate exception — the Sunderer arena is a SEALED, teleport-only pocket (players /boss in,
-        // never walk in), so its 22x22 interior is intentionally unreachable on foot. We assert (a) NO arena interior
-        // tile is reachable (it really is the sealed pocket), and (b) every OTHER walkable tile IS reachable (the
-        // count equals all-walkable minus the arena). An ACCIDENTAL future orphan ANYWHERE ELSE still fails (b).
+        // BOSS-1 + ADUE P2-A: TWO deliberate exceptions — the Sunderer arena AND the practice room are both SEALED,
+        // teleport-only pockets (players /boss or /practice in, never walk in), so their 22x22 interiors are
+        // intentionally unreachable on foot. We assert (a) NO interior tile of EITHER pocket is reachable (they really
+        // are sealed), and (b) every OTHER walkable tile IS reachable (the count equals all-walkable minus BOTH
+        // pockets). An ACCIDENTAL future orphan ANYWHERE ELSE still fails (b).
         Assert.Equal(6, Map.SpawnTiles.Count);
 
-        var arenaInterior = new HashSet<TileCoord>();
+        var sealedPockets = new HashSet<TileCoord>();
         for (var y = BossArena.InteriorMinY; y <= BossArena.InteriorMaxY; y++)
         {
             for (var x = BossArena.InteriorMinX; x <= BossArena.InteriorMaxX; x++)
             {
-                arenaInterior.Add(new TileCoord(x, y));
+                sealedPockets.Add(new TileCoord(x, y));
+            }
+        }
+
+        for (var y = PracticeRoom.InteriorMinY; y <= PracticeRoom.InteriorMaxY; y++)
+        {
+            for (var x = PracticeRoom.InteriorMinX; x <= PracticeRoom.InteriorMaxX; x++)
+            {
+                sealedPockets.Add(new TileCoord(x, y));
             }
         }
 
@@ -74,9 +88,9 @@ public sealed class TownAndFloor1MapTests
         {
             var reached = Map.FloodFillWalkableFrom(spawn);
             Assert.False(
-                reached.Any(arenaInterior.Contains),
-                $"The Sunderer arena must be a sealed pocket, but a tile was reachable on foot from spawn {spawn}.");
-            Assert.Equal(Map.WalkableTileCount - arenaInterior.Count, reached.Count);
+                reached.Any(sealedPockets.Contains),
+                $"The Sunderer arena + practice room must be sealed pockets, but a tile was reachable on foot from spawn {spawn}.");
+            Assert.Equal(Map.WalkableTileCount - sealedPockets.Count, reached.Count);
         }
     }
 
@@ -248,5 +262,48 @@ public sealed class TownAndFloor1MapTests
             Assert.True(Map.IsWalkable(tile), $"arena landmark {tile} must be walkable interior");
             Assert.True(BossArena.ContainsInterior(tile), $"arena landmark {tile} must be inside the interior");
         }
+    }
+
+    [Fact]
+    public void PracticeRoomIsASealedDungeonStonePocket()
+    {
+        // ADUE P2-A (todo/S-p2-practice-room-and-dummy.md): the far-NW practice room — the BossArena's twin: a 1-tile
+        // wall ring around a 22x22 DungeonStone floor (the non-grass surface masks the node scatter out for free), with
+        // NO mouth. Pins the stamp (AuthoredMaps + PracticeRoom): the ring is fully blocked, the interior is all walkable
+        // dungeon stone, and the fixed entry tiles + dummy-spawn tile the /practice command teleports to / spawns at are
+        // walkable interior tiles.
+        for (var x = PracticeRoom.ExteriorMinX; x <= PracticeRoom.ExteriorMaxX; x++)
+        {
+            Assert.True(Map.IsBlocked(new TileCoord(x, PracticeRoom.ExteriorMinY)), $"practice-room south wall gap at x={x}");
+            Assert.True(Map.IsBlocked(new TileCoord(x, PracticeRoom.ExteriorMaxY)), $"practice-room north wall gap at x={x}");
+        }
+
+        for (var y = PracticeRoom.ExteriorMinY; y <= PracticeRoom.ExteriorMaxY; y++)
+        {
+            Assert.True(Map.IsBlocked(new TileCoord(PracticeRoom.ExteriorMinX, y)), $"practice-room west wall gap at y={y}");
+            Assert.True(Map.IsBlocked(new TileCoord(PracticeRoom.ExteriorMaxX, y)), $"practice-room east wall gap at y={y}");
+        }
+
+        for (var y = PracticeRoom.InteriorMinY; y <= PracticeRoom.InteriorMaxY; y++)
+        {
+            for (var x = PracticeRoom.InteriorMinX; x <= PracticeRoom.InteriorMaxX; x++)
+            {
+                var tile = new TileCoord(x, y);
+                Assert.True(Map.IsWalkable(tile), $"practice-room interior tile {tile} is not walkable");
+                Assert.Equal(SurfaceCategory.DungeonStone, Map.CategoryAt(tile));
+            }
+        }
+
+        foreach (var tile in new[] { PracticeRoom.IssuerEntryTile, PracticeRoom.PartnerEntryTile, PracticeRoom.DummySpawnTile })
+        {
+            Assert.True(Map.IsWalkable(tile), $"practice-room landmark {tile} must be walkable interior");
+            Assert.True(PracticeRoom.ContainsInterior(tile), $"practice-room landmark {tile} must be inside the interior");
+        }
+
+        // The two sealed pockets must not overlap (they live in opposite corners).
+        Assert.False(
+            PracticeRoom.ExteriorMaxX >= BossArena.ExteriorMinX && BossArena.ExteriorMaxX >= PracticeRoom.ExteriorMinX
+            && PracticeRoom.ExteriorMaxY >= BossArena.ExteriorMinY && BossArena.ExteriorMaxY >= PracticeRoom.ExteriorMinY,
+            "the practice room and Sunderer arena must not overlap");
     }
 }
