@@ -46,6 +46,12 @@ Identical to the MMO contract this repo forked from, in brief:
 - Work happens on **feature branches, never directly on `main`**; merge only tested + reviewed.
 - **Scale rigor to risk**: trivial edits direct with no review; standard changes gate the
   affected suite; server-authoritative combat/damage/protocol/concurrency get full rigor.
+- **Design decisions survive a Fable adversarial review** (2026-08-09): consequential
+  design/direction/identity calls pass a Fable RED-TEAM — a Fable-model agent prompted to REFUTE the
+  decision (strongest case against, failure modes, cheaper alternatives, how it dies at the P2
+  kill-test), not to bless it — before being written into a design doc or this contract; the decision
+  stands only if it survives or is revised in light of it. Scale to consequence. 12-Law changes
+  remain a user decision on top. See the `design-decisions-survive-fable-adversarial-review` memory.
 - Some verification (anything that runs the live Godot client) only the human can do — ask.
 
 ## Project Guardrails
